@@ -929,6 +929,16 @@ impl<'de> Deserialize<'de> for PtyState {
 /// is the daemon-down read path (`fno agents list` when the socket is down)
 /// AND recovery step 1.
 pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
+    let (registry, _raw_rows) = load_registry_with_counts(path)?;
+    Ok(registry)
+}
+
+/// [`load_registry`] plus the raw on-disk row count the typed decode must be
+/// reconciled against. The daemon's startup assertion (x-4c87 AC5) reads both:
+/// a registry whose rows the typed reader dropped (today only a future-schema
+/// partial read) must refuse to serve, never publish the dropped subset as the
+/// complete roster.
+pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), StateError> {
     // Lock the SAME sidecar `update_registry` locks (shared mode here), not the
     // data file. This is the canonical cross-language lock target: a Python
     // `fno` writer taking `flock` on `<registry>.lock` and the Rust daemon's
@@ -942,10 +952,10 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
     // authoritative existence check.
     let lock = acquire_shared(&lock_path(path))?;
     let result = match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(&file),
+        Ok(file) => read_registry_tolerant(path, &file),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let _ = lock.unlock();
-            return Ok(Registry::default());
+            return Ok((Registry::default(), 0));
         }
         Err(e) => {
             let _ = lock.unlock();
@@ -956,23 +966,74 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
     result
 }
 
+/// The raw on-disk row count the typed decode is reconciled against (x-4c87):
+/// the canonical `agents` array, falling back to the legacy `entries` alias,
+/// mirroring [`Registry`]'s serde rename/alias precedence. A missing or
+/// non-array key counts as 0 (a valid empty registry, not a divergence).
+fn registry_raw_row_count(probe: &serde_json::Value) -> usize {
+    probe
+        .get("agents")
+        .or_else(|| probe.get("entries"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+/// The x-4c87 refusal text: name the registry path, both row counts, and the
+/// comparison to run. Names no force/skip/ignore/bypass/no-verify remedy --
+/// there is deliberately no override that defeats this check (x-d19e wording
+/// rule, scoped to diagnostics this change introduces).
+pub fn registry_row_divergence_msg(path: &Path, raw_rows: usize, decoded_rows: usize) -> String {
+    format!(
+        "{} contains raw_rows={} but Rust decoded_rows={}; inspect {} and compare \
+         its agents array count with the Rust decoded count",
+        path.display(),
+        raw_rows,
+        decoded_rows,
+        path.display()
+    )
+}
+
 /// Read a registry, tolerating ONLY a genuinely empty file (0 bytes / all
 /// whitespace) as the empty registry. A present-but-unparseable file (malformed
-/// JSON, schema mismatch, corruption) propagates `StateError::Json` instead of
-/// silently defaulting: a default fed back through `update_registry`'s
+/// JSON, schema mismatch, corruption) propagates an error instead of silently
+/// defaulting: a default fed back through `update_registry`'s
 /// read-modify-write would publish an empty registry and permanently wipe every
 /// other agent (Gemini high, PR #364). `write_json_atomic` publishes via
 /// tempfile + rename, so a reader never observes a torn write -- a parse failure
 /// is therefore real corruption, not the transient partial read the prior
 /// `unwrap_or_default()` was excusing.
-fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
+///
+/// Returns the typed registry plus the RAW array row count (x-4c87): a
+/// positive raw count whose typed decode loses rows is an
+/// `InvariantViolation` carrying both counts and the comparison to run, never a
+/// successful empty roster. The one exception stays the forward-schema retry
+/// below, where every dropped row is announced; the daemon's startup assertion
+/// still refuses that partial read before serving.
+fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usize), StateError> {
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
     if buf.trim().is_empty() {
-        return Ok(Registry::default());
+        return Ok((Registry::default(), 0));
     }
-    let mut reg: Registry = match serde_json::from_str(&buf) {
-        Ok(reg) => reg,
+    let probe: serde_json::Value = serde_json::from_str(&buf)?;
+    let raw_rows = registry_raw_row_count(&probe);
+    let mut reg: Registry = match serde_json::from_str::<Registry>(&buf) {
+        Ok(reg) => {
+            // The same-schema success guard (x-4c87 AC3): serde cannot drop
+            // elements from a `Vec` today, so this holds by construction -- but
+            // the invariant is load-bearing enough (a changed reader mapping a
+            // nonempty array to the default empty vec would publish a false
+            // zero-agent roster) that it is asserted, not assumed.
+            if reg.entries.len() != raw_rows {
+                return Err(StateError::InvariantViolation(registry_row_divergence_msg(
+                    path,
+                    raw_rows,
+                    reg.entries.len(),
+                )));
+            }
+            reg
+        }
         Err(typed_err) => {
             // A newer writer can widen a field's VALUES, not only add keys, and
             // `AgentStatus` has no catch-all variant -- so one row carrying a
@@ -982,13 +1043,24 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
             //
             // Retry per row, keeping the ones this binary can represent, but ONLY
             // when the store says it is newer than us. At or below our own schema
-            // an unparseable row is a writer bug and stays fatal.
-            let probe: serde_json::Value = serde_json::from_str(&buf)?;
+            // an unparseable row is a writer bug and stays fatal -- and since
+            // x-4c87 it is fatal BY NAME when rows were on disk: the error
+            // carries the raw and decoded counts so a lost roster can never read
+            // as a valid empty one downstream.
             let on_disk = probe
                 .get("schema_version")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             if on_disk <= REGISTRY_SCHEMA_VERSION as u64 {
+                if raw_rows > 0 {
+                    // Keep the count-bearing refusal (AC3) but carry the typed
+                    // error too: a decode failure that lost no rows (a bad
+                    // top-level type) still names its field instead of
+                    // masquerading as a pure count divergence (PR 924 review).
+                    let mut msg = registry_row_divergence_msg(path, raw_rows, 0);
+                    msg.push_str(&format!("; typed error: {typed_err}"));
+                    return Err(StateError::InvariantViolation(msg));
+                }
                 return Err(typed_err.into());
             }
             let rows = probe
@@ -1012,6 +1084,10 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
                      to this process until it is upgraded."
                 );
             }
+            // Forward-schema partial read: divergence is allowed HERE (every
+            // dropped row is announced above), so this arm is exempt from the
+            // count guard the Ok arm runs; the daemon's startup assertion is
+            // what refuses to serve a partial roster as complete.
             Registry {
                 // Saturate rather than `as u32`. A truncating cast can wrap an
                 // absurd version DOWN to one at or below ours, and the write
@@ -1080,7 +1156,7 @@ fn read_registry_tolerant(mut file: &File) -> Result<Registry, StateError> {
             );
         }
     }
-    Ok(reg)
+    Ok((reg, raw_rows))
 }
 
 /// Read-modify-write the registry under an exclusive lock, publishing the
@@ -1228,7 +1304,7 @@ fn validate_changed_identities(
 
 fn read_existing_registry(path: &Path) -> Result<Registry, StateError> {
     match OpenOptions::new().read(true).open(path) {
-        Ok(file) => read_registry_tolerant(&file),
+        Ok(file) => Ok(read_registry_tolerant(path, &file)?.0),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
         Err(e) => Err(e.into()),
     }
@@ -2683,5 +2759,210 @@ mod tests {
         });
         let pty: PtyState = serde_json::from_value(legacy).unwrap();
         assert!(pty.drive.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // x-4c87: the raw-versus-decoded row count invariant. The live outage's
+    // sanitized shape: real worker rows at the CURRENT schema, one carrying a
+    // value the typed model cannot represent. (On the machine it was measured
+    // on, the divergence was versional: a stale v11 daemon meeting the v14
+    // store; the same-schema unknown-status row below drives the identical
+    // code path -- typed decode fails with rows on disk.)
+    // ------------------------------------------------------------------
+
+    /// A sanitized 3-row registry whose middle row the typed reader cannot
+    /// represent. Keys and value types mirror a real worker row; names, ids,
+    /// and paths are synthetic.
+    fn divergent_registry_fixture() -> String {
+        let row = |name: &str, status: &str| {
+            format!(
+                r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+            )
+        };
+        format!(
+            r#"{{"schema_version":{},"agents":[{},{},{}]}}"#,
+            REGISTRY_SCHEMA_VERSION,
+            row("worker-alpha", "live"),
+            row("worker-beta", "hibernating"),
+            row("worker-gamma", "live")
+        )
+    }
+
+    /// x-d19e wording contract, scoped to text this change introduces: a
+    /// refusal names what to verify and never advertises an override.
+    fn assert_no_override_remedy(msg: &str) {
+        for banned in ["force", "skip", "ignore", "bypass", "no-verify"] {
+            assert!(
+                !msg.to_lowercase().contains(banned),
+                "diagnostic must not name an override remedy ({banned}): {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_with_unrepresentable_row_errors_naming_both_counts() {
+        // AC3-ERR: a positive raw row count whose typed decode fails is an
+        // InvariantViolation carrying the path, both counts, and the
+        // comparison to run -- never a successful empty roster.
+        let dir = tmpdir("divergent-row");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(&path, divergent_registry_fixture()).unwrap();
+
+        let err = load_registry(&path).expect_err("unrepresentable row must fail the read");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, StateError::InvariantViolation(_)),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains(path.to_str().unwrap()),
+            "names the path: {msg}"
+        );
+        assert!(msg.contains("raw_rows=3"), "names the raw count: {msg}");
+        assert!(
+            msg.contains("decoded_rows=0"),
+            "names the decoded count: {msg}"
+        );
+        assert!(
+            msg.contains("inspect"),
+            "tells the operator to inspect: {msg}"
+        );
+        assert!(
+            msg.contains("compare"),
+            "names the comparison to run: {msg}"
+        );
+        assert_no_override_remedy(&msg);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_preserves_the_count_of_valid_canonical_rows() {
+        // AC2-HP: a valid schema-14 registry round-trips its exact row count.
+        let dir = tmpdir("valid-count");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"agents":[
+                {"name":"worker-alpha","cwd":"/tmp/proj","harness":"claude",
+                 "status":"live","created_at":"2026-08-16T00:00:00Z"},
+                {"name":"worker-gamma","cwd":"/tmp/proj","harness":"codex",
+                 "status":"exited","created_at":"2026-08-16T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert_eq!(reg.entries.len(), 2, "both valid rows decode");
+        assert_eq!(raw, 2, "raw count agrees with the typed count");
+        assert!(reg.find("worker-alpha").is_some());
+        assert!(reg.find("worker-gamma").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_counts_the_legacy_entries_alias_too() {
+        // A daemon-written legacy store keys its rows under `entries`; the raw
+        // count must follow the same alias the typed decode follows.
+        let dir = tmpdir("legacy-entries");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":14,"entries":[
+                {"name":"legacy-one","cwd":"/tmp/proj","harness":"claude",
+                 "status":"live","created_at":"2026-08-16T00:00:00Z"},
+                {"name":"legacy-two","cwd":"/tmp/proj","harness":"claude",
+                 "status":"live","created_at":"2026-08-16T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert_eq!(reg.entries.len(), 2);
+        assert_eq!(raw, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_missing_agents_key_is_a_valid_empty() {
+        // A store with no row array at all is a valid zero-agent registry (the
+        // raw count is 0; nothing could have been lost).
+        let dir = tmpdir("no-array-key");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(&path, r#"{"schema_version":14}"#).unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert!(reg.entries.is_empty());
+        assert_eq!(raw, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_true_empty_states_stay_successful_zeros() {
+        // AC4-EDGE: missing file, whitespace-only, and a real empty array are
+        // valid zero-agent states. No check treats byte length as evidence of
+        // rows.
+        let dir = tmpdir("true-empties");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert!(reg.entries.is_empty(), "missing file is a valid empty");
+        assert_eq!(raw, 0);
+
+        std::fs::write(&path, "   \n\t ").unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert!(reg.entries.is_empty(), "whitespace file is a valid empty");
+        assert_eq!(raw, 0);
+
+        std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert!(reg.entries.is_empty(), "an empty array is a valid empty");
+        assert_eq!(raw, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_typed_failure_without_rows_keeps_the_parse_error() {
+        // A parse failure with NO rows on disk (here: schema_version of the
+        // wrong type) is a plain parse error, not a row-loss divergence -- the
+        // guard is keyed to a positive raw count, never to byte length.
+        let dir = tmpdir("no-rows-failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(&path, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
+        let err = load_registry(&path).expect_err("wrong-typed schema_version must fail");
+        assert!(
+            !matches!(err, StateError::InvariantViolation(_)),
+            "no rows existed to lose: {err}"
+        );
+        assert!(!err.to_string().contains("raw_rows"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn registry_future_schema_partial_read_exposes_both_counts() {
+        // Forward policy preserved (see a_newer_row_with_an_unknown_status_
+        // skips_that_row_only): a future-schema store still degrades per-row
+        // with an announcement. What changes is that the read now CARRIES the
+        // raw count, so the daemon's startup assertion can refuse to serve
+        // the 1-of-2 partial as a complete roster.
+        let dir = tmpdir("future-partial");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("registry.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":15,"agents":[
+                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
+                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+        let (reg, raw) = load_registry_with_counts(&path).unwrap();
+        assert_eq!(reg.entries.len(), 1, "the representable row still decodes");
+        assert_eq!(raw, 2, "the raw count says what was dropped");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

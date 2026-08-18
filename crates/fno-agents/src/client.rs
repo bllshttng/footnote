@@ -18,6 +18,8 @@ pub enum ClientError {
     Io(#[from] std::io::Error),
     #[error("daemon did not come up within {0:?}")]
     DaemonStartTimeout(Duration),
+    #[error("daemon exited during startup with status {0}")]
+    DaemonExitedEarly(std::process::ExitStatus),
     #[error(
         "daemon binary not found: {0} - the fno-agents triad (client/daemon/worker) \
          is split here. Run `fno update` to redeploy the pair, or set \
@@ -64,8 +66,7 @@ pub async fn ensure_daemon(
     if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
         cmd.env("FNO_AGENTS_WORKER_BIN", v);
     }
-    let child = cmd.spawn()?;
-    drop(child); // do not await; it is detached
+    let mut child = cmd.spawn()?;
 
     let start = Instant::now();
     let budget = Duration::from_secs(10);
@@ -73,8 +74,21 @@ pub async fn ensure_daemon(
         if UnixStream::connect(&sock).await.is_ok() {
             return Ok(());
         }
+        // A daemon that REFUSED startup (x-4c87: a divergent registry exits
+        // nonzero before binding, having printed the path and both counts to
+        // inherited stderr) must fail this verb immediately with its real
+        // cause, not burn the full socket budget on a socket that will never
+        // appear (code-review on PR 924).
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(ClientError::DaemonExitedEarly(status));
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    // Budget spent and the child still lives: it is genuinely slow to boot.
+    // Drop the handle WITHOUT killing (tokio does not kill on drop; the child
+    // is in its own process group) so it can finish booting and serve a later
+    // verb, matching the old detach behavior.
+    drop(child);
     Err(ClientError::DaemonStartTimeout(budget))
 }
 
