@@ -366,3 +366,15 @@ per-harness discovery seam.
 The subagent source is a display-only third input to `fno agents top`; it is
 deliberately not wired into `census()`'s slot arithmetic, so it cannot move
 the spawn gate's `slot_count` denominator.
+
+## Two axes: reachability and progress
+
+`fno.agents.reachability` (`cli/src/fno/agents/reachability.py`) answers two different questions about one row, in two separate fields, on purpose.
+
+**`reachability`** answers "can I reach this process": `reachable` | `unreachable` | `unknown`, with a `basis` naming the evidence (`transcript` | `process-gone` | `pane-gone` | `silent` | `no-evidence`). It is the older axis and `fno agents list --status` still filters on its rendered wire word (`live` | `orphaned` | `unknown`).
+
+**`progress`** answers a question reachability cannot: "is it advancing, awaiting the operator, parked, or refused" - `advancing` | `awaiting-operator` | `parked` | `refused` | `unknown`, with a `progress_basis` naming the evidence (`transcript-turn` | `operator-turn` | `promise` | `model-refused` | `silent` | `no-evidence`). `fno agents list --progress` filters it independently of `--status`.
+
+They stay two fields rather than a fourth `WIRE_STATUS` value because a worker taking its own next turn, one that finished and parked, and one that is alive and reachable but handed a model its endpoint cannot serve all classify `reachable` - correctly, since all three genuinely are reachable. Before this axis existed, all three also rendered the SAME word, `live`, so an operator scanning `fno agents top` could not tell a staffed row from a stalled one: 31 live pids, 8513 MB, and no way to see which rows were parked or refused (`x-cbd9`).
+
+A reading about one artifact is not a verdict about the agent. A missing transcript file proves only that a file is missing at that path; it must classify `unknown` on both axes, never a death verdict and never `refused` or `parked`. Every falsifier in `reachability.py` (`pid_falsifier`, `pane_falsifier`) already returns `None` - not a condemnation - when its own evidence is absent or unreadable, and `classify_progress` follows the same rule for the transcript's model reading. Only the classifiers in `reachability.py` may answer either axis; a reader that derives liveness or progress from bare file existence anywhere else is rebuilding the collapse this module exists to prevent, one layer over.
