@@ -564,7 +564,7 @@ def _ledger_nodes() -> dict[str, str]:
     return out
 
 
-def fleet_rows() -> tuple[list[Row], list[str]]:
+def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]]:
     """Enumerate the fleet from ``claude agents --json --all`` joined to the
     registry for recorded identity. Node identity is the worktree MANIFEST
     first (runtime-recorded), then the execution LEDGER for rows with no
@@ -573,10 +573,15 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
 
+    # A caller running INSIDE a bounded tick spends its remaining budget,
+    # never this lane's own: the tick's wall-clock deadline is the shorter of
+    # the two, and blowing it exits 75 and kills every later leg. Unbounded
+    # callers (the manual sweep) get the full fleet budget.
+    budget = ROSTER_TIMEOUT_S if timeout is None else max(1.0, min(timeout, ROSTER_TIMEOUT_S))
     probe_started = time.time()
-    raw, warnings = claude_agents_rows(timeout=ROSTER_TIMEOUT_S)
+    raw, warnings = claude_agents_rows(timeout=budget)
     elapsed = time.time() - probe_started
-    if elapsed > ROSTER_TIMEOUT_S * ROSTER_HEADROOM:
+    if elapsed > budget * ROSTER_HEADROOM:
         # A fixed budget measured against a GROWING fleet fails silently on
         # the day the fleet outgrows it: the probe times out, the sweep reads
         # zero rows, and the refusal reads as a broken fleet rather than a
@@ -584,9 +589,9 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
         # the line has to be the thing that speaks.
         warnings = [
             *warnings,
-            f"roster probe took {elapsed:.1f}s of its {ROSTER_TIMEOUT_S:.0f}s "
-            f"budget for {len(raw)} row(s); past the budget the sweep reads "
-            f"zero rows and refuses. Raise ROSTER_TIMEOUT_S",
+            f"roster probe took {elapsed:.1f}s of its {budget:.0f}s budget "
+            f"for {len(raw)} row(s); past the budget the sweep reads zero "
+            f"rows and refuses. Raise ROSTER_TIMEOUT_S",
         ]
     by_sid: dict[str, Any] = {}
     try:
@@ -717,6 +722,7 @@ def run_sweep(
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
     claim_fn: Optional[Callable[[str], dict]] = None,
     graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
+    roster_timeout: Optional[float] = None,
 ) -> tuple[dict, list[Row]]:
     """Build the real seams and classify the whole fleet once. Returns
     ``(payload, rows)`` - the payload is the ``--json`` shape
@@ -729,7 +735,10 @@ def run_sweep(
     on it, so the missing write turns into loud staleness instead of clean
     evidence."""
     now_s = now_s if now_s is not None else datetime.now(timezone.utc).timestamp()
-    rows, warnings = (rows_provider or fleet_rows)()
+    rows, warnings = (
+        rows_provider() if rows_provider is not None
+        else fleet_rows(timeout=roster_timeout)
+    )
     if not rows:
         return {
             "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(

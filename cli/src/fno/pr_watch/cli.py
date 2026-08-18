@@ -415,7 +415,14 @@ def tick() -> None:
                 from fno.agents import watchdog as _wd
 
                 now = _time.time()
-                payload, rows = _wd.run_sweep(now_s=now)
+                # The tick's deadline is the shorter budget and it is fatal:
+                # a roster probe that outlives it exits 75 and kills every
+                # later leg, so this lane spends at most half of what is
+                # left rather than its own standalone budget.
+                left = deadline - (time.monotonic() - started)
+                payload, rows = _wd.run_sweep(
+                    now_s=now, roster_timeout=max(1.0, left / 2)
+                )
                 # Read BEFORE any write and defaulted here: the refused branch
                 # writes nothing, and an unbound read after the if/else crashed
                 # every refused tick into the outer except.

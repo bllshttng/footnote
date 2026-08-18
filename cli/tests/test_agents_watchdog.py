@@ -1348,3 +1348,31 @@ def test_a_fast_roster_probe_stays_quiet(monkeypatch):
     monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
     _rows, warnings = watchdog.fleet_rows()
     assert warnings == []
+
+
+def test_a_bounded_caller_spends_its_own_budget_not_the_lanes(monkeypatch):
+    """The tick's wall-clock deadline is the shorter budget AND the fatal one.
+
+    A roster probe that outlives it raises the tick's deadline signal, which
+    exits 75 and kills every later leg. Measured: arming the lane on the tick
+    with the standalone 30s budget timed the whole tick out. So a bounded
+    caller passes what it has left and the enumeration must honour it.
+    """
+    from fno.agents.harnesses import claude as claude_mod
+
+    spent = {}
+
+    def fake_rows(timeout=3.0):
+        spent["timeout"] = timeout
+        return [], []
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", fake_rows)
+    watchdog.fleet_rows(timeout=4.0)
+    assert spent["timeout"] == 4.0
+    # The lane's own budget is still the CEILING, never a floor a caller
+    # can raise past.
+    watchdog.fleet_rows(timeout=999.0)
+    assert spent["timeout"] == watchdog.ROSTER_TIMEOUT_S
+    # An exhausted tick still probes rather than passing a zero timeout.
+    watchdog.fleet_rows(timeout=0.0)
+    assert spent["timeout"] == 1.0
