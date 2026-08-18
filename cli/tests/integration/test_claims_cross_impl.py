@@ -89,7 +89,7 @@ def rust(op: str, key: str, root: Path, cwd: Path, *extra: str) -> subprocess.Co
         [str(RUST_BIN), "claim", op, key, "--root", str(root), *extra],
         capture_output=True,
         text=True,
-        cwd=cwd,  # claim events land in <cwd>/.fno/events.jsonl on both sides
+        cwd=cwd,  # no env=, so the FNO_EVENTS_PATH pin below reaches this child too
         timeout=60,
     )
 
@@ -133,8 +133,34 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def events(cwd: Path) -> list[dict]:
-    p = cwd / ".fno" / "events.jsonl"
+@pytest.fixture(autouse=True)
+def _one_journal_for_both_sides(tmp_path: Path, monkeypatch) -> None:
+    """Name the journal both implementations must write to.
+
+    Python (`fno.paths.project_events_json`) and Rust (`claim_events_path`) both
+    read `FNO_EVENTS_PATH` ahead of the repo root they resolve. The two share
+    this journal AND its `.lock.d` mutex as a wire contract, so a pin only one
+    side honored would put the writers on different files and stop the mutex
+    serialising them against each other.
+
+    Deliberately NOT `<cwd>/.fno/events.jsonl`. Every test here runs with cwd at
+    `tmp_path`, so a pin there is also what cwd-derived resolution returns, and
+    the assertions pass whether or not either side reads the var. Pointing it at
+    a sibling directory makes the pinned path and the cwd-derived path differ, so
+    a side that ignores the pin writes somewhere this file does not read, and the
+    gate goes red. Verified: reverting the Rust read fails these tests.
+    """
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / "pinned" / "events.jsonl"))
+
+
+def events(_cwd: Path | None = None) -> list[dict]:
+    """Every claim audit row, read from the journal the pin names.
+
+    Takes the old cwd argument and ignores it: which file the writers use is the
+    property under test, so reading a hand-built `<cwd>/.fno/events.jsonl` would
+    assert the answer instead of observing it.
+    """
+    p = Path(os.environ["FNO_EVENTS_PATH"])
     if not p.exists():
         return []
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
