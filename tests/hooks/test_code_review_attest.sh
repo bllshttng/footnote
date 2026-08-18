@@ -189,6 +189,14 @@ run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_CLEAN")"
 expect_attest "headered-json-clean"
 
 echo "== SubagentStop: caller-chosen names never identify a review =="
+# The one name the harness controls: agent_type naming the skill type. This
+# is signal 1's positive case, so a regression in its loop cannot hide
+# behind a suite that never sets the field.
+run_hook "$(jq -nc --arg cwd "$WORK" --arg msg "$JSON_CLEAN" \
+  '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"code-review",
+    last_assistant_message:$msg}')"
+expect_attest "agent-type-documented-json-clean"
+
 # agent_name is the spawn name the caller picked. Naming a task code-review
 # does not make its output a review, whatever the output looks like.
 run_hook "$(subagent_stop "/code-review" "$JSON_CLEAN")"
