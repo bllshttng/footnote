@@ -35,12 +35,14 @@ class FakeGh:
         slug: str = REPO,
         post_rc: int = 0,
         review_decision: str = "APPROVED",
+        pr_for_head: Optional[str] = "931",
     ) -> None:
         self.author = author
         self.pr_head = pr_head
         self.slug = slug
         self.post_rc = post_rc
         self.review_decision = review_decision
+        self.pr_for_head = pr_for_head
         self.posts: list[dict] = []
         self.saw_envs: list[Optional[dict]] = []
 
@@ -51,6 +53,8 @@ class FakeGh:
             return _ok(str(cwd))
         if argv[:2] == ["gh", "pr"] and "--json" in argv:
             field = argv[argv.index("--json") + 1]
+            if "number" in field.split(",") and "reviewDecision" not in field:
+                return _ok(self.pr_for_head or "")
             if "author" in field.split(","):
                 return _ok(self.author)
             if "headRefOid" in field.split(","):
@@ -205,3 +209,45 @@ def test_no_open_pr_author_unreadable_skips(repo, monkeypatch):
     result = _publish(repo, fake, monkeypatch)
     assert result.status == "skipped"
     assert fake.posts == []
+
+
+def test_pr_number_omitted_resolves_head_pr(repo, monkeypatch):
+    """The emit-chokepoint shape: no PR in hand, resolve the branch's open PR."""
+    fake = FakeGh()
+    monkeypatch.setattr(pr_mod, "run", fake)
+    result = pr_mod.publish_review(
+        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(repo)
+    )
+    assert result.status == "posted"
+    assert "#931" in result.receipt
+
+
+def test_pr_number_omitted_no_open_pr_skips(repo, monkeypatch):
+    fake = FakeGh(pr_for_head=None)
+    monkeypatch.setattr(pr_mod, "run", fake)
+    result = pr_mod.publish_review(
+        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(repo)
+    )
+    assert result.status == "skipped"
+    assert result.reason == "no open PR for HEAD"
+    assert fake.posts == []
+
+
+def test_unconfigured_lane_makes_no_network_calls(tmp_path, monkeypatch):
+    """Byte-identical behavior apart from the receipt: with no bot_identity,
+    publish must not even resolve the PR (no gh call at all)."""
+    monkeypatch.delenv("GH_REVIEW_BOT_TOKEN", raising=False)
+    calls = []
+
+    def recorder(cmd, **kw):
+        calls.append(list(cmd))
+        return _rc(1, "", "should not be reached")
+
+    monkeypatch.setattr(pr_mod, "run", recorder)
+    result = pr_mod.publish_review(
+        head_sha=HEAD, verdict="pass", reviewer="sigma", cwd=str(tmp_path)
+    )
+    assert result.status == "skipped"
+    assert result.reason == "review.bot_identity unset"
+    # git rev-parse (repo-root resolution) is allowed; gh is not.
+    assert all(c[0] == "git" for c in calls)
