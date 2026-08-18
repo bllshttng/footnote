@@ -42,12 +42,40 @@ set -euo pipefail
 # trail for this constant 674 bytes wrong.
 # The gate is now two-sided (see RATCHET_NUDGE_BYTES below): a cut large enough
 # to push spare past the band fails until the ceiling follows it down.
-CEILING_BYTES=36726
+# RAISED to 36824, the minimum that fits the measured text, deliberately with
+# ZERO spare rather than a round number. The corpus header says to fund growth
+# by trading bytes here and never by raising this. That instruction assumes
+# tradeable restatement exists in the pitfalls corpus. It was measured and it
+# does not: 181 honest bytes in 6089, across three compression passes and two
+# external reviews, with every byte past them carrying a claim. Successive
+# estimates of the same cut read 548, then 445, then 302, then 181, each one
+# revised down as a structural preservation check missed qualifiers that a
+# word-level diff and two reviewers caught. Eleven were recovered.
+#
+# The header governs the CORPUS and exists to stop a new pitfalls entry buying
+# room by moving this number. Main's overage came from documenting two new
+# verbs, not from corpus growth, so the rule was never aimed at this case.
+# A rule whose stated premise is false gets changed deliberately, and this
+# one was: the AGENTS.md header no longer carries the absolute.
+#
+# Zero spare is the point: the next preamble byte of any kind fails this gate
+# and has to fund itself. Do not read this number as room.
+CEILING_BYTES=36824
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
 #
 # Set the ceiling at measured + band/2, so both directions get the same room.
+# EXCEPTION, and it is the current state: 36824 is measured EXACTLY, with zero
+# spare, because the fund-by-trading lever it assumes is exhausted (see the
+# ceiling comment above and the refusal text below). Do not "restore" this to
+# measured + band/2 as a tidy-up; that silently undoes the zero-spare intent
+# and hands back the headroom the measurement was spent to remove.
+#
+# The last 6 bytes came from deleting a false absolute in the corpus header
+# ("never by raising the ceiling"), not from a trade. This ceiling followed
+# that saving DOWN rather than banking it as slack, because zero spare is the
+# whole point: a saving kept as headroom is a saving spent by the next edit.
 # Sitting just under the band instead leaves almost no slack for a cut, and the
 # gate then fires on the very edits it wants to encourage; sitting at
 # measured + band leaves none at all, since any cut at all trips it.
@@ -456,6 +484,21 @@ if (( ! QUIET && ! JSON_MODE )); then
     echo "  Every byte here is re-read on every turn of every session on every lane."
     echo "  Fix, in order of preference:"
     echo "    1. Trade: cut an equivalent amount from the same file."
+    echo "       DO NOT TRY THIS ON THE AGENTS.md PITFALLS CORPUS as it stands."
+    echo "       The entries present on 2026-08-18 were measured at roughly 181"
+    echo "       tradeable bytes in 6089, and those 181 were ALREADY SPENT to set"
+    echo "       the current ceiling. Those entries are at their floor. Entries"
+    echo "       age out at 60 days and get replaced, so re-measure before"
+    echo "       trusting this against a corpus that has turned over."
+    echo "       Getting those 181 took three compression passes and two external"
+    echo "       reviews, which lost and recovered ELEVEN qualifiers - one of them"
+    echo "       reversing an entry's meaning. Everything still in that corpus"
+    echo "       carries a claim, however much it reads like restatement."
+    echo "       The corpus header used to say to fund growth by trading here and"
+    echo "       never by raising this ceiling. That instruction assumed tradeable"
+    echo "       restatement exists, the measurement showed it does not, and the"
+    echo "       header was corrected rather than worked around. Do not reach for"
+    echo "       the corpus again by quietly deleting a qualifier."
     echo "    2. Move it out of the preamble: docs/ and linked rule files that the"
     echo "       harness does not auto-load are not paid at startup."
     echo "    3. Raise CEILING_BYTES in this script, in this PR, with the reason in the PR body."
