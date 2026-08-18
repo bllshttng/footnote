@@ -94,6 +94,46 @@ def board_cmd(
     raise typer.Exit(board["exit_code"])
 
 
+@king_app.command("escalate")
+def escalate_cmd(
+    stalled: str = typer.Option(
+        "", "--stalled", help="Comma-separated board rows nothing is clearing."
+    ),
+    reason: str = typer.Option(
+        "NoProgress", "--reason", help="The terminal reason that triggered this."
+    ),
+) -> None:
+    """Tell the operator the king stopped with work still pending.
+
+    Called by BOTH king terminals - the stop hook's NoProgress and the walk
+    arm's per-unit park - because a guard on one of two reachable paths is
+    decorative. Idempotent per stalled id set, so a respawned king meeting the
+    same stalled board never records a second question.
+    """
+    from fno.carveout.core import resolve_carveout_root, resolve_session_id
+    from fno.king.escalate import escalate
+    from fno.paths import resolve_repo_root
+
+    ids = [part.strip() for part in stalled.split(",") if part.strip()]
+    try:
+        session_id = resolve_session_id(resolve_repo_root())
+    except Exception:  # noqa: BLE001 - an unresolvable session never blocks the ask
+        session_id = None
+    try:
+        outcome, qid = escalate(
+            ids,
+            reason=reason,
+            root=resolve_carveout_root(),
+            session_id=session_id,
+            cwd=Path.cwd(),
+        )
+    except Exception as exc:  # noqa: BLE001 - named, never swallowed
+        typer.echo(f"king: escalation failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"king: {outcome} {qid}", err=True)
+    typer.echo(qid)
+
+
 def _render(board: dict) -> None:
     typer.echo(f"actionable: {board['actionable']}")
     for q in board["queues"]:

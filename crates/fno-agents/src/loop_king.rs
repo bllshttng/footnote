@@ -26,7 +26,7 @@
 //! node to graduate, so there is nothing left for a close to do.
 
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
-use serde_json::Value;
+use crate::loopcheck::TerminationReason;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -86,34 +86,58 @@ impl KingQueue {
         &self.scope
     }
 
-    /// Actionable row count from `fno king board --json`.
+    /// The board, read through `loopcheck`'s reader.
+    ///
+    /// Deliberately the SAME reader both king arms use rather than a second
+    /// parse: `actionable_ids` is derived from the queue rows, not a field the
+    /// board prints, so a private parse here would silently disagree with the
+    /// stop hook about what a stalled row even is.
     ///
     /// The board exits non-zero when a queue is unreadable and still prints a
-    /// full payload, so the payload is parsed regardless of that exit code. Only
-    /// an absent or unparseable one is a read failure, and that is an error
-    /// rather than a zero: a walk that read "0" from a broken reader would
-    /// report the board clean and stop respawning a king that still has work.
-    fn actionable(&self) -> Result<i64, LoopError> {
-        let output = Command::new(&self.fno_bin)
-            .args(["king", "board", "--json"])
-            .current_dir(&self.cwd)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| {
-                LoopError::Queue(format!("cannot run {} king board: {e}", self.fno_bin))
-            })?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let value: Value = serde_json::from_str(&stdout).map_err(|e| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            LoopError::Queue(format!(
-                "king board output unparseable ({e}); stderr: {}",
-                stderr.trim().chars().take(300).collect::<String>()
-            ))
-        })?;
-        value
-            .get("actionable")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| LoopError::Queue("king board payload has no actionable count".into()))
+    /// full payload, so that exit code is not a read failure; only an absent or
+    /// unparseable payload is. That is an error rather than a zero: a walk that
+    /// read "0" from a broken reader would report the board clean and stop
+    /// respawning a king that still has work.
+    fn board(&self) -> Result<crate::loopcheck::KingBoard, LoopError> {
+        crate::loopcheck::read_king_board(&self.fno_bin, &self.cwd).map_err(LoopError::Queue)
+    }
+}
+
+/// Tell the operator the king stopped with work still pending.
+///
+/// Shared by both king terminals - this arm's park and the stop hook's
+/// NoProgress in `loopcheck` - because a guard on one of two reachable paths is
+/// decorative. Returns the one-line outcome to record, never an error: a failed
+/// escalation is named and moves on, since blocking the terminal on it would
+/// leave the king running with nobody told either way.
+pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason: &str) -> String {
+    let output = Command::new(fno_bin)
+        .args([
+            "king",
+            "escalate",
+            "--stalled",
+            &ids.join(","),
+            "--reason",
+            reason,
+        ])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let qid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            format!("escalated to the operator as {qid}")
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let detail = stderr.trim().chars().take(300).collect::<String>();
+            eprintln!("king: escalation failed: {detail}");
+            format!("escalation FAILED: {detail}")
+        }
+        Err(e) => {
+            eprintln!("king: cannot run {fno_bin} king escalate: {e}");
+            format!("escalation FAILED: cannot run {fno_bin} king escalate: {e}")
+        }
     }
 }
 
@@ -169,7 +193,7 @@ impl Queue for KingQueue {
         if self.yielded {
             return Ok(None);
         }
-        if self.actionable()? == 0 {
+        if self.board()?.actionable == 0 {
             return Ok(None);
         }
         self.yielded = true;
@@ -186,9 +210,23 @@ impl Queue for KingQueue {
         }))
     }
 
-    /// Inert close: see the module doc for why this does nothing.
-    fn close(&mut self, _unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
-        Ok(CloseOutcome::Closed)
+    /// Inert on every terminal but one: see the module doc for why.
+    ///
+    /// The exception is a NoProgress park. That is the walk arm giving up with
+    /// the board still non-empty, which is this feature's own failure wearing a
+    /// different exit code, so it tells the operator rather than exiting quiet.
+    /// `Parked` carries the outcome into the journal; a failed escalation is
+    /// named there and on stderr and never blocks the park.
+    fn close(&mut self, _unit: &Unit, evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
+        if evidence.reason != TerminationReason::NoProgress {
+            return Ok(CloseOutcome::Closed);
+        }
+        // An unreadable board escalates over an EMPTY set rather than
+        // swallowing the ask: the park is already happening, and the question
+        // text tells the two cases apart so empty never reads as clean.
+        let ids = self.board().map(|b| b.actionable_ids).unwrap_or_default();
+        let outcome = escalate_stalled(&self.fno_bin, &self.cwd, &ids, "NoProgress");
+        Ok(CloseOutcome::Parked(outcome))
     }
 }
 

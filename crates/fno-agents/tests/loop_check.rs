@@ -7101,3 +7101,122 @@ fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
         "got: {err}"
     );
 }
+
+/// A mock `fno` that answers `king board --json` and LOGS every `king escalate`
+/// argv, so a test can read back which paths escalated and over what.
+fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
+    make_script(
+        dir,
+        "fno-king-escalate-mock",
+        &format!(
+            "if [ \"$1\" = \"king\" ] && [ \"$2\" = \"escalate\" ]; then\n\
+             \x20 echo \"$*\" >> {log}\n\
+             \x20 echo q-mock\n\
+             \x20 exit 0\n\
+             fi\n\
+             cat <<'JSON'\n{payload}\nJSON",
+            log = log.display()
+        ),
+    )
+}
+
+/// Plan verification 7, first half: BOTH king terminals escalate, over the same
+/// stalled set.
+///
+/// The two arms are the stop hook's NoProgress (`king_decide`) and the walk
+/// arm's per-unit park (`KingQueue::close`). A guard on one of two reachable
+/// paths is decorative, so this drives both and asserts both, rather than
+/// asserting the helper they share - which would pin the function, not the
+/// destination.
+///
+/// The second half, that the two identical calls yield exactly ONE operator
+/// question, is `test_king_escalate.py`: the dedupe lives in the verb, and a
+/// mock `fno` here records no questions to count. Neither test alone is the
+/// verification; the seam between them is the `--stalled` argument both assert.
+#[test]
+fn both_king_terminals_escalate_over_the_same_stalled_set() {
+    use fno_agents::loop_runtime::Queue as _;
+
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest(cwd, "k-escalate");
+    let events = cwd.join("events.jsonl");
+    let fno = king_escalate_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, &log);
+
+    // Arm 1: fire the stop hook until the dry-fire ceiling trips NoProgress.
+    let mut last = (0, serde_json::Value::Null);
+    for _ in 0..3 {
+        last = king_fire(&state, cwd, &events, &fno);
+    }
+    assert_eq!(
+        last.1["termination_reason"], "NoProgress",
+        "three dry fires must reach the NoProgress terminal: {:?}",
+        last.1
+    );
+
+    // Arm 2: the walk arm parks the unit on the same board.
+    let fno_dir = cwd.join(".fno");
+    fs::create_dir_all(&fno_dir).unwrap();
+    fs::copy(&state, fno_dir.join("king-state.md")).unwrap();
+    let mut queue =
+        fno_agents::loop_king::KingQueue::from_manifest(cwd, fno.to_str().unwrap().to_string())
+            .unwrap();
+    let unit = queue
+        .next()
+        .unwrap()
+        .expect("a non-empty board yields a unit");
+    let evidence = fno_agents::loop_runtime::Evidence {
+        reason: fno_agents::loopcheck::TerminationReason::NoProgress,
+        message: "no termination event after 3 dispatch(es); unit parked".to_string(),
+    };
+    let outcome = queue.close(&unit, &evidence).unwrap();
+    assert!(
+        matches!(outcome, fno_agents::loop_runtime::CloseOutcome::Parked(ref d) if d.contains("q-mock")),
+        "the park must carry the escalation into the journal, got {outcome:?}"
+    );
+
+    // Both arms escalated, and over the same stalled set - which is what makes
+    // the verb's dedupe key identical and the operator's question single.
+    let logged = fs::read_to_string(&log).unwrap_or_default();
+    let calls: Vec<&str> = logged.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected one escalation per arm, got: {logged}"
+    );
+    for call in &calls {
+        assert!(
+            call.contains("--stalled undispatched:x-1234,undispatched:x-5678"),
+            "every arm escalates over the board's actionable rows, QUEUE-QUALIFIED \
+             (the same node in two queues is two rows), got: {call}"
+        );
+    }
+    assert_eq!(
+        calls[0], calls[1],
+        "both arms must produce the same dedupe input"
+    );
+}
+
+/// A terminal that is NOT NoProgress never escalates. NoWork is the king's
+/// clean exit; asking the operator about a board it just emptied would train
+/// them to ignore the queue this feature depends on.
+#[test]
+fn a_clean_king_terminal_does_not_ask_the_operator_anything() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let log = cwd.join("escalations.log");
+    let state = king_manifest(cwd, "k-clean");
+    let events = cwd.join("events.jsonl");
+    let fno = king_escalate_bin(bin_dir.path(), BOARD_CLEAN, &log);
+
+    let (_, json) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(json["termination_reason"], "NoWork");
+    assert!(
+        !log.exists(),
+        "a NoWork terminal must not escalate: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+}

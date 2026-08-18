@@ -8604,7 +8604,25 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let emit = |event_type: &str, data: serde_json::Value| {
         emit_to_both(&project_events, &global_events, event_type, data);
     };
-    let terminate = |reason: TerminationReason, message: &str, actionable: i64, fires: u64| {
+    // Every NoProgress terminal escalates, which is why the escalation lives in
+    // the shared closure rather than at one call site: a king that gives up
+    // with work still pending is this feature's own failure arriving through a
+    // different door, and a guard on one of several terminals is decorative.
+    let terminate = |reason: TerminationReason,
+                     message: &str,
+                     actionable: i64,
+                     fires: u64,
+                     stalled: &[String]| {
+        let mut message = message.to_string();
+        if reason == TerminationReason::NoProgress {
+            let outcome = crate::loop_king::escalate_stalled(
+                &parsed.fno_bin,
+                &parsed.cwd,
+                stalled,
+                "NoProgress",
+            );
+            message = format!("{message}; {outcome}");
+        }
         emit(
             "termination",
             serde_json::json!({
@@ -8616,7 +8634,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         );
         (
             0,
-            king_output("allow", Some(reason), message, actionable, fires),
+            king_output("allow", Some(reason), &message, actionable, fires),
         )
     };
 
@@ -8626,6 +8644,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             "cancel sentinel present; exiting",
             0,
             0,
+            &[],
         );
     }
 
@@ -8644,6 +8663,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                     &format!("king board unreadable {} fires running: {e}", dry + 1),
                     0,
                     dry + 1,
+                    &[],
                 );
             }
             emit(
@@ -8672,7 +8692,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         } else {
             "board clean; exiting NoWork"
         };
-        return terminate(TerminationReason::NoWork, message, 0, dry);
+        return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
     }
 
     // A row the previous fire called actionable and this one does not is work
@@ -8691,6 +8711,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             ),
             board.actionable,
             dry + 1,
+            &board.actionable_ids,
         );
     }
 
