@@ -70,11 +70,12 @@ case "$event" in
     # fence parser had nothing to parse. Six PRs shipped green and unmergeable
     # on that hole, each rescued by a hand-run emit-attestation.sh.
     #
-    # 1. A name field names the invocation. `agent_type` is the DOCUMENTED
-    #    one; the other three are names this repo's hooks have observed a
-    #    subagent's task carried under. Each is tested on its own rather than
-    #    first-non-null, because agent_type is always populated and a `//`
-    #    chain starting with it would shadow every later field.
+    # 1. A name field names the invocation: `agent_type` (the DOCUMENTED
+    #    one) or `agent_name`. The payload's description fields are CALLER
+    #    PROSE - a task told to "code-review the failing tests" names a task,
+    #    not a review - so they are not read here, for the same reason the
+    #    meta guard below refuses its description field.
+    #
     # The reviewer identity rule lives HERE and only here; every signal reads
     # it through this variable, so one edit cannot leave two spellings
     # disagreeing about what counts as a code review.
@@ -83,7 +84,7 @@ case "$event" in
     while IFS= read -r cand; do
       [[ "$cand" =~ $REVIEWER_RE ]] && described=1
     done < <(printf '%s' "$input" \
-      | jq -r '[.agent_type?, .agent_name?, .description?, .subagent_description?]
+      | jq -r '[.agent_type?, .agent_name?]
                | map(select(type == "string")) | .[]' 2>/dev/null || true)
 
     # 2. The harness's own record of WHAT THIS FORK RAN, which it writes
@@ -102,16 +103,16 @@ case "$event" in
     agent_transcript="${agent_transcript/#\~/$HOME}"
     if [[ -n "$agent_transcript" ]]; then
       sidecar_base="${agent_transcript%.jsonl}"
-      for sidecar in "$sidecar_base.forked-skill.marker.json" \
-        "$sidecar_base.forked-skill.json"; do
-        [[ -f "$sidecar" ]] || continue
-        if jq -e --arg re "$REVIEWER_RE" \
+      # Only the marker file carries the forkedSkill flag in live harness
+      # data (checked over 200 real sidecars); the sibling .forked-skill.json
+      # does not, so listing it here would advertise a fallback that never
+      # fires.
+      if [[ -f "$sidecar_base.forked-skill.marker.json" ]] \
+        && jq -e --arg re "$REVIEWER_RE" \
           '(.forkedSkill == true) and ((.skillName? // "") | test($re))' \
-          "$sidecar" >/dev/null 2>&1; then
-          forked=1
-          break
-        fi
-      done
+          "$sidecar_base.forked-skill.marker.json" >/dev/null 2>&1; then
+        forked=1
+      fi
       # `.meta.json` is written for EVERY subagent, spawned tasks included,
       # and its description is caller prose: a task told to "code-review the
       # failing tests" is not a review fork. Only the harness-recorded name

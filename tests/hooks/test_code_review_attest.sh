@@ -42,8 +42,10 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 if ! command -v jq >/dev/null 2>&1; then
-  # exit 77 is the tree's skip convention: the smoke runner scores a 77 as a
-  # visible skip, while a 0 here would report every case green unexecuted.
+  # The runner has no skip state: it scores 77 as a red failure and a 0 as a
+  # green pass. A jq-less machine is broken for this suite, so red is the
+  # honest outcome; a 0 would report every case green having asserted
+  # nothing.
   echo "SKIP: jq not available"; exit 77
 fi
 
@@ -248,6 +250,16 @@ expect_silent "marker-without-forkedskill-flag"
 # the verb must not attest even over an empty fence.
 run_hook "$(task_spawn_stop "code-review the failing tests and report matches" $'Matches for the pattern:\n\n```json\n[]\n```')"
 expect_silent "task-spawn-verb-in-description"
+
+# Same trap in the PAYLOAD: its description field is caller prose too, so a
+# task described as a review that ends clean must stay silent. (The
+# subagent_stop helper writes agent_name, a field that IS read, so this
+# payload is built directly with description.)
+run_hook "$(jq -nc --arg cwd "$WORK" \
+  --arg desc "code-review the failing tests and report matches" --arg msg "$JSON_CLEAN" \
+  '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
+    description:$desc, last_assistant_message:$msg}')"
+expect_silent "task-payload-description-prose"
 
 echo "== SubagentStop: shapes that must stay silent =="
 run_hook "$(subagent_stop "/code-review" "$JSON_DIRTY")"

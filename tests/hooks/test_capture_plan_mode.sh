@@ -23,8 +23,10 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 if ! command -v jq >/dev/null 2>&1; then
-  # exit 77 is the tree's skip convention: the smoke runner scores a 77 as a
-  # visible skip, while a 0 here would report every case green unexecuted.
+  # The runner has no skip state: it scores 77 as a red failure and a 0 as a
+  # green pass. A jq-less machine is broken for this suite, so red is the
+  # honest outcome; a 0 would report every case green having asserted
+  # nothing.
   echo "SKIP: jq not available"; exit 77
 fi
 
