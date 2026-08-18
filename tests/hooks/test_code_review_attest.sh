@@ -12,8 +12,8 @@
 # The matrix below is the delivery shapes OBSERVED LIVE, not shapes imagined:
 #   - ReportFindings tool call with findings: []          (works, keep working)
 #   - a fork ending in a fenced json block, WITH the header
-#   - a fork ending in a fenced json block, NO header     (specimen: PR 922)
-#   - a fork ending in the literal "(none)"               (specimen: PR 923)
+#   - a fork ending in a fenced json block, NO header
+#   - a fork whose entire final text is the literal "(none)"
 # plus the negative half, which matters more: every non-clean and every
 # unrecognized shape must emit NOTHING, so the gate holds rather than clearing
 # on evidence that never arrived.
@@ -165,9 +165,14 @@ expect_attest "described-with-level-json-clean"
 run_hook "$(subagent_stop "/code-review <level>" "(none)")"
 expect_attest "described-none-marker"
 
-# Prose around the marker is NOT the marker. The observed shape is the whole
-# final text equal to "(none)"; anything longer must never clear the gate,
-# an excuse line above the marker least of all.
+# The measured shape: the marker LEADS, then one sentence explaining that the
+# diff held nothing this level reviews. A complete review of an empty scope,
+# so it must attest. This exact text is the fork's own final message.
+run_hook "$(subagent_stop "/code-review" $'(none)\n\nThe only change is `tests/hooks/test_code_review_attest.sh`, a new test file - excluded from review at this level.')"
+expect_attest "none-marker-leads-then-scope-note"
+
+# Prose BEFORE the marker is not a verdict. The first non-blank line decides,
+# so an excuse line above the marker attests nothing.
 run_hook "$(subagent_stop "/code-review" $'Reviewed.\n\n(none)\n')"
 expect_silent "described-none-marker-buried-in-prose"
 

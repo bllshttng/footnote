@@ -140,11 +140,14 @@ print("[]" if data == [] else "nonempty")
     if [[ "$findings" == "[]" ]]; then
       is_clean=1
     elif [[ "$findings" == "absent" ]] \
-      && [[ "$message" =~ ^[[:space:]]*\(none\)[[:space:]]*$ ]]; then
-      # Only when NO array was parsed and the ENTIRE final text is the bare
-      # marker - the observed protocol spells its whole verdict that way. A
-      # standalone "(none)" line inside longer output, an excuse line above
-      # it especially, attests nothing.
+      && [[ "$(printf '%s\n' "$message" | grep -m1 -v '^[[:space:]]*$')" \
+           =~ ^[[:space:]]*\(none\)[[:space:]]*$ ]]; then
+      # Only when NO array was parsed and the FIRST non-blank line is the
+      # bare marker. Position, not equality: the measured fork leads with the
+      # marker and then explains its scope on a later line, so requiring the
+      # whole message to equal the marker silences the very shape this branch
+      # exists to catch. An excuse line ABOVE the marker still attests
+      # nothing, because then the first non-blank line is the excuse.
       is_clean=1
     fi
     ;;
