@@ -8299,10 +8299,6 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
 }
 
-// ── public entry points ───────────────────────────────────────────────────────
-
-/// Entry point called from `bin/client.rs` direct dispatch.
-/// Prints JSON to stdout, returns exit code.
 // ── king driver arm ───────────────────────────────────────────────────────────
 //
 // A target driver asks whether its one deliverable shipped: PR, CI, review,
@@ -8642,6 +8638,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     )
 }
 
+// ── public entry points ───────────────────────────────────────────────────────
+
+/// Entry point called from `bin/client.rs` direct dispatch.
+/// Prints JSON to stdout, returns exit code.
 pub fn run_loop_check(args: &[String]) -> i32 {
     let (code, json) = decide(args);
     println!("{json}");
