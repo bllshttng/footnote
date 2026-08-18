@@ -182,6 +182,36 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 
+## The board-empty walk (king driver)
+
+A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state: `done_probes` are additive only, so a plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath, and the run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
+
+`fno king board --json` reads six queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
+
+| Queue | Read | King can shrink it |
+|---|---|---|
+| `undispatched` | `fno backlog ready --json` + `fno claim list -J` | yes, by spawning a worker |
+| `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
+| `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
+| `stale_claim` | `fno claim list -J --include-stale` | yes, by `fno claim reap` |
+| `operator_question` | `fno outstanding --json` | no, a human answers it |
+| `unreachable_worker` | `fno agents needs --json` | not yet |
+
+The split in that last column is what makes the loop converge. A queue only a human can clear would hold the loop open forever, so it is reported and never counted toward done. That holds when its verb breaks too: an unreadable report-only queue is loud (the board exits non-zero) and still uncounted, because a rule that a human-gated queue never gates `NoWork` does not get weaker when the reader behind it fails.
+
+**Staffed is an activity reading, never a status word.** The roster's wire vocabulary collapses four real states into three words: a worker consuming tokens, a worker parked at its prompt with its turn finished, and a worker whose model refused all render alike. A board that read that word would drop every stalled node out of its queue and terminate `NoWork` while claims are held and nothing moves, which is worse than no loop. The discriminator is membership in `_ACTIVE_STATES` plus a fresh activity age, and the set is imported rather than copied so a later vocabulary fix reaches the board without an edit here.
+
+**Progress is a positive marker, never board size.** A king's board refills while it works, because dispatching a worker and merging a PR both create future work. So progress is a `king_action` event naming a `target_id` this run has not acted on before. Re-emitting the same `target_id` is not progress. That matters because a `stalled_holder` row can survive the only action a king has for it (a wake, which can fail, because the holder's model is the thing that refused); three dry fires then terminate the loop `NoProgress` with a reason naming what stayed unshrunk, which is the truthful terminal for a stalled board.
+
+**Two arms.**
+
+- *In-session:* `hooks/target-stop-hook.sh` adds `.fno/king-state.md` as a second candidate after its target search comes up empty and forwards `--driver king`. A target manifest wins when both are present: a session holding one is a worker whatever else sits beside it. A king terminal skips `finalize`, which stamps a plan and graduates a node that a king does not have. `hooks/agy-target-stop-hook.sh` cannot gate a king (the loop is claude-only in v1) and names the manifest and refuses rather than allowing the stop, because a guard on one of two reachable paths is decorative.
+- *Cross-session:* `fno-agents loop run --driver king` respawns a king that died mid-board. `KingQueue::next()` shells the board and returns `None` at `actionable: 0`, which is what makes `run_loop` emit `NoWork`. An unparseable board is an error rather than a zero: a walk that read zero from a broken reader would report the board clean and stop respawning a king that still has work. The walk passes a per-unit dispatch cap where the target arm passes `None`.
+
+**What a clean `NoWork` terminal means, and the edge it leaves open.** It means the king EXITS. Nothing described here restarts it when the board refills. The walk arm covers a king that died mid-board; it does not cover a king that correctly exited on an empty board. That trigger belongs to an external watchdog, and shipping the loop without one trades idle-forever-with-work-pending for exited-and-nothing-restarts-me, which is the same failure with a better exit code. The pair belongs together.
+
+Gated by `config.king.enabled` (default false), visible as the `king loop` row in `fno autonomy status`. It is the first row in that table that is a loop rather than a trigger: every other one is woken by a PR merge, a launchd tick, a daemon tick, or a node's birth.
+
 ### `done_probes`: the operational-evidence conjunct
 
 `DonePRGreen` normally conjuncts PR-exists + CI-green + review-clean + HEAD-shipped.

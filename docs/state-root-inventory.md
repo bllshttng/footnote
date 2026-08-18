@@ -123,4 +123,6 @@ Not state-root writers, listed here because they are the other family of session
 | `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno target init` | write-once per target session; archived on a terminal |
 | `.fno/king-state.md` | `cli/src/fno/king/state.py` via `fno king init` | write-once per king session; deleted when the crown expires |
 
-Both are write-once after init and both gate a stop hook. A king runs in the canonical checkout where a target manifest may also exist, which is why the king gets its own file rather than a `driver:` field on the target one: a manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.
+Both are write-once after init. Both gate a stop hook.
+
+A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.

@@ -67,8 +67,9 @@ def test_ac1_hp_every_known_spawner_appears(
     rows = collect_status(tmp_path)
 
     # master switch + 9 known spawners + groom/restart/evals (wave 2 gated
-    # these) + recovery sweep (found while building the wave-3 registry ratchet).
-    assert len(rows) == 14
+    # these) + recovery sweep (found while building the wave-3 registry ratchet)
+    # + the king loop.
+    assert len(rows) == 15
     for r in rows:
         assert r.trigger
         assert r.gate_key
@@ -113,6 +114,26 @@ def test_previously_ungated_spawners_now_gated_and_default_true(
         assert by_name[name].armed is True
         assert by_name[name].gate_key == gate_key
         assert by_name[name].rank == "config"
+
+
+def test_king_loop_row_is_present_and_defaults_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The king loop is the first self-sustaining row in this table, and it is
+    the discoverability contract for it: an autonomous spawner that does not
+    appear here is exactly what this verb exists to stop hiding."""
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
+    _write_settings(tmp_path, "schema_version: 1\n")
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+    rows = collect_status(tmp_path)
+    king = next(r for r in rows if r.name == "king loop")
+    assert king.gate_key == "config.king.enabled"
+    assert king.armed is False, "the king loop must default off"
+    assert king.rank == "config"
+    assert "board non-empty" in king.trigger
 
 
 def test_master_switch_row_present_and_armed_by_default(
