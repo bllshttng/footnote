@@ -516,6 +516,11 @@ def test_reindex_counts_a_journal_row_and_its_own_projection_once(
     counts = reindex(sources=[root / ".fno" / "events.jsonl"])
     assert (counts["added"], counts["already"]) == (1, 0), counts
 
+    # And on the SECOND run it is one already-indexed decision, not two
+    # sightings of one.
+    again = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert (again["added"], again["already"]) == (0, 1), again
+
 
 def test_a_failed_index_write_names_reindex_and_never_a_retry(
     root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
@@ -679,6 +684,65 @@ def test_equal_timestamps_do_not_invert_newest_first(
         runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
     )
     assert [d["decision_id"] for d in payload["decisions"]] == ["d-bbb002", "d-aaa001"]
+
+
+def test_a_torn_journal_does_not_make_reindex_impossible(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The fold reads every journal the graph names. One torn multi-byte append
+    in any of them must not take out the recovery command itself."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+    journal = root / ".fno" / "events.jsonl"
+    with journal.open("ab") as fh:
+        fh.write(b'{"type":"other","data":{"x":"caf\xc3\n')
+
+    assert reindex(sources=[journal])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["merged"]
+
+
+def test_a_failed_projection_never_reports_a_lost_capture(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The projection is the third of three writes. Both durable stores already
+    hold the decision, so failing here would invite the duplicate retry."""
+    import fno.graph.store as gs
+
+    def boom(*a, **kw):
+        raise SystemExit(1)  # what locked_mutate_graph does on a corrupt graph
+
+    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
+    assert res.exit_code == 0, res.output
+    assert "graph projection failed" in res.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["fold first"]
+
+
+def test_a_non_node_subject_is_case_insensitive_but_still_exact(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`pr-<n>` is advertised as a first-class subject with no spelling rule,
+    and a node subject already gets case-folding through the resolver."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+
+    found = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "PR-923", "--json"]).stdout
+    )
+    assert [d["decision"] for d in found["decisions"]] == ["merged"]
+
+    miss = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-92", "--json"]).stdout
+    )
+    assert miss["decisions"] == [], "folding case is not a prefix match"
 
 
 def test_operator_decision_retention_is_durable_by_an_explicit_key():

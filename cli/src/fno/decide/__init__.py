@@ -115,7 +115,21 @@ def record_decision(
         append_event(event, events_path=_index_path())
     except Exception as exc:  # noqa: BLE001 - re-raised with what the caller must know
         raise IndexWriteError(decision_id, exc) from exc
-    node_id = _project(event)
+    try:
+        node_id = _project(event)
+    except (Exception, SystemExit) as exc:  # noqa: BLE001
+        # The projection is the node VIEW, the third of three writes. Both
+        # durable stores already hold the decision, so failing the command here
+        # would report a lost capture and invite the retry that mints a second
+        # id. SystemExit is caught on purpose: locked_mutate_graph exits the
+        # process on a corrupt graph, and SystemExit is not an Exception.
+        print(
+            f"decide: recorded {decision_id}, but the graph projection failed: "
+            f"{exc}. The decision is durable and recoverable with "
+            f"`fno decide list`; the subject node just does not show it.",
+            file=sys.stderr,
+        )
+        node_id = None
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
 
 
@@ -293,7 +307,13 @@ def _subject_matcher(subject: str):
     entries = _graph_entries()
     node_id = _resolved_node(subject, entries)
     if node_id is None:
-        return lambda recorded: recorded == subject
+        # casefold, not ==. A node subject gets case-folding free through the
+        # resolver's slug tier, so without this `--subject PR-923` answers
+        # nothing for a ruling recorded as `pr-923` while the node classes work
+        # - two subject shapes behaving differently on the case this fixes.
+        # Still exact: folding case never turns `pr-92` into `pr-921`.
+        want = subject.strip().casefold()
+        return lambda recorded: recorded.strip().casefold() == want
 
     # Resolved per DISTINCT recorded subject by the caller's cache, never per
     # row: the graph read is the expensive part and it already happened.
@@ -446,7 +466,12 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
     events: "list[dict]" = []
     for path in paths:
         try:
-            fh = path.open(encoding="utf-8")
+            # errors="replace" for the same reason the index reader uses it,
+            # and it matters MORE here: this folds every journal the graph
+            # names, so one torn multi-byte append in any of them would make
+            # reindex impossible - the very recovery the damaged-row warning
+            # sends the operator to.
+            fh = path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
         with fh:
@@ -483,6 +508,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
     repaired = _compact_index(index)
     known = {str(row["decision_id"]) for row in _read_index(index, warn=False)}
     preexisting = set(known)
+    counted: "set[str]" = set()
     already = 0
     invalid = 0
     added = 0
@@ -497,10 +523,13 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         if not did:
             continue
         if did in known:
-            # Counted only against what the index already held. A journal row
-            # and its own projection are one decision seen twice in one run,
-            # not a record that was "already indexed".
-            already += did in preexisting
+            # Counted once per DECISION, not once per sighting, and only
+            # against what the index already held. A journal row and its own
+            # projection are one decision seen twice in one run, not a record
+            # that was "already indexed", and not two of them either.
+            if did in preexisting and did not in counted:
+                counted.add(did)
+                already += 1
             continue
         try:
             append_event(event, events_path=index)

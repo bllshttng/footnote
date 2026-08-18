@@ -151,8 +151,11 @@ def clear(
         try:
             # An answered question IS a decision, so the close path records it
             # as one. A close with no answer is a withdrawal and decides
-            # nothing. Record it before closing so a projection failure leaves
-            # the question open and therefore retryable.
+            # nothing. Record it before closing, so a failure to record leaves
+            # the question open and therefore retryable. That no longer covers
+            # a failed graph PROJECTION: the machine-wide index carries recall
+            # now, so the answer is already findable and a retry would record
+            # it twice.
             # Routed through record_decision so the decision gets both halves
             # a `fno decide` record has: the event AND the graph projection
             # onto the subject node, which is what `fno decide list` reads.

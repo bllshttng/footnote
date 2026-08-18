@@ -34,6 +34,8 @@ One `fno decide` call writes the journal, then the index, then the projection. A
 
 It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno decide reindex` as the recovery.
 
+A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
+
 ## Why the index is separate from the global journal
 
 The event stays project-local because it is durable there. `cli/src/fno/events/gc.py` refuses to compact the global journal but does compact project journals, and it deletes rows classified `retention: ephemeral`. `operator_decision` carries an explicit `retention: durable` key, so the GC keeps it.
