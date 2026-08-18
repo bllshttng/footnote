@@ -21,11 +21,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import time
 import re
 import stat
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Mapping, Optional, Tuple
 
@@ -39,10 +37,6 @@ BYPASS_VALUE = "stale-acknowledged"
 OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
-
-
-class VerificationLockReleaseError(RuntimeError):
-    """A reader lock could not be released, so its verdict is unavailable."""
 
 _PREFLIGHT_GATE_SCOPE = frozenset(
     {
@@ -517,54 +511,40 @@ def check_verification_evidence(
             "receipt": None,
             "coverage": {"complete": False, "error": "candidate SHA unavailable"},
         }
-    try:
-        with _verification_read_lock(repo) as lock_error:
-            if lock_error is not None:
-                return {
-                    "satisfied": False,
-                    "mode": None,
-                    "result": "unavailable",
-                    "receipt": None,
-                    "coverage": {"complete": False, "lock_error": lock_error},
-                }
-            discovery_errors: list[str] = []
-            if event_paths is None:
-                event_paths, discovery_errors = verification_event_paths(cwd=repo)
-            decision = verification_decision(candidate_sha, event_paths)
-            if discovery_errors:
-                decision["coverage"]["complete"] = False
-                decision["coverage"]["discovery_errors"] = discovery_errors
-                decision["satisfied"] = False
-            if (
-                allow_equivalent
-                and not decision["satisfied"]
-                and not discovery_errors
-                # A failed or still-running verdict for HEAD itself is
-                # authoritative: the same patches can fail against a newer
-                # main, so an older green for a patch-equal ancestor must
-                # never override a fresh red, and an unfinished attempt
-                # (result "pending") deserves the same protection.
-                and decision.get("result") not in ("failed", "pending")
-                # The strict path refuses on incomplete coverage; equivalence
-                # must not relax that (malformed lines, unreadable journals).
-                and decision["coverage"].get("complete")
-            ):
-                equivalent = rebase_equivalent_evidence(
-                    cwd=repo,
-                    candidate_sha=candidate_sha,
-                    event_paths=event_paths,
-                    decision=decision,
-                )
-                if equivalent is not None:
-                    decision = equivalent
-    except VerificationLockReleaseError as exc:
-        return {
-            "satisfied": False,
-            "mode": None,
-            "result": "unavailable",
-            "receipt": None,
-            "coverage": {"complete": False, "lock_error": str(exc)},
-        }
+    # The journal is append-only, so a read excludes nobody: writers
+    # append single lines without holding any lock. Taking the preflight
+    # writer lock here made every fleet verification unavailable for the
+    # duration of any preflight run.
+    discovery_errors: list[str] = []
+    if event_paths is None:
+        event_paths, discovery_errors = verification_event_paths(cwd=repo)
+    decision = verification_decision(candidate_sha, event_paths)
+    if discovery_errors:
+        decision["coverage"]["complete"] = False
+        decision["coverage"]["discovery_errors"] = discovery_errors
+        decision["satisfied"] = False
+    if (
+        allow_equivalent
+        and not decision["satisfied"]
+        and not discovery_errors
+        # A failed or still-running verdict for HEAD itself is
+        # authoritative: the same patches can fail against a newer
+        # main, so an older green for a patch-equal ancestor must
+        # never override a fresh red, and an unfinished attempt
+        # (result "pending") deserves the same protection.
+        and decision.get("result") not in ("failed", "pending")
+        # The strict path refuses on incomplete coverage; equivalence
+        # must not relax that (malformed lines, unreadable journals).
+        and decision["coverage"].get("complete")
+    ):
+        equivalent = rebase_equivalent_evidence(
+            cwd=repo,
+            candidate_sha=candidate_sha,
+            event_paths=event_paths,
+            decision=decision,
+        )
+        if equivalent is not None:
+            decision = equivalent
     return decision
 
 
@@ -736,71 +716,6 @@ def local_verification_required(
         if path and path != "README.md" and not path.startswith(("docs/", "internal/"))
     ]
     return (True, "required") if non_docs else (False, "docs-only")
-
-
-def _git_common_dir(repo: str) -> Optional[Path]:
-    result = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return Path(result.stdout.strip()).resolve()
-
-
-@contextmanager
-def _verification_read_lock(repo: str):
-    common = _git_common_dir(repo)
-    if common is None:
-        yield "git common directory unavailable"
-        return
-    lock = common / ".preflight.lock.d"
-    stamp = f"pid={os.getpid()} kind=evidence-reader"
-    # The writer lock is now held across queued preflights, not only across
-    # single runs, so a reader that one-shot fails on FileExistsError refuses
-    # ships for however long the queue drains. Retry briefly instead: the
-    # writer releases between runs and 15 x 2s covers a handoff.
-    acquired = False
-    detail: Optional[str] = None
-    for _attempt in range(15):
-        try:
-            lock.mkdir()
-            (lock / "holder").write_text(stamp + "\n", encoding="utf-8")
-            acquired = True
-            break
-        except FileExistsError:
-            time.sleep(2.0)
-        except OSError as exc:
-            cleanup_errors: list[str] = []
-            try:
-                (lock / "holder").unlink(missing_ok=True)
-            except OSError as cleanup_exc:
-                cleanup_errors.append(str(cleanup_exc))
-            try:
-                lock.rmdir()
-            except OSError as cleanup_exc:
-                cleanup_errors.append(str(cleanup_exc))
-            detail = f"verification lock unavailable: {exc}"
-            if cleanup_errors:
-                detail += f"; partial acquisition cleanup failed: {'; '.join(cleanup_errors)}"
-            break
-    if not acquired:
-        yield detail or "preflight transition in progress"
-        return
-    try:
-        yield None
-    finally:
-        try:
-            observed = (lock / "holder").read_text(encoding="utf-8").strip()
-            if observed != stamp:
-                raise VerificationLockReleaseError(
-                    f"verification lock ownership changed: {lock}"
-                )
-            (lock / "holder").unlink()
-            lock.rmdir()
-        except VerificationLockReleaseError:
-            raise
-        except OSError as exc:
-            raise VerificationLockReleaseError(
-                f"verification lock release failed: {lock}: {exc}"
-            ) from exc
 
 
 def run_evidence_check(
