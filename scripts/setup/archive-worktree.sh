@@ -195,13 +195,22 @@ if [[ "$FORCE" -eq 0 ]]; then
     source "$_UNPUSHED_LIB"
   else
     wt_unpushed_count() { printf '1\n'; }   # partial deploy: keep everything
+    wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
   fi
   UPSTREAM="$(git -C "$TARGET" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
   if [[ "$BRANCH" == "(detached)" ]]; then
+    # Refresh in THIS shell: the count below runs in a $( ) subshell whose
+    # exports die with it, so the receipt's verified-vs-unverifiable branch
+    # below needs the freshness flag here.
+    wt_refresh_remote_refs "$TARGET" >/dev/null 2>&1 || true
     UNPUSHED="$(wt_unpushed_count "$TARGET")"
     if [[ "$UNPUSHED" -gt 0 ]]; then
-      echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
-      git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes >&2
+      if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+        echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
+        git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes >&2
+      else
+        echo "archive-worktree: remote refs not verifiable (fetch failed); refusing to judge the detached HEAD at $TARGET" >&2
+      fi
       echo "    --force to override, or push first." >&2
       exit 2
     fi

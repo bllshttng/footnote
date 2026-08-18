@@ -566,6 +566,24 @@ def test_dead_secondary_remote_degrades_instead_of_aborting(repo: Path):
     assert det.exists(), "refs unverifiable against a dead remote must keep detached trees" + diag
 
 
+def test_non_origin_single_remote_detached_still_archives(repo: Path):
+    """The refresh verifies whichever remotes exist. A repo whose only remote
+    is named anything but origin must still archive a detached head that the
+    remote carries; hardcoding origin made every such repo read as
+    permanently unverifiable."""
+    _git(repo, "remote", "rename", "origin", "upstream")
+    det = _add_detached(repo, repo / "wt-scratch-upstream")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert not det.exists(), f"stderr={r.stderr}"
+
+
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
 def test_empty_state_is_explicit(repo: Path):
     r = _sweep(repo)

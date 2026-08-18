@@ -238,16 +238,17 @@ case "${1:-status}" in
             # One refresh up front, PRUNED: a branch deleted on the server
             # leaves its local tracking ref behind, and that stale ref would
             # vouch for a commit no remote carries (wt_unpushed_count) or a
-            # phantom merged baseline. Origin failing (rc 2) aborts loudly
-            # rather than reaping against stale refs - silently keeping
-            # everything looks identical to a clean state, so that failure
-            # must be loud. A dead NON-origin remote (rc 1) degrades instead
-            # of bricking the sweep: detached trees are kept (their refs
-            # cannot be verified against the dead remote) and the helper says
-            # so on stderr, while origin-keyed judging continues.
+            # phantom merged baseline. The shared predicate is
+            # remote-agnostic, so a failure is sorted HERE, where the
+            # origin-keyed baseline lives: origin unreachable aborts loudly
+            # (silently keeping everything looks identical to a clean state,
+            # so that failure must be loud); a dead NON-origin remote
+            # degrades instead of bricking the sweep - detached trees are
+            # kept (their refs cannot be verified) while origin-keyed
+            # judging and the report continue.
             REFRESH_RC=0
             wt_refresh_remote_refs "$MAIN_DIR" || REFRESH_RC=$?
-            if [[ "$REFRESH_RC" -eq 2 ]]; then
+            if [[ "$REFRESH_RC" -ne 0 ]] && ! git fetch --prune origin >/dev/null 2>&1; then
                 echo "worktree cleanup --merged: refresh of origin failed; aborting (refs would be stale)" >&2
                 exit 1
             fi
