@@ -140,11 +140,16 @@ def coverage_publish(
     ),
 )
 def info(
-    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number; defaults to current branch"),
     repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
 ) -> None:
     from fno.pr import _rest
 
+    if pr_number is None:
+        pr_number, reason = _rest.resolve_current_pr_number_rest(cwd=os.getcwd(), repo=repo)
+        if pr_number is None:
+            typer.echo(json.dumps({"pr": None, "error": reason}, separators=(",", ":")))
+            raise typer.Exit(code=4)
     payload, reason = _rest.fetch_pr_info_rest(str(pr_number), cwd=os.getcwd(), repo=repo)
     if payload is None:
         typer.echo(json.dumps({"pr": pr_number, "error": reason}, separators=(",", ":")))

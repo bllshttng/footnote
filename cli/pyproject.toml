@@ -45,6 +45,7 @@ Issues = "https://github.com/bllshttng/footnote/issues"
 [project.scripts]
 fno-py = "fno.cli:app"
 fno-gh-coverage = "fno.pr._quota:coverage_main"
+fno-gh-proxy = "fno.pr.gh_proxy:main"
 
 [tool.hatch.version]
 path = "src/fno/__init__.py"

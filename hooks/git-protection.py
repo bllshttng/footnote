@@ -1338,6 +1338,24 @@ def _find_git_segments(segments):
     return out
 
 
+def _find_graphql_pr_reads(segments):
+    """Return classified direct GraphQL `gh` reads in command positions."""
+    out = []
+    for seg in segments:
+        argv = _effective_argv(seg)
+        if not argv or argv[0].rsplit("/", 1)[-1].lower() != "gh":
+            continue
+        lowered = [token.lower() for token in argv]
+        if len(argv) >= 3 and lowered[1:3] == ["pr", "checks"]:
+            out.append(("status", next((v for v in argv[3:] if v.isdigit()), "<n>")))
+        elif (len(argv) >= 3 and lowered[1:3] == ["pr", "view"]
+              and "--json" in argv):
+            out.append(("info", next((v for v in argv[3:] if v.isdigit()), "<n>")))
+        elif len(argv) >= 3 and lowered[1:3] == ["api", "graphql"]:
+            out.append(("graphql", "<n>"))
+    return out
+
+
 def _emit(decision, reason):
     """Print a PreToolUse permission decision as JSON."""
     print(json.dumps({
@@ -1682,6 +1700,38 @@ def main():
         segments = _command_segments(command)
     except ValueError:
         segments = None
+
+    if segments is not None:
+        graphql_reads = _find_graphql_pr_reads(segments)
+    else:
+        graphql_reads = []
+        if re.search(r"\bgh\s+pr\s+checks\b", command, re.IGNORECASE):
+            graphql_reads.append(("status", "<n>"))
+        if (re.search(r"\bgh\s+pr\s+view\b", command, re.IGNORECASE)
+                and "--json" in command):
+            graphql_reads.append(("info", "<n>"))
+        if re.search(r"\bgh\s+api\s+graphql\b", command, re.IGNORECASE):
+            graphql_reads.append(("graphql", "<n>"))
+    if graphql_reads:
+        kind, pr = graphql_reads[0]
+        if kind == "info":
+            reason = (
+                f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability; "
+                "stop retrying `gh pr view --json` this quota window."
+            )
+        elif kind == "status":
+            reason = (
+                f"[fno GraphQL reserve] use `fno pr status {pr}` for CI. Its CI read is REST; "
+                "optional review-thread and coverage reads inside it remain GraphQL."
+            )
+        else:
+            reason = (
+                "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
+                "through `fno pr graphql-exec --purpose discretionary -- ...` and stop "
+                "retrying until the quota reset."
+            )
+        _emit("deny", reason)
+        sys.exit(0)
 
     # ==========================================
     # gh pr create - always allowed (ad-hoc dev is legit; the merge gate is

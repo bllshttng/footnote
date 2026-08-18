@@ -127,6 +127,38 @@ def fetch_pr_info_rest(
     )
 
 
+def resolve_current_pr_number_rest(
+    *, cwd: Optional[str] = None, runner: Callable = run, repo: Optional[str] = None
+) -> "tuple[Optional[int], str]":
+    """Resolve the current branch's PR with the REST pulls-list endpoint."""
+    slug = repo or _repo_slug(cwd, runner)
+    if not slug or "/" not in slug:
+        return None, "could not resolve owner/repo from `git remote get-url origin`"
+    branch = runner(["git", "branch", "--show-current"], cwd=cwd)
+    if not branch.ok or not branch.stdout.strip():
+        return None, "could not resolve the current git branch"
+    owner = slug.split("/", 1)[0]
+    rows = runner(
+        [
+            "gh", "api",
+            f"repos/{slug}/pulls?state=all&head={owner}:{branch.stdout.strip()}&per_page=2",
+        ],
+        cwd=cwd,
+    )
+    if not rows.ok:
+        return None, _rest_reason(rows)
+    try:
+        payload = json.loads(rows.stdout)
+    except json.JSONDecodeError:
+        return None, "gh api pulls list returned output that is not JSON"
+    if not isinstance(payload, list) or not payload:
+        return None, f"no PR found for current branch {branch.stdout.strip()}"
+    number = payload[0].get("number") if isinstance(payload[0], dict) else None
+    if not isinstance(number, int):
+        return None, "gh api pulls list carried no PR number"
+    return number, ""
+
+
 def fetch_pr_rest(
     pr: str,
     cwd: Optional[str] = None,

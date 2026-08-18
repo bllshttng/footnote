@@ -142,17 +142,19 @@ is a preference, never a paywall.
 ### 1. Get PR Info
 
 ```bash
-# If PR number not provided, get from current branch
-gh pr view --json number,url --jq '{number: .number, url: .url}'
+# If PR number is not provided, resolve the current branch over REST
+fno pr info
 ```
 
 Resolve the current head and live node, then inspect the sigma artifact as a second source before any zero-reviewer return or polling decision:
 
 ```bash
-PR_NUMBER=$(gh pr view --json number --jq .number)
-PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
-OWNER=$(gh repo view --json owner --jq '.owner.login')
-REPO=$(gh repo view --json name --jq '.name')
+PR_INFO=$(fno pr info)
+PR_NUMBER=$(printf '%s' "$PR_INFO" | jq -er .pr)
+PR_HEAD=$(printf '%s' "$PR_INFO" | jq -er .head_sha)
+REPO_SLUG=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\.git$##')
+OWNER=${REPO_SLUG%%/*}
+REPO=${REPO_SLUG#*/}
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
 SIGMA_JSON=$(fno review --inspect-sigma --sigma-node "$NODE_ID" \
   --sigma-pr "$PR_NUMBER" --sigma-head "$PR_HEAD" --json)
@@ -602,9 +604,9 @@ gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments \
 
 ### Get PR Summary Comment
 ```bash
-# Note: gh pr view uses author.login WITHOUT [bot] suffix
-gh pr view PR_NUMBER --json comments \
-  --jq ".comments[] | select(.author.login == \"$REVIEWER_NAME\") | .body"
+# REST issue comments expose `user.login` with the `[bot]` suffix
+gh api "repos/{owner}/{repo}/issues/PR_NUMBER/comments" --paginate \
+  --jq ".[] | select(.user.login == \"$REVIEWER_BOT\") | .body"
 
 # Alternative using gh api (uses user.login WITH [bot] suffix)
 gh api repos/OWNER/REPO/issues/PR_NUMBER/comments \
@@ -626,7 +628,7 @@ gh pr comment PR_NUMBER --body "Your response message here"
 |---------|-------|-------|
 | `gh api .../reviews` | `user.login` | `$REVIEWER_BOT` (with `[bot]`) |
 | `gh api .../comments` | `user.login` | `$REVIEWER_BOT` (with `[bot]`) |
-| `gh pr view --json` | `author.login` | `$REVIEWER_NAME` (no `[bot]`) |
+| REST issue comments | `user.login` | `$REVIEWER_BOT` (with `[bot]`) |
 
 Always use `$REVIEWER_BOT` (with `[bot]` suffix) for `gh api` commands.
 
