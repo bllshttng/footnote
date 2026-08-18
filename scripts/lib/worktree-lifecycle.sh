@@ -223,10 +223,20 @@ case "${1:-status}" in
             # Used only to guard job-record reaping off the canonical path.
             CANONICAL_MAIN="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /,"");print}')"
 
-            # One fetch up front. A failure aborts loudly rather than reaping
-            # against stale refs (silently keeping everything looks identical
-            # to a clean state, so the failure must be loud).
-            if ! git fetch origin main >/dev/null 2>&1; then
+            # One refresh up front, PRUNED: a branch deleted on the server
+            # leaves its local tracking ref behind, and that stale ref would
+            # vouch for a commit no remote carries (wt_unpushed_count) or a
+            # phantom merged baseline. A failure aborts loudly rather than
+            # reaping against stale refs (silently keeping everything looks
+            # identical to a clean state, so the failure must be loud). The
+            # fallback keeps a partial deploy that dropped the lib on today's
+            # fetch-what-the-merged-check-needs behavior.
+            if declare -F wt_refresh_remote_refs >/dev/null 2>&1; then
+                wt_refresh_remote_refs "$MAIN_DIR" || {
+                    echo "worktree cleanup --merged: refresh of remote refs (fetch --all --prune) failed; aborting (refs would be stale)" >&2
+                    exit 1
+                }
+            elif ! git fetch origin main >/dev/null 2>&1; then
                 echo "worktree cleanup --merged: git fetch origin main failed; aborting (refs would be stale)" >&2
                 exit 1
             fi

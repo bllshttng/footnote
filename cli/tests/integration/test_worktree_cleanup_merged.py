@@ -439,6 +439,73 @@ def test_archive_detached_local_only_refused(repo: Path):
     assert det.exists()
 
 
+# ── stale tracking refs: the branch is gone on the server, the ref lives on ─
+def _origin_bare(repo: Path) -> Path:
+    return Path(_git(repo, "remote", "get-url", "origin").stdout.strip())
+
+
+def _detached_at_deleted_remote_branch(repo: Path, name: str) -> Path:
+    """A tree detached at a commit whose remote branch is GONE on the server:
+    the local refs/remotes entry still points at the commit, so only a pruned
+    refresh sees that no remote carries it anymore."""
+    src = repo / f"{name}-src"
+    _git(repo, "worktree", "add", str(src), "-b", f"feature/{name}", "main")
+    _commit(src, f"{name}.txt")
+    _git(src, "push", "origin", f"feature/{name}")
+    sha = _git(src, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "worktree", "remove", str(src))
+    _git(_origin_bare(repo), "branch", "-D", f"feature/{name}")
+    return _add_detached(repo, repo / f"wt-scratch-{name}", at=sha)
+
+
+def test_detached_kept_when_remote_branch_was_deleted(repo: Path):
+    """Judged against the stale tracking ref the count reads 0 and the sweep
+    destroys the only copy of the commit. The pruned refresh must flip the
+    verdict to kept."""
+    wt = _detached_at_deleted_remote_branch(repo, "gone")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (unpushed)" in r.stdout, diag
+    assert wt.exists(), "a commit no remote carries anymore must never be reaped" + diag
+
+
+def test_archive_detached_kept_when_remote_branch_was_deleted(repo: Path):
+    """The removal-time gate must agree with the sweep on the stale-ref case;
+    otherwise a tree the sweep keeps can still be archived by hand against
+    the stale ref."""
+    wt = _detached_at_deleted_remote_branch(repo, "gone2")
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_detached_refused_when_refs_unverifiable(repo: Path):
+    """No network, no verdict. A detached head whose commits the (now
+    unreachable) remote does carry must still be kept when the refresh
+    cannot verify that, not archived against refs that may be stale."""
+    wt = _add_detached(repo, repo / "wt-scratch-unverifiable")
+    _git(repo, "remote", "set-url", "origin", str(repo / "unreachable.git"))
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "not verifiable" in r.stderr, f"stderr={r.stderr}"
+    assert wt.exists(), f"stderr={r.stderr}"
+
+
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
 def test_empty_state_is_explicit(repo: Path):
     r = _sweep(repo)
