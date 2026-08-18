@@ -21,6 +21,7 @@ def _empty_inputs(**overrides) -> BoardInputs:
     base = dict(
         ready=_ok([]),
         claims=_ok([]),
+        claimed_nodes=_ok([]),
         holder_activity={},
         prs=_ok([]),
         questions=_ok([]),
@@ -36,6 +37,23 @@ def _node(node_id, priority="p0", plan_path="/plans/p.md"):
 
 def _claim(node_id, state="live", holder="target-session:abc"):
     return {"key": f"node:{node_id}", "state": state, "holder": holder}
+
+
+def _held(node_id, holder, *, priority="p0", activity=None):
+    """A node held by a live claim, in the shape the real verbs produce.
+
+    The load-bearing detail is that the node is NOT in `ready`. `fno backlog
+    ready` filters through `live_claimed_node_ids`, so a live-claimed node
+    cannot appear there. The first cut of these tests put one in both lists,
+    which is a state the system cannot reach, and the stalled_holder queue
+    passed its tests while being structurally unreachable in production.
+    """
+    return dict(
+        ready=_ok([]),
+        claims=_ok([_claim(node_id, holder=holder)]),
+        claimed_nodes=_ok([_node(node_id, priority=priority)]),
+        holder_activity={holder: activity} if activity else {},
+    )
 
 
 def _queue(board, name):
@@ -138,11 +156,27 @@ def test_mergeable_pr_is_gated_on_the_autonomous_merge_key(
 # --- AC1c-HP ----------------------------------------------------------------
 
 
-def test_node_held_by_an_inactive_holder_is_stalled_not_undispatched():
+def test_a_live_claimed_node_is_never_in_the_ready_list():
+    """The fixture invariant every stalled_holder test below depends on.
+
+    `fno backlog ready` filters through `live_claimed_node_ids`. Measured
+    2026-08-18: 12 live-or-suspect node claims on one machine, zero of them in
+    the ready payload. A test that puts a live-claimed node in `ready` pins a
+    state the system cannot reach and reports coverage over an unreachable
+    path, which is how this queue passed its tests while being dead code.
+    """
+    inputs = _empty_inputs(**_held("x-1234", "target-session:dead"))
+    assert inputs.ready.rows() == []
+    assert [n["id"] for n in inputs.claimed_nodes.rows()] == ["x-1234"]
+
+
+def test_node_held_by_an_inactive_holder_is_stalled():
     inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([_claim("x-1234", holder="target-session:dead")]),
-        holder_activity={"target-session:dead": {"state": "stalled", "age_s": 9000}},
+        **_held(
+            "x-1234",
+            "target-session:dead",
+            activity={"state": "stalled", "age_s": 9000},
+        )
     )
     board = build_board(inputs)
 
@@ -153,9 +187,9 @@ def test_node_held_by_an_inactive_holder_is_stalled_not_undispatched():
 
 def test_node_held_by_an_active_holder_appears_in_neither_queue():
     inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([_claim("x-1234", holder="target-session:busy")]),
-        holder_activity={"target-session:busy": {"state": "working", "age_s": 12}},
+        **_held(
+            "x-1234", "target-session:busy", activity={"state": "working", "age_s": 12}
+        )
     )
     board = build_board(inputs)
 
@@ -165,25 +199,31 @@ def test_node_held_by_an_active_holder_appears_in_neither_queue():
 
 
 def test_an_active_state_with_a_stale_age_is_still_stalled():
-    """`working` with a two-hour-old transcript is the wedged worker; the age is
+    """`working` with a nine-hour-old transcript is the wedged worker; the age is
     what makes the activity axis actionable rather than decorative."""
     inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([_claim("x-1234", holder="target-session:wedged")]),
-        holder_activity={"target-session:wedged": {"state": "working", "age_s": 60 * 60 * 9}},
+        **_held(
+            "x-1234",
+            "target-session:wedged",
+            activity={"state": "working", "age_s": 60 * 60 * 9},
+        )
     )
     board = build_board(inputs)
     assert _queue(board, "stalled_holder")["count"] == 1
 
 
 def test_unresolvable_holder_activity_is_stalled_not_staffed():
-    inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([_claim("x-1234", holder="target-session:ghost")]),
-        holder_activity={},
-    )
+    inputs = _empty_inputs(**_held("x-1234", "target-session:ghost"))
     board = build_board(inputs)
     assert _queue(board, "stalled_holder")["count"] == 1
+
+
+def test_a_p2_node_held_by_a_wedged_worker_is_not_the_kings_work():
+    inputs = _empty_inputs(
+        **_held("x-1234", "target-session:dead", priority="p2")
+    )
+    board = build_board(inputs)
+    assert _queue(board, "stalled_holder")["count"] == 0
 
 
 # --- AC1c-ERR ---------------------------------------------------------------
@@ -197,16 +237,16 @@ def test_a_holder_whose_wire_status_reads_live_is_still_stalled_when_parked():
     fixture pins `status` to exactly `live` so the wrong read fails loudly.
     """
     inputs = _empty_inputs(
-        ready=_ok([_node("x-1234")]),
-        claims=_ok([_claim("x-1234", holder="target-session:parked")]),
-        holder_activity={
-            "target-session:parked": {
+        **_held(
+            "x-1234",
+            "target-session:parked",
+            activity={
                 "state": "done",
                 "age_s": 30,
                 "status": "live",
                 "reachability": "reachable",
-            }
-        },
+            },
+        )
     )
     board = build_board(inputs)
 

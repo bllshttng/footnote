@@ -48,6 +48,12 @@ KING_PRIORITIES = frozenset({"p0", "p1"})
 #: and the cut is reported. A silent cap reads as full coverage.
 DEFAULT_MAX_ROWS = 25
 
+#: Claim states that mean the lock outlived its holder. `fno claim list
+#: --include-stale` returns both, and a corrupted lockfile is as unreapable by
+#: its owner as an expired one, so both belong in the queue the king clears
+#: with `fno claim reap`.
+_DEAD_CLAIM_STATES = frozenset({"stale", "corrupted"})
+
 #: The literal commands a reader can re-run. These strings ARE the checkability
 #: property, so they live beside the readers that run them.
 SRC_READY = "fno backlog ready --json"
@@ -93,6 +99,10 @@ class BoardInputs:
 
     ready: SourceRead
     claims: SourceRead
+    #: The backlog rows for nodes holding a LIVE claim. A separate source from
+    #: `ready` on purpose: `ready` excludes exactly these, so a wedged worker is
+    #: invisible from that side.
+    claimed_nodes: SourceRead
     holder_activity: dict[str, dict]
     prs: SourceRead
     questions: SourceRead
@@ -167,36 +177,63 @@ def build_board(
             claim_by_node[key[len("node:") :]] = row
 
     undispatched: list[dict] = []
-    stalled: list[dict] = []
     for node in inputs.ready.rows():
         if node.get("priority") not in KING_PRIORITIES:
             continue
         if not node.get("plan_path"):
             continue
-        node_id = node.get("id")
-        claim = claim_by_node.get(str(node_id))
-        row = {
-            "id": node_id,
-            "priority": node.get("priority"),
-            "title": node.get("title"),
-        }
-        if claim is None:
-            undispatched.append(row)
+        # `fno backlog ready` already drops every node holding a LIVE claim, so
+        # anything still here is unstaffed. A STALE claim survives that filter,
+        # and it belongs to the `stale_claim` queue: counting it here too would
+        # let the king spawn a second worker over a lock nobody reaped. Reaping
+        # first makes the node undispatched on the next read, which converges
+        # without the duplicate.
+        claim = claim_by_node.get(str(node.get("id")))
+        if claim is not None and claim.get("state") in _DEAD_CLAIM_STATES:
             continue
-        # A stale claim is the `stale_claim` queue's job. Counting the node as
-        # undispatched too would let the king spawn a second worker over a lock
-        # nobody reaped yet; reaping first makes it undispatched on the next
-        # read, which converges without the duplicate.
-        if claim.get("state") == "stale":
+        undispatched.append(
+            {
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+            }
+        )
+
+    # `stalled_holder` CANNOT be sourced from the ready list, and that mistake
+    # is what made this queue structurally unreachable in the first cut.
+    # `fno backlog ready` filters through `live_claimed_node_ids`, so a node
+    # with a live holder is exactly the node that has already been removed.
+    # Measured 2026-08-18: 12 live-or-suspect node claims on one machine, zero
+    # of them in the ready payload. Reading a wedged worker therefore has to
+    # start from the CLAIM and look the node up, which is the opposite
+    # direction from every other queue here.
+    stalled: list[dict] = []
+    for node in inputs.claimed_nodes.rows():
+        if node.get("priority") not in KING_PRIORITIES:
+            continue
+        claim = claim_by_node.get(str(node.get("id")))
+        if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:
             continue
         holder = str(claim.get("holder") or "")
-        if not _holder_is_active(inputs.holder_activity.get(holder)):
-            stalled.append({**row, "holder": holder, "claim_state": claim.get("state")})
+        if _holder_is_active(inputs.holder_activity.get(holder)):
+            continue
+        stalled.append(
+            {
+                "id": node.get("id"),
+                "priority": node.get("priority"),
+                "title": node.get("title"),
+                "holder": holder,
+                "claim_state": claim.get("state"),
+            }
+        )
 
+    # A corrupted lockfile is as much a lock nobody will reap as a stale one,
+    # and it carries no holder, so leaving it out points the king at a wake it
+    # cannot perform instead of the reap it can.
     stale_claims = [
-        {"key": r.get("key"), "holder": r.get("holder")}
+        {"key": r.get("key"), "holder": r.get("holder"), "state": r.get("state")}
         for r in inputs.claims.rows()
-        if r.get("state") == "stale"
+        if r.get("state") in _DEAD_CLAIM_STATES
     ]
 
     pr_rows = [
@@ -228,8 +265,8 @@ def build_board(
         ),
         _queue(
             "stalled_holder",
-            f"{SRC_READY} + {SRC_CLAIMS} + fno agents peek <holder>",
-            SourceRead(error=inputs.ready.error or inputs.claims.error),
+            f"{SRC_CLAIMS} + fno backlog get <id> + fno agents peek <holder>",
+            SourceRead(error=inputs.claims.error or inputs.claimed_nodes.error),
             stalled,
             actionable=True,
             max_rows=max_rows,
@@ -421,6 +458,62 @@ def _resolve_holder_activity(holders: set[str]) -> dict[str, dict]:
     return out
 
 
+#: Live node claims resolved per board read. Each costs one `fno backlog get`,
+#: and the read feeds a stop hook, so the count is capped and the cut is
+#: reported rather than swallowed.
+MAX_CLAIMED_NODE_READS = 20
+
+
+def _read_claimed_nodes(
+    claims: SourceRead, timeout: int
+) -> tuple[SourceRead, set[str], list[str]]:
+    """Look up the backlog row behind each LIVE node claim.
+
+    This is the read that makes `stalled_holder` reachable at all. Every other
+    queue starts from a list of nodes; this one starts from a list of LOCKS,
+    because `fno backlog ready` has already removed exactly the nodes a wedged
+    worker is holding.
+    """
+    if not claims.ok:
+        return SourceRead(error=claims.error), set(), []
+
+    held: list[tuple[str, str]] = []
+    for row in claims.rows():
+        key = str(row.get("key") or "")
+        if not key.startswith("node:"):
+            continue
+        if row.get("state") in _DEAD_CLAIM_STATES:
+            continue
+        holder = str(row.get("holder") or "")
+        if holder:
+            held.append((key[len("node:") :], holder))
+
+    warnings: list[str] = []
+    if len(held) > MAX_CLAIMED_NODE_READS:
+        warnings.append(
+            f"stalled_holder: capped at {MAX_CLAIMED_NODE_READS} of {len(held)} live claims"
+        )
+        held = held[:MAX_CLAIMED_NODE_READS]
+
+    nodes: list[dict] = []
+    holders: set[str] = set()
+    for node_id, holder in held:
+        read = _run_json(["fno", "backlog", "get", node_id], timeout=timeout)
+        if not read.ok:
+            # One unreadable node is not an unreadable queue: the other claims
+            # still answer. It is reported so a silent gap never reads as a
+            # clean lane.
+            warnings.append(f"stalled_holder: {node_id} unreadable: {read.error}")
+            continue
+        node = read.payload if isinstance(read.payload, dict) else None
+        if not node:
+            continue
+        nodes.append(node)
+        if node.get("priority") in KING_PRIORITIES:
+            holders.add(holder)
+    return SourceRead(payload=nodes), holders, warnings
+
+
 def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
     """Fetch every source. Never raises; every failure lands in a SourceRead."""
     ready = _run_json(["fno", "backlog", "ready", "--json"], timeout=timeout)
@@ -429,24 +522,13 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         timeout=timeout,
     )
     prs, warnings = _read_prs(timeout, max_pr_reads)
-
-    holders: set[str] = set()
-    if ready.ok and claims.ok:
-        wanted = {
-            str(n.get("id"))
-            for n in ready.rows()
-            if n.get("priority") in KING_PRIORITIES and n.get("plan_path")
-        }
-        for row in claims.rows():
-            key = str(row.get("key") or "")
-            if not key.startswith("node:") or row.get("state") == "stale":
-                continue
-            if key[len("node:") :] in wanted and row.get("holder"):
-                holders.add(str(row["holder"]))
+    claimed_nodes, holders, claimed_warnings = _read_claimed_nodes(claims, timeout)
+    warnings.extend(claimed_warnings)
 
     return BoardInputs(
         ready=ready,
         claims=claims,
+        claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
         questions=_read_questions(timeout),
