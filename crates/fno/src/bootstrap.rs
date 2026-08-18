@@ -136,7 +136,8 @@ fn run(args: &[OsString]) -> BootResult<()> {
         // So re-check on the same budget the verify uses. The cost lands only on
         // a genuinely uninstalled wheel, where 3s precedes a multi-second
         // reinstall and is not the expensive part.
-        if executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
+        if let (true, exe_waited) = executable_within_reporting(&real, VERIFY_ATTEMPTS, VERIFY_POLL)
+        {
             if file_mtime(&real) == Some(recorded_mtime) {
                 return Err(exec_real(&real, args)); // unchanged: already verified
             }
@@ -170,7 +171,10 @@ fn run(args: &[OsString]) -> BootResult<()> {
             // always has. Whether that --force should ever refuse over a
             // stranger is a real design question, and it is not decided here.
             let _ = fs::remove_file(sentinel_path());
-            executable_budget_spent = true;
+            // Only count the executable budget as spent when it was: an
+            // instant first-pass success answered the question for free, and
+            // the adopt arm below still owes that subject a full wait.
+            executable_budget_spent = exe_waited;
             verify_budget_spent = true;
         } else {
             // Stale sentinel (wheel uninstalled): drop it and re-provision.
@@ -570,16 +574,25 @@ const VERIFY_POLL: Duration = Duration::from_millis(200);
 /// Falsifiable, not hopeful: a wheel that really was uninstalled stays absent
 /// through every pass and answers false, exactly as the single look did.
 fn executable_within(path: &Path, attempts: u32, poll: Duration) -> bool {
+    executable_within_reporting(path, attempts, poll).0
+}
+
+/// [`executable_within`] plus whether the budget was actually spent: an
+/// instant first-pass success answers the question without waiting, so the
+/// caller tracking "this call already paid for this subject" must not count
+/// it. The sentinel arm reads this; the sites that only want the answer keep
+/// the bool wrapper.
+fn executable_within_reporting(path: &Path, attempts: u32, poll: Duration) -> (bool, bool) {
     if is_executable(path) {
-        return true;
+        return (true, false);
     }
     for _ in 0..attempts {
         thread::sleep(poll);
         if is_executable(path) {
-            return true;
+            return (true, true);
         }
     }
-    false
+    (false, true)
 }
 
 /// [`verify_ours`], retried until it passes or the budget runs out.
@@ -717,6 +730,15 @@ fn install_verified(uv: &Path) -> Result<(), VerifyFail> {
         // True absence, worded as absence. Any OTHER stat failure (a parent
         // dir the predicate cannot read) is could-not-answer, not a missing
         // script: a false-absence diagnosis would be replayed by the stamp.
+        //
+        // A deliberate trade, stated where it lives: absence that outlasted
+        // the caller's 3s re-check is classified as a settled bad install and
+        // so reaches the 600s stamp. Under the 100-process storm a GOOD
+        // install can stay absent past 3s (the doc files that window as an
+        // accepted residual), so this can wedge a settling tree for the
+        // cooldown. The alternative is worse and already happened: a broken
+        // env re-ran the full 19-package install on every call. The proven
+        // harm outranks the residual.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(VerifyFail::BadInstall(format!(
                 "no console script at {}",
