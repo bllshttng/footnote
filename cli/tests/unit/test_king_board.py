@@ -361,16 +361,60 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
     assert read.rows() == []
 
 
-def test_capping_the_per_pr_reads_is_reported_not_swallowed(monkeypatch):
+# --- the PR listing bound (codex P2) ----------------------------------------
+#
+# `gh pr list` fetches 30 by default. An unbounded listing plus a post-hoc
+# slice dropped eligible PRs from the count, and a truncated read then reached
+# NoWork with an empty board. The bound has to sit on the CALL, where it costs
+# something, not on the rows after they are already paid for.
+
+
+def test_the_listing_names_its_own_limit(monkeypatch):
+    """An implicit 30 is a truncation nobody declared."""
+    from fno.king import board as board_mod
+
+    seen: list[list[str]] = []
+
+    def _capture(cmd, **kwargs):
+        seen.append(cmd)
+        return _ok([])
+
+    monkeypatch.setattr(board_mod, "_run_json", _capture)
+    board_mod._read_prs(timeout=1, max_pr_reads=7)
+    assert seen, "no listing call was made"
+    cmd = seen[0]
+    assert "--limit" in cmd, f"listing does not bound itself: {cmd}"
+    assert cmd[cmd.index("--limit") + 1] == "7"
+
+
+def test_a_listing_that_hits_its_bound_is_reported(monkeypatch):
+    """Exactly-at-the-bound is indistinguishable from more-were-waiting."""
     from fno.king import board as board_mod
 
     listing = [
         {"number": n, "title": "t", "mergeable": "MERGEABLE", "statusCheckRollup": []}
-        for n in range(30)
+        for n in range(5)
     ]
     monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
     _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
-    assert any("capped at 5 of 30" in w for w in warnings)
+    assert any("5" in w and "mergeable_pr" in w for w in warnings), warnings
+
+
+def test_every_fetched_pr_is_judged(monkeypatch):
+    """Rows already fetched are free to read; discarding them drops real work.
+
+    The old cap sliced BEFORE filtering, so a green mergeable PR past the slice
+    vanished from the count while costing the same single API call.
+    """
+    from fno.king import board as board_mod
+
+    listing = [
+        {"number": n, "title": "t", "mergeable": "MERGEABLE", "statusCheckRollup": []}
+        for n in range(8)
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    assert len(read.rows()) == 8
 
 
 # --- truncation -------------------------------------------------------------

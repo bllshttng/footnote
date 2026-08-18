@@ -377,8 +377,16 @@ def _run_json(cmd: list[str], *, timeout: int = 60) -> SourceRead:
 def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
     """Open PRs that are green, mergeable and unmerged.
 
-    Costs one listing plus one status read per open PR, so the per-PR reads are
-    capped and the truncation is reported rather than swallowed.
+    Costs exactly ONE call: the rollup arrives inside the listing, so there is
+    no per-PR status read to cap. The bound therefore sits on the CALL, via
+    ``--limit``, which is the only place it buys anything.
+
+    Two silent truncations lived here. ``gh pr list`` fetches 30 by default, so
+    an unbounded listing hid every PR past the thirtieth behind no message at
+    all. The cap then sliced rows BEFORE filtering, discarding PRs already
+    fetched and paid for. Either one drops an eligible PR from the count, and a
+    board that undercounts reaches ``NoWork`` while real work is open - the
+    same silent-truncation class as the row cap this module already fixed.
     """
     listing = _run_json(
         [
@@ -387,6 +395,8 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
             "list",
             "--state",
             "open",
+            "--limit",
+            str(max_pr_reads),
             "--json",
             "number,title,mergeable,statusCheckRollup",
         ],
@@ -396,11 +406,16 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         return listing, []
     rows = listing.rows()
     warnings: list[str] = []
-    if len(rows) > max_pr_reads:
+    # A listing that comes back exactly AT its limit is indistinguishable from
+    # one that had more waiting, so it is reported rather than assumed whole.
+    # Assert the bound was reached; never infer completeness from its absence.
+    if len(rows) >= max_pr_reads:
         warnings.append(
-            f"mergeable_pr: capped at {max_pr_reads} of {len(rows)} open PRs"
+            f"mergeable_pr: the open-PR listing hit its {max_pr_reads}-PR limit, "
+            f"so more open PRs can exist; raise max_pr_reads to read further"
         )
-        rows = rows[:max_pr_reads]
+    # Every fetched row is judged. They cost the same one call whether read or
+    # discarded, so dropping any of them buys nothing and loses real work.
     ready: list[dict] = []
     for pr in rows:
         if pr.get("mergeable") != "MERGEABLE":

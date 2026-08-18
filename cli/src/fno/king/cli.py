@@ -40,8 +40,9 @@ def init_cmd(
     """Write ``.fno/king-state.md``, the manifest the king loop arms read.
 
     Write-once, like the target manifest. Without it the stop hook allows exit
-    silently and the walk arm refuses to dispatch, which is the correct posture
-    for a session nobody crowned.
+    silently, which is the correct posture for a session nobody crowned.
+    Re-crowning an ended king needs --force until a crown lifecycle exists to
+    expire the manifest on its own.
     """
     from fno.king.state import KingManifestExists, king_loop_enabled, write_manifest
 

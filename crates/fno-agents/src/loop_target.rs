@@ -562,10 +562,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let cancel = move || SIGINT_RECEIVED.load(Ordering::SeqCst) || cancel_file.exists();
 
     // ── run the loop ──────────────────────────────────────────────────────────
-    // The king passes a per-unit dispatch cap where the target passes None. A
-    // target unit is one deliverable and re-dispatches until it terminates; a
-    // king unit is re-derived from the board every pass, so an uncapped
-    // re-dispatch against a board that will not shrink would burn a night.
+    // No cap: a target unit is one deliverable and re-dispatches until it
+    // terminates. The king walk that needed a per-unit cap was cut before it
+    // shipped, and `--driver king` refuses by name above, so there is no
+    // second caller to branch for here.
     let queue: &mut dyn Queue = target_queue
         .as_mut()
         .expect("the target queue is always constructed above");
