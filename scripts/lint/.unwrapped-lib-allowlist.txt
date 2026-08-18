@@ -228,3 +228,10 @@ rotate-append-log.sh
 # a second wrapper here would be a third opinion on one question.
 # tests/test-worktree-status.sh runs it directly. Pure helper, no CLI of its own.
 worktree-status.py
+
+# Shared post-compaction carrier selection for the two reinject hooks
+# (target-postcompact-reinject.sh and king-postcompact-reinject.sh) plus
+# precompact-canon-doc.sh. Sourced, never executed; the hooks are the entry
+# points and need no fno verb between them and the lib. Pure sourcing
+# library; no standalone CLI of its own.
+postcompact-carrier.sh
