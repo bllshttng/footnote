@@ -9,9 +9,19 @@ source "$_events_lib_dir/events-lock.sh" || return 1 2>/dev/null || exit 1
 unset _events_lib_dir
 
 if [[ -z "${EVENTS_FILE:-}" ]]; then
-    _events_repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || _events_repo_root="$PWD"
-    EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
-    unset _events_repo_root
+    # FNO_EVENTS_PATH is the journal pin, the same var paths.project_events_json()
+    # reads on the Python side. It stands in for a repo root nobody can sandbox:
+    # fno.hermetic.neutralise leaves FNO_REPO_ROOT unset on purpose, so without
+    # the pin a shell test running inside the checkout appends a real row to the
+    # journal the operator needs panel folds. An explicit EVENTS_FILE still wins,
+    # exactly as an explicit events_path= wins in Python.
+    if [[ -n "${FNO_EVENTS_PATH:-}" ]]; then
+        EVENTS_FILE="$FNO_EVENTS_PATH"
+    else
+        _events_repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || _events_repo_root="$PWD"
+        EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
+        unset _events_repo_root
+    fi
 fi
 
 # Resolve only an existing symlink leaf. Already-running shells retain the old
