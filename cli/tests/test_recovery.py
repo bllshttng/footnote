@@ -1781,3 +1781,203 @@ class TestNotifyManualResume:
                                        SimpleNamespace(id="claude-secondary"), "U-1")
         assert "claude --resume U-1" in sent["body"]
         assert "claude-secondary" in sent["title"]
+
+
+# ---------------------------------------------------------------------------
+# Re-dispatch across the harness axis (AC6-*)
+# ---------------------------------------------------------------------------
+
+
+class _FakeLink:
+    """One fallback link, in SpawnDefaultsBlock's own field spelling."""
+
+    def __init__(self, provider, model="", effort="", substrate=""):
+        self.provider = provider
+        self.model = model
+        self.effort = effort
+        self.substrate = substrate
+        self.permission_mode = ""
+        self.route = ""
+        self.account = ""
+
+
+class TestChainRedispatch:
+    """The operator's sentence, executed: complex work reaches codex."""
+
+    def _wire(self, monkeypatch, tmp_path, chain, redispatch_ok=True):
+        """Point the walk at a tmp state file and a fixed chain."""
+        from fno import fleet_state
+
+        hb = tmp_path / "fleet-sweep-state.json"
+        monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
+        monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
+
+        import fno.agents.spawn_defaults as sd
+
+        monkeypatch.setattr(
+            sd, "resolve_fallback_chain",
+            lambda size, exclude=(), **kw: [
+                link for link in chain
+                if sd.link_id(link) not in set(exclude)
+            ],
+            raising=True,
+        )
+
+        spawned: list[list[str]] = []
+
+        def _fake_redispatch(candidate, *, pre_spawn=None, flags=None):
+            spawned.append(list(flags or []))
+            return redispatch_ok
+
+        monkeypatch.setattr(recovery, "_redispatch", _fake_redispatch, raising=True)
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            recovery, "_emit_recovery_event",
+            lambda t, d: events.append((t, dict(d))), raising=True,
+        )
+        return spawned, events, hb
+
+    def test_ac6_hp_a_refused_node_reaches_codex(self, tmp_path, monkeypatch):
+        chain = [_FakeLink("codex", "gpt-5.6-sol", effort="high"),
+                 _FakeLink("claude", "sonnet", substrate="bg")]
+        spawned, events, _hb = self._wire(monkeypatch, tmp_path, chain)
+        c = _stale_candidate(tmp_path)
+
+        assert recovery._chain_redispatch(c, reason="queue-exhausted") == "swapped"
+        assert spawned == [["-H", "codex", "-m", "gpt-5.6-sol",
+                           "--effort", "high", "--substrate", "pane"]]
+        assert [t for t, _ in events] == ["failover_swapped"]
+        assert events[0][1]["link"] == "codex/gpt-5.6-sol"
+
+    def test_a_node_walks_its_chain_once(self, tmp_path, monkeypatch):
+        # The link is recorded, so the next tick takes the NEXT link rather
+        # than the same failing vendor. A chain that loops is a worse failure
+        # than a chain that ends.
+        chain = [_FakeLink("codex", "gpt-5.6-sol"), _FakeLink("claude", "sonnet")]
+        spawned, _events, _hb = self._wire(monkeypatch, tmp_path, chain)
+        c = _stale_candidate(tmp_path)
+
+        recovery._chain_redispatch(c, reason="r")
+        recovery._chain_redispatch(c, reason="r")
+        assert [f[1] for f in spawned] == ["codex", "claude"]
+
+    def test_a_link_counts_as_tried_even_when_its_spawn_fails(
+        self, tmp_path, monkeypatch
+    ):
+        chain = [_FakeLink("codex", "gpt-5.6-sol"), _FakeLink("claude", "sonnet")]
+        spawned, _events, hb = self._wire(
+            monkeypatch, tmp_path, chain, redispatch_ok=False,
+        )
+        c = _stale_candidate(tmp_path)
+
+        assert recovery._chain_redispatch(c, reason="r") == "rotated-no-worker"
+        from fno import fleet_state
+        assert fleet_state.links_tried("x-test", path=hb) == ["codex/gpt-5.6-sol"]
+
+    def test_ac6_edge_an_exhausted_chain_spawns_nothing_and_says_so(
+        self, tmp_path, monkeypatch
+    ):
+        chain = [_FakeLink("codex", "gpt-5.6-sol")]
+        spawned, events, _hb = self._wire(monkeypatch, tmp_path, chain)
+        c = _stale_candidate(tmp_path)
+
+        recovery._chain_redispatch(c, reason="r")
+        spawned.clear()
+        assert recovery._chain_redispatch(c, reason="r") == "rotated-no-worker"
+        assert spawned == []
+        assert events[-1][0] == "failover_exhausted"
+        assert events[-1][1]["links_tried"] == "codex/gpt-5.6-sol"
+        assert events[-1][1]["reason"] == "all-tried"
+
+    def test_ac5_neg_a_malformed_chain_refuses_and_spawns_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from fno import fleet_state
+
+        hb = tmp_path / "fleet-sweep-state.json"
+        monkeypatch.setattr(fleet_state, "fleet_state_path", lambda: hb, raising=True)
+        monkeypatch.setattr(recovery, "_node_size", lambda node: "L", raising=True)
+
+        import fno.agents.spawn_defaults as sd
+
+        def _boom(size, exclude=(), **kw):
+            raise ValueError("config.agents.fallback.L[0].harness='banana'")
+
+        monkeypatch.setattr(sd, "resolve_fallback_chain", _boom, raising=True)
+
+        spawned = []
+        monkeypatch.setattr(
+            recovery, "_redispatch",
+            lambda c, **kw: spawned.append(kw) or True, raising=True,
+        )
+        events = []
+        monkeypatch.setattr(
+            recovery, "_emit_recovery_event",
+            lambda t, d: events.append((t, dict(d))), raising=True,
+        )
+
+        c = _stale_candidate(tmp_path)
+        assert recovery._chain_redispatch(c, reason="r") == "rotated-no-worker"
+        assert spawned == [], "a malformed chain must never bill a spawn"
+        assert events[0][0] == "failover_exhausted"
+        assert "banana" in events[0][1]["reason"]
+
+    def test_a_node_less_worktree_never_walks_a_chain(self, tmp_path, monkeypatch):
+        spawned, _events, _hb = self._wire(
+            monkeypatch, tmp_path, [_FakeLink("codex", "m")],
+        )
+        c = _stale_candidate(tmp_path, node_less=True)
+        assert recovery._chain_redispatch(c, reason="r") == "rotated-no-worker"
+        assert spawned == []
+
+
+class TestRedispatchAxisBundle:
+    """The spawn call actually changes vendor, not just its label."""
+
+    def test_no_flags_keeps_todays_claude_bg_shape(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            recovery, "_node_id_from_worktree", lambda cwd: "x-test", raising=True,
+        )
+        monkeypatch.setattr(recovery, "_node_is_done", lambda n: False, raising=True)
+
+        class _Ok:
+            returncode = 0
+
+        def _run(cmd, **kw):
+            calls.append(cmd)
+            return _Ok()
+
+        import subprocess as _sp
+        monkeypatch.setattr(_sp, "run", _run, raising=True)
+
+        c = _stale_candidate(tmp_path)
+        assert recovery._redispatch(c) is True
+        spawn_cmd = [x for x in calls if "spawn" in x][0]
+        assert "--harness" in spawn_cmd
+        assert spawn_cmd[spawn_cmd.index("--substrate") + 1] == "bg"
+
+    def test_flags_replace_the_hardcoded_claude_bg_pair(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            recovery, "_node_id_from_worktree", lambda cwd: "x-test", raising=True,
+        )
+        monkeypatch.setattr(recovery, "_node_is_done", lambda n: False, raising=True)
+
+        class _Ok:
+            returncode = 0
+
+        import subprocess as _sp
+        monkeypatch.setattr(
+            _sp, "run", lambda cmd, **kw: calls.append(cmd) or _Ok(), raising=True,
+        )
+
+        c = _stale_candidate(tmp_path)
+        assert recovery._redispatch(
+            c, flags=["-H", "codex", "-m", "gpt-5.6-sol", "--substrate", "pane"],
+        ) is True
+        spawn_cmd = [x for x in calls if "spawn" in x][0]
+        assert "-H" in spawn_cmd and "codex" in spawn_cmd
+        assert spawn_cmd[spawn_cmd.index("--substrate") + 1] == "pane"
+        assert "--harness" not in spawn_cmd

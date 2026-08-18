@@ -63,7 +63,7 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
 from fno.agents.harnesses.claude import ProviderSocketError
@@ -617,6 +617,110 @@ def _node_is_done(node: str) -> bool:
     return False
 
 
+def _node_size(node: str) -> Optional[str]:
+    """The node's ``--size`` (S/M/L), or None.
+
+    Size is already on every node and is already the operator's own
+    simple-versus-complex split, which is why the chain is keyed on it rather
+    than on a second classification nobody maintains. An unreadable graph
+    returns None and the caller reads the ``default`` chain.
+    """
+    try:
+        from fno.graph.load import load_graph
+
+        for entry in load_graph():
+            if entry.get("id") == node:
+                return str(entry.get("size") or "") or None
+    except Exception:  # noqa: BLE001 - a size read must never crash the sweep
+        return None
+    return None
+
+
+def _emit_recovery_event(event_type: str, data: dict) -> None:
+    """Append one canonical event from a non-sweep code path.
+
+    ``_default_failover`` is called as an injected ``failover_fn`` and returns a
+    string; it has no ``emit`` seam. The chain walk still has to say why it
+    stopped, because a silent refusal to spawn is indistinguishable from a
+    fleet with nothing to do - which is the whole failure this node exists to
+    end. Best-effort: a failed emit never breaks the walk.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.paths import state_dir
+
+        append_event(_build(event_type, "daemon", data), state_dir() / "events.jsonl")
+    except Exception:  # noqa: BLE001 - a lost event never breaks a recovery arm
+        pass
+
+
+def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
+    """Walk the node's fallback chain one link, or stop and say why.
+
+    Reached at the two points where failover used to give up: a swap that
+    landed somewhere ``/target`` cannot bg-run, and a queue with no alternate
+    account left. Account rotation stays chain position ZERO - same-vendor
+    headroom is cheaper than a vendor swap and it already works - so this only
+    runs after that has been tried.
+
+    Returns the same outcome vocabulary the caller already speaks:
+    ``"swapped"`` when a fresh worker started, ``"rotated-no-worker"`` when
+    nothing was spawned.
+    """
+    cwd = getattr(candidate, "cwd", None)
+    node = _node_id_from_worktree(cwd) if cwd else None
+    if not node:
+        return "rotated-no-worker"
+
+    from fno import fleet_state
+    from fno.agents.spawn_defaults import (
+        link_id,
+        link_to_spawn_flags,
+        resolve_fallback_chain,
+    )
+
+    tried = fleet_state.links_tried(node)
+    try:
+        chain = resolve_fallback_chain(_node_size(node), exclude=tried)
+    except Exception as exc:  # noqa: BLE001 - a malformed chain REFUSES, loudly
+        # Locked Decision 11. Degrading open here would spawn a worker at an
+        # unintended vendor and bill it, so the worker stays alive, the node
+        # stays claimed, and the config error is named.
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": f"chain-malformed: {exc}"[:400],
+        })
+        return "rotated-no-worker"
+
+    if not chain:
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": "all-tried" if tried else "chain-empty",
+        })
+        return "rotated-no-worker"
+
+    link = chain[0]
+    # Recorded BEFORE the spawn, not after: a link whose spawn dies half-way
+    # must still count as tried, or the next tick walks into the same failing
+    # vendor again and the chain loops. A chain that loops is a worse failure
+    # than a chain that ends.
+    fleet_state.record_link(node, link_id(link))
+    if _redispatch(candidate, flags=link_to_spawn_flags(link)):
+        _emit_recovery_event("failover_swapped", {
+            "short_id": candidate.short_id,
+            "node": node,
+            "link": link_id(link),
+            "redispatched": True,
+            "reason": reason,
+        })
+        return "swapped"
+    return "rotated-no-worker"
+
+
 # spawn_think names a birth pass ``think-<node>-<slug>`` and every other pass
 # ``think-<node>-<reason>-<slug>`` over this closed vocabulary
 # (provenance/spawn_think.py). Only a birth pass is certified by ``plan_path``.
@@ -715,17 +819,28 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
-def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool]] = None) -> bool:
+def _redispatch(
+    candidate: "Candidate",
+    *,
+    pre_spawn: Optional[Callable[[], bool]] = None,
+    flags: Optional[Sequence[str]] = None,
+) -> bool:
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
     actually launched (spawn exit 0).
 
-    Caller guarantees the new active provider's cli is ``claude`` before calling,
-    so the substrate is ``bg`` (claude-only) and ``--provider claude`` selects
-    the now-active claude record the swap installed in settings.yaml. (A
-    non-claude swap cannot bg-redispatch a multi-phase /target, so the caller
-    skips this entirely — codex P1.)
+    With no ``flags``, the caller guarantees the new active provider's cli is
+    ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
+    selects the now-active claude record the swap installed in settings.yaml.
+
+    ``flags`` carries one fallback-chain link's axis bundle instead, which is
+    how a refused node reaches ANOTHER VENDOR. That is the axis the old
+    non-claude dead end refused, and it is exactly the axis the operator's own
+    rule names: simple work to a claude sonnet bg thread, complex work to codex.
+    A codex link resolves ``--substrate pane``, because the Rust client rejects
+    ``--substrate bg`` for a non-claude harness - a real difference in the spawn
+    call, not a naming change.
 
     Ordered reuse-first sequence (x-370f residual 1): stop the worker, then
     ``fno claim force-release`` the node claim (the verified reliability gap —
@@ -789,9 +904,10 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         # --provider claude: the swap already installed the new claude record as
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
+        axis = list(flags) if flags else ["--harness", "claude", "--substrate", "bg"]
         proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
-             "--substrate", "bg", "--cwd", cwd, "--name", agent,
+            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", *axis,
+             "--cwd", cwd, "--name", agent,
              f"/target --no-merge {node}"],
             # x-9d11: the env carrier backs the flag - a replacement worker
             # that drops the flag post-compaction still folds the refusal at
@@ -1093,10 +1209,14 @@ def _default_failover(candidate: "Candidate", error) -> str:
             snap = read_active_provider_atomic(settings_path=settings_path)
         except Exception:  # noqa: BLE001
             return "rotated-no-worker"
-        # Autonomous /target only bg-runs on claude; a non-claude target cannot
-        # be bg-redispatched (the Rust client rejects --substrate bg for it).
+        # A non-claude swap cannot bg-redispatch a /target (the Rust client
+        # rejects --substrate bg for it), so this used to dead-end here and fall
+        # through to the held-by-design no-op - which recovery.py records as a
+        # documented no-op for every bypassPermissions recipient, and every
+        # autonomous worker is one. Codex sat completely unused all session. The
+        # chain reaches the harness axis that dead end refused.
         if snap.harness != "claude":
-            return "rotated-no-worker"
+            return _chain_redispatch(candidate, reason="swap-not-bg-runnable")
         # repo_root was already resolved above, before attempt_swap, so the
         # materialize_managed gate and every downstream auto_switch check
         # here read the same value.
@@ -1133,7 +1253,13 @@ def _default_failover(candidate: "Candidate", error) -> str:
     if result.decision is SwapDecision.BLOCKED_THRASH:
         return "blocked-thrash"
     if result.decision is SwapDecision.QUEUE_EXHAUSTED:
-        return "queue-exhausted"
+        # The single-account case, and the case the operator actually lives in.
+        # The account queue is chain position zero and it has now answered
+        # "nothing left"; the harness-and-model chain is what comes next. A
+        # chain that yields nothing falls back to the original outcome, so a
+        # fresh install with no configured chain behaves exactly as today.
+        outcome = _chain_redispatch(candidate, reason="queue-exhausted")
+        return outcome if outcome == "swapped" else "queue-exhausted"
     return "no-swap"
 
 
