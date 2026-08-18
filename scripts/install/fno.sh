@@ -306,8 +306,11 @@ print("version=" + (md.get("Version") or ""))'
 	for _f in "$_name" "$_author" "$_version"; do
 		[ -n "$_f" ] && [ "$_f" != None ] || FNO_VERIFY_STABLE=
 	done
-	case "Jason Noah Choi" in
-		"$_author"|"$_author"*) FNO_VERIFY_STABLE= ;;
+	# A torn author lands as a PREFIX of the owner string: an instrument
+	# failure even when every field answered, so it clears the stable mark.
+	_owner="Jason Noah Choi"
+	case "$_owner" in
+		"$_author"*) FNO_VERIFY_STABLE= ;;
 	esac
 	# name must be `fno` (case-insensitive)...
 	case "$_name" in
