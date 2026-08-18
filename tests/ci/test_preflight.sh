@@ -22,6 +22,11 @@ set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PREFLIGHT_SRC="$REPO_ROOT/scripts/ci/preflight.sh"
+# The fixture's preflight falls back to bare python3, whose only route to the
+# fno package is this path; the smoke runner exports it for its steps, so a
+# bare `bash tests/ci/test_preflight.sh` must export it itself or every
+# receipt write dies with ModuleNotFoundError.
+export PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}"
 # pwd -P: resolve macOS /var -> /private/var so `git worktree list` paths match.
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
