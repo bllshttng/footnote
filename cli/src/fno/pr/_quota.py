@@ -5,7 +5,6 @@ import fcntl
 import json
 import os
 import shutil
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -94,13 +93,3 @@ def execute_graphql(
             return runner([gh, *gh_args], timeout=120)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
-
-
-def coverage_main() -> None:
-    """Internal executable used only by the review-coverage producer."""
-    result = execute_graphql("coverage", sys.argv[1:])
-    if result.stdout:
-        sys.stdout.write(result.stdout)
-    if result.stderr:
-        sys.stderr.write(result.stderr + ("" if result.stderr.endswith("\n") else "\n"))
-    raise SystemExit(result.returncode)

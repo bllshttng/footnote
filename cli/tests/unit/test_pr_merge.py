@@ -65,6 +65,8 @@ class FakeRun:
         if tool == "git":
             if cmd[1:3] == ["rev-parse", "--show-toplevel"]:
                 return Result(0, (self.toplevel or cwd or "") + "\n", "")
+            if cmd[1:4] == ["remote", "get-url", "origin"]:
+                return Result(0, "git@github.com:owner/repo.git\n", "")
             return Result(0, "", "")
         if tool == "gh":
             if cmd[1:3] == ["pr", "merge"]:
@@ -108,6 +110,55 @@ class FakeRun:
                     )
                 return Result(0, self.view_url + "\n", "")
             if cmd[1] == "api":
+                endpoint = cmd[-1]
+                if endpoint.startswith("repos/owner/repo/pulls/") and "/comments" not in endpoint:
+                    return Result(
+                        0,
+                        json.dumps(
+                            {
+                                "number": int(endpoint.rsplit("/", 1)[-1]),
+                                "state": str(self.checks.get("state") or "OPEN").lower(),
+                                "merged": self.checks.get("state") == "MERGED",
+                                "mergeable": True,
+                                "head": {
+                                    "sha": self.checks.get("headRefOid", "deadbeefcafe"),
+                                    "ref": self.head_ref,
+                                },
+                                "base": {"ref": "main"},
+                            }
+                        )
+                        + "\n",
+                        "",
+                    )
+                if "/check-runs?" in endpoint:
+                    rows = []
+                    for check in self.checks.get("statusCheckRollup") or []:
+                        if not check.get("name"):
+                            continue
+                        rows.append(
+                            {
+                                "name": check.get("name"),
+                                "status": str(check.get("status") or "completed").lower(),
+                                "conclusion": str(check.get("conclusion") or "").lower(),
+                                "started_at": check.get("startedAt") or "2026-08-18T00:00:00Z",
+                            }
+                        )
+                    return Result(
+                        0,
+                        json.dumps({"total_count": len(rows), "check_runs": rows}) + "\n",
+                        "",
+                    )
+                if endpoint.endswith("/status"):
+                    rows = [
+                        {
+                            "context": check.get("context"),
+                            "state": check.get("state"),
+                            "created_at": check.get("createdAt") or "2026-08-18T00:00:00Z",
+                        }
+                        for check in self.checks.get("statusCheckRollup") or []
+                        if check.get("context")
+                    ]
+                    return Result(0, json.dumps({"statuses": rows}) + "\n", "")
                 if len(cmd) > 2 and "/compare/" in cmd[2]:
                     return Result(0, f"{self.behind_by}\n", "")
                 if "DELETE" in cmd and "/git/refs/heads/" in cmd[-1]:
@@ -369,8 +420,8 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     assert obj["outcome"] == "merged"
     assert "worktree fallback" in obj["reason"]
     # The API path uses a literal that does NOT contain "gh pr merge".
-    api_calls = [c for c in fake.calls if c[:2] == ["gh", "api"]]
-    assert api_calls and "PUT" in api_calls[0]
+    api_calls = [c for c in fake.calls if c[:2] == ["gh", "api"] and "PUT" in c]
+    assert api_calls
 
 
 def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, capsys, tmp_path):
@@ -858,6 +909,7 @@ class _AutoMergeRejectingRun(FakeRun):
         super().__init__(**kw)
         self.merge_cmds: list[list[str]] = []
         self.rollup = rollup if rollup is not None else _rollup("SUCCESS", "SUCCESS")
+        self.checks = self.rollup
         self.head_moved = head_moved
         # The head as it exists server-side at merge time. head_moved=True means
         # someone pushed after the rollup read, so this differs from the rollup's.
@@ -975,8 +1027,10 @@ def test_a_green_verdict_without_a_readable_head_refuses(
     )
     monkeypatch.setattr(_merge, "run", fake)
 
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
-    assert "unreadable" in _last_json(capsys, stream="err")["reason"]
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    blocked = _last_json(capsys, stream="err")
+    assert blocked["outcome"] == "blocked"
+    assert "head" in blocked["reason"]
     # Refused BEFORE any merge call: the pin is a precondition, not a retry.
     assert len(fake.merge_cmds) == 0
 
@@ -1276,9 +1330,7 @@ def test_a_degraded_checks_read_names_why_it_could_not_tell(
     class _BadRollup(_AutoMergeRejectingRun):
         def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
             cmd = list(cmd)
-            if cmd[:3] == ["gh", "pr", "view"] and any(
-                "statusCheckRollup" in a for a in cmd
-            ):
+            if cmd[:2] == ["gh", "api"] and any("/check-runs?" in a for a in cmd):
                 return Result(0, "not json at all", "")
             return super().__call__(
                 cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
@@ -1292,7 +1344,7 @@ def test_a_degraded_checks_read_names_why_it_could_not_tell(
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     held = _last_json(capsys)
     assert held["outcome"] == "held"
-    assert "unparseable" in held["reason"], held["reason"]
+    assert "not JSON" in held["reason"], held["reason"]
 
 
 def test_a_missing_gh_during_the_checks_read_keeps_exit_127(
@@ -1306,9 +1358,7 @@ def test_a_missing_gh_during_the_checks_read_keeps_exit_127(
     class _GhVanishes(_AutoMergeRejectingRun):
         def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
             cmd = list(cmd)
-            if cmd[:3] == ["gh", "pr", "view"] and any(
-                "statusCheckRollup" in a for a in cmd
-            ):
+            if cmd[:2] == ["gh", "api"] and any("/check-runs?" in a for a in cmd):
                 raise ToolMissing("gh")
             return super().__call__(
                 cmd, cwd=cwd, env=env, input_text=input_text, timeout=timeout
@@ -2195,4 +2245,3 @@ def test_fidelity_guard_degrades_open_on_a_probe_crash(enabled, monkeypatch, cap
     monkeypatch.setattr(_merge, "run", fake)
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))
     assert rc == 0  # degraded open, merge proceeded
-
