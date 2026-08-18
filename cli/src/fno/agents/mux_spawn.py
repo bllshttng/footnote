@@ -1113,8 +1113,8 @@ def _mesh_env_wrapper(
     from fno.setup.github_cli import worker_environment
 
     proxy_env = worker_environment(os.environ)
-    if proxy_env.get("FNO_REAL_GH"):
-        pairs += [f"PATH={proxy_env['PATH']}", f"FNO_REAL_GH={proxy_env['FNO_REAL_GH']}"]
+    if proxy_env.get("PATH") != os.environ.get("PATH"):
+        pairs.append(f"PATH={proxy_env['PATH']}")
     unset: list[str] = []
     # A spawned child inherits its parent's ROUTE (account, model, node
     # provenance below) but never its parent's IDENTITY. An ambient session
