@@ -528,6 +528,23 @@ def bg_create(
     from fno.agents.model_routing import route_settings_path_for
 
     settings_path = route_settings_path_for(route_env, account_env)
+    # Without a route/account there is no settings file, so an env-only scrub
+    # of the poisoned model vars below is decorative for `claude --bg`: the
+    # serving session is forked by the claude daemon with the DAEMON's own
+    # env (x-6de8), never this process's spawn_env. Float a settings file
+    # flooring just the offending vars so the fix reaches the actual worker
+    # in the plain unrouted case too - the shape x-4709 exists to fix.
+    if settings_path is None:
+        from fno.agents.model_routing import (
+            incoherent_model_env,
+            materialize_model_scrub_settings,
+        )
+
+        _incoherent = incoherent_model_env()
+        if _incoherent:
+            settings_path = materialize_model_scrub_settings(
+                [_k for _k, _v in _incoherent]
+            )
     argv = _build_argv(
         name=name,
         message=message,

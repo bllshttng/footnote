@@ -852,16 +852,46 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     A composed ``--route`` + ``--account`` spawn writes ONLY this file (the
     route wins the settings file by design), which is where that gap lived.
     """
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
+    env.update(route_env)
+    return _write_settings_env_file(env)
+
+
+def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
+    """Write a ``--settings`` JSON flooring only ``dropped`` to "" and return
+    its path.
+
+    ``bg_create``'s incoherent-model-env scrub mutates the spawn env, but a
+    ``claude --bg`` session is forked by the claude daemon with the DAEMON's
+    own env (x-6de8) - the same reason :func:`materialize_route_settings`
+    exists. Without a route or account overlay there is no other reason to
+    write a settings file, so the plain poisoned-inherited-env case (the
+    shape this module exists to fix) reached only the short-lived front-end
+    process, never the actual serving session. This is the same mechanism
+    scoped to just the offending model vars, not the whole auth floor -
+    a coherent ``ANTHROPIC_API_KEY``/``ANTHROPIC_AUTH_TOKEN`` must not be
+    wiped by a spawn that only had a poisoned model tier.
+    """
+    return _write_settings_env_file({name: "" for name in dropped})
+
+
+def _write_settings_env_file(env: Mapping[str, str]) -> str:
+    """Content-addressed ``0600`` write of ``{"env": env}`` under
+    ``paths.state_dir() / "route-settings"``; returns the path.
+
+    Shared by :func:`materialize_route_settings` and
+    :func:`materialize_model_scrub_settings` so the atomic-write mechanics
+    (content addressing, tmp-then-``os.replace``) exist in one place.
+    """
     import hashlib
     import json
     import os
 
     from fno import paths
-    from fno.agents.account_env import SCRUB_AUTH_VARS
 
-    env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
-    env.update(route_env)
-    payload = json.dumps({"env": env}, sort_keys=True)
+    payload = json.dumps({"env": dict(env)}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare
     # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and

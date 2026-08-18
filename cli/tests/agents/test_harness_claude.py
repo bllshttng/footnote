@@ -270,6 +270,104 @@ def test_bg_create_argv_shape_small_message(tmp_path: Path, monkeypatch) -> None
     assert captured["input"] is None  # argv path, not stdin
 
 
+def test_bg_create_floors_incoherent_model_env_via_settings_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A `claude --bg` session's serving process is forked by the claude
+    daemon with the DAEMON's own env (x-6de8), so scrubbing this process's
+    spawn_env alone is decorative on that lane. Without a route/account
+    settings file the poisoned-inherited-env fix must still reach the real
+    worker, so bg_create floats a --settings file flooring just the
+    offending model vars."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backgrounded · 7c5dcf5d · demo\n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    claude_mod.bg_create(name="demo", message="hi", cwd=cwd, timeout=5)
+
+    argv = captured["argv"]
+    assert "--settings" in argv, "poisoned model env must float a settings file"
+    settings_path = Path(argv[argv.index("--settings") + 1])
+    import json
+
+    payload = json.loads(settings_path.read_text())
+    assert payload["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == ""
+    # Only the offending var is floored, not the whole SCRUB_AUTH_VARS set -
+    # a coherent ANTHROPIC_API_KEY (unset here, but the contract is scope) is
+    # not implicated by a poisoned model tier alone.
+    assert set(payload["env"]) == {"ANTHROPIC_DEFAULT_HAIKU_MODEL"}
+
+
+def test_bg_create_a_route_still_writes_its_own_settings_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A route/account settings file (route_settings_path_for) already floors
+    the full auth/model set; the new poisoned-env-only floor must not
+    override or duplicate it."""
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backgrounded · 7c5dcf5d · demo\n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    route_env = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "zai-secret-token",
+        "ANTHROPIC_MODEL": "glm-5.3",
+        # A pre-resolved route missing any tier is refused (resolve_spawn_route).
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3",
+    }
+    claude_mod.bg_create(
+        name="demo",
+        message="hi",
+        cwd=cwd,
+        timeout=5,
+        route_env=route_env,
+    )
+
+    argv = captured["argv"]
+    assert "--settings" in argv
+    settings_path = Path(argv[argv.index("--settings") + 1])
+    import json
+
+    payload = json.loads(settings_path.read_text())
+    assert payload["env"]["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+
+
 def test_claude_stop_hook_block_cap_default_and_override(monkeypatch) -> None:
     """The cap defaults to 50 and honors an operator-set env value (x-1680)."""
     from fno.agents.harnesses import claude as claude_mod
