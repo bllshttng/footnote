@@ -165,14 +165,29 @@ fi
 PRE_SPARE=""
 PRE_FIT=""
 PREAMBLE_BUDGET_SH="$(dirname "${BASH_SOURCE[0]}")/check-preamble-budget.sh"
-if [[ -f "$PREAMBLE_BUDGET_SH" ]]; then
-  # Pass the repo root explicitly. Without it the budget script measured $PWD,
-  # so running this from anywhere else produced no match below, left PRE_SPARE
-  # empty, and made the over-ceiling refusal silently no-op while still
-  # printing "all valid". An absence-shaped success condition, in the file that
-  # ships the entry warning against exactly that.
-  PRE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet "$PRE_ROOT" 2>/dev/null || true)"
+PRE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# The byte half applies to the REPO's own preamble, so it runs only when TARGET
+# is that file. A fixture path parses a corpus that is not the preamble, and
+# reporting this repo's bytes beside it made one message describe two different
+# trees - and, at zero spare, failed every fixture test on an unrelated ceiling.
+CHECK_BYTES=0
+if [[ "$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")" == "$PRE_ROOT/AGENTS.md" ]]; then
+  CHECK_BYTES=1
+fi
+
+if (( CHECK_BYTES )); then
+  # Fail CLOSED on a reading we could not take. Passing the root fixed the $PWD
+  # trigger, but the SHAPE was the defect: any unmatched read left PRE_SPARE
+  # empty, the refusal below no-opped, and the run printed "all valid" with the
+  # byte gate silently gone. This gate declares that it consults the byte
+  # budget, so a run that could not consult it is not a pass.
+  if [[ ! -f "$PREAMBLE_BUDGET_SH" ]]; then
+    echo "check-pitfalls: cannot consult the byte budget: $PREAMBLE_BUDGET_SH is missing." >&2
+    echo "  This gate reports preamble headroom, so a run that cannot read it is not a pass." >&2
+    exit 1
+  fi
+  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet "$PRE_ROOT" 2>&1 || true)"
   if [[ "$PRE_QUIET" =~ preamble:\ ([0-9]+)\ /\ ([0-9]+)\ B ]]; then
     PRE_TOTAL="${BASH_REMATCH[1]}"
     PRE_CEIL="${BASH_REMATCH[2]}"
@@ -186,6 +201,12 @@ if [[ -f "$PREAMBLE_BUDGET_SH" ]]; then
     else
       PRE_FIT=0
     fi
+  else
+    echo "check-pitfalls: could not read a byte verdict from $PREAMBLE_BUDGET_SH." >&2
+    echo "  Its --quiet output did not carry the expected 'preamble: N / M B' line:" >&2
+    echo "    ${PRE_QUIET:-(no output)}" >&2
+    echo "  Refusing rather than reporting 'all valid' with the byte gate absent." >&2
+    exit 1
   fi
 fi
 

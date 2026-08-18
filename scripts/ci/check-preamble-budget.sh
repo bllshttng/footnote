@@ -55,10 +55,11 @@ set -euo pipefail
 # The header governs the CORPUS and exists to stop a new pitfalls entry buying
 # room by moving this number. Main's overage came from documenting two new
 # verbs, not from corpus growth, so the rule was never aimed at this case.
-# A rule whose stated premise is false gets changed deliberately.
+# A rule whose stated premise is false gets changed deliberately, and this
+# one was: the AGENTS.md header no longer carries the absolute.
 #
 # Zero spare is the point: the next preamble byte of any kind fails this gate
-# and has to fund itself. Do not read 36830 as room.
+# and has to fund itself. Do not read this number as room.
 CEILING_BYTES=36824
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
@@ -483,19 +484,21 @@ if (( ! QUIET && ! JSON_MODE )); then
     echo "  Every byte here is re-read on every turn of every session on every lane."
     echo "  Fix, in order of preference:"
     echo "    1. Trade: cut an equivalent amount from the same file."
-    echo "       DO NOT TRY THIS ON THE AGENTS.md PITFALLS CORPUS. It was measured"
-    echo "       on 2026-08-18 at roughly 181 tradeable bytes in 6089, and those"
-    echo "       181 were ALREADY SPENT to set the current ceiling. The corpus is"
-    echo "       at its floor; there is no trade left there."
+    echo "       DO NOT TRY THIS ON THE AGENTS.md PITFALLS CORPUS as it stands."
+    echo "       The entries present on 2026-08-18 were measured at roughly 181"
+    echo "       tradeable bytes in 6089, and those 181 were ALREADY SPENT to set"
+    echo "       the current ceiling. Those entries are at their floor. Entries"
+    echo "       age out at 60 days and get replaced, so re-measure before"
+    echo "       trusting this against a corpus that has turned over."
     echo "       Getting those 181 took three compression passes and two external"
     echo "       reviews, which lost and recovered ELEVEN qualifiers - one of them"
     echo "       reversing an entry's meaning. Everything still in that corpus"
     echo "       carries a claim, however much it reads like restatement."
-    echo "       The corpus header still says to fund growth by trading here and"
-    echo "       never by raising this ceiling. That instruction assumes tradeable"
-    echo "       restatement exists, and it measurably does not. Reconciling the"
-    echo "       header with that measurement is an open policy question. Do not"
-    echo "       resolve it by quietly deleting a qualifier."
+    echo "       The corpus header used to say to fund growth by trading here and"
+    echo "       never by raising this ceiling. That instruction assumed tradeable"
+    echo "       restatement exists, the measurement showed it does not, and the"
+    echo "       header was corrected rather than worked around. Do not reach for"
+    echo "       the corpus again by quietly deleting a qualifier."
     echo "    2. Move it out of the preamble: docs/ and linked rule files that the"
     echo "       harness does not auto-load are not paid at startup."
     echo "    3. Raise CEILING_BYTES in this script, in this PR, with the reason in the PR body."
