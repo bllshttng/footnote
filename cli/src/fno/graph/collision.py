@@ -457,8 +457,10 @@ def _claims_default(plan_path: Path) -> str | None:
     A plan intaked against a node collides with that node's plan at HIGH, the
     exact severity meant to stop an operator, so a caller that forgets
     ``self_id`` manufactures a reflexive finding. The plan file is already in
-    hand here, so the default lives in this one place and every caller
-    (graph/cli.py, backlog/advance.py, graph/triage.py) inherits it. Claims are
+    hand here, so the default lives in this one place rather than in each
+    caller. In practice only a ``collisions check`` run with no ``--self-id``
+    reaches it: ``backlog/advance.py`` and ``graph/triage.py`` both pass one
+    explicitly, and this default is what covers the path they do not. Claims are
     read by the shared ``_intake.plan_claims`` parser (both ``claims:`` and
     ``node:`` - 41% of plans carry only the latter). One declared id is used;
     zero or several leave the behavior unchanged, and an explicit ``self_id``

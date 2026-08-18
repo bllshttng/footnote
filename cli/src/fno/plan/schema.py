@@ -45,10 +45,13 @@ class ConsolidationEntry(BaseModel):
 class ConsolidationBlock(BaseModel):
     """The step 2d Consolidation Gate's recorded outcome.
 
-    Shape authority only: this model pins the enum and the non-empty reason
-    per id so `fno plan validate` and scripts/validate-plan.sh can never
-    disagree about a PRESENT block. Presence itself is the bash gate's call,
-    because grandfathering pre-gate plans is a policy date, not a shape.
+    Shape authority: this model pins the enum, the non-empty reason per id,
+    and the rule that absorb/append must record a decision, so the two
+    surfaces agree on those. Two things stay deliberately one-sided.
+    Presence is the bash gate's call, because grandfathering pre-gate plans
+    is a policy date rather than a shape. Block style is the bash gate's too:
+    a flow-style list is valid YAML this model accepts and that walk cannot
+    parse, so it refuses the shape instead of misreading it.
     """
 
     outcome: Literal["absorb", "append", "proceed_alone"]

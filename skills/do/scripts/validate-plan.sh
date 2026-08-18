@@ -670,6 +670,13 @@ check_consolidation_file() {
     local file="$1"
     local label="$2"
     local block=""
+    # This check reports through its OWN counter, not the global ERRORS: the
+    # positive marker below must print on a clean block even when an unrelated
+    # earlier check already failed, or the gate goes silent exactly when the
+    # output is longest.
+    local c_errors=0
+    c_error() { error "$@"; c_errors=$((c_errors + 1)); }
+
     # Same two-stage extraction as check_kill_criteria_file: top-level
     # frontmatter first, then the consolidation: block up to the next
     # top-level key.
@@ -683,11 +690,11 @@ check_consolidation_file() {
     ')
 
     if [[ -z "$block" ]]; then
-        # Grandfather: the gate governs plans written after it shipped
-        # (2026-08-17). ~1900 pre-existing plans cannot retroactively record a
-        # decision, and erroring on them would halt /do and /target on every
-        # in-flight deliverable, so they WARN until backfilled. created is the
-        # discriminator; lexicographic ISO comparison is safe on YYYY-MM-DD.
+        # Grandfather: the gate governs plans written AFTER it shipped. Every
+        # pre-existing plan would otherwise halt /do and /target on work
+        # already in flight, so they WARN until backfilled. The boundary is
+        # strictly-after: a plan created ON the gate date predates the gate
+        # reaching its author, and nine live plans carry that date.
         local created gate_date="2026-08-17"
         created=$(awk '
             /^---/ { c++; if (c==2) exit; next }
@@ -695,14 +702,25 @@ check_consolidation_file() {
                 line=$0
                 sub(/^[[:space:]]*created:[[:space:]]*/, "", line)
                 sub(/[[:space:]]#.*$/, "", line)
-                print substr(line, 1, 10)
+                gsub(/["'"'"']/, "", line)
+                sub(/[[:space:]].*$/, "", line)
+                sub(/T.*$/, "", line)
+                print line
                 exit
             }
         ' "$file")
-        if [[ -z "$created" || "$created" < "$gate_date" ]]; then
-            warn "$label: no consolidation: block (created ${created:-unknown}, before the $gate_date gate) - backfill one before the next blueprint of this node"
+        # Normalize a compact YYYYMMDD stamp (real plans carry both spellings);
+        # anything else is unparsable and must not be compared lexicographically,
+        # because a malformed value sorts arbitrarily against the gate date.
+        if [[ "$created" =~ ^[0-9]{8}$ ]]; then
+            created="${created:0:4}-${created:4:2}-${created:6:2}"
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            warn "$label: no consolidation: block, and created ${created:-<missing>} is not a readable date - grandfathered, but backfill the block and a YYYY-MM-DD created before the next blueprint of this node"
+        elif [[ "$created" > "$gate_date" ]]; then
+            c_error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone), and silence is not an outcome"
         else
-            error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone); silence is not an outcome"
+            warn "$label: no consolidation: block (created $created, not after the $gate_date gate) - backfill one before the next blueprint of this node"
         fi
         # Never abort the validator here: the later checks and the summary
         # must still run on the most common failure path.
@@ -710,9 +728,10 @@ check_consolidation_file() {
     fi
 
     # Flow-style lists (`absorbed: [{id: ...}]`) are valid YAML this awk walk
-    # cannot parse - error with the fix rather than misreading them.
+    # cannot parse - error with the fix rather than misreading them. An empty
+    # `[]` is not flow style in this sense and stays legal.
     if printf '%s\n' "$block" | grep -Eq '^[[:space:]]*(absorbed|appended_to|proceed_alone_against):[[:space:]]*\[[^]]'; then
-        error "$label: consolidation id lists must use block style (one '- id:' + 'reason:' pair per line), not a flow-style list"
+        c_error "$label: consolidation id lists must use block style (a '- id:' entry with its own 'reason:'), not a flow-style list"
     fi
 
     local outcome outcome_rc=0
@@ -732,40 +751,50 @@ check_consolidation_file() {
     # A YAML reader takes the LAST duplicate key while this walk pinned the
     # first, so more than one outcome line is an error, not a silent pick.
     if [[ "$outcome_rc" -eq 42 ]]; then
-        error "$label: consolidation block has more than one outcome: line - a block records exactly one outcome"
+        c_error "$label: consolidation block has more than one outcome: line - a block records exactly one outcome"
     fi
     if [[ -z "$outcome" ]]; then
-        error "$label: consolidation block present but has no outcome: line (expected absorb | append | proceed_alone)"
+        c_error "$label: consolidation block present but has no outcome: line (expected absorb | append | proceed_alone)"
     elif [[ "$outcome" != "absorb" && "$outcome" != "append" && "$outcome" != "proceed_alone" ]]; then
-        error "$label: consolidation outcome \`${outcome}\` is not in the enum (absorb | append | proceed_alone)"
+        c_error "$label: consolidation outcome \`${outcome}\` is not in the enum (absorb | append | proceed_alone)"
     fi
 
-    # Walk the id lists: absorbed / appended_to / proceed_alone_against. Each
-    # `- id:` entry must carry a non-empty reason a later reader can check.
+    # Walk the id lists: absorbed / appended_to / proceed_alone_against. An
+    # entry starts at its '-' marker, NOT at an 'id:' key, because YAML lets
+    # the keys of one mapping come in any order - keying the walk on 'id:'
+    # read a reason-first entry as no entry at all and blamed the list for
+    # being empty.
     local entries
     entries=$(printf '%s\n' "$block" | awk '
-        function flush() { if (sec != "" && cur != "") printf "%s\037%s\037%s\n", sec, cur, rsn }
+        function clean(v) {
+            sub(/[[:space:]]#.*$/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            gsub(/^["'"'"']|["'"'"']$/, "", v)
+            return v
+        }
+        function flush() { if (sec != "" && started) printf "%s\037%s\037%s\n", sec, cur, rsn }
         /^[[:space:]]*(absorbed|appended_to|proceed_alone_against):/ {
-            flush(); cur=""; rsn=""
+            flush(); started=0; cur=""; rsn=""
             sec=$0
             sub(/^[[:space:]]*/, "", sec)
             sub(/:.*/, "", sec)
             next
         }
-        sec != "" && /^[[:space:]]*-[[:space:]]+id:/ {
-            flush()
-            cur=$0
-            sub(/^[[:space:]]*-[[:space:]]+id:[[:space:]]*/, "", cur)
-            sub(/[[:space:]]#.*$/, "", cur)
-            gsub(/^["'"'"']|["'"'"']$/, "", cur)
-            rsn=""
+        sec != "" && /^[[:space:]]*-[[:space:]]*/ {
+            flush(); started=1; cur=""; rsn=""
+            line=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            if (line ~ /^id:/) { sub(/^id:[[:space:]]*/, "", line); cur=clean(line) }
+            else if (line ~ /^reason:/) { sub(/^reason:[[:space:]]*/, "", line); rsn=line; sub(/[[:space:]]+$/, "", rsn) }
             next
         }
-        sec != "" && cur != "" && /^[[:space:]]*reason:/ {
-            rsn=$0
-            sub(/^[[:space:]]*reason:[[:space:]]*/, "", rsn)
-            gsub(/^["'"'"']|["'"'"']$/, "", rsn)
-            next
+        sec != "" && started && /^[[:space:]]*id:/ {
+            line=$0; sub(/^[[:space:]]*id:[[:space:]]*/, "", line); cur=clean(line); next
+        }
+        sec != "" && started && /^[[:space:]]*reason:/ {
+            line=$0; sub(/^[[:space:]]*reason:[[:space:]]*/, "", line)
+            sub(/[[:space:]]+$/, "", line); gsub(/^["'"'"']|["'"'"']$/, "", line)
+            rsn=line; next
         }
         END { flush() }
     ')
@@ -774,11 +803,11 @@ check_consolidation_file() {
     while IFS=$'\037' read -r sec entry_id entry_reason; do
         [[ -n "$sec" ]] || continue
         if [[ -z "$entry_id" ]]; then
-            error "$label: consolidation section \`${sec}\` has an entry with no id"
+            c_error "$label: consolidation section \`${sec}\` has an entry with no id"
             continue
         fi
         if [[ -z "$entry_reason" ]]; then
-            error "$label: consolidation entry \`${entry_id}\` (${sec}) has an empty reason - the recorded decision must be checkable by a later reader"
+            c_error "$label: consolidation entry \`${entry_id}\` (${sec}) has an empty reason - the recorded decision must be checkable by a later reader"
         fi
         [[ "$sec" == "absorbed" ]] && absorb_count=$((absorb_count + 1))
         [[ "$sec" == "appended_to" ]] && append_count=$((append_count + 1))
@@ -786,16 +815,19 @@ check_consolidation_file() {
 
     # An outcome that records no decision is an empty block wearing a label.
     if [[ "$outcome" == "absorb" && "$absorb_count" -eq 0 ]]; then
-        error "$label: consolidation outcome is absorb but the absorbed: list is empty"
+        c_error "$label: consolidation outcome is absorb but the absorbed: list is empty"
     fi
     if [[ "$outcome" == "append" && "$append_count" -eq 0 ]]; then
-        error "$label: consolidation outcome is append but the appended_to: list is empty"
+        c_error "$label: consolidation outcome is append but the appended_to: list is empty"
     fi
 
-    if [[ $ERRORS -eq 0 ]]; then
+    if [[ $c_errors -eq 0 ]]; then
         ok "$label: consolidation outcome is ${outcome:-<missing>} (step 2d gate)"
     fi
 }
+
+echo ""
+echo "--- Consolidation Gate ---"
 
 if [[ -f "$PLAN_DIR" ]]; then
     check_consolidation_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"

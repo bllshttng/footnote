@@ -96,6 +96,94 @@ def test_absorb_with_empty_absorbed_list_errors(tmp_path):
     assert "absorbed: list is empty" in result.stdout
 
 
+def test_plan_created_on_the_gate_date_is_grandfathered(tmp_path):
+    # Strictly-after boundary: a plan created ON the gate date predates the
+    # gate reaching its author. Nine live plans carry that date, and erroring
+    # on them would refuse every one at /do time.
+    plan = tmp_path / "on-gate.md"
+    plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-17\n"))
+    result = _run(plan)
+    assert result.returncode == 0, result.stdout
+    assert "not after the 2026-08-17 gate" in result.stdout
+
+
+def test_quoted_and_compact_created_dates_are_read_not_guessed(tmp_path):
+    # A quoted date used to keep its quote, sort before the gate, and warn
+    # forever; a compact YYYYMMDD stamp sorted after it and hard-errored.
+    quoted = tmp_path / "quoted.md"
+    quoted.write_text(_plan('title: T\nstatus: ready\nkind: quick-plan\ncreated: "2026-08-25"\n'))
+    assert _run(quoted).returncode == 1
+
+    compact = tmp_path / "compact.md"
+    compact.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: 20260806\n"))
+    out = _run(compact)
+    assert out.returncode == 0, out.stdout
+    assert "created 2026-08-06" in out.stdout
+
+
+def test_unreadable_created_grandfathers_and_says_so(tmp_path):
+    # An unparsable date must not be compared lexicographically against the
+    # gate. Warn (never block in-flight work) and name the real reason.
+    plan = tmp_path / "junk-date.md"
+    plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: last tuesday\n"))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+    assert "is not a readable date" in out.stdout
+
+
+def test_entry_keys_may_come_in_any_order(tmp_path):
+    # YAML lets a mapping's keys come in any order. Keying the walk on `- id:`
+    # read a reason-first entry as no entry and blamed the list for being empty.
+    plan = tmp_path / "reason-first.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  absorbed:\n"
+        "    - reason: same lock, wave B\n"
+        "      id: x-ab12\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+    assert "consolidation outcome is absorb" in out.stdout
+
+
+def test_entry_with_no_id_is_reported(tmp_path):
+    plan = tmp_path / "no-id.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  absorbed:\n"
+        "    - reason: only a reason\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 1
+    assert "entry with no id" in out.stdout
+
+
+def test_positive_marker_survives_an_unrelated_error(tmp_path):
+    # The gate reports through its own counter: a valid block must still print
+    # its marker when some other check has already failed.
+    plan = tmp_path / "unrelated.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "kill_criteria:\n  - name: x\n"
+        "consolidation:\n  outcome: proceed_alone\n  proceed_alone_against: []\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 1  # the unrelated kill_criteria error
+    assert "consolidation outcome is proceed_alone" in out.stdout
+
+
+def test_blueprint_owns_the_consolidation_frontmatter_key():
+    # The validator requires the block, so the ownership model must permit the
+    # write that satisfies it, or blueprint raises OwnershipViolation instead.
+    from fno.plan._ownership import check_blueprint_can_write
+
+    assert check_blueprint_can_write("consolidation")
+
+
 # -- the Pydantic shape authority (fno plan validate must agree with the gate) --
 
 

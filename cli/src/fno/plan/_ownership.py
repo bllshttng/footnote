@@ -25,6 +25,10 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
         # when a design promotes to ready, marking the plan as carrying strict
         # reference-resolved acceptance criteria.
         "acceptance_contract",
+        # The step 2d consolidation decision. Blueprint-owned like
+        # kill_criteria: the validator requires the block, so the ownership
+        # model has to permit the write that satisfies it.
+        "consolidation",
     }
 )
 
