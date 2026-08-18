@@ -394,6 +394,46 @@ def test_a_malformed_profiles_table_returns_a_reason_not_a_raise(
     assert doctor._codex_context_window_report()["model"] == "gpt-5.6-sol"
 
 
+def test_a_malformed_cache_shape_returns_a_reason_not_a_raise(tmp_path, monkeypatch) -> None:
+    """Same contract as the profiles branch: the caller swallows a raise, so a
+    raise here drops the key from --json and hides that anything went wrong."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        'model = "gpt-5.6-sol"\nmodel_context_window = 1000000\n'
+    )
+
+    for shape in ('{"models": "nope"}', '{"models": ["nope"]}', '"nope"', "[]"):
+        (tmp_path / "models_cache.json").write_text(shape)
+        report = doctor._codex_context_window_report()
+        assert "reason" in report, shape
+
+
+def test_a_float_cap_is_honored_like_a_float_percent(tmp_path, monkeypatch) -> None:
+    """Rejecting a float cap substituted the base and reported a clamp that is
+    not real, a false positive in the direction the check exists to catch."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=400000, cached_max=872000.0)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["max_context_window"] == 872000
+    assert report["effective"] == 380000
+
+
+def test_a_synthesized_cap_says_the_cache_carries_none(tmp_path, monkeypatch) -> None:
+    """A missing max_context_window makes `cap` a copy of the base that the
+    cache never carried.  Calling that 'its base' is a false cache fact."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=None)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["cap_synthesized"] is True
+    line = _emit(report)[0]
+    assert "carries no cap for gpt-5.6-sol" in line
+    assert "its base" not in line
+
+
 def test_a_synthesized_cap_is_not_called_the_base(tmp_path, monkeypatch) -> None:
     """A missing max_context_window makes `cap` a copy of the base that the
     cache never carried, and a cap BELOW base is upstream nonsense.  Neither

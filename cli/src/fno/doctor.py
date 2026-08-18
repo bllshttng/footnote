@@ -1838,14 +1838,29 @@ def _codex_context_window_report() -> dict[str, Any]:
         return {"reason": "no-configured-window"}
     if not isinstance(slug, str):
         return {"reason": "no-configured-model"}
-    entry = next((m for m in cache.get("models") or [] if m.get("slug") == slug), None)
+    # Same hardening as the profiles branch above: a malformed shape must
+    # return a reason, since the caller swallows a raise and drops the key.
+    models = cache.get("models") if isinstance(cache, dict) else None
+    if not isinstance(models, list):
+        return {"reason": "cache-schema-drift: models"}
+    entry = next(
+        (m for m in models if isinstance(m, dict) and m.get("slug") == slug), None
+    )
     if entry is None:
         return {"reason": f"model-not-in-cache: {slug}"}
+    # Accept a float everywhere, not just for the percent.  Rejecting a float
+    # cap silently substitutes the base and reports a clamp that is not real,
+    # which is a false positive in the exact direction this check exists for.
     cap = entry.get("max_context_window")
     base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    if not isinstance(cap, int):
-        cap = base if isinstance(base, int) else None
+    cap = int(cap) if isinstance(cap, (int, float)) and not isinstance(cap, bool) else None
+    base = int(base) if isinstance(base, (int, float)) and not isinstance(base, bool) else None
+    # A cap the cache never carried is not a cache fact, so remember that the
+    # fallback happened rather than letting the line call it one.
+    synthesized = cap is None
+    if synthesized:
+        cap = base
     if cap is None:
         return {"reason": f"cache-schema-drift: {slug}"}
     # A missing percent must not silence a clamp that needs no percent to
@@ -1861,6 +1876,7 @@ def _codex_context_window_report() -> dict[str, Any]:
         "window_source": window_source,
         "configured": configured,
         "max_context_window": cap,
+        "cap_synthesized": synthesized,
         "context_window": base if isinstance(base, int) else cap,
         "effective": effective,
         "percent": percent,
@@ -1913,19 +1929,22 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
                 f" models_cache.json holds {report['model']} at {cap}, above its {base} "
                 f"base {provenance}. A base-tier fetch drops this to {base_tier}."
             )
-        elif cap == base:
+        elif cap == base and not report.get("cap_synthesized"):
             line += (
                 f" models_cache.json caps {report['model']} at {cap}, its base "
                 f"{provenance}, so whichever launcher fetched last set it for every "
                 "thread started since."
             )
         else:
-            # cap < base is upstream nonsense, and a synthesized cap the cache
-            # never carried lands here too.  State the number, claim nothing.
+            # A synthesized cap equals base by construction, so it reaches here
+            # only via the flag.  A cap BELOW base is upstream nonsense and
+            # lands here too.  State the number and claim nothing about it.
+            held = "carries no cap for" if report.get("cap_synthesized") else "puts"
             line += (
-                f" models_cache.json puts {report['model']} at {cap} {provenance}, "
-                "so whichever launcher fetched last set it for every thread "
-                "started since."
+                f" models_cache.json {held} {report['model']}"
+                f"{'' if report.get('cap_synthesized') else f' at {cap}'} "
+                f"{provenance}, so whichever launcher fetched last set it for every "
+                "thread started since."
             )
         # Belongs on every branch, and most of all on the RAISED-cap one: the
         # daemon is the thing that pulls a raised cap back down, so the run
