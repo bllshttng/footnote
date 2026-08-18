@@ -41,12 +41,12 @@ FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-if ! command -v jq >/dev/null 2>&1; then
+if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
   # The runner has no skip state: it scores 77 as a red failure and a 0 as a
-  # green pass. A jq-less machine is broken for this suite, so red is the
-  # honest outcome; a 0 would report every case green having asserted
-  # nothing.
-  echo "SKIP: jq not available"; exit 77
+  # green pass. A machine without jq or python3 is broken for this suite,
+  # so red is the honest outcome; a 0 would report every case green having
+  # asserted nothing.
+  echo "SKIP: jq or python3 not available"; exit 77
 fi
 
 # --- a real git repo, because emit-attestation.sh head-pins with rev-parse ---
@@ -247,8 +247,10 @@ expect_silent "forked-no-sidecar"
 # The live specimen, byte exact: the marker, a blank line, then the scope
 # sentence naming the file the fork excluded. That review read zero files, so
 # strict equality stays silent on its real text, not a paraphrase of it. The
-# em-dash inside the sentence is the fork's own byte, kept as evidence.
-run_hook "$(forked_skill_stop $'(none)\n\nThe only change is `tests/hooks/test_code_review_attest.sh`, a new test file — excluded from review at this level.' "code-review")"
+# em-dash arrives via printf splice: the source stays ASCII and the tested
+# byte is still the fork's own.
+SPECIMEN="$(printf '(none)\n\nThe only change is `tests/hooks/test_code_review_attest.sh`, a new test file \xe2\x80\x94 excluded from review at this level.')"
+run_hook "$(forked_skill_stop "$SPECIMEN" "code-review")"
 expect_silent "forked-real-specimen-marker-then-scope-note"
 
 # skillName alone is not a skill fork. The forkedSkill flag is the part only

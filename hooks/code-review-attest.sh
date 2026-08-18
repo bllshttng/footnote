@@ -83,11 +83,8 @@ case "$event" in
     # disagreeing about what counts as a code review.
     REVIEWER_RE='^/?code-review([[:space:]]|$)'
     described=0
-    while IFS= read -r cand; do
-      [[ "$cand" =~ $REVIEWER_RE ]] && described=1
-    done < <(printf '%s' "$input" \
-      | jq -r '[.agent_type?] | map(select(type == "string")) | .[]' \
-      2>/dev/null || true)
+    agent_type="$(printf '%s' "$input" | jq -r '.agent_type? // empty' 2>/dev/null || true)"
+    [[ "$agent_type" =~ $REVIEWER_RE ]] && described=1
 
     # 2. The harness's own record of WHAT THIS FORK RAN, which it writes
     #    beside the subagent transcript whatever the skill's output contract
