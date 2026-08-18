@@ -674,6 +674,12 @@ pub fn run_loop(
         // restarted mid-flight), close the unit without dispatching so work
         // is not duplicated.
         if let Some(evidence) = journal.find_termination(&unit.session_key)? {
+            // A closed-without-dispatch pass is still work: it derives a unit,
+            // reads the journal, and journals a close. A queue that re-derives
+            // the same unit repeats it forever, so it must spend budget like a
+            // dispatch does. Spend it before journaling so node_closed reports
+            // the counter including this pass, matching dispatch closes.
+            iterations_used += 1;
             let close = queue.close(&unit, &evidence)?;
             // AC2-UI: journal node_closed for every close path.
             journal_node_closed(journal, &unit, &evidence, &close, iterations_used)?;
@@ -682,11 +688,6 @@ pub fn run_loop(
                 evidence,
                 close,
             });
-            // A closed-without-dispatch pass is still work: it derives a unit,
-            // reads the journal, and journals a close. A queue that re-derives
-            // the same unit repeats it forever, so it must spend budget like a
-            // dispatch does.
-            iterations_used += 1;
             continue;
         }
 

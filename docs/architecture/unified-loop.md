@@ -178,9 +178,9 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Watchdog synthesis:** if a dispatched session exits and `find_termination` finds no matching event, the runtime emits `node_failed` with the exit code (including `128+N` for signal deaths) and re-dispatches on the next inner iteration.
 
-**Iteration ceiling -> Budget:** when `iterations_used >= budget.max_iterations`, the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event.
+**Iteration ceiling -> Budget:** when `iterations_used >= budget.max_iterations`, the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event. The outer-loop check sits AFTER the dequeue, so a drained queue reports `NoWork` even at an exhausted budget; only a real unit the walk cannot afford reports `Budget`, and that unit is left unclosed. A `Queue` whose `next()` acquires a claim (megawalk) must therefore not strand one beyond its tolerance: run at a budget with headroom, make an unaffordable dequeue cheap to abandon, or release in `close()` - parking holds the claim, so a park-shaped close does not release it.
 
-**Resume guard (AC1-FR):** on the first `next()` call, if `find_termination` finds a pre-existing `termination` event for the manifest's `session_key`, the unit is closed without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. No iteration is consumed; no duplicate dispatch occurs.
+**Resume guard (AC1-FR):** on the first `next()` call, if `find_termination` finds a pre-existing `termination` event for the manifest's `session_key`, the unit is closed without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. The close pass consumes one iteration (a budget counts work, not dispatches - a queue that re-derives the same unit must not spin for free); no duplicate dispatch occurs.
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 
