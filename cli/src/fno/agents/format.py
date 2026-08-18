@@ -96,6 +96,8 @@ def serialize_entry(
     observed_model: Optional[dict] = None,
     reachability: Optional[str] = None,
     basis: Optional[str] = None,
+    progress: Optional[str] = None,
+    progress_basis: Optional[str] = None,
     last_activity_age_s: Optional[int] = None,
     last_event_at: Optional[str] = None,
     last_message: Optional[str] = None,
@@ -179,6 +181,12 @@ def serialize_entry(
         # this contract was written to stop.
         "reachability": reachability,
         "basis": basis,
+        # The orthogonal axis: reachability answers "can I reach this
+        # process"; progress answers "is it advancing, awaiting the operator,
+        # parked, or refused" -- a question a refused-but-reachable worker
+        # needs answered separately (fno.agents.reachability.classify_progress).
+        "progress": progress,
+        "progress_basis": progress_basis,
         "last_activity_age_s": last_activity_age_s,
         # The absolute stamp of the newest transcript activity and the flattened
         # text of the LAST turn. Both come from the same truth probe as

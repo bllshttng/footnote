@@ -3907,6 +3907,69 @@ fn rendered_status_from_truth(
     }
 }
 
+/// True for a Claude model id or tier alias. Mirrors
+/// `fno.agents.model_routing.is_anthropic_model` (cli/src/fno/agents/model_routing.py) --
+/// duplicated rather than shelled out to because the daemon already pays one
+/// probe per row and a second process spawn per row would multiply that cost
+/// for a four-branch string check.
+fn is_anthropic_model(model: &str) -> bool {
+    let name = model.trim().to_ascii_lowercase();
+    name.starts_with("claude-") || matches!(name.as_str(), "opus" | "sonnet" | "haiku" | "fable")
+}
+
+/// Structural refusal predicate (Locked Decision 3). Mirrors
+/// `fno.agents.reachability._is_refused` -- never reads the transcript's
+/// prose, so a reworded refusal message cannot break it. Fails OPEN: a
+/// recorded `route_settings_path` records the INTENDED route, so a
+/// foreign-routed worker answering as a foreign model is healthy, not refused.
+fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option<&str>) -> bool {
+    if harness != "claude" {
+        return false;
+    }
+    if route_settings_path.is_some() {
+        return false;
+    }
+    if observed_model.get("kind").and_then(Value::as_str) != Some("observed") {
+        return false;
+    }
+    match observed_model.get("model").and_then(Value::as_str) {
+        Some(model) => !is_anthropic_model(model),
+        None => false,
+    }
+}
+
+/// Map a truth probe onto the progress axis `list` renders, mirroring Python's
+/// `classify_progress` (`fno/agents/reachability.py`). Reads the SAME probe
+/// `rendered_status_from_truth` reads, plus `harness` and
+/// `route_settings_path` off the registry entry -- no second probe is paid.
+///
+/// Precedence matches the Python classifier exactly: a falsified/unresolved
+/// row first (`reachability` absent or `unreachable` -- AC12-FR, the
+/// compatibility-fallback case included, since an unmeasured row has no
+/// progress state to report either), then the refusal predicate, then the
+/// truth-state arms.
+fn progress_from_truth(
+    probe: Option<&crate::claude_ask::TruthProbe>,
+    harness: &str,
+    route_settings_path: Option<&str>,
+) -> (&'static str, &'static str) {
+    match probe.and_then(|p| p.reachability.as_deref()) {
+        Some("unreachable") | None => return ("unknown", "no-evidence"),
+        _ => {}
+    }
+    let observed_model = probe.map(|p| &p.observed_model);
+    if observed_model.is_some_and(|om| is_refused(om, harness, route_settings_path)) {
+        return ("refused", "model-refused");
+    }
+    match probe.map(|p| p.state.as_str()) {
+        Some("working" | "watching") => ("advancing", "transcript-turn"),
+        Some("your-move") => ("awaiting-operator", "operator-turn"),
+        Some("done") => ("parked", "promise"),
+        Some("stalled") => ("unknown", "silent"),
+        _ => ("unknown", "no-evidence"),
+    }
+}
+
 fn registry_truth_handle(entry: &RegistryEntry) -> String {
     if let Some(session_id) = entry.harness_session_id.as_deref() {
         return session_id.to_string();
@@ -4081,6 +4144,13 @@ where
                 json!(truth.as_ref().and_then(|t| t.last_event_at.as_deref())),
                 json!(truth.as_ref().and_then(|t| t.last_message.as_deref())),
             );
+            // The orthogonal axis: reachability answers "can I reach this
+            // process"; progress answers "is it advancing, awaiting the
+            // operator, parked, or refused" -- read off the SAME probe, so a
+            // refused-but-reachable row is never rendered as a fourth
+            // reachability value.
+            let (progress, progress_basis) =
+                progress_from_truth(truth.as_ref(), e.harness_name(), e.route_settings_path.as_deref());
             // A probe that did not answer is the same situation Python's
             // resolver reports as `no-transcript` (its dominant cause here is
             // the routine exit-13 miss), so both emitters say the same thing
@@ -4089,12 +4159,12 @@ where
                 .map(|t| t.observed_model)
                 .filter(|v| !v.is_null())
                 .unwrap_or_else(|| json!({"kind": "no-transcript"}));
-            (e, rendered_status, observed_model, evidence)
+            (e, rendered_status, observed_model, evidence, progress, progress_basis)
         })
         .collect();
     let mut entries: Vec<Value> = classified
         .into_iter()
-        .filter(|(_e, rendered_status, _observed, _evidence)| {
+        .filter(|(_e, rendered_status, _observed, _evidence, _progress, _progress_basis)| {
             if let Some(ref st) = filter_status {
                 if rendered_status != &st.as_str() {
                     return false;
@@ -4102,7 +4172,7 @@ where
             }
             true
         })
-        .map(|(e, rendered_status, observed_model, evidence)| {
+        .map(|(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
             let (reachability, basis, last_activity_age_s, last_event_at, last_message) = evidence;
             // Return the full row shape matching Python's serialize_entry. The
             // key set is pinned by schemas/agents-list-row.json, asserted here
@@ -4212,6 +4282,10 @@ where
                 // documented field missing on the path readers actually take.
                 "reachability": reachability,
                 "basis": basis,
+                // The orthogonal progress axis, from the same probe as the
+                // reachability triple above (fno.agents.reachability.classify_progress).
+                "progress": progress,
+                "progress_basis": progress_basis,
                 "last_activity_age_s": last_activity_age_s,
                 // The absolute stamp of the newest transcript activity and the
                 // flattened LAST-turn text, from the same probe as the age -
@@ -9639,6 +9713,107 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref(), true),
             "orphaned",
             "a positive falsifier must never be overridden by pid liveness"
+        );
+    }
+
+    /// A verdict-carrying probe with an explicit `observed_model`, for the
+    /// progress-axis tests below (`probe_with_verdict` above always carries
+    /// `Value::Null`, which is `no-transcript` and can never refuse).
+    fn probe_observed(state: &str, reachability: &str, observed_model: Value) -> Option<crate::claude_ask::TruthProbe> {
+        Some(crate::claude_ask::TruthProbe {
+            state: state.into(),
+            reachability: Some(reachability.into()),
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(12.0),
+            last_event_at: None,
+            last_message: None,
+            observed_model,
+        })
+    }
+
+    #[test]
+    fn progress_ac1_ac2_done_is_parked_working_is_advancing() {
+        assert_eq!(
+            progress_from_truth(probe_with_verdict("done", "reachable").as_ref(), "claude", None),
+            ("parked", "promise")
+        );
+        assert_eq!(
+            progress_from_truth(probe_with_verdict("working", "reachable").as_ref(), "claude", None),
+            ("advancing", "transcript-turn")
+        );
+        assert_eq!(
+            progress_from_truth(probe_with_verdict("your-move", "reachable").as_ref(), "claude", None),
+            ("awaiting-operator", "operator-turn")
+        );
+    }
+
+    #[test]
+    fn progress_ac3_ac4_refusal_outranks_working_but_never_a_routed_worker() {
+        let refused_model = json!({"kind": "observed", "model": "glm-5.2[1m]"});
+        assert_eq!(
+            progress_from_truth(
+                probe_observed("working", "reachable", refused_model.clone()).as_ref(),
+                "claude",
+                None
+            ),
+            ("refused", "model-refused"),
+            "the refusal must outrank the active working truth state"
+        );
+        assert_eq!(
+            progress_from_truth(
+                probe_observed("working", "reachable", refused_model).as_ref(),
+                "claude",
+                Some("/x/route-settings/ab12.json")
+            ),
+            ("advancing", "transcript-turn"),
+            "a deliberately routed worker must never be condemned"
+        );
+    }
+
+    #[test]
+    fn progress_ac5_unmeasured_observed_model_kinds_never_refuse() {
+        for kind in ["no-transcript", "not-file-backed", "no-model-yet", "unreadable"] {
+            let (verdict, _) = progress_from_truth(
+                probe_observed("working", "reachable", json!({"kind": kind})).as_ref(),
+                "claude",
+                None,
+            );
+            assert_ne!(verdict, "refused", "kind={kind} must never refuse");
+        }
+    }
+
+    #[test]
+    fn progress_ac6_stalled_is_unknown_silent_never_parked() {
+        assert_eq!(
+            progress_from_truth(probe_with_verdict("stalled", "reachable").as_ref(), "claude", None),
+            ("unknown", "silent")
+        );
+    }
+
+    #[test]
+    fn progress_ac7_unreachable_is_unknown_no_evidence_regardless_of_state() {
+        for state in ["working", "done", "your-move", "stalled"] {
+            assert_eq!(
+                progress_from_truth(probe_with_verdict(state, "unreachable").as_ref(), "claude", None),
+                ("unknown", "no-evidence"),
+                "state={state}"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_ac12_fr_a_probe_with_no_reachability_verdict_is_unknown_no_evidence() {
+        // The compatibility fallback (a `fno` too old to emit the verdict):
+        // `probe()` carries `reachability: None`. An unmeasured row has no
+        // progress state to report, so this must never panic and must never
+        // read a stale `state` as an active truth-state arm.
+        assert_eq!(
+            progress_from_truth(probe("working").as_ref(), "claude", None),
+            ("unknown", "no-evidence")
+        );
+        assert_eq!(
+            progress_from_truth(None, "claude", None),
+            ("unknown", "no-evidence")
         );
     }
 
