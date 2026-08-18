@@ -238,13 +238,19 @@ case "${1:-status}" in
             # One refresh up front, PRUNED: a branch deleted on the server
             # leaves its local tracking ref behind, and that stale ref would
             # vouch for a commit no remote carries (wt_unpushed_count) or a
-            # phantom merged baseline. A failure aborts loudly rather than
-            # reaping against stale refs (silently keeping everything looks
-            # identical to a clean state, so the failure must be loud).
-            wt_refresh_remote_refs "$MAIN_DIR" || {
-                echo "worktree cleanup --merged: refresh of remote refs failed; aborting (refs would be stale)" >&2
+            # phantom merged baseline. Origin failing (rc 2) aborts loudly
+            # rather than reaping against stale refs - silently keeping
+            # everything looks identical to a clean state, so that failure
+            # must be loud. A dead NON-origin remote (rc 1) degrades instead
+            # of bricking the sweep: detached trees are kept (their refs
+            # cannot be verified against the dead remote) and the helper says
+            # so on stderr, while origin-keyed judging continues.
+            REFRESH_RC=0
+            wt_refresh_remote_refs "$MAIN_DIR" || REFRESH_RC=$?
+            if [[ "$REFRESH_RC" -eq 2 ]]; then
+                echo "worktree cleanup --merged: refresh of origin failed; aborting (refs would be stale)" >&2
                 exit 1
-            }
+            fi
             if ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
                 echo "worktree cleanup --merged: origin/main does not resolve after fetch; aborting" >&2
                 exit 1
@@ -302,7 +308,16 @@ case "${1:-status}" in
                 #    merged-or-upstream logic below unchanged.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then
                     if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
-                        printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt"; N_UNPUSHED=$((N_UNPUSHED + 1)); continue
+                        # The fail-safe count (1) is indistinguishable from a
+                        # real one in the status column, so the row names an
+                        # unverifiable refresh instead of asserting unpushed
+                        # commits that may not exist.
+                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                            printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt"
+                        else
+                            printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt  (remote refs unverifiable)"
+                        fi
+                        N_UNPUSHED=$((N_UNPUSHED + 1)); continue
                     fi
                 elif ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
                     # Not in main. Local-only commits (data loss) = unpushed;
@@ -427,6 +442,17 @@ case "${1:-status}" in
                 # a $( ) subshell that cannot carry the freshness flag back,
                 # so refreshing only inside it re-fetches per detached tree.
                 if [[ -z "$BRANCH" ]]; then
+                    # Uncommitted content first, before any network: a detached
+                    # tree has no branch holding it, so --force destroys an
+                    # untracked or modified file as surely as an unpushed
+                    # commit. Same classifier as the merged sweep; the
+                    # in-flight marker cli/src/fno/evals/runner.py drops is
+                    # untracked and rides this guard.
+                    if ! wt_reapable "$wt"; then
+                        reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                        echo "  SKIP: $wt (detached HEAD holds uncommitted work: $reason)"
+                        continue
+                    fi
                     wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true
                     if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
                         if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
