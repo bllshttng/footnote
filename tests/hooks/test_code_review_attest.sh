@@ -12,8 +12,8 @@
 # The matrix below is the delivery shapes OBSERVED LIVE, not shapes imagined:
 #   - ReportFindings tool call with findings: []          (works, keep working)
 #   - a fork ending in a fenced json block, WITH the header
-#   - a fork ending in a fenced json block, NO header     (specimen: PR 922)
-#   - a fork ending in the literal "(none)"               (specimen: PR 923)
+#   - a fork ending in a fenced json block, NO header
+#   - a fork whose entire final text is the literal "(none)"
 # plus the negative half, which matters more: every non-clean and every
 # unrecognized shape must emit NOTHING, so the gate holds rather than clearing
 # on evidence that never arrived.
