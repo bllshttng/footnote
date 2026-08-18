@@ -268,6 +268,10 @@ FNO_VERIFY_REASON=
 verify_ours() {
 	FNO_VERIFY_REASON=
 	FNO_VERIFY_STABLE=
+	# The owner identity, one literal beside both users (the accept case and
+	# the torn-prefix rule). The drift test pins it to OWNER_AUTHOR in
+	# crates/fno/src/bootstrap.rs, the one tie a curl-piped script can carry.
+	_owner="Jason Noah Choi"
 	if [ ! -x "$FNO_VENV_PY" ]; then
 		FNO_VERIFY_REASON="its tool venv python is missing"
 		return 1
@@ -308,7 +312,6 @@ print("version=" + (md.get("Version") or ""))'
 	done
 	# A torn author lands as a PREFIX of the owner string: an instrument
 	# failure even when every field answered, so it clears the stable mark.
-	_owner="Jason Noah Choi"
 	case "$_owner" in
 		"$_author"*) FNO_VERIFY_STABLE= ;;
 	esac
@@ -319,7 +322,7 @@ print("version=" + (md.get("Version") or ""))'
 	esac
 	# ...AND authored by this project's owner.
 	case "$_author" in
-		*"Jason Noah Choi"*) : ;;
+		*"$_owner"*) : ;;
 		*) FNO_VERIFY_REASON="author=$_author"; return 1 ;;
 	esac
 	FNO_VERIFIED_VERSION="$_version"

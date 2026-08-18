@@ -623,9 +623,16 @@ def _stacked_base_refusal(command=""):
         return None
     return _fno_veto_refusal(
         ["pr", "base-lineage-check", pr_number],
-        timeout=25,
+        timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: base no longer leads to the default branch",
     )
+
+
+# Both merge vetoes' probe timeout, one literal. The pair runs sequentially in
+# one PreToolUse hook with a 60s budget; the coverage veto's comment states the
+# pair arithmetic. Split literals can drift apart, and the drift test pins this
+# definition against the doc's per-invocation ceiling.
+_VETO_PROBE_TIMEOUT = 25
 
 
 def _fno_veto_refusal(args, timeout, fallback):
@@ -696,10 +703,10 @@ def _coverage_refusal(command=""):
         # 15s of verify waits before the CLI's own coverage read starts (see
         # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout kills
         # exactly that probe mid-wait and fails open in the storm state, so
-        # this carries the lineage veto's 25s: over the shim's ceiling. With
-        # that veto ahead of it, the pair's worst case is 25s + 25s plus
+        # this carries the shared 25s: over the shim's ceiling. With the
+        # lineage veto ahead of it, the pair's worst case is 25s + 25s plus
         # process startup, about 51s of the 60s hook budget.
-        timeout=25,
+        timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
     )
 
