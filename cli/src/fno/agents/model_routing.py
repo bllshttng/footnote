@@ -57,7 +57,15 @@ Two non-negotiable invariants:
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Mapping,
+    MutableMapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+)
 
 from fno.env_file import read_var_from_env_file
 
@@ -432,7 +440,7 @@ def incoherent_model_env(env: Optional[Mapping[str, str]] = None) -> tuple[tuple
 
 
 def scrub_incoherent_model_env(
-    environ: Optional[dict[str, str]] = None,
+    environ: Optional[MutableMapping[str, str]] = None,
 ) -> tuple[str, ...]:
     """Remove every incoherent model var from ``environ`` (default
     ``os.environ``); return the names actually removed.
@@ -453,7 +461,7 @@ def scrub_incoherent_model_env(
 
 
 def scrub_incoherent_model_env_and_notify(
-    environ: Optional[dict[str, str]] = None,
+    environ: Optional[MutableMapping[str, str]] = None,
     *,
     routed: bool = False,
 ) -> tuple[str, ...]:
