@@ -1277,11 +1277,13 @@ def register_existing_session(
     Idempotent on ``(provider, session_id)``: re-registering the same
     session (the hook re-fires after a resume/compaction) refreshes the
     row in place rather than appending a duplicate. A genuinely new session
-    whose generated canonical handle names the SAME session as another row is
-    refused rather than assigned an order-dependent numeric address; a
-    first-eight overlap with a different session is the time-prefixed codex
-    same-window shape and registers (the generated name suffixes when the name
-    itself is already taken). Explicitly supplied friendly names retain their
+    whose generated canonical handle NAMES another row's full session id (only
+    reachable when a stored id is itself eight chars) is refused rather than
+    assigned an order-dependent numeric address; a first-eight overlap with a
+    different session is the time-prefixed codex same-window shape and
+    registers (the generated name suffixes when the name itself is already
+    taken; duplicate full session ids are refused by the write validator's
+    "collides with row" check). Explicitly supplied friendly names retain their
     existing suffix behavior.
 
     Raises on registry I/O failure or bad input; the SessionStart caller

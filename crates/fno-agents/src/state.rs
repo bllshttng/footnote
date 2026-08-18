@@ -1249,16 +1249,23 @@ fn validate_changed_identities(
 ) -> Result<(), String> {
     use crate::identity::{canonical_handle, legacy_suffix_handle, session_handle_tier};
 
-    let matches = |token: &str, other: &RegistryEntry, include_legacy: bool| {
-        if token == other.name || (!other.short_id.is_empty() && token == other.short_id) {
+    // Parity with Python `_validate_changed_identities` (registry.py): chosen
+    // tokens (name, transport short id) may not shadow any address tier;
+    // minted tokens (session id, canonical handle, legacy suffix) collide only
+    // when they name the SAME session (tier 0), because codex UUIDv7 ids share
+    // their first eight across one time window and resolution fails closed on
+    // the shared short instead of the write refusing.
+    let matches = |token: &str, other: &RegistryEntry, same_session_only: bool| {
+        if !same_session_only
+            && (token == other.name || (!other.short_id.is_empty() && token == other.short_id))
+        {
             return true;
         }
         let Some(session_id) = other.harness_session_id.as_deref() else {
             return false;
         };
         match session_handle_tier(token, session_id) {
-            Some(2) => include_legacy,
-            Some(_) => true,
+            Some(tier) => !same_session_only || tier == 0,
             None => false,
         }
     };
@@ -1267,28 +1274,35 @@ fn validate_changed_identities(
         if before.get(&candidate.name) == Some(&identity_signature(candidate)) {
             continue;
         }
-        let mut strong = BTreeSet::from([candidate.name.clone()]);
+        let mut chosen = BTreeSet::from([candidate.name.clone()]);
         if !candidate.short_id.is_empty() {
-            strong.insert(candidate.short_id.clone());
+            chosen.insert(candidate.short_id.clone());
         }
+        let mut minted = BTreeSet::new();
         let session_id = candidate.harness_session_id.as_deref().unwrap_or("");
         if !session_id.is_empty() {
-            strong.insert(session_id.to_string());
-            strong.insert(canonical_handle(session_id));
+            minted.insert(session_id.to_string());
+            minted.insert(canonical_handle(session_id));
         }
         let legacy = (!session_id.is_empty()).then(|| legacy_suffix_handle(session_id));
         for (other_index, other) in entries.iter().enumerate() {
             if index == other_index {
                 continue;
             }
-            let collision = strong
+            let collision = chosen
                 .iter()
-                .find(|token| matches(token, other, true))
+                .find(|token| matches(token, other, false))
                 .cloned()
+                .or_else(|| {
+                    minted
+                        .iter()
+                        .find(|token| matches(token, other, true))
+                        .cloned()
+                })
                 .or_else(|| {
                     legacy
                         .as_ref()
-                        .filter(|token| matches(token, other, false))
+                        .filter(|token| matches(token, other, true))
                         .cloned()
                 });
             if let Some(token) = collision {
@@ -1770,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn state_update_registry_refuses_new_canonical_handle_collision() {
+    fn state_update_registry_allows_first_eight_overlap_between_sessions() {
         let dir = tmpdir("identity-collision");
         let path = dir.join("registry.json");
         update_registry(&path, |registry| {
@@ -1782,14 +1796,62 @@ mod tests {
         })
         .unwrap();
 
-        let result = update_registry(&path, |registry| {
+        // Same first-eight (canonical address) as `first`, different session:
+        // the codex same-window shape. Both land; the shared short resolves as
+        // ambiguity, so the write must not refuse.
+        update_registry(&path, |registry| {
             let mut second = sample_entry("second");
             second.short_id = "transport2".into();
             second.harness = Some("codex".into());
-            // Same first-eight (canonical address) as `first` -> refused. Their
-            // last-eight differs, so this is a canonical-only collision.
             second.harness_session_id = Some("aaaaaaaa-0000-0000-0000-222222222222".into());
             registry.entries.push(second);
+        })
+        .unwrap();
+
+        assert_eq!(load_registry(&path).unwrap().entries.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_update_registry_allows_same_window_codex_pair_null_short() {
+        let dir = tmpdir("same-window-codex");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut first = sample_entry("gql-codex");
+            first.harness = Some("codex".into());
+            first.harness_session_id = Some("01a0152f-45fd-78f0-b109-78f8dffdeeca".into());
+            registry.entries.push(first);
+        })
+        .unwrap();
+        update_registry(&path, |registry| {
+            let mut second = sample_entry("preflight-codex");
+            second.harness = Some("codex".into());
+            second.harness_session_id = Some("01a0152f-9a2b-74c3-8b0f-11aa22bb33cc".into());
+            registry.entries.push(second);
+        })
+        .unwrap();
+
+        assert_eq!(load_registry(&path).unwrap().entries.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_update_registry_refuses_second_row_claiming_same_session_id() {
+        let dir = tmpdir("same-session-duplicate");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut first = sample_entry("gql-codex");
+            first.harness = Some("codex".into());
+            first.harness_session_id = Some("01a0152f-45fd-78f0-b109-78f8dffdeeca".into());
+            registry.entries.push(first);
+        })
+        .unwrap();
+
+        let result = update_registry(&path, |registry| {
+            let mut dup = sample_entry("clone-codex");
+            dup.harness = Some("codex".into());
+            dup.harness_session_id = Some("01a0152f-45fd-78f0-b109-78f8dffdeeca".into());
+            registry.entries.push(dup);
         });
 
         assert!(matches!(result, Err(StateError::InvariantViolation(_))));
