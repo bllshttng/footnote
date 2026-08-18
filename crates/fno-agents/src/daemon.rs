@@ -6226,7 +6226,7 @@ mod tests {
 
     /// The real summary line, copied from this machine's output.
     const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
-Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
+Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned, 1 permanent), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
 
     #[test]
     fn sweep_summary_parses_the_real_line() {

@@ -33,6 +33,15 @@ else
     }
 fi
 
+# The detached-HEAD reachability answer, shared with archive-worktree.sh. A
+# partial deploy that dropped the lib keeps everything (count 1), never reaps.
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh"
+else
+    wt_unpushed_count() { printf '1\n'; }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
@@ -227,7 +236,7 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0
 
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
@@ -250,6 +259,16 @@ case "${1:-status}" in
                     printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)); continue
                 fi
 
+                # 0a. permanent by design. scripts/ci/preflight.sh pins a
+                #     scratch worktree named `preflight` (hard-reset to the
+                #     candidate SHA per run, caches deliberately preserved);
+                #     hermeticity comes from the reset, not from disposal.
+                #     Sweeping it would churn those caches every run. See
+                #     docs/state-root-inventory.md for the recorded entry.
+                if [[ "$(basename "$wt")" == "preflight" ]]; then
+                    printf '%-18s %-34s %s\n' "kept (permanent)" "$branch" "$wt"; N_PERM=$((N_PERM + 1)); continue
+                fi
+
                 # 1. holds content removal would destroy (tracked only; no
                 #    --ignored so the .fno symlink family is not "dirty"). A
                 #    tracked file MISSING from disk is recoverable from HEAD, so
@@ -263,11 +282,19 @@ case "${1:-status}" in
                     reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
                     printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
-                # 2. merged into origin/main? Detached HEAD (deleted branch) is always kept.
+                # 2. merged into origin/main? A detached HEAD is judged by
+                #    content, not by the branch-name proxy: the tree is kept
+                #    only while it holds commits no remote carries
+                #    (wt_unpushed_count fails toward keep), because scratch
+                #    trees are detached BY CONSTRUCTION and a blanket keep
+                #    meant the disk-reclaim verb could never reap the
+                #    population that grows. Branched trees keep the
+                #    merged-or-upstream logic below unchanged.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then
-                    printf '%-18s %-34s %s\n' "kept (unmerged)" "$branch" "$wt"; N_UNMERGED=$((N_UNMERGED + 1)); continue
-                fi
-                if ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
+                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                        printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt"; N_UNPUSHED=$((N_UNPUSHED + 1)); continue
+                    fi
+                elif ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
                     # Not in main. Local-only commits (data loss) = unpushed;
                     # pushed to its own remote but not in main = unmerged (safe).
                     up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
@@ -328,7 +355,7 @@ case "${1:-status}" in
                 _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
             fi
 
-            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED))
+            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED + N_PERM))
             echo ""
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
@@ -336,8 +363,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
             fi
             exit 0
         fi

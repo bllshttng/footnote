@@ -117,7 +117,8 @@ def test_sweep_reports_before_it_removes() -> None:
 
 
 @pytest.mark.parametrize(
-    "verdict", ["kept (dirty)", "kept (unmerged)", "kept (unpushed)", "kept (live-session)"]
+    "verdict",
+    ["kept (dirty)", "kept (unmerged)", "kept (unpushed)", "kept (live-session)", "kept (permanent)"],
 )
 def test_sweep_keeps_rather_than_forces(verdict: str) -> None:
     """Every refusal the sweep can reach must KEEP. A sweep that forced past any

@@ -140,6 +140,12 @@ fi
 cd "$CANONICAL"
 
 BRANCH="$(git -C "$TARGET" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "(detached)")"
+# A detached HEAD names itself "HEAD" (rev-parse succeeds; the fallback above
+# only fires on a hard error), so normalize to one shape for every consumer
+# below: strict check 2, --delete-branch, and the salvage namer.
+if [[ "$BRANCH" == "HEAD" ]]; then
+  BRANCH="(detached)"
+fi
 
 echo "=== Archiving worktree ===" >&2
 echo "    Path:   $TARGET" >&2
@@ -179,9 +185,27 @@ if [[ "$FORCE" -eq 0 ]]; then
 
   # 2. No unpushed commits. If branch has an upstream, compare to it; else
   #    compare to origin/main as a best-effort check for "anything not on
-  #    the remote".
+  #    the remote". A DETACHED head has neither branch nor upstream, and the
+  #    default-ref comparison refuses a head that lives on a pushed
+  #    non-default branch, so it is judged by the same shared reachability
+  #    rule the sweep uses (wt_unpushed_count, fail toward keep).
+  _UNPUSHED_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-unpushed.sh"
+  if [[ -f "$_UNPUSHED_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_UNPUSHED_LIB"
+  else
+    wt_unpushed_count() { printf '1\n'; }   # partial deploy: keep everything
+  fi
   UPSTREAM="$(git -C "$TARGET" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-  if [[ -n "$UPSTREAM" ]]; then
+  if [[ "$BRANCH" == "(detached)" ]]; then
+    UNPUSHED="$(wt_unpushed_count "$TARGET")"
+    if [[ "$UNPUSHED" -gt 0 ]]; then
+      echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
+      git -C "$TARGET" log --oneline HEAD --not --remotes >&2
+      echo "    --force to override, or push first." >&2
+      exit 2
+    fi
+  elif [[ -n "$UPSTREAM" ]]; then
     AHEAD="$(git -C "$TARGET" rev-list --count "$UPSTREAM"..HEAD 2>/dev/null || echo 0)"
     if [[ "$AHEAD" -gt 0 ]]; then
       echo "archive-worktree: $AHEAD unpushed commit(s) on $BRANCH vs $UPSTREAM" >&2

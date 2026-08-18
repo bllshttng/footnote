@@ -17,6 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
+UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 
 
@@ -55,6 +56,7 @@ def repo(tmp_path: Path) -> Path:
     (canon / "scripts" / "setup").mkdir(parents=True)
     shutil.copy2(LIFECYCLE_SRC, canon / "scripts" / "lib" / "worktree-lifecycle.sh")
     shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
+    shutil.copy2(UNPUSHED_SRC, canon / "scripts" / "lib" / "worktree-unpushed.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -339,6 +341,102 @@ def test_compat_age_sweep_delegates_app_owned_guard(
     assert r.returncode == 0, r.stderr
     assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
     assert wt.exists()
+
+
+# ── detached scratch trees: classified by content, not branch name ──────────
+def _add_detached(repo: Path, wt: Path, at: str = "main") -> Path:
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), at)
+    return wt
+
+
+def test_detached_at_remote_tip_is_reap_candidate(repo: Path):
+    """A scratch tree is detached BY CONSTRUCTION; a head that some remote
+    already carries is recreatable, so the sweep must offer it as a candidate
+    instead of keeping it on the branch-name proxy."""
+    wt = _add_detached(repo, repo / "wt-scratch-clean")
+
+    r = _sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert any(
+        "would-archive" in line and str(wt) in line for line in r.stdout.splitlines()
+    ), r.stdout
+    assert wt.exists(), "dry-run must not remove the worktree"
+
+
+def test_apply_reaps_detached_scratch_tree(repo: Path):
+    wt = _add_detached(repo, repo / "wt-scratch-reapme")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not wt.exists(), "clean detached tree with nothing unpushed should be archived" + diag
+
+
+def test_detached_with_local_commits_kept(repo: Path):
+    wt = _add_detached(repo, repo / "wt-scratch-unpushed")
+    _commit(wt, "d.txt")
+
+    r = _sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert "kept (unpushed)" in r.stdout
+    assert wt.exists(), "local-only commits at a detached HEAD must never be removed"
+
+
+def test_preflight_tree_is_permanent(repo: Path):
+    """scripts/ci/preflight.sh pins a scratch worktree named `preflight` and
+    hard-resets it per run; sweeping it would churn its warm caches."""
+    wt = _add_detached(repo, repo / ".claude" / "worktrees" / "preflight")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (permanent)" in r.stdout, diag
+    assert "1 permanent" in r.stdout, diag
+    assert wt.exists(), diag
+
+
+def test_archive_detached_pushed_to_nondefault_remote_branch(repo: Path):
+    """The removal-time gate must agree with the sweep. A detached head that
+    lives on a pushed non-default branch holds nothing unique, yet the
+    default-ref comparison used to refuse it (exit 2), so a sweep that
+    classified the tree as reapable could never actually remove it."""
+    src = repo / "wt-pushed-src"
+    _git(repo, "worktree", "add", str(src), "-b", "feature/pushed", "main")
+    _commit(src, "s.txt")
+    _git(src, "push", "origin", "feature/pushed")
+    sha = _git(src, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "worktree", "remove", str(src))
+    det = _add_detached(repo, repo / "wt-scratch-pushed", at=sha)
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert not det.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_detached_local_only_refused(repo: Path):
+    det = _add_detached(repo, repo / "wt-scratch-local")
+    _commit(det, "l.txt")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2
+    assert "detached HEAD not on any remote" in r.stderr
+    assert det.exists()
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
