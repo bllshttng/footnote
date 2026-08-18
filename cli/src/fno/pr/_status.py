@@ -27,6 +27,7 @@ from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
+    _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
     read_optional_review_state,
     read_review_coverage,
@@ -247,7 +248,6 @@ def _ready_blockers(
     *,
     head: str = "",
     code_review_required: bool = False,
-    merged: bool = False,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -265,9 +265,17 @@ def _ready_blockers(
     The coverage conjuncts themselves are the merge gate's own, read through
     ``_coverage_gate.covered_conjuncts`` - one copy, never a restatement - so
     ``ready`` cannot pass a row ``fno pr merge`` refuses (missing local pass,
-    stale head pin). A MERGED PR is exempt from the coverage conjunct: the
-    gate guards what would merge, and a PR merged out-of-band (UI, bare gh)
-    has no "would" left to guard.
+    stale head pin).
+
+    A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
+    gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has
+    no "would" left to guard. That exemption arrives as ``review_lane=False``
+    from the caller's terminal arm and needs no conjunct of its own here. It
+    had one - a ``merged`` flag - and it was decorative: ``merged`` is only
+    ever True inside the branch that already sets ``review_lane=False``, so it
+    never changed an outcome while reading like the protection its name
+    promised. A guard that cannot fire is worse than no guard, because the
+    next reader budgets for it.
     """
     blockers: list[str] = []
     if not green:
@@ -278,7 +286,7 @@ def _ready_blockers(
         blockers.append("optional_reviews_unknown")
     elif unresolved > 0:
         blockers.append("optional_reviews_unresolved")
-    if review_lane and not merged:
+    if review_lane:
         cov_word = coverage.get("coverage")
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
@@ -337,7 +345,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # variable to int and fail the reassignments' type check.
         reviews: Any = {"optional_reviews": [], "optional_reviews_unresolved": 0}
         unresolved: Any = 0
-        coverage: Any = dict(_UNKNOWN_COVERAGE)
+        coverage: Any = dict(_NOT_ASKED_COVERAGE)
         review_lane = False
         code_review_required = False
     else:
@@ -400,7 +408,6 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         review_lane,
         head=pr_json.get("headRefOid") or "",
         code_review_required=code_review_required,
-        merged=merged,
     )
     sys.stdout.write(
         json.dumps(

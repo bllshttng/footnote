@@ -731,6 +731,26 @@ def test_ready_exempts_a_merged_pr_from_the_coverage_conjunct(monkeypatch, capsy
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True
     assert out["ready_blockers"] == []
+    # And it says WHY it has no coverage number, in a word that is not the
+    # instrument-failed sentinel. `unknown` here read as "the probe died" on
+    # every merged PR - including the path king-for-a-day now prescribes - and
+    # carries its own `review_coverage_unknown` blocker. A deliberate skip and
+    # a broken probe must never share a spelling.
+    assert out["review_coverage"]["coverage"] == "not_asked"
+    assert out["review_coverage"]["reviewed_count"] == 0
+
+
+def test_a_closed_pr_also_reports_not_asked_rather_than_unknown(monkeypatch, capsys):
+    """CLOSED takes the same terminal arm as MERGED, so it must report the
+    same deliberate skip. Asserted separately because the arm tests one state
+    and branches on two, and only MERGED had a test."""
+    import json
+
+    _lane_fetch(monkeypatch, state="CLOSED")
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["review_coverage"]["coverage"] == "not_asked"
+    assert "review_coverage_unknown" not in out["ready_blockers"]
 
 
 def test_ready_names_a_stale_head_pin(monkeypatch, capsys):
