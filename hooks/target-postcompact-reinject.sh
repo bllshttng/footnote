@@ -11,7 +11,9 @@
 # On Codex the same script still runs as a PostCompact hook, and the systemMessage
 # carrier is used there. The carrier is chosen from the harness (FNO_PLATFORM /
 # CLAUDE_PLUGIN_ROOT), not from the event payload, so a lost or empty stdin cannot
-# silently downgrade Claude to a carrier the model never sees.
+# silently downgrade Claude to a carrier the model never sees. That carrier choice
+# and the payload emission live in scripts/lib/postcompact-carrier.sh, shared with
+# hooks/king-postcompact-reinject.sh.
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
@@ -22,6 +24,7 @@ FNO_DIR=".fno"
 # would resolve GUARD_LIB into an unrelated checkout and source whatever it finds.
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
+CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 
 # Read the hook event. SessionStart carries a "source" field; "compact" is the
 # value the harness sets after a compaction. PostCompact (Codex) has no such
@@ -45,33 +48,13 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
     exit 0
 fi
 
-# Carrier selection keys off the harness, not off SOURCE alone. An unreadable or
-# empty stdin (the observer wrapper writes an empty input file when its own `cat`
-# fails) would otherwise fall through to the systemMessage carrier on Claude,
-# which reaches the user but never the model - silently re-breaking the delivery
-# this hook exists to guarantee, with no error anywhere.
-# FNO_PLATFORM is authoritative when set (codex-hooks.json sets it to "codex"),
-# so it is checked before the ambient CLAUDE_PLUGIN_ROOT, which a nested session
-# can leak into a codex environment.
-CARRIER="systemMessage"
-if [[ -n "${FNO_PLATFORM:-}" ]]; then
-    [[ "$FNO_PLATFORM" == "claude" ]] && CARRIER="additionalContext"
-elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" || "$SOURCE" == "compact" ]]; then
-    CARRIER="additionalContext"
-fi
-
-emit_context() {
-    local context="$1"
-    python3 -c "
-import json, sys
-carrier, context = sys.argv[1:3]
-if carrier == 'additionalContext':
-    payload = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
-else:
-    payload = {'systemMessage': context}
-print(json.dumps(payload))
-" "$CARRIER" "$context" 2>/dev/null
-}
+# Carrier selection and payload emission come from the shared lib: keyed on the
+# harness, never on the event payload (the reasoning is documented in the lib).
+# An unreadable lib means a broken plugin install; emit nothing rather than guess.
+[[ -r "$CARRIER_LIB" ]] || exit 0
+# shellcheck source=../scripts/lib/postcompact-carrier.sh
+source "$CARRIER_LIB"
+CARRIER="$(postcompact_carrier "$SOURCE")"
 
 # Guard (c) re-surface: if a handoff was armed pre-compaction (by
 # arm-handoff-precompact.sh), nudge the agent to run it at the next wave
@@ -93,7 +76,7 @@ if [[ -f "$GUARD_LIB" ]]; then
     # state from a prior session would otherwise inject a dead goal into an
     # unrelated compaction event.
     if ! target_is_active "$STATE_FILE"; then
-        [[ -n "$HANDOFF_NUDGE" ]] && emit_context "$HANDOFF_NUDGE"
+        [[ -n "$HANDOFF_NUDGE" ]] && postcompact_emit "$CARRIER" "$HANDOFF_NUDGE"
         exit 0
     fi
 else
@@ -134,6 +117,6 @@ for live phase + completion state (git HEAD, PR/CI, review)."
 
 ${HANDOFF_NUDGE}"
 
-emit_context "$CONTEXT"
+postcompact_emit "$CARRIER" "$CONTEXT"
 
 exit 0
