@@ -236,6 +236,16 @@ def _close_key(short_id: str) -> str:
     return f"close:{short_id}"
 
 
+def _refused_key(short_id: str, error_class: str) -> str:
+    """Sentinel: ``worker_refused`` has fired once for this id + error class.
+
+    Keyed on the pair rather than the id alone so a quota refusal followed by an
+    auth refusal is two findings, while the SAME refusal re-read on every tick
+    (a capped worker's last turn does not change) stays one.
+    """
+    return f"refused:{short_id}:{error_class}"
+
+
 def recovery_sweep(
     now: datetime,
     cfg,
@@ -281,6 +291,38 @@ def recovery_sweep(
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
         truth = truth_fn(c)
+
+        # Locked Decision 3: a refusal is affirmative evidence and acts NOW.
+        # Both gates below are built for silence and both swallow a refusal.
+        # ``classify()`` returns NOT_STALE while the transcript mtime is fresh,
+        # and a capped worker's last turn is plain refusal prose with a fresh
+        # mtime; a worker that emitted <promise> earlier reads done and goes to
+        # SKIP_TERMINAL forever. A worker that has SAID it cannot think must not
+        # wait behind either. Both inputs are already in hand, so this costs no
+        # extra read.
+        refusal = classify_worker_refusal(
+            getattr(snap, "output_result", None), truth.get("last_message")
+        )
+        if refusal is not None:
+            _err, _source = refusal
+            _rk = _refused_key(c.short_id, _err.error_class.value)
+            if not counts.get(_rk):
+                counts[_rk] = True
+                _observed = truth.get("observed_model")
+                emit("worker_refused", {
+                    "short_id": c.short_id,
+                    "node": _node_id_from_worktree(c.cwd) if c.cwd else None,
+                    "error_class": _err.error_class.value,
+                    "source": _source,
+                    "model": (
+                        _observed.get("model")
+                        if isinstance(_observed, dict) else None
+                    ),
+                    "resets_at": _err.resets_at,
+                    "reset_stamp_unparsed": _err.reset_stamp_unparsed,
+                    "excerpt": _err.body_excerpt,
+                })
+
         truth_state = str(truth.get("state") or "unknown")
         # Probe only behind a terminal promise - every other state is already
         # decided by family 1 alone, so this stays off the hot path.
@@ -331,8 +373,15 @@ def recovery_sweep(
         # per-phase storm-cap inside attempt_swap) and before liveness (a swap
         # re-dispatches a fresh session, it does not need the dead socket).
         if failover_fn is not None and not rotated:
-            err = classify_session_error(getattr(snap, "output_result", None))
-            if err is not None and getattr(err, "triggers_swap", False):
+            # Same evidence the hoisted check already resolved, so a
+            # transcript-sourced refusal reaches failover on the path a death
+            # does. The failover stays HERE, below the staleness gate, on
+            # purpose: the event says "it refused" and fires immediately, while
+            # acting on it wants the second signal that the worker has also
+            # stopped producing turns. Stopping a live worker that retried
+            # through a transient throttle costs more than a tick of patience.
+            err = refusal[0] if refusal is not None else None
+            if err is not None:
                 outcome = failover_fn(c, err)
                 if outcome in ("swapped", "rotated-no-worker", "notified"):
                     # Either way the global active provider rotated, so no
@@ -1090,6 +1139,12 @@ def _default_failover(candidate: "Candidate", error) -> str:
 
 def _prune_keep(key: str, live: set) -> bool:
     """Keep a counts entry only while its session is still a live candidate."""
+    if key.startswith("refused:"):
+        # ``refused:<short_id>:<error_class>`` - the id is the middle field, so
+        # this prefix cannot share the plain suffix-strip below. Without an arm
+        # here every refusal key survives forever and the counts file grows
+        # unbounded.
+        return key.split(":")[1] in live
     for prefix in ("capped:", "close:"):
         if key.startswith(prefix):
             return key[len(prefix):] in live

@@ -516,6 +516,94 @@ class TestClassifyWorkerRefusal:
         assert recovery.classify_worker_refusal("", "") is None
 
 
+class _RefusalHarness(_Harness):
+    """A sweep harness whose worker is LIVE, fresh, and carrying a refusal.
+
+    This is the population the whole plan exists for: state=running, transcript
+    mtime seconds old, and the last turn is the provider saying no. Every gate
+    in the sweep reads it as healthy.
+    """
+
+    def __init__(self, last_message, **kw):
+        super().__init__(updated_age_s=5, **kw)
+        self._last_message = last_message
+
+    def truth(self, _candidate):
+        return {
+            "state": "working",
+            "last_activity_age_s": 5,
+            "last_message": self._last_message,
+            "observed_model": {"kind": "observed", "model": "glm-5.2", "samples": 3},
+        }
+
+
+class TestRefusalHoistedAboveTheStalenessGate:
+    """AC1: a refusal is affirmative evidence and does not wait for a timer."""
+
+    _QUOTA = (
+        "Claude usage limit reached. Your limit will reset at "
+        "2026-08-18T07:19:38+08:00"
+    )
+
+    def _sweep(self, h, tmp_path, counts):
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts=counts,
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+        )
+
+    def test_ac1_hp_fires_on_the_first_tick_while_the_worker_reads_fresh(
+        self, tmp_path
+    ):
+        # The worker is 5s old against a 300s idle threshold, so classify()
+        # returns NOT_STALE and the old code skipped it entirely. The event must
+        # fire anyway, on this tick.
+        h = _RefusalHarness(self._QUOTA)
+        self._sweep(h, tmp_path, {})
+        assert "worker_refused" in h.event_types()
+        payload = dict(h.events[h.event_types().index("worker_refused")][1])
+        assert payload["short_id"] == "aaaa1111"
+        assert payload["node"] == "x-test"
+        assert payload["error_class"] == "provider_4xx_quota"
+        assert payload["source"] == "transcript"
+        assert payload["model"] == "glm-5.2"
+        assert payload["resets_at"] is not None
+
+    def test_a_terminal_promise_does_not_suppress_the_refusal(self, tmp_path):
+        # A worker that emitted <promise> earlier reads done -> SKIP_TERMINAL
+        # forever. The refusal must still be heard.
+        h = _RefusalHarness(self._QUOTA, state="done")
+        self._sweep(h, tmp_path, {})
+        assert "worker_refused" in h.event_types()
+
+    def test_ac1_edge_a_second_tick_with_no_new_turn_stays_silent(self, tmp_path):
+        counts: dict = {}
+        h = _RefusalHarness(self._QUOTA)
+        self._sweep(h, tmp_path, counts)
+        h2 = _RefusalHarness(self._QUOTA)
+        self._sweep(h2, tmp_path, counts)
+        assert "worker_refused" not in h2.event_types()
+
+    def test_ac1_neg_ordinary_work_text_emits_nothing_new(self, tmp_path):
+        h = _RefusalHarness("Ran the tests, 41 passed. Committing now.")
+        self._sweep(h, tmp_path, {})
+        assert "worker_refused" not in h.event_types()
+
+    def test_the_dedup_key_is_pruned_when_the_session_dies(self):
+        live = {"aaaa1111"}
+        assert recovery._prune_keep("refused:aaaa1111:provider_4xx_quota", live)
+        assert not recovery._prune_keep("refused:bbbb2222:provider_4xx_quota", live)
+
+    def test_the_dedup_key_is_scoped_to_the_error_class(self):
+        # A quota refusal followed by an auth refusal is two findings; the SAME
+        # refusal re-read every tick is one.
+        assert recovery._refused_key("a", "provider_4xx_quota") != (
+            recovery._refused_key("a", "provider_4xx_auth")
+        )
+
+
 class _FailoverHarness(_Harness):
     """A sweep harness with a controllable last-error and a fake failover_fn."""
 
@@ -550,8 +638,10 @@ class TestFailoverSweep:
         self._run(h, tmp_path)
         assert len(h.failover_calls) == 1
         assert h.sends == []                       # NOT nudged
-        assert h.event_types() == ["failover_swapped"]
-        assert h.events[0][1]["redispatched"] is True   # honest: worker started
+        # worker_refused first: the swap-class error is now announced as a
+        # positive finding before anything acts on it.
+        assert h.event_types() == ["worker_refused", "failover_swapped"]
+        assert h.events[1][1]["redispatched"] is True   # honest: worker started
 
     def test_rotated_no_worker_emits_swapped_then_held(self, tmp_path):
         # codex P1: the swap rotated the provider but no replacement worker
@@ -560,9 +650,11 @@ class TestFailoverSweep:
         # falls through to the held-by-design surface (not a socket nudge).
         h = _FailoverHarness(output_result="rate limit", outcome="rotated-no-worker")
         self._run(h, tmp_path)
-        assert h.event_types() == ["failover_swapped", "recovery_skipped"]
-        assert h.events[0][1]["redispatched"] is False
-        assert h.events[1][1]["reason"] == "held-by-design"
+        assert h.event_types() == [
+            "worker_refused", "failover_swapped", "recovery_skipped",
+        ]
+        assert h.events[1][1]["redispatched"] is False
+        assert h.events[2][1]["reason"] == "held-by-design"
         assert h.sends == []
 
     def test_one_swap_per_tick(self, tmp_path):
@@ -584,8 +676,13 @@ class TestFailoverSweep:
         )
         assert len(h.failover_calls) == 1            # only the first swaps
         assert h.failover_calls[0][0] == "aaaa1111"
-        assert h.event_types() == ["failover_swapped", "recovery_skipped"]
-        assert h.events[1][1]["short_id"] == "bbbb2222"   # the second surfaced
+        # Two candidates, so two refusal notices: the once-only guard is per
+        # short_id, and the one-swap-per-tick guard is separate from it.
+        assert h.event_types() == [
+            "worker_refused", "failover_swapped",
+            "worker_refused", "recovery_skipped",
+        ]
+        assert h.events[3][1]["short_id"] == "bbbb2222"   # the second surfaced
 
     def test_connection_drop_surfaces_held(self, tmp_path):
         # AC2-FR: a clean connection-drop never triggers failover; the stuck
@@ -611,8 +708,8 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="rate limit", outcome="blocked-thrash")
         self._run(h, tmp_path)
         assert h.sends == []
-        assert h.event_types() == ["failover_blocked"]
-        assert h.events[0][1]["reason"] == "blocked-thrash"
+        assert h.event_types() == ["worker_refused", "failover_blocked"]
+        assert h.events[1][1]["reason"] == "blocked-thrash"
 
     def test_notified_emits_swapped_and_does_not_nudge(self, tmp_path):
         # US4/US5 (AC3-FR + AC4-FR "dead one not also nudged"): a revival that
@@ -622,8 +719,8 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="usage limit reached", outcome="notified")
         self._run(h, tmp_path)
         assert h.sends == []                           # NOT nudged
-        assert h.event_types() == ["failover_swapped"]
-        assert h.events[0][1]["redispatched"] is False
+        assert h.event_types() == ["worker_refused", "failover_swapped"]
+        assert h.events[1][1]["redispatched"] is False
 
     def test_queue_exhausted_falls_through_to_held(self, tmp_path):
         # AC1-EDGE (watchdog reading): no eligible alternate -> nothing to swap
@@ -633,15 +730,15 @@ class TestFailoverSweep:
         h = _FailoverHarness(output_result="quota exceeded", outcome="queue-exhausted")
         self._run(h, tmp_path)
         assert h.sends == []
-        assert h.event_types() == ["recovery_skipped"]
-        assert h.events[0][1]["reason"] == "held-by-design"
+        assert h.event_types() == ["worker_refused", "recovery_skipped"]
+        assert h.events[1][1]["reason"] == "held-by-design"
 
     def test_no_swap_outcome_falls_through_to_held(self, tmp_path):
         # Controller declined (NO_SWAP_NEEDED): defensive fall-through to held.
         h = _FailoverHarness(output_result="rate limit", outcome="no-swap")
         self._run(h, tmp_path)
-        assert h.event_types() == ["recovery_skipped"]
-        assert h.events[0][1]["reason"] == "held-by-design"
+        assert h.event_types() == ["worker_refused", "recovery_skipped"]
+        assert h.events[1][1]["reason"] == "held-by-design"
 
     def test_failover_disabled_when_fn_absent(self, tmp_path):
         # Backward compat: no failover_fn -> swap-class error surfaces held-by-design.
@@ -655,8 +752,10 @@ class TestFailoverSweep:
             # failover_fn omitted
         )
         assert h.failover_calls == []
-        assert h.event_types() == ["recovery_skipped"]
-        assert h.events[0][1]["reason"] == "held-by-design"
+        # The refusal notice is independent of failover_fn: reporting that a
+        # worker cannot think must not depend on having somewhere to move it.
+        assert h.event_types() == ["worker_refused", "recovery_skipped"]
+        assert h.events[1][1]["reason"] == "held-by-design"
 
 
 class TestDefaultFailover:
@@ -1157,7 +1256,7 @@ class TestMissionAwareTerminalGate:
             failover_fn=lambda c, err: seen.append(err) or "swapped",
         )
         assert len(seen) == 1
-        assert h.event_types() == ["failover_swapped"]
+        assert h.event_types() == ["worker_refused", "failover_swapped"]
         assert h.sends == []
 
     def test_cap_bounds_the_restored_path(self, tmp_path):
