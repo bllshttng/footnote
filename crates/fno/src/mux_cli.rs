@@ -2948,12 +2948,17 @@ fn resolve_selector(
     keys.sort_unstable();
     keys.dedup();
     if keys.len() > 1 {
-        // One line per DISTINCT candidate, so a twice-listed row prints once.
+        // One line per DISTINCT candidate - dedup by the same identity key the
+        // ambiguity count used, never by name: two identities can share a
+        // name, and printing "matches 1 agents" while refusing is a lie.
+        let mut seen: Vec<&str> = Vec::new();
         let mut candidates: Vec<Candidate> = Vec::new();
         for a in &tier {
-            if candidates.iter().any(|c| c.name == a.name) {
+            let key = candidate_key(a);
+            if seen.contains(&key) {
                 continue;
             }
+            seen.push(key);
             candidates.push(Candidate {
                 name: a.name.clone(),
                 pane: a.mux.clone(),
@@ -2962,9 +2967,15 @@ fn resolve_selector(
         }
         return Resolution::Ambiguous(candidates);
     }
-    // One identity, possibly several rows: prefer the pane-hosted spelling so
-    // a paneless duplicate never masks the live pane.
-    let row = tier.iter().find(|a| a.mux.is_some()).unwrap_or(&tier[0]);
+    // One identity, possibly several rows. No writer clears `mux` on exit, so
+    // an exited spelling can carry a stale pane ref: prefer a LIVE pane-hosted
+    // row, then any pane-hosted row (status lies in both directions), then
+    // whatever is left - a paneless duplicate never masks the live pane.
+    let row = tier
+        .iter()
+        .find(|a| !a.exited && a.mux.is_some())
+        .or_else(|| tier.iter().find(|a| a.mux.is_some()))
+        .unwrap_or(&tier[0]);
     Resolution::Found(Box::new((*row).clone()))
 }
 
@@ -4684,6 +4695,24 @@ mod tests {
             other => panic!("expected Found, got {other:?}"),
         }
         assert!(hosted.mux.is_some());
+    }
+
+    #[test]
+    fn resolve_selector_prefers_a_live_row_over_a_stale_pane_ref() {
+        // No writer clears `mux` on exit, so an exited row can carry a dead
+        // pane ref: a live pane-hosted spelling of the same identity wins.
+        let mut dead = reg_row("t-x919-finish", Some("aaaa1111"));
+        dead.exited = true;
+        dead.mux = Some(("work".into(), 12));
+        let mut live = reg_row("t-x919-finish", Some("aaaa1111"));
+        live.mux = Some(("work".into(), 13));
+        match resolve_selector(&[dead, live], "finish", 0) {
+            Resolution::Found(r) => {
+                assert!(!r.exited);
+                assert_eq!(r.mux, Some(("work".to_string(), 13)));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 
     #[test]
