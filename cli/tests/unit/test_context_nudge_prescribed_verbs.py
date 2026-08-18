@@ -8,9 +8,11 @@ A hook string is the highest-cost instance of the prescribed-verb class: a dead
 verb or a wrong-layer transport here is acted on blind.
 
 Backstory: the hook once prescribed `fno agents crown --succeed` (a deleted
-verb) and `fno-agents mail-inject` (the daemon transport, not the agent front
-door). Both were caught by a human noticing a worker echo them back, not by any
-gate. The live forms are `fno agents spawn --crown <scope>` and
+succession shape) and `fno-agents mail-inject` (the daemon transport, not the
+agent front door). Both were caught by a human noticing a worker echo them back,
+not by any gate. The live succession form is `fno agents spawn --crown <scope>`;
+the restored `fno agents crown` verb is human-attended promotion and must never
+be prescribed to a running agent. The review front door is
 `fno mail send '<verb>' --to-self --raw`.
 
 Scope is the `fno` surface that `verb-baseline.txt` covers. `bash <script>` and
@@ -116,8 +118,9 @@ def test_hook_output_commands_resolve() -> None:
 
 def test_hook_output_prescribes_no_dead_verbs_or_transport() -> None:
     emitted = "\n".join(_output_lines(HOOK.read_text(encoding="utf-8")))
-    # crown was deleted; the live succession is `fno agents spawn --crown`.
-    assert "agents crown " not in emitted, "dead verb `fno agents crown` in output"
+    # Human-attended promotion is live, but a hook injected into an agent must
+    # prescribe spawn-time succession rather than tell the agent to self-crown.
+    assert "agents crown " not in emitted, "human-only `fno agents crown` prescribed to an agent"
     assert "--succeed" not in emitted, "dead `--succeed` flag in output"
     # mail-inject is the daemon transport, not the agent front door.
     assert not _FNO_AGENTS.search(emitted), (

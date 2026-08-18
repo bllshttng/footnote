@@ -366,15 +366,13 @@ def test_auto_route_verbs_have_no_python_contract() -> None:
     auto-routed verb is daemon-native, so routing it cannot regress a Python
     flag/stdout contract.
 
-    Since ab-73da4ac2 ``PYTHON_AGENT_VERBS`` is empty (the ``ask`` holdout was
-    the last carve-out — claude ab-cc926b4e, codex ab-0429c6e1, gemini
-    ab-73da4ac2), so AUTO_ROUTE_VERBS equals RUST_CLIENT_VERBS and that identity
-    is the whole routing contract. Every shared verb plus ``ask`` auto-routes.
+    ``crown`` is the one human-attended shared-registry mutation with no Rust
+    port. Every Rust-backed verb plus ``ask`` still auto-routes.
     """
     assert rr.AUTO_ROUTE_VERBS == rr.RUST_CLIENT_VERBS - rr.PYTHON_AGENT_VERBS
     assert rr.AUTO_ROUTE_VERBS.isdisjoint(rr.PYTHON_AGENT_VERBS)
-    # PYTHON_AGENT_VERBS is empty, so the set difference is the identity.
-    assert rr.AUTO_ROUTE_VERBS == rr.RUST_CLIENT_VERBS
+    assert "crown" in rr.PYTHON_AGENT_VERBS
+    assert "crown" not in rr.AUTO_ROUTE_VERBS
     for parity in ("stop", "rm", "list", "reconcile", "ask"):
         assert parity in rr.AUTO_ROUTE_VERBS, f"{parity} must auto-route"
 
@@ -383,12 +381,10 @@ def test_python_agent_verbs_match_registered_commands() -> None:
     """PYTHON_AGENT_VERBS mirrors the Python-owned @agents_app.command registrations.
 
     Every Python ``@agents_app.command`` is preserved as fallback dispatch for
-    ``FNO_AGENTS_RUNTIME=python`` mode and no-binary environments, but since
-    ab-73da4ac2 NONE are carved out of auto-routing: ``PYTHON_AGENT_VERBS`` is
-    empty. ``ask`` was the last holdout and now auto-routes for every provider,
-    so it joins the rust-parity set. The guard remains so a NEW Python-only verb
-    (one without a Rust client port) can't silently escape into auto-routing —
-    it would land in ``python_owned`` and fail the empty-set assertion below.
+    ``FNO_AGENTS_RUNTIME=python`` mode and no-binary environments. Rust-backed
+    commands auto-route; ``crown`` remains Python-owned because no Rust client
+    port exists. The guard keeps any future Python-only verb from silently
+    escaping the explicit set.
     """
     from fno.agents.cli import agents_app
 
