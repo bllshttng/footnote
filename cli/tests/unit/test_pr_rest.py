@@ -14,7 +14,12 @@ import json
 from fno.pr import _rest, _status
 from fno.pr._proc import Result
 
-_PULLS = {"state": "open", "merged": False, "head": {"sha": "abc123def"}}
+_PULLS = {
+    "state": "open",
+    "merged": False,
+    "head": {"sha": "abc123def", "ref": "feature/test"},
+    "base": {"ref": "main"},
+}
 _GH_URL = "git@github.com:Owner/Repo.git"
 
 
@@ -86,6 +91,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "head_ref": "feature/rest-info",
         "base_ref": "main",
         "mergeable": "MERGEABLE",
+        "merged_at": None,
     }
     assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
 
@@ -103,6 +109,46 @@ def test_pr_info_preserves_unknown_mergeability():
     )
     assert reason == ""
     assert info["mergeable"] == "UNKNOWN"
+
+
+def test_pr_info_rejects_malformed_head_shape():
+    info, reason = _rest.fetch_pr_info_rest(
+        "42",
+        repo="Owner/Repo",
+        runner=_runner(pulls={"state": "open", "head": [], "base": {"ref": "main"}}),
+    )
+    assert info is None
+    assert "malformed head/base" in reason
+
+
+def test_rest_reader_rejects_malformed_check_runs():
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "remote"]:
+            return Result(0, _GH_URL, "")
+        if "/pulls/" in cmd[-1]:
+            return Result(0, json.dumps(_PULLS), "")
+        if "check-runs" in cmd[-1]:
+            return Result(0, '{"check_runs":{}}', "")
+        return Result(0, '{"statuses":[]}', "")
+
+    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
+    assert payload is None
+    assert "malformed check_runs" in reason
+
+
+def test_rest_reader_rejects_malformed_statuses():
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "remote"]:
+            return Result(0, _GH_URL, "")
+        if "/pulls/" in cmd[-1]:
+            return Result(0, json.dumps(_PULLS), "")
+        if "check-runs" in cmd[-1]:
+            return Result(0, '{"check_runs":[{"name":"ci"}]}', "")
+        return Result(0, '{"statuses":{}}', "")
+
+    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
+    assert payload is None
+    assert "malformed statuses" in reason
 
 
 def test_current_pr_number_uses_rest_not_gh_pr_view():
@@ -197,7 +243,15 @@ def test_rest_primary_limit_reason_names_core_bucket():
 
 
 def test_rest_merged_state_maps():
-    r = _runner(pulls={"state": "closed", "merged": True, "head": {"sha": "s"}})
+    r = _runner(
+        pulls={
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-08-18T00:00:00Z",
+            "head": {"sha": "s", "ref": "feature/test"},
+            "base": {"ref": "main"},
+        }
+    )
     pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
     assert pr_json["state"] == "MERGED"
 

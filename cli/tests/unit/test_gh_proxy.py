@@ -7,15 +7,29 @@ import pytest
 
 from fno.pr import gh_proxy
 from fno.pr._proc import Result
-from fno.pr.gh_proxy import Action, classify, delegate
+from fno.pr.gh_proxy import Action, classify, command_args, delegate
 from fno.setup.github_cli import InstallResult, ensure_proxy, worker_environment
 
 
 def test_proxy_classifies_every_graphql_gh_surface():
     assert classify(["pr", "view", "930", "--json", "headRefOid"]) is Action.BROKER
     assert classify(["pr", "checks", "930"]) is Action.BROKER
+    assert classify(["pr", "view", "930"]) is Action.BROKER
+    assert classify(["pr", "view", "930", "--json=state"]) is Action.BROKER
+    assert classify(["pr", "list", "--state", "open"]) is Action.BROKER
+    assert classify(["pr", "status"]) is Action.BROKER
     assert classify(["api", "graphql", "-f", "query={viewer{login}}"]) is Action.BROKER
+    assert classify(["api", "-X", "POST", "graphql", "-f", "query=x"]) is Action.BROKER
+    assert classify(["api", "--hostname", "github.com", "graphql"]) is Action.BROKER
     assert classify(["api", "repos/o/r/pulls/930"]) is Action.DELEGATE
+
+
+def test_proxy_normalizes_repo_global_options_before_classifying():
+    assert command_args(["-R", "o/r", "pr", "view", "930"]) == ["pr", "view", "930"]
+    assert classify(["--repo=o/r", "pr", "checks", "930"]) is Action.BROKER
+    assert classify(["-Ro/r", "pr", "list"]) is Action.BROKER
+    assert classify(["pr", "-R", "o/r", "view", "930"]) is Action.BROKER
+    assert classify(["pr", "--repo=o/r", "checks", "930"]) is Action.BROKER
 
 
 def test_install_backs_up_an_unrelated_existing_wrapper(tmp_path):
@@ -70,15 +84,23 @@ def test_worker_environment_surfaces_proxy_install_io_failure(monkeypatch):
 def test_delegate_replaces_proxy_to_preserve_tty(monkeypatch):
     seen = {}
 
-    def execv(path, argv):
+    def execve(path, argv, env):
         seen["path"] = path
         seen["argv"] = argv
+        seen["path_env"] = env["PATH"]
         raise RuntimeError("exec sentinel")
 
-    monkeypatch.setattr("fno.pr.gh_proxy.os.execv", execv)
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", execve)
+    monkeypatch.setattr(
+        "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
+    )
     with __import__("pytest").raises(RuntimeError, match="exec sentinel"):
         delegate("/real/gh", ["auth", "status"])
-    assert seen == {"path": "/real/gh", "argv": ["/real/gh", "auth", "status"]}
+    assert seen == {
+        "path": "/real/gh",
+        "argv": ["/real/gh", "auth", "status"],
+        "path_env": "/real/bin",
+    }
 
 
 def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, capsys):

@@ -109,19 +109,29 @@ def fetch_pr_info_rest(
     if not isinstance(pr_data, dict):
         return None, "gh api pulls/<n> returned a JSON value that is not an object"
 
-    head = pr_data.get("head") or {}
-    base = pr_data.get("base") or {}
-    sha = str(head.get("sha") or "")
-    if not sha:
+    head = pr_data.get("head")
+    base = pr_data.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        return None, "gh api pulls/<n> carried malformed head/base objects"
+    sha = head.get("sha")
+    head_ref = head.get("ref")
+    base_ref = base.get("ref")
+    if not isinstance(sha, str) or not sha:
         return None, "gh api pulls/<n> carried no head sha"
+    if not isinstance(head_ref, str) or not isinstance(base_ref, str):
+        return None, "gh api pulls/<n> carried malformed head/base refs"
+    merged_at = pr_data.get("merged_at")
+    if merged_at is not None and not isinstance(merged_at, str):
+        return None, "gh api pulls/<n> carried malformed merged_at"
     return (
         {
             "pr": int(pr),
             "state": _map_pr_state(pr_data),
             "head_sha": sha,
-            "head_ref": str(head.get("ref") or ""),
-            "base_ref": str(base.get("ref") or ""),
+            "head_ref": head_ref,
+            "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
+            "merged_at": merged_at,
         },
         "",
     )
@@ -152,7 +162,7 @@ def resolve_current_pr_number_rest(
     except json.JSONDecodeError:
         return None, "gh api pulls list returned output that is not JSON"
     if not isinstance(payload, list) or not payload:
-        return None, f"no PR found for current branch {branch.stdout.strip()}"
+        return None, f"no pull requests found for branch {branch.stdout.strip()}"
     number = payload[0].get("number") if isinstance(payload[0], dict) else None
     if not isinstance(number, int):
         return None, "gh api pulls list carried no PR number"
@@ -196,7 +206,12 @@ def fetch_pr_rest(
             return None, _rest_reason(checks)
         try:
             payload = json.loads(checks.stdout)
-            check_runs.extend(payload.get("check_runs") or [])
+            if not isinstance(payload, dict):
+                return None, "gh api check-runs returned a JSON value that is not an object"
+            page_runs = payload.get("check_runs")
+            if not isinstance(page_runs, list) or not all(isinstance(row, dict) for row in page_runs):
+                return None, "gh api check-runs carried malformed check_runs"
+            check_runs.extend(page_runs)
             total = payload.get("total_count")
         except json.JSONDecodeError:
             return None, "gh api check-runs returned output that is not JSON"
@@ -228,7 +243,15 @@ def fetch_pr_rest(
         return None, _rest_reason(statuses)
     if statuses.ok:
         try:
-            for sc in json.loads(statuses.stdout).get("statuses") or []:
+            status_payload = json.loads(statuses.stdout)
+            if not isinstance(status_payload, dict):
+                return None, "gh api status returned a JSON value that is not an object"
+            status_rows = status_payload.get("statuses")
+            if not isinstance(status_rows, list) or not all(
+                isinstance(row, dict) for row in status_rows
+            ):
+                return None, "gh api status carried malformed statuses"
+            for sc in status_rows:
                 rollup.append(
                     {
                         "context": sc.get("context"),
@@ -237,7 +260,7 @@ def fetch_pr_rest(
                     }
                 )
         except json.JSONDecodeError:
-            pass
+            return None, "gh api status returned output that is not JSON"
 
     return (
         {"state": info["state"], "statusCheckRollup": rollup, "headRefOid": sha},
@@ -254,6 +277,7 @@ def list_prs_rest(
     per_page: int = 100,
     max_pages: int = 20,
     timeout: Optional[float] = 30.0,
+    details: bool = False,
 ) -> "tuple[Optional[list[dict]], str]":
     """List a repo's PRs on REST: `(rows, reason)`.
 
@@ -287,7 +311,23 @@ def list_prs_rest(
             number = row.get("number")
             if not isinstance(number, int):
                 continue
-            rows.append({"number": number, "state": _map_pr_state(row)})
+            summary: dict[str, Any] = {"number": number, "state": _map_pr_state(row)}
+            if details:
+                head = row.get("head")
+                if not isinstance(head, dict) or not isinstance(head.get("ref"), str):
+                    return None, f"gh api pulls list page {page} carried malformed head ref"
+                if not isinstance(row.get("title"), str) or not isinstance(
+                    row.get("html_url"), str
+                ):
+                    return None, f"gh api pulls list page {page} carried malformed title/url"
+                summary.update(
+                    {
+                        "title": row["title"],
+                        "headRefName": head["ref"],
+                        "url": row["html_url"],
+                    }
+                )
+            rows.append(summary)
         if len(payload) < per_page:
             break
     else:

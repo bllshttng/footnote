@@ -14,19 +14,48 @@ class Action(str, Enum):
     BROKER = "broker"
 
 
+def command_args(args: Sequence[str]) -> list[str]:
+    """Drop gh-wide options so equivalent command spellings share one policy."""
+    def strip(tokens: list[str]) -> list[str]:
+        while tokens:
+            token = tokens[0]
+            if token in {"-R", "--repo", "--hostname"}:
+                if len(tokens) < 2:
+                    return []
+                tokens = tokens[2:]
+            elif (
+                (token.startswith("-R") and token != "-R")
+                or token.startswith("--repo=")
+                or token.startswith("--hostname=")
+            ):
+                tokens = tokens[1:]
+            else:
+                break
+        return tokens
+
+    normalized = strip(list(args))
+    if normalized[:1] == ["pr"]:
+        normalized = ["pr", *strip(normalized[1:])]
+    return normalized
+
+
 def classify(args: Sequence[str]) -> Action:
-    if len(args) >= 2 and args[:2] == ["pr", "checks"]:
+    command = command_args(args)
+    if len(command) >= 2 and command[:2] in (
+        ["pr", "checks"],
+        ["pr", "list"],
+        ["pr", "status"],
+        ["pr", "view"],
+    ):
         return Action.BROKER
-    if len(args) >= 2 and args[:2] == ["pr", "view"] and "--json" in args:
-        return Action.BROKER
-    if len(args) >= 2 and args[:2] == ["api", "graphql"]:
+    if command[:1] == ["api"] and "graphql" in command[1:]:
         return Action.BROKER
     return Action.DELEGATE
 
 
 def delegate(real: str, args: Sequence[str]) -> None:
     """Replace the proxy so untouched gh commands keep TTY and streaming semantics."""
-    os.execv(real, [real, *args])
+    os.execve(real, [real, *args], _quota.delegate_environment())
 
 
 def main() -> None:

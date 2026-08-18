@@ -454,6 +454,21 @@ def callback(
 ) -> None:
     _check_migration()
     _warn_deprecated_alias_if_needed()
+    from fno.setup.github_cli import worker_environment
+
+    original_path = os.environ.get("PATH")
+    protected = worker_environment(os.environ)
+    protected_path = protected.get("PATH")
+    if protected_path is not None and protected_path != original_path:
+        os.environ["PATH"] = protected_path
+
+        def restore_path() -> None:
+            if original_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = original_path
+
+        ctx.call_on_close(restore_path)
     ctx.ensure_object(dict)
     ctx.obj["json"] = json_output
     if version:

@@ -13,7 +13,6 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.pr import _merge
-from fno.pr._proc import Result
 
 runner = CliRunner()
 
@@ -32,6 +31,7 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
                 "head_ref": "feature/x",
                 "base_ref": "main",
                 "mergeable": "MERGEABLE",
+                "merged_at": None,
             },
             "",
         ),
@@ -45,27 +45,57 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
         "head_ref": "feature/x",
         "base_ref": "main",
         "mergeable": "MERGEABLE",
+        "merged_at": None,
     }
 
 
-def test_graphql_exec_forwards_the_explicit_coverage_purpose(monkeypatch):
-    from fno.pr import _quota
+def test_pr_list_prints_rest_summaries(monkeypatch):
+    from fno.pr import _rest
 
-    captured = {}
+    monkeypatch.setattr(
+        _rest,
+        "list_prs_rest",
+        lambda slug, **kwargs: (
+            [
+                {
+                    "number": 930,
+                    "state": "OPEN",
+                    "title": "Quota reserve",
+                    "headRefName": "feature/x",
+                    "url": "https://github.com/o/r/pull/930",
+                }
+            ],
+            "",
+        ),
+    )
+    result = runner.invoke(app, ["pr", "list", "--repo", "o/r"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)[0]["headRefName"] == "feature/x"
 
-    def execute(purpose, args):
-        captured["purpose"] = purpose
-        captured["args"] = args
-        return Result(0, '{"coverage":"covered"}\n', "")
 
-    monkeypatch.setattr(_quota, "execute_graphql", execute)
+def test_graphql_exec_rejects_public_coverage_purpose():
     result = runner.invoke(
         app,
         ["pr", "graphql-exec", "--purpose", "coverage", "--", "pr", "view", "930"],
     )
-    assert result.exit_code == 0
-    assert captured == {"purpose": "coverage", "args": ["pr", "view", "930"]}
-    assert json.loads(result.stdout) == {"coverage": "covered"}
+    assert result.exit_code == 2
+
+
+def test_fno_process_routes_subprocesses_through_proxy(monkeypatch):
+    monkeypatch.setenv("PATH", "/real/bin")
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/quota-proxy:/real/bin"},
+    )
+
+    def _fake(argv, cwd=None):
+        assert __import__("os").environ["PATH"] == "/quota-proxy:/real/bin"
+        return 2
+
+    monkeypatch.setattr(_merge, "run_merge", _fake)
+    result = runner.invoke(app, ["pr", "merge", "930"])
+    assert result.exit_code == 2
+    assert __import__("os").environ["PATH"] == "/real/bin"
 
 
 def test_pr_help_renders():

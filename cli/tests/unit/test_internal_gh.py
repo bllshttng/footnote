@@ -108,3 +108,23 @@ def test_review_read_uses_fixed_purpose_broker(monkeypatch):
         "purpose": "coverage",
         "args": ["pr", "view", "930", "--json", "reviews,comments"],
     }
+
+
+def test_numeric_option_value_is_not_mistaken_for_pr(monkeypatch):
+    monkeypatch.setattr(
+        _internal_gh._rest,
+        "resolve_current_pr_number_rest",
+        lambda **kwargs: (42, ""),
+    )
+    number, reason = _internal_gh._pr_number(
+        ["pr", "view", "--jq", "930", "--json=state"], cwd=None, runner=lambda *a: None
+    )
+    assert (number, reason) == (42, "")
+
+
+def test_ambiguous_pr_selectors_are_rejected():
+    number, reason = _internal_gh._pr_number(
+        ["pr", "view", "42", "43", "--json", "state"], cwd=None, runner=lambda *a: None
+    )
+    assert number is None
+    assert "ambiguous" in reason

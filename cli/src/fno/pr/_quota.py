@@ -19,20 +19,51 @@ def quota_lock_path() -> Path:
     return graphql_quota_lock()
 
 
+def delegate_environment() -> dict[str, str]:
+    """Remove the quota proxy from PATH before invoking a preserved gh wrapper."""
+    env = dict(os.environ)
+    proxy_dir = str(github_cli_proxy_dir().resolve())
+    env["PATH"] = os.pathsep.join(
+        part for part in env.get("PATH", "").split(os.pathsep)
+        if part and str(Path(part).resolve()) != proxy_dir
+    )
+    env.pop("FNO_REAL_GH", None)
+    return env
+
+
 def resolve_real_gh() -> Optional[str]:
     configured = os.environ.get("FNO_REAL_GH")
-    if configured:
-        return configured
     proxy = (github_cli_proxy_dir() / "gh").resolve()
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.resolve() != proxy:
+            return str(candidate.resolve())
+    skipped_proxy = False
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory:
             continue
         candidate = Path(directory) / "gh"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        if candidate.resolve() != proxy:
-            return str(candidate.resolve())
+        if candidate.resolve() == proxy:
+            skipped_proxy = True
+            continue
+        return str(candidate.resolve()) if skipped_proxy else "gh"
     return None
+
+
+def _coverage_read(args: Sequence[str]) -> bool:
+    """Only the two review-coverage queries may spend the reserved points."""
+    if len(args) < 4 or list(args[:2]) != ["pr", "view"]:
+        return False
+    try:
+        fields_arg = args[args.index("--json") + 1]
+    except (ValueError, IndexError):
+        fields_arg = next(
+            (arg.partition("=")[2] for arg in args if arg.startswith("--json=")), ""
+        )
+    fields = frozenset(part for part in fields_arg.split(",") if part)
+    return fields in {frozenset({"reviews", "comments"}), frozenset({"commits"})}
 
 
 def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
@@ -62,9 +93,15 @@ def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = F
     else:
         stamp = datetime.fromtimestamp(reset, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         window = f"reset at {stamp}"
+    if len(args) >= 2 and list(args[:2]) == ["pr", "list"]:
+        cheap = "Use `fno pr list` for a REST-backed PR listing"
+    else:
+        cheap = (
+            f"Use `fno pr info {pr}` for state/head/mergeability and "
+            f"`fno pr status {pr}` for CI"
+        )
     return (
-        f"GraphQL discretionary read refused: {window}. Use `fno pr info {pr}` for "
-        f"state/head/mergeability and `fno pr status {pr}` for CI; stop retrying GraphQL "
+        f"GraphQL discretionary read refused: {window}. {cheap}; stop retrying GraphQL "
         "until reset. `fno pr status` still contains optional review-thread and coverage reads "
         "that are GraphQL; those reads preserve the reserved coverage budget."
     )
@@ -85,6 +122,8 @@ def execute_graphql(
         return Result(2, "", "purpose must be discretionary or coverage")
     if not gh_args:
         return Result(2, "", "graphql-exec needs gh arguments after --")
+    if purpose == "coverage" and not _coverage_read(gh_args):
+        return Result(2, "", "coverage reserve accepts review-coverage reads only")
     # A caller spelling bare ``gh`` inside a protected worker would resolve to
     # the proxy. Re-entering the broker while this process holds the flock
     # deadlocks until the outer command times out, so only an explicit non-bare
@@ -97,13 +136,16 @@ def execute_graphql(
     with lock.open("a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
-            probe = runner([gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout))
+            env = delegate_environment()
+            probe = runner(
+                [gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env
+            )
             remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
             if purpose == "discretionary":
                 if remaining is None:
                     return Result(REFUSED, "", _refusal(gh_args, reset=None, unavailable=True))
                 if remaining <= GRAPHQL_RESERVE:
                     return Result(REFUSED, "", _refusal(gh_args, reset=reset))
-            return runner([gh, *gh_args], cwd=cwd, timeout=timeout)
+            return runner([gh, *gh_args], cwd=cwd, timeout=timeout, env=env)
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
