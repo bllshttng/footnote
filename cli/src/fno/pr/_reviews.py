@@ -31,6 +31,28 @@ _OPTIONAL_BOTS = ("gemini-code-assist", "chatgpt-codex-connector")
 # so "read failed" never reads as "nothing posted" (US4).
 _UNKNOWN = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
 
+# Mirrors crates/fno-agents/src/loopcheck.rs GRAPHQL_FLOOR - keep the two in
+# sync. Below this many GraphQL points remaining, the reviewThreads read is
+# skipped entirely: spending the account's last points on a poll is what
+# manufactures a false-clean read (an exhausted query returns no threads,
+# byte-identical to a PR with genuinely none), so the budget is left for
+# whichever operation actually ships.
+_GRAPHQL_FLOOR = 200
+
+
+def _graphql_remaining(cwd: Optional[str], timeout: float, runner: Runner) -> Optional[int]:
+    """Remaining GraphQL quota via `gh api rate_limit` (costs nothing against
+    any bucket - safe to call before every reviewThreads read). None on any
+    read/parse failure: a broken probe must never fabricate a floor trip."""
+    res = runner(["gh", "api", "rate_limit"], cwd=cwd, timeout=timeout)
+    if not res.ok or not res.stdout.strip():
+        return None
+    try:
+        data = json.loads(res.stdout)
+        return int(data["resources"]["graphql"]["remaining"])
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        return None
+
 # One GraphQL page of review threads: each thread's resolved state plus its first
 # comment's author (the thread author == the reviewer, used to classify optional).
 _THREADS_QUERY = (
@@ -554,8 +576,17 @@ def read_optional_review_state(
     `optional_reviews_unresolved`: count of unresolved (`isResolved == false`)
     threads authored by an optional reviewer - the headline actionable field
     (`green && unresolved == 0` == ready) - OR `None` on a read failure.
+
+    Gated on the quota floor BEFORE the first read: `gh pr view` spends the
+    same shared per-user GraphQL quota as the reviewThreads query below it
+    (`_status.py`'s `_fetch` docstring documents this), so checking the floor
+    only inside `_fetch_threads` would still let every cache miss drain the
+    reserved points on this call alone.
     """
     names = optional_reviewer_names(cwd)
+    remaining = _graphql_remaining(cwd, timeout, runner)
+    if remaining is not None and remaining < _GRAPHQL_FLOOR:
+        return dict(_UNKNOWN)
     res = runner(["gh", "pr", "view", pr, "--json", "reviews,url"], cwd=cwd, timeout=timeout)
     if not res.ok or not res.stdout.strip():
         return dict(_UNKNOWN)
