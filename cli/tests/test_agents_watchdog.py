@@ -652,6 +652,9 @@ def test_reap_applies_on_clean_worktree(tmp_path, monkeypatch):
 
 
 def test_reroute_delegates_to_the_full_failover(monkeypatch):
+    # These exercise the failover mechanism PAST the shared-manifest
+    # guard, which has its own test.
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     seen = {}
 
     def fake_failover(candidate, err):
@@ -676,6 +679,9 @@ def test_reroute_delegates_to_the_full_failover(monkeypatch):
 
 
 def test_reroute_refuses_when_no_alternate_is_armed(monkeypatch):
+    # These exercise the failover mechanism PAST the shared-manifest
+    # guard, which has its own test.
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
         watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
@@ -695,6 +701,9 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
     """The receipt must not lie about an action already taken: on
     rotated-no-worker the stop and the node-claim force-release may already
     have run, and notified means a human ping, not a delivery."""
+    # These exercise the failover mechanism PAST the shared-manifest
+    # guard, which has its own test.
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
         watchdog, "tail_facts", lambda sid, cwd: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
@@ -734,6 +743,9 @@ def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
     """_default_failover mutates the GLOBAL active provider and its storm cap
     is per row, so eight blocked rows would walk the whole account queue in
     one --apply-all. The sweep rotates once, like the recovery sweep."""
+    # These exercise the failover mechanism PAST the shared-manifest
+    # guard, which has its own test.
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     monkeypatch.setattr(
         watchdog, "tail_facts", lambda *a, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
     )
@@ -1719,3 +1731,21 @@ def test_a_filtered_hand_run_keeps_the_rows_it_filtered_out():
     merged = watchdog.union_signature("a:wake;b:ghost", "b:ghost;c:reap")
     assert merged == "a:wake;b:ghost;c:reap"
     assert watchdog.union_signature("", "a:wake") == "a:wake"
+
+
+def test_reroute_refuses_a_shared_manifest_it_would_respawn_from(monkeypatch):
+    """`_redispatch` re-derives the node from the cwd's target-state manifest,
+    which is the read fleet_rows refuses to trust for identity: on a canonical
+    checkout every session reads the same node. Acting on it force-releases a
+    claim another live session may hold, then spawns a duplicate onto it."""
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: False)
+
+    def never(*a, **k):
+        raise AssertionError("failover must not run against a shared manifest")
+
+    v = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429 resets", "redispatch")
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/repos/main", failover_fn=never
+    )
+    assert outcome == "refused"
+    assert "not a linked worktree" in detail

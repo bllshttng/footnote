@@ -1548,6 +1548,20 @@ def _apply_reroute(
         )
     if not cwd:
         return "refused", "reroute refused: no recorded worktree to respawn into"
+    if not _is_linked_worktree(cwd):
+        # `_redispatch` re-derives the node from `.fno/target-state.md` under
+        # this cwd - the shared-manifest read `fleet_rows` refuses to trust
+        # for identity, because on a canonical checkout every session reads
+        # the same node. Acting on it force-releases a claim a DIFFERENT live
+        # session may hold and then spawns a duplicate /target onto it. The
+        # reap lane guards this one function below; the lane that ships ON
+        # was the one missing it.
+        return (
+            "refused",
+            f"reroute refused: {cwd} is not a linked worktree, so the node "
+            f"it respawns is read from a manifest other sessions share. "
+            f"Rotate the provider and respawn this row by hand",
+        )
     facts = tail_facts(v.row_id, cwd)
     err = classify_session_error(facts.tail_text if facts is not None else "")
     if err is None or not getattr(err, "triggers_swap", False):
