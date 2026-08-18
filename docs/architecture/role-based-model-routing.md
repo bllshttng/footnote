@@ -173,7 +173,7 @@ The built-in `zai` provider already routes the background (haiku) tier to the ch
 
 A long-lived background daemon holds a copy of the env of its first shell. It re-stamps that copy into every session it spawns. A shell with foreign model exports and no base URL poisons every child. Each child asks Anthropic for a model it does not serve. The whole tier errors rather than degrading. No config edit reaches a running daemon. Only a restart or a settings pin does.
 
-`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin. It is the only fix that spares live sessions. The current Anthropic ids to pin: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
+`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin. It is the only fix that spares live sessions. The current Anthropic ids to pin, one per tier: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
 
 **The naming trap.** There is no Haiku 4.7. The current lineup is Haiku 4.5, with Sonnet, Opus and Fable at 5. The zai provider's `haiku_model` IS `glm-4.7`. That number does not transfer to an Anthropic id. Guessing `claude-haiku-4-7` fails exactly the way the GLM names do.
 

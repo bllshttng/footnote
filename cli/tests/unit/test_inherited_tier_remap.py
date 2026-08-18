@@ -563,6 +563,31 @@ def test_rust_mirror_has_a_settings_floor_writer():
     )
 
 
+def test_rust_mirror_notice_matches_python_notice():
+    # The stderr remedy line exists once per language and cannot share code.
+    # Pin its operative content (both fallback sentences and both remedies)
+    # to what incoherent_model_env_notice prints, so the Rust door cannot
+    # drift from the Python doors on what the operator is told to do.
+    from pathlib import Path
+
+    mirror = (
+        Path(__file__).resolve().parents[3]
+        / "crates/fno-agents/src/model_env_scrub.rs"
+    )
+    src = mirror.read_text()
+    for phrase in (
+        "falls back to its account's own default",
+        "receives that route's own model instead",
+        "settings.json",
+        "restart the daemon",
+    ):
+        assert phrase in src, (
+            f"model_env_scrub.rs notice lost '{phrase}': the Rust door now "
+            "tells the operator something different from Python's "
+            "incoherent_model_env_notice"
+        )
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
