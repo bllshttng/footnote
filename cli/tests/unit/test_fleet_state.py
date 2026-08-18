@@ -87,3 +87,53 @@ class TestChainMemory:
         assert fleet_state.links_tried("n1", path=p) == []
         fleet_state.record_link("n1", "codex/sol", path=p)
         assert fleet_state.links_tried("n1", path=p) == ["codex/sol"]
+
+
+class TestWalkAgesOut:
+    def test_a_walk_older_than_the_ttl_is_forgotten(self, tmp_path: Path) -> None:
+        # Without this, one systematic spawn failure burns the chain link by
+        # link and the node emits failover_exhausted forever, including long
+        # after every provider has recovered.
+        p = _p(tmp_path)
+        old = time.time() - 25 * 3600
+        fleet_state.record_link("n1", "codex/sol", path=p, now=old)
+        assert fleet_state.links_tried("n1", path=p) == []
+
+    def test_a_fresh_walk_is_remembered(self, tmp_path: Path) -> None:
+        p = _p(tmp_path)
+        fleet_state.record_link("n1", "codex/sol", path=p)
+        assert fleet_state.links_tried("n1", path=p) == ["codex/sol"]
+
+    def test_each_attempt_restamps_the_walk(self, tmp_path: Path) -> None:
+        # The TTL measures time since the LAST attempt, so a node still being
+        # walked never forgets mid-walk.
+        p = _p(tmp_path)
+        old = time.time() - 23 * 3600
+        fleet_state.record_link("n1", "codex/sol", path=p, now=old)
+        fleet_state.record_link("n1", "claude/sonnet", path=p)
+        assert fleet_state.links_tried("n1", path=p) == ["codex/sol", "claude/sonnet"]
+
+    def test_a_legacy_bare_list_walk_reads_as_empty(self, tmp_path: Path) -> None:
+        p = _p(tmp_path)
+        p.write_text(json.dumps({"chains": {"n1": ["codex/sol"]}}), encoding="utf-8")
+        assert fleet_state.links_tried("n1", path=p) == []
+
+
+class TestSilentMemo:
+    def test_a_handle_reported_once_is_not_reported_again(self, tmp_path: Path) -> None:
+        p = _p(tmp_path)
+        assert fleet_state.silent_seen(p) == set()
+        fleet_state.set_silent_seen(["w1", "w2"], path=p)
+        assert fleet_state.silent_seen(p) == {"w1", "w2"}
+
+    def test_a_handle_that_recovers_re_arms(self, tmp_path: Path) -> None:
+        p = _p(tmp_path)
+        fleet_state.set_silent_seen(["w1", "w2"], path=p)
+        fleet_state.set_silent_seen(["w2"], path=p)
+        assert fleet_state.silent_seen(p) == {"w2"}
+
+    def test_the_memo_survives_a_heartbeat(self, tmp_path: Path) -> None:
+        p = _p(tmp_path)
+        fleet_state.set_silent_seen(["w1"], path=p)
+        fleet_state.write_heartbeat(candidates=1, path=p)
+        assert fleet_state.silent_seen(p) == {"w1"}

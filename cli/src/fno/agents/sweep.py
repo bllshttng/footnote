@@ -179,22 +179,48 @@ def run_sweep(
     truth_fn: Optional[Callable[[Any], dict]] = None,
     now_s: Optional[float] = None,
     budget_s: float = DEFAULT_SWEEP_BUDGET_S,
+    source: str = "daemon",
+    dedup: bool = True,
 ) -> tuple[list[SweepRow], int]:
-    """``(rows, silent_count)``. Emits one ``worker_silent`` per silent worker.
+    """``(rows, silent_count)``. Emits ``worker_silent`` on the TRANSITION.
 
     The event is the producer the watching agent later reads. Nothing here
     consumes it, and nothing here acts on it.
+
+    ``dedup`` keeps the emit once per silent spell rather than once per tick.
+    A worker idle past its deadline stays idle for hours, so a per-tick emit
+    would be six events an hour per worker forever, and an event that fires
+    every tick is not a "something changed" signal at all. A handle that goes
+    quiet, comes back, and goes quiet again is two findings, because it drops
+    out of the seen set the moment it reports healthy.
+
+    ``source`` names who ran it, so a hand-run report is not filed as a daemon
+    observation.
     """
     rows = sweep_rows(
         deadline_s=deadline_s, registry_load=registry_load,
         truth_fn=truth_fn, now_s=now_s, budget_s=budget_s,
     )
-    emitter = emit if emit is not None else _emit_event
+    emitter = emit if emit is not None else _emitter_for(source)
+
+    seen: set = set()
+    if dedup:
+        try:
+            from fno import fleet_state
+
+            seen = fleet_state.silent_seen()
+        except Exception:  # noqa: BLE001 - no memory means report, never suppress
+            seen = set()
+
     silent = 0
+    now_silent = set()
     for row in rows:
         if not row.silent:
             continue
         silent += 1
+        now_silent.add(row.handle)
+        if row.handle in seen:
+            continue
         emitter("worker_silent", {
             "handle": row.handle,
             "harness": row.harness,
@@ -203,15 +229,33 @@ def run_sweep(
             "node": row.node,
             "last_message": row.last_message,
         })
+
+    if dedup:
+        try:
+            from fno import fleet_state
+
+            # Only rows the sweep actually READ can leave the set. An unread
+            # row (past the budget) keeps its memo, or a truncated sweep would
+            # re-report every worker it did not reach next tick.
+            unread = {r.handle for r in rows if r.unread}
+            fleet_state.set_silent_seen(now_silent | (seen & unread))
+        except Exception:  # noqa: BLE001 - a lost memo costs one repeat report
+            pass
     return rows, silent
 
 
-def _emit_event(event_type: str, data: dict) -> None:
+def _emitter_for(source: str) -> Callable[[str, dict], None]:
     """Best-effort canonical emit; a lost event never breaks a read-only sweep."""
-    try:
-        from fno.events import _build, append_event
-        from fno.paths import state_dir
 
-        append_event(_build(event_type, "daemon", data), state_dir() / "events.jsonl")
-    except Exception:  # noqa: BLE001
-        pass
+    def _emit(event_type: str, data: dict) -> None:
+        try:
+            from fno.events import _build, append_event
+            from fno.paths import state_dir
+
+            append_event(
+                _build(event_type, source, data), state_dir() / "events.jsonl"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    return _emit

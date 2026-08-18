@@ -559,3 +559,58 @@ class TestResetStampHarvest:
         err = normalize(503, None, "overloaded; retry after 2026-08-18T07:19:38Z")
         assert err.error_class is ErrorClass.PROVIDER_5XX
         assert err.resets_at is not None
+
+
+class TestResetStampBounds:
+    """A misread stamp must never outlive the outage it describes.
+
+    The lock this feeds is read with NO TTL, so a stamp resolving to next year
+    takes the provider out until next year - and `link_is_exhausted` drops the
+    whole harness from the fallback chain with it.
+    """
+
+    def _soon(self, hours: float = 9) -> str:
+        import time
+
+        return time.strftime(
+            "%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + hours * 3600)
+        ) + "+00:00"
+
+    def test_a_millisecond_epoch_is_not_read_as_seconds(self) -> None:
+        # Without a trailing digit boundary the regex truncated a 13-digit
+        # epoch to its first 11 and 1786000000000 read as the year 2535.
+        from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+        got = reset_epoch_from('{"error":"rate limit","ratelimit_reset":1786000000000}')
+        assert got is not None
+        assert got == 1786000000.0
+
+    def test_a_far_future_stamp_is_refused(self) -> None:
+        # A quota body that also mentions a token expiry or a renewal date must
+        # not lock the provider until that date.
+        from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+        assert reset_epoch_from(
+            "rate limit exceeded; your token expires 2035-01-01T00:00:00Z"
+        ) is None
+
+    def test_a_real_window_still_parses(self) -> None:
+        from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+        assert reset_epoch_from(f"rate limit; resets at {self._soon()}") is not None
+
+    def test_a_weekly_window_is_inside_the_horizon(self) -> None:
+        from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+        assert reset_epoch_from(
+            f"usage limit reached; resets {self._soon(hours=7 * 24)}"
+        ) is not None
+
+    def test_a_naive_far_future_stamp_is_refused_and_named(self) -> None:
+        from fno.adapters.providers.error_taxonomy import _parse_reset_stamp
+
+        epoch, unparsed = _parse_reset_stamp(
+            "usage limit reached. Resets 2035-01-01 07:19:38", "UTC",
+        )
+        assert epoch is None
+        assert unparsed == "2035-01-01 07:19:38"

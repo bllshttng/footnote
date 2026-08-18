@@ -918,10 +918,21 @@ def update_provider_health(
             if resets_at is not None and resets_at > now:
                 span = _record_window_seconds(provider_id)
                 if span:
-                    windows_opened[provider_id] = {
-                        WINDOW_LABEL: {
-                            "opened_at": resets_at - span, "warned": False,
-                        }
+                    labels = windows_opened.setdefault(provider_id, {})
+                    opened_at = resets_at - span
+                    prior = labels.get(WINDOW_LABEL)
+                    # Preserve `warned` while the window is the SAME one, and
+                    # never touch a sibling label. Several workers hit one cap
+                    # at once, so a blind overwrite re-armed the once-per-window
+                    # warning on every refusal and `provider_window_closing`
+                    # fired again for a window already reported.
+                    same = (
+                        prior is not None
+                        and abs(float(prior["opened_at"]) - opened_at) < 1.0
+                    )
+                    labels[WINDOW_LABEL] = {
+                        "opened_at": opened_at,
+                        "warned": bool(prior.get("warned")) if same else False,
                     }
 
             new_state = ProviderRuntimeState(

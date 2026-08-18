@@ -511,6 +511,21 @@ class TestClassifyWorkerRefusal:
         assert got is not None
         assert got[1] == "transcript"
 
+    def test_only_the_leading_clause_of_a_live_turn_is_read(self):
+        # A worker whose turn buries a marker past the lead is not refused.
+        # This narrows the false positives; the sweep's corroboration gate
+        # closes the rest.
+        buried = "x" * 200 + " usage limit reached"
+        assert recovery.classify_worker_refusal(None, buried) is None
+
+    def test_a_refusal_still_reads_when_it_leads(self):
+        # Every refusal measured so far leads with its marker.
+        assert recovery.classify_worker_refusal(
+            None,
+            "Claude usage limit reached. Your limit will reset later today, "
+            "so I cannot continue with the remaining tasks right now.",
+        ) is not None
+
     def test_no_evidence_at_all_returns_none(self):
         assert recovery.classify_worker_refusal(None, None) is None
         assert recovery.classify_worker_refusal("", "") is None
@@ -602,6 +617,92 @@ class TestRefusalHoistedAboveTheStalenessGate:
         assert recovery._refused_key("a", "provider_4xx_quota") != (
             recovery._refused_key("a", "provider_4xx_auth")
         )
+
+
+class _StaleRefusalHarness(_Harness):
+    """A worker that is BOTH stale and carrying a refusal in its last turn.
+
+    The population where the transcript source can actually drive a failover:
+    the sweep still requires NUDGE before the failover branch is reached.
+    """
+
+    def __init__(self, last_message, outcome="swapped", **kw):
+        super().__init__(**kw)
+        self._last_message = last_message
+        self.failover_calls = []
+        self._outcome = outcome
+
+    def truth(self, _candidate):
+        return {
+            "state": "stalled",
+            "last_activity_age_s": 900,
+            "last_message": self._last_message,
+            "observed_model": {"kind": "observed", "model": "glm-5.2"},
+        }
+
+    def failover(self, candidate, err):
+        self.failover_calls.append((candidate.short_id, err))
+        return self._outcome
+
+
+class TestTranscriptRefusalNeedsCorroboration:
+    """A live worker's prose about a cap reads the same as a cap.
+
+    The event costs nothing when it is wrong. The action costs a stopped worker
+    and a re-dispatched node, so it waits for one more tick with the same turn.
+    """
+
+    _QUOTA = "Claude usage limit reached. Resets 2026-08-18T07:19:38+08:00"
+
+    def _sweep(self, h, tmp_path, counts):
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts=counts,
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+            failover_fn=h.failover,
+        )
+
+    def test_the_first_tick_reports_but_does_not_act(self, tmp_path):
+        counts: dict = {}
+        h = _StaleRefusalHarness(self._QUOTA)
+        self._sweep(h, tmp_path, counts)
+        assert "worker_refused" in h.event_types()
+        assert h.failover_calls == [], "a first sighting must not stop a worker"
+
+    def test_the_same_turn_a_tick_later_acts(self, tmp_path):
+        counts: dict = {}
+        self._sweep(_StaleRefusalHarness(self._QUOTA), tmp_path, counts)
+        h2 = _StaleRefusalHarness(self._QUOTA)
+        self._sweep(h2, tmp_path, counts)
+        assert len(h2.failover_calls) == 1
+
+    def test_a_worker_that_moved_on_never_acts(self, tmp_path):
+        # The independent signal: prose about a cap is followed by a different
+        # turn, and the refusal simply stops classifying.
+        counts: dict = {}
+        self._sweep(
+            _StaleRefusalHarness("Added a test for the rate limit path."),
+            tmp_path, counts,
+        )
+        h2 = _StaleRefusalHarness("Pushed the branch and opened the PR.")
+        self._sweep(h2, tmp_path, counts)
+        assert h2.failover_calls == []
+
+    def test_a_dead_sessions_own_error_still_acts_at_once(self, tmp_path):
+        # output_result is the session's own error text, not prose about
+        # someone else's cap, so its path is unchanged.
+        h = _FailoverHarness(output_result="rate limit exceeded", outcome="swapped")
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+            failover_fn=h.failover,
+        )
+        assert len(h.failover_calls) == 1
 
 
 class _FailoverHarness(_Harness):

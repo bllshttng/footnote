@@ -303,10 +303,14 @@ def recovery_sweep(
         refusal = classify_worker_refusal(
             getattr(snap, "output_result", None), truth.get("last_message")
         )
+        refusal_acts = refusal is None or refusal[1] == "output_result"
         if refusal is not None:
             _err, _source = refusal
             _rk = _refused_key(c.short_id, _err.error_class.value)
-            if not counts.get(_rk):
+            _already = bool(counts.get(_rk))
+            if _source == "transcript":
+                refusal_acts = _transcript_refusal_is_corroborated(_already)
+            if not _already:
                 counts[_rk] = True
                 _observed = truth.get("observed_model")
                 emit("worker_refused", {
@@ -380,7 +384,7 @@ def recovery_sweep(
             # acting on it wants the second signal that the worker has also
             # stopped producing turns. Stopping a live worker that retried
             # through a transient throttle costs more than a tick of patience.
-            err = refusal[0] if refusal is not None else None
+            err = refusal[0] if (refusal is not None and refusal_acts) else None
             if err is not None:
                 outcome = failover_fn(c, err)
                 if outcome in ("swapped", "rotated-no-worker", "notified"):
@@ -526,6 +530,25 @@ def classify_session_error(output_result: Optional[str]):
     return normalize(http_status=None, exit_code=None, body=output_result)
 
 
+#: How much of a live worker's last turn counts as its refusal.
+#:
+#: The transcript source has a false positive the ``output_result`` source
+#: cannot have: a worker whose turn merely DISCUSSES rate limits carries the
+#: taxonomy's bare substrings, and in this repository that is routine - a
+#: worker editing the failover code would do it. Once that worker also goes
+#: stale, the failover branch stops it and re-dispatches its node to another
+#: vendor over a sentence about a cap.
+#:
+#: The first discriminator is position, not a second marker list (Locked
+#: Decision 4). Every refusal measured so far leads with its marker: "Claude
+#: usage limit reached...", "API Error: rate limit exceeded...". Prose about a
+#: refusal usually buries it, so only the leading clause of a live turn is
+#: classified. This narrows the false positives; it does not close them, and a
+#: substring match on a worker's own prose never will. The second
+#: discriminator is in the sweep: see ``_transcript_refusal_is_corroborated``.
+_REFUSAL_LEAD_CHARS = 120
+
+
 def classify_worker_refusal(
     output_result: Optional[str],
     last_message: Optional[str],
@@ -543,14 +566,42 @@ def classify_worker_refusal(
     ``source`` is ``"output_result"`` or ``"transcript"`` and is carried into the
     event, because "the session died saying this" and "the session is alive
     saying this" call for different recovery arms.
+
+    Only the LEADING CLAUSE of a live turn is classified - see
+    ``_REFUSAL_LEAD_CHARS``. A dead session's own error text cannot be prose
+    about someone else's cap, so it is read whole.
     """
     err = classify_session_error(output_result)
     if err is not None and err.triggers_swap:
         return err, "output_result"
-    err = classify_session_error(last_message)
+    lead = last_message[:_REFUSAL_LEAD_CHARS] if last_message else last_message
+    err = classify_session_error(lead)
     if err is not None and err.triggers_swap:
         return err, "transcript"
     return None
+
+
+def _transcript_refusal_is_corroborated(already_seen: bool) -> bool:
+    """Is a LIVE worker's refusal strong enough to stop it and move its node?
+
+    The event costs nothing when it is wrong; the action costs a stopped worker
+    and a re-dispatched node. So the two are gated differently.
+
+    A dead session's ``output_result`` is its own error text and acts at once,
+    exactly as before. A live worker's turn is prose, and prose about a cap
+    reads the same as a cap to any substring matcher. The independent signal
+    is TIME WITHOUT A NEW TURN: a worker that merely mentioned rate limits and
+    carried on produces a different last turn on the next tick, and its refusal
+    never repeats. A capped worker's last turn never changes, so the same
+    refusal is still there a tick later - which is what ``already_seen`` means,
+    because the once-only sentinel was set by an earlier tick and the current
+    turn still classifies the same way.
+
+    The cost of the gate is one tick of delay, against a fleet that used to
+    stay paused all night. The cost of skipping it is stopping a healthy worker
+    over a sentence.
+    """
+    return already_seen
 
 
 def _node_id_from_worktree(cwd: str) -> Optional[str]:

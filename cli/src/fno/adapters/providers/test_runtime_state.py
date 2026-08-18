@@ -1171,3 +1171,61 @@ class TestEveryLockWriterHarvestsTheReset:
         import fno.adapters.providers.runtime_state as rs
 
         assert rs.record_reset_timezone("no-such-record") is None
+
+
+class TestHarvestedStampDoesNotClobberTheWarnFlag:
+    def test_a_second_refusal_in_one_window_does_not_re_arm_the_warning(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Several workers hit one cap at once, so a blind overwrite re-armed
+        # the once-per-window warning on every refusal.
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        reset = now + 1800
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=reset,
+        )
+        assert rs.mark_window_warned("zai") is True
+
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now + 1, resets_at=reset,
+        )
+        assert rs.mark_window_warned("zai") is False, "the flag must survive"
+
+    def test_a_new_window_still_re_arms(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 1800,
+        )
+        assert rs.mark_window_warned("zai") is True
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 9000,
+        )
+        assert rs.mark_window_warned("zai") is True
+
+    def test_a_sibling_label_survives_the_stamp(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        rs.stamp_window_open("zai", now - 60, label="weekly")
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 1800,
+        )
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        assert set(raw["windows_opened"]["zai"]) == {"weekly", rs.WINDOW_LABEL}

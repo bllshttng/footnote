@@ -157,3 +157,84 @@ class TestConfiguredDeadline:
             agents_sweep, "load_settings", None, raising=False,
         )
         assert agents_sweep._configured_deadline() > 0
+
+
+class TestSilenceReportsOnTheTransition:
+    """A worker idle past its deadline stays idle for hours.
+
+    A per-tick emit is six events an hour per worker forever, and an event that
+    fires every tick is not a "something changed" signal at all.
+    """
+
+    def _run(self, monkeypatch, tmp_path, rows, ages, seen_store):
+        from fno import fleet_state
+
+        monkeypatch.setattr(
+            fleet_state, "fleet_state_path",
+            lambda: tmp_path / "fleet-sweep-state.json", raising=True,
+        )
+        events = []
+        agents_sweep.run_sweep(
+            emit=lambda t, d: events.append((t, dict(d))),
+            deadline_s=600,
+            registry_load=lambda: rows,
+            truth_fn=_truth(ages),
+        )
+        return events
+
+    def test_a_second_tick_on_the_same_silence_emits_nothing(
+        self, monkeypatch, tmp_path
+    ):
+        rows, ages = [_Row("w1")], {"w1": 5000}
+        first = self._run(monkeypatch, tmp_path, rows, ages, None)
+        second = self._run(monkeypatch, tmp_path, rows, ages, None)
+        assert [t for t, _ in first] == ["worker_silent"]
+        assert second == []
+
+    def test_a_worker_that_recovers_and_goes_quiet_again_is_two_findings(
+        self, monkeypatch, tmp_path
+    ):
+        rows = [_Row("w1")]
+        assert self._run(monkeypatch, tmp_path, rows, {"w1": 5000}, None)
+        assert self._run(monkeypatch, tmp_path, rows, {"w1": 5}, None) == []
+        assert self._run(monkeypatch, tmp_path, rows, {"w1": 5000}, None)
+
+    def test_an_unread_row_keeps_its_memo(self, monkeypatch, tmp_path):
+        # A truncated sweep must not re-report every worker it did not reach.
+        from fno import fleet_state
+
+        monkeypatch.setattr(
+            fleet_state, "fleet_state_path",
+            lambda: tmp_path / "fleet-sweep-state.json", raising=True,
+        )
+        rows = [_Row("w1"), _Row("w2")]
+        agents_sweep.run_sweep(
+            emit=lambda t, d: None, deadline_s=600,
+            registry_load=lambda: rows, truth_fn=_truth({"w1": 5000, "w2": 5000}),
+        )
+        assert fleet_state.silent_seen() == {"w1", "w2"}
+
+        # Budget 0 disables the bound, so force truncation with a negative-free
+        # budget by making every row unread.
+        agents_sweep.run_sweep(
+            emit=lambda t, d: None, deadline_s=600, budget_s=0.0000001,
+            registry_load=lambda: rows, truth_fn=_truth({"w1": 5000, "w2": 5000}),
+        )
+        assert fleet_state.silent_seen() == {"w1", "w2"}
+
+    def test_the_cli_lane_never_dedups(self, monkeypatch, tmp_path):
+        # A human running the report twice wants two answers.
+        from fno import fleet_state
+
+        monkeypatch.setattr(
+            fleet_state, "fleet_state_path",
+            lambda: tmp_path / "fleet-sweep-state.json", raising=True,
+        )
+        rows, ages = [_Row("w1")], {"w1": 5000}
+        out = []
+        for _ in range(2):
+            agents_sweep.run_sweep(
+                emit=lambda t, d: out.append(t), deadline_s=600, dedup=False,
+                registry_load=lambda: rows, truth_fn=_truth(ages),
+            )
+        assert out == ["worker_silent", "worker_silent"]

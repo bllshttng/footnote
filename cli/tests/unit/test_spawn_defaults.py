@@ -1014,44 +1014,53 @@ class TestResolveFallbackChain:
 
 
 class TestChainValidatorRefuses:
-    """AC5-NEG: the failover path is where degrading open costs money."""
+    """AC5-NEG: the failover path is where degrading open costs money.
+
+    The refusal lives on the READ, not on the load. A field validator would
+    fail load_settings() process-wide, so one typo would make every fno command
+    raise and kill the pr-watch tick at its settings phase - taking down the
+    daemon that runs the failover, which is worse than the mis-spawn it
+    prevents.
+    """
+
+    def _refuses(self, table):
+        import pytest as _pytest
+
+        from fno.agents.spawn_defaults import (
+            FallbackConfigError,
+            resolve_fallback_chain,
+        )
+
+        with _pytest.raises(FallbackConfigError) as exc:
+            resolve_fallback_chain("L", settings=_chain_settings(table))
+        return str(exc.value)
 
     def test_an_out_of_enum_harness_is_refused_by_name(self) -> None:
-        import pytest as _pytest
-
-        from fno.config import AgentsBlock
-
-        with _pytest.raises(Exception) as exc:
-            AgentsBlock(fallback={"L": [{"harness": "banana", "model": "x"}]})
-        assert "banana" in str(exc.value)
-        assert "agents.fallback.L[0].harness" in str(exc.value)
+        message = self._refuses({"L": [{"harness": "banana", "model": "x"}]})
+        assert "banana" in message
+        assert "agents.fallback.L[0].harness" in message
 
     def test_an_unknown_size_key_is_refused_by_name(self) -> None:
-        import pytest as _pytest
-
-        from fno.config import AgentsBlock
-
-        with _pytest.raises(Exception) as exc:
-            AgentsBlock(fallback={"XL": [{"harness": "codex"}]})
-        assert "agents.fallback.XL" in str(exc.value)
+        assert "agents.fallback.XL" in self._refuses({"XL": [{"harness": "codex"}]})
 
     def test_a_non_list_chain_is_refused(self) -> None:
-        import pytest as _pytest
-
-        from fno.config import AgentsBlock
-
-        with _pytest.raises(Exception) as exc:
-            AgentsBlock(fallback={"L": "codex"})
-        assert "agents.fallback.L" in str(exc.value)
+        assert "agents.fallback.L" in self._refuses({"L": "codex"})
 
     def test_a_non_table_link_is_refused(self) -> None:
-        import pytest as _pytest
+        assert "agents.fallback.L[0]" in self._refuses({"L": ["codex"]})
 
+    def test_a_malformed_chain_never_fails_the_config_load(self) -> None:
+        # The whole point of moving the refusal: every one of these loads.
         from fno.config import AgentsBlock
 
-        with _pytest.raises(Exception) as exc:
-            AgentsBlock(fallback={"L": ["codex"]})
-        assert "agents.fallback.L[0]" in str(exc.value)
+        for bad in (
+            {"XL": [{"harness": "codex"}]},
+            {"L": "codex"},
+            {"L": ["codex"]},
+            {"L": [{"harness": "banana"}]},
+            "banana",
+        ):
+            AgentsBlock(fallback=bad)
 
     def test_the_profiles_table_still_degrades_open(self) -> None:
         # The contrast that makes the refusal deliberate: a typo in profiles
@@ -1070,8 +1079,7 @@ class TestLinkToSpawnFlags:
     def test_no_new_axis_vocabulary(self) -> None:
         from fno.agents import spawn_defaults as sd
 
-        st = _chain_settings(_OPERATOR_RULE)
-        codex, claude = st.agents.fallback["L"]
+        codex, claude = sd.validate_fallback(_OPERATOR_RULE)["L"]
         assert sd.link_to_spawn_flags(codex) == [
             "-H", "codex", "-m", "gpt-5.6-sol", "--effort", "high",
             "--substrate", "pane",
@@ -1085,9 +1093,9 @@ class TestLinkToSpawnFlags:
         # this is a real difference in the spawn call, not a naming change.
         from fno.agents import spawn_defaults as sd
 
-        st = _chain_settings({"L": [{"harness": "codex", "model": "m"}]})
-        assert "--substrate" in sd.link_to_spawn_flags(st.agents.fallback["L"][0])
-        flags = sd.link_to_spawn_flags(st.agents.fallback["L"][0])
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        flags = sd.link_to_spawn_flags(link)
+        assert "--substrate" in flags
         assert flags[flags.index("--substrate") + 1] == "pane"
 
     def test_effort_alone_does_not_make_two_links_one_destination(self) -> None:
@@ -1095,9 +1103,8 @@ class TestLinkToSpawnFlags:
         # answer a cap, so the walk's memory key ignores effort.
         from fno.agents import spawn_defaults as sd
 
-        st = _chain_settings({"L": [
+        a, b = sd.validate_fallback({"L": [
             {"harness": "codex", "model": "m", "effort": "high"},
             {"harness": "codex", "model": "m", "effort": "low"},
-        ]})
-        a, b = st.agents.fallback["L"]
+        ]})["L"]
         assert sd.link_id(a) == sd.link_id(b)

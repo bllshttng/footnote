@@ -2005,6 +2005,11 @@ def cmd_sweep(
     rows, silent = run_sweep(
         deadline_s=deadline,
         budget_s=DEFAULT_SWEEP_BUDGET_S if budget is None else float(budget),
+        # A hand-run report is not a daemon observation, and the dedup memo
+        # belongs to the daemon's cadence: a human running this twice wants two
+        # answers, not one answer and a silence.
+        source="cli",
+        dedup=False,
     )
     unread = sum(1 for r in rows if r.unread)
 

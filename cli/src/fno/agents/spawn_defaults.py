@@ -1020,6 +1020,84 @@ def inject_spawn_defaults(
 #: Sizes that resolve to their own chain. Anything else reads `default`.
 _CHAIN_SIZES = ("S", "M", "L")
 
+_CHAIN_KEYS = frozenset({"S", "M", "L", "default"})
+# The harness axis is the BINARY (docs/architecture/axis-vocabulary.md).
+# `opencode` is legally both a harness and a provider, so never infer the axis
+# from the value.
+_CHAIN_HARNESSES = frozenset({"claude", "codex", "agy", "opencode"})
+
+
+class FallbackConfigError(ValueError):
+    """A fallback chain that cannot be trusted to name a vendor."""
+
+
+def validate_fallback(table: object) -> dict:
+    """Return the chain table as links, or raise naming the offending key.
+
+    Called on the failover path, never at config load. Unlike
+    ``_coerce_profiles``, which degrades a typo to no-profiles so a bad config
+    cannot brick spawning, this REFUSES: a chain is read only when a provider
+    has already refused, and degrading open there spawns a worker at an
+    unintended vendor and bills it. Refusing leaves the worker alive and the
+    node claimed, which is a bounded stop.
+
+    Raising here rather than in the config model is deliberate. A field
+    validator would fail ``load_settings()`` process-wide, so one typo would
+    make every ``fno`` command raise and stop the pr-watch tick at its settings
+    phase - taking down the daemon that runs the failover, which is a strictly
+    worse outcome than the one being prevented.
+    """
+    from fno.config import SpawnDefaultsBlock
+
+    if not isinstance(table, dict):
+        raise FallbackConfigError(
+            "config.agents.fallback must be a table keyed by size "
+            f"(S|M|L|default); got {type(table).__name__}"
+        )
+    out: dict[str, list] = {}
+    for size, chain in table.items():
+        if size not in _CHAIN_KEYS:
+            raise FallbackConfigError(
+                f"config.agents.fallback.{size}: unknown size key; "
+                f"expected one of {'|'.join(sorted(_CHAIN_KEYS))}"
+            )
+        if not isinstance(chain, list):
+            raise FallbackConfigError(
+                f"config.agents.fallback.{size} must be a list of links; "
+                f"got {type(chain).__name__}"
+            )
+        links = []
+        for i, link in enumerate(chain):
+            if isinstance(link, SpawnDefaultsBlock):
+                links.append(link)
+                continue
+            if not isinstance(link, dict):
+                raise FallbackConfigError(
+                    f"config.agents.fallback.{size}[{i}] must be a table of "
+                    f"axis fields; got {type(link).__name__}"
+                )
+            # A link is spelled with the CORRECT axis word, `harness` (the
+            # binary). SpawnDefaultsBlock's own field is the legacy `provider`,
+            # which its comment records as meaning harness. Both spellings
+            # read and `harness` wins. The value is checked either way, because
+            # `extra="ignore"` would otherwise drop a typo'd harness silently
+            # and the link would spawn on the ambient binary.
+            link = dict(link)
+            harness = str(
+                link.pop("harness", "") or link.get("provider", "") or ""
+            ).strip()
+            if harness and harness not in _CHAIN_HARNESSES:
+                raise FallbackConfigError(
+                    f"config.agents.fallback.{size}[{i}].harness={harness!r} "
+                    f"is not a known harness "
+                    f"({'|'.join(sorted(_CHAIN_HARNESSES))})"
+                )
+            if harness:
+                link["provider"] = harness
+            links.append(SpawnDefaultsBlock(**link))
+        out[size] = links
+    return out
+
 
 def link_id(link) -> str:
     """A stable ``harness/model`` name for one chain link.
@@ -1100,7 +1178,9 @@ def resolve_fallback_chain(
         from fno.config import load_settings
 
         settings = load_settings()
-    table = getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
+    table = validate_fallback(
+        getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
+    )
     key = size if size in _CHAIN_SIZES else "default"
     chain = table.get(key) or table.get("default") or []
     spent = set(exclude)

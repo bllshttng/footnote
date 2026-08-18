@@ -80,9 +80,26 @@ _ISO_NAIVE_STAMP_RE = re.compile(
 )
 # An epoch is read only when a reset-shaped key names it. A bare ten-digit
 # number in a refusal body is as likely to be a request id as a timestamp.
+# The trailing (?!\d) is load-bearing: without it a MILLISECOND epoch (the
+# normal shape for an X-RateLimit-Reset field) is truncated to its first
+# eleven digits, and 1786000000000 reads as the year 2535.
 _EPOCH_STAMP_RE = re.compile(
-    r"""reset[a-zA-Z_]*["'\s:=]+(\d{9,11})""",
+    r"""reset[a-zA-Z_]*["'\s:=]+(\d{9,13})(?!\d)""",
 )
+
+# The furthest ahead a rate-limit window is allowed to reopen. Every real one
+# is hours to a week; a claude weekly limit is the longest measured.
+#
+# This bound is what keeps a misread stamp from becoming a permanent outage.
+# The lock it feeds is read with NO TTL, so a stamp that resolves to next year
+# takes the provider out until next year, and `link_is_exhausted` then drops
+# the whole harness from the fallback chain with it. Two ways in: a
+# millisecond epoch read as seconds, and an offset-bearing stamp in the body
+# that is not a reset at all (a token expiry, a subscription renewal, a trial
+# end date). Both are far-future by construction, so one ceiling closes both.
+# A refused stamp falls back to today's backoff, which is exactly the behavior
+# that shipped before this feature.
+_MAX_RESET_HORIZON_S = 14 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -170,14 +187,29 @@ def _parse_reset_stamp(
     """
     if not body or not isinstance(body, str):
         return None, None
+    import time as _time
+
     from fno.adapters.providers.usage import _iso_to_epoch
+
+    def _sane(epoch: float | None) -> float | None:
+        """Drop a reset further out than any real rate-limit window.
+
+        Returns None rather than the value, so the caller falls back to the
+        existing backoff. Silence beats a lock that outlives the outage.
+        """
+        if epoch is None:
+            return None
+        return epoch if epoch <= _time.time() + _MAX_RESET_HORIZON_S else None
 
     m = _ISO_OFFSET_STAMP_RE.search(body)
     if m is not None:
-        return _iso_to_epoch(m.group(0)), None
+        return _sane(_iso_to_epoch(m.group(0))), None
     m = _EPOCH_STAMP_RE.search(body)
     if m is not None:
-        return float(m.group(1)), None
+        raw = float(m.group(1))
+        # A 13-digit value is milliseconds. Nothing else distinguishes the two
+        # units, and reading ms as seconds lands five centuries out.
+        return _sane(raw / 1000.0 if len(m.group(1)) > 11 else raw), None
     m = _ISO_NAIVE_STAMP_RE.search(body)
     if m is None:
         return None, None
@@ -188,7 +220,8 @@ def _parse_reset_stamp(
         from zoneinfo import ZoneInfo
 
         parsed = datetime.fromisoformat(stamp.replace(" ", "T"))
-        return parsed.replace(tzinfo=ZoneInfo(tz)).timestamp(), None
+        resolved = _sane(parsed.replace(tzinfo=ZoneInfo(tz)).timestamp())
+        return (resolved, None) if resolved is not None else (None, stamp)
     except Exception:  # noqa: BLE001 - a bad tz name refuses like a missing one
         return None, stamp
 

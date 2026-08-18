@@ -1022,6 +1022,20 @@ def pick_account(
     chosen = next_healthy_provider(
         Combo(name="pick", providers=tuple(launchable)), quota=quota
     )
+    if chosen is not None:
+        # The window this account is about to spend opens here, unless one is
+        # already recorded and still running. Without this the only writer of
+        # `windows_opened` is the harvested reset, which lands AFTER a cap - so
+        # `fno config accounts window` would read unknown right up until the
+        # moment the operator no longer needs it, and the whole point is lead
+        # time. Idempotent inside a live window and best-effort: a projection
+        # is advisory and must never fail a pick.
+        try:
+            from fno.adapters.providers.runtime_state import stamp_window_open
+
+            stamp_window_open(chosen, _resolve_time())
+        except Exception:  # noqa: BLE001 - a projection never blocks a launch
+            pass
     if chosen is None:
         return PickVerdict(
             None,
