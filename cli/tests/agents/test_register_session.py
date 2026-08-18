@@ -94,47 +94,56 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
 
 
 def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypatch) -> None:
-    """A canonical collision never mints an order-dependent numeric address."""
+    """A canonical first-eight overlap between two sessions never blocks
+    registration: both register (the name suffixes), and the shared short
+    fails closed as ambiguity at read time."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import (
         AgentResolutionError,
         load_registry,
         register_existing_session,
+        resolve_agent,
     )
 
     a = register_existing_session(
         provider="claude", session_id="tail0001-aaaa-bbbb-cccc-dddddddddddd", cwd="/s"
     )
-    with pytest.raises(AgentResolutionError, match="canonical handle.*collision"):
-        register_existing_session(
-            provider="claude", session_id="tail0001-1111-2222-3333-444455556666", cwd="/s"
-        )
+    b = register_existing_session(
+        provider="claude", session_id="tail0001-1111-2222-3333-444455556666", cwd="/s"
+    )
 
     assert a.name == "tail0001"
-    assert len(load_registry()) == 1
+    assert b.name == "tail0001-2"
+    assert len(load_registry()) == 2
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("tail0001")
 
 
 def test_named_row_does_not_hide_its_canonical_handle_collision(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Two named rows whose sids share a canonical first-eight coexist; the
+    shared short stays ambiguous at read instead of refusing the second row."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import (
         AgentResolutionError,
         load_registry,
         register_existing_session,
+        resolve_agent,
     )
 
     register_existing_session(
         provider="claude", session_id="session-A-tail0001", cwd="/s", name="friendly"
     )
-    with pytest.raises(AgentResolutionError, match="canonical handle.*collision"):
-        register_existing_session(
-            provider="claude",
-            session_id="session-B-tail0001",
-            cwd="/s",
-            name="another-friendly",
-        )
-    assert [row.name for row in load_registry()] == ["friendly"]
+    register_existing_session(
+        provider="claude",
+        session_id="session-B-tail0001",
+        cwd="/s",
+        name="another-friendly",
+    )
+    assert [row.name for row in load_registry()] == ["friendly", "another-friendly"]
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("session-")
 
 
 def test_friendly_name_is_suffixed_away_from_existing_handle_namespace(

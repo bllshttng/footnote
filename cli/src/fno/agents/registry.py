@@ -1276,10 +1276,13 @@ def register_existing_session(
 
     Idempotent on ``(provider, session_id)``: re-registering the same
     session (the hook re-fires after a resume/compaction) refreshes the
-    row in place rather than appending a duplicate. A genuinely new
-    session whose generated canonical handle collides with a different row is
-    refused rather than assigned an order-dependent numeric address. Explicitly
-    supplied friendly names retain their existing suffix behavior.
+    row in place rather than appending a duplicate. A genuinely new session
+    whose generated canonical handle names the SAME session as another row is
+    refused rather than assigned an order-dependent numeric address; a
+    first-eight overlap with a different session is the time-prefixed codex
+    same-window shape and registers (the generated name suffixes when the name
+    itself is already taken). Explicitly supplied friendly names retain their
+    existing suffix behavior.
 
     Raises on registry I/O failure or bad input; the SessionStart caller
     (``register_session.main``) fails open and emits a warning event
@@ -1316,17 +1319,28 @@ def register_existing_session(
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         def _address_is_taken(
-            token: str, *, exclude: Optional[AgentEntry] = None
+            token: str,
+            *,
+            exclude: Optional[AgentEntry] = None,
+            same_session_only: bool = False,
         ) -> bool:
-            return any(
-                entry is not exclude
-                and (
+            # same_session_only: the token is MINTED from the session id (the
+            # generated canonical handle), so it is taken only by the SAME
+            # session (tier 0). A first-eight overlap with a different session
+            # is the time-prefixed codex same-window shape - read-side
+            # ambiguity, not a registration wall.
+            def _row_takes(entry: AgentEntry) -> bool:
+                if entry is exclude:
+                    return False
+                if not same_session_only and (
                     getattr(entry, "name", None) == token
                     or getattr(entry, "short_id", None) == token
-                    or _session_tier(entry, token) is not None
-                )
-                for entry in entries
-            )
+                ):
+                    return True
+                tier = _session_tier(entry, token)
+                return tier is not None and (not same_session_only or tier == 0)
+
+            return any(_row_takes(entry) for entry in entries)
 
         for entry in entries:
             # Keyed on harness_session_id, the canonical id every row carries --
@@ -1372,7 +1386,7 @@ def register_existing_session(
                     )
                 return entries
         generated = canonical_handle(session_id)
-        if _address_is_taken(generated):
+        if _address_is_taken(generated, same_session_only=True):
             raise AgentResolutionError(
                 f"canonical handle {generated!r} collision while registering session "
                 f"{session_id!r}; use the full session id directly",
@@ -1560,26 +1574,36 @@ def _validate_changed_identities(
     """Reject a newly minted address that shadows any existing row.
 
     Historical legacy-prefix collisions remain readable and resolve as
-    ambiguity. New names, transport keys, full ids, and canonical handles may
-    not enter that namespace because those are current producers and durable
-    mailbox addresses.
+    ambiguity. Tokens come in two kinds. Chosen tokens (the row name and an
+    explicit transport short id) may not shadow another row's name, short id,
+    or any session address tier. Minted tokens (derived from the harness-minted
+    session id) shadow only the SAME session: a tier-0 full-id match. A
+    first-eight overlap between two DIFFERENT sessions is not a collision -
+    codex ids are time-prefixed, so sessions started in one window share their
+    first eight, and resolution already fails closed on the shared short asking
+    for the full id.
     """
 
-    def _matches(token: str, other: AgentEntry, *, include_legacy: bool) -> bool:
-        if token == other.name or (other.short_id and token == other.short_id):
+    def _matches(token: str, other: AgentEntry, *, same_session_only: bool) -> bool:
+        if not same_session_only and (
+            token == other.name or (other.short_id and token == other.short_id)
+        ):
             return True
         tier = _session_tier(other, token)
-        return tier is not None and (include_legacy or tier != 2)
+        if same_session_only:
+            return tier == 0
+        return tier is not None
 
     for index, candidate in enumerate(entries):
         if before.get(candidate.name) == _identity_signature(candidate):
             continue
         sid = candidate.harness_session_id or ""
-        strong_tokens = {candidate.name}
+        chosen_tokens = {candidate.name}
         if candidate.short_id:
-            strong_tokens.add(candidate.short_id)
+            chosen_tokens.add(candidate.short_id)
+        minted_tokens: set[str] = set()
         if sid:
-            strong_tokens.update((sid, canonical_handle(sid)))
+            minted_tokens.update((sid, canonical_handle(sid)))
         legacy = legacy_suffix_handle(sid) if sid else ""
         for other_index, other in enumerate(entries):
             if index == other_index:
@@ -1587,13 +1611,20 @@ def _validate_changed_identities(
             collision = next(
                 (
                     token
-                    for token in strong_tokens
-                    if _matches(token, other, include_legacy=True)
+                    for token in chosen_tokens
+                    if _matches(token, other, same_session_only=False)
+                ),
+                None,
+            ) or next(
+                (
+                    token
+                    for token in minted_tokens
+                    if _matches(token, other, same_session_only=True)
                 ),
                 None,
             )
             if collision is None and legacy and _matches(
-                legacy, other, include_legacy=False
+                legacy, other, same_session_only=True
             ):
                 collision = legacy
             if collision is not None:
