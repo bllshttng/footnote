@@ -32,8 +32,10 @@ All drivers share one loop body. The driver supplies a `Queue` impl and a `Dispa
 outer loop:
   check cancel -> Interrupted
   unit = queue.next()   -> None: NoWork (terminate)
+  budget check          -> Budget (axis: "iterations")
   resume guard: journal has termination for unit.session_key?
-    yes -> close without dispatch (AC1-FR; no iteration consumed)
+    yes -> close without dispatch (AC1-FR), journal node_closed,
+           iterations_used += 1, continue
   inner loop:
     budget check         -> Budget (axis: "iterations")
     cancel check         -> Interrupted
@@ -176,9 +178,9 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Watchdog synthesis:** if a dispatched session exits and `find_termination` finds no matching event, the runtime emits `node_failed` with the exit code (including `128+N` for signal deaths) and re-dispatches on the next inner iteration.
 
-**Iteration ceiling -> Budget:** when `iterations_used >= budget.max_iterations`, the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event.
+**Iteration ceiling -> Budget:** the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event at `iterations_used >= budget.max_iterations`. The outer-loop check sits after the dequeue. A drained queue reports `NoWork` even at an exhausted budget. Only a real unit the walk cannot afford reports `Budget`, and that unit is left unclosed. A claiming `Queue` (megawalk) must not strand a dequeued unit beyond its tolerance. It can run at a budget with headroom, make an unaffordable dequeue cheap to abandon, or release in `close()`. Parking holds the claim, so a park-shaped close does not release it.
 
-**Resume guard (AC1-FR):** on the first `next()` call, if `find_termination` finds a pre-existing `termination` event for the manifest's `session_key`, the unit is closed without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. No iteration is consumed; no duplicate dispatch occurs.
+**Resume guard (AC1-FR):** a pre-existing `termination` event for the manifest's `session_key` on the first `next()` call closes the unit without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. The close pass consumes one iteration. A budget counts work, not dispatches. A queue that re-derives the same unit must not spin for free. No duplicate dispatch occurs.
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 

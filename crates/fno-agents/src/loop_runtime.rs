@@ -564,8 +564,10 @@ fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
 /// loop:
 ///   check cancel -> Interrupted
 ///   unit = queue.next()  -> None: NoWork
+///   check budget -> Budget
 ///   resume guard: if journal has a termination event for unit.session_key,
-///     close the unit without dispatching, journal node_closed, and continue.
+///     close the unit without dispatching, journal node_closed,
+///     iterations_used += 1, and continue.
 ///   inner dispatch loop:
 ///     check budget -> Budget
 ///     check cancel -> Interrupted
@@ -644,11 +646,40 @@ pub fn run_loop(
             Err(e) => return Err(e),
         };
 
+        // ── budget check (outer loop) ──────────────────────────────────────
+        // After the dequeue so an exhausted budget over an empty queue still
+        // reports NoWork: the work is finished, which is not the same news as
+        // running out of room. Only a real unit we cannot afford reports
+        // Budget. Reachable from the resume-guard path, which `continue`s
+        // past the inner loop's own check.
+        if iterations_used >= budget.max_iterations {
+            journal.append(
+                "loop_terminated",
+                json!({
+                    "reason": "Budget",
+                    "iterations_used": iterations_used,
+                    "units_closed": units.len(),
+                    "axis": "iterations",
+                }),
+            )?;
+            return Ok(LoopOutcome {
+                reason: TerminationReason::Budget,
+                iterations_used,
+                units,
+            });
+        }
+
         // ── resume guard (AC1-FR): check for pre-existing termination ─────
         // If a prior session for this unit already terminated (e.g. the walk
         // restarted mid-flight), close the unit without dispatching so work
         // is not duplicated.
         if let Some(evidence) = journal.find_termination(&unit.session_key)? {
+            // A closed-without-dispatch pass is still work: it derives a unit,
+            // reads the journal, and journals a close. A queue that re-derives
+            // the same unit repeats it forever, so it must spend budget like a
+            // dispatch does. Spend it before journaling so node_closed reports
+            // the counter including this pass, matching dispatch closes.
+            iterations_used += 1;
             let close = queue.close(&unit, &evidence)?;
             // AC2-UI: journal node_closed for every close path.
             journal_node_closed(journal, &unit, &evidence, &close, iterations_used)?;
@@ -657,7 +688,6 @@ pub fn run_loop(
                 evidence,
                 close,
             });
-            // Do NOT increment iterations_used: no dispatch happened.
             continue;
         }
 
