@@ -1171,7 +1171,10 @@ fn parse_probe_fields(text: &str) -> (String, String, String) {
 /// string the rule matches on - and no foreign package carries that prefix,
 /// so it is an instrument failure, not an identity verdict.
 fn refusal_is_stable(answered: bool, author: &str) -> bool {
-    answered && !author.is_empty() && OWNER_AUTHOR.strip_prefix(author).is_none()
+    // `answered` already requires a present author, so emptiness needs no
+    // separate conjunct here: it would only suggest a third case that the
+    // completeness check already covers.
+    answered && OWNER_AUTHOR.strip_prefix(author).is_none()
 }
 
 /// The audit line for a verified install (AC3-UI). A blank version must not
