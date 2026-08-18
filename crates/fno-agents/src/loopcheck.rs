@@ -3516,7 +3516,11 @@ fn reviewed_commit_from_body(body: &str) -> &str {
             .split_whitespace()
             .next()
             .unwrap_or("");
-        let hex: &str = token.trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+        // Trimmed on BOTH ends, not just the trailing one: the bot writes
+        // markdown, so the sha arrives wrapped as often as it arrives bare
+        // (`` `abc1234` ``, `(abc1234)`), and a leading wrapper character left
+        // in place fails the all-hex test and drops a genuine pinned pass.
+        let hex: &str = token.trim_matches(|c: char| !c.is_ascii_hexdigit());
         if hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return hex;
         }
@@ -3641,7 +3645,11 @@ fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
             return true;
         }
         if let Some(rest) = t.strip_prefix('>') {
-            return shaped(rest.split_once('\n').map(|(_, next)| next).unwrap_or(""));
+            return shaped(
+                rest.split_once('\n')
+                    .map(|(_, next)| next.trim_start())
+                    .unwrap_or(""),
+            );
         }
         t.starts_with("reviewed commit:")
             || match t.strip_prefix("bravo") {
@@ -4360,6 +4368,28 @@ pub fn classify_coverage(
                     }
                 }
                 None => reviewed_authors.push((author.to_string(), oid.to_string(), fresh)),
+            }
+        }
+        // (1b) A known App whose clean pass is a COMMENT posts no review
+        // object, so the scan above never sees it. Without this, (3) counts a
+        // findings review from an unconfigured App and drops its clean one -
+        // the gate strictly easier to satisfy with a flawed PR than a clean
+        // one, the same defect `bot_verdict` closes for CONFIGURED logins.
+        for c in comments {
+            let author = c
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if author.is_empty()
+                || !author_is_known_bot(author, github_app_logins)
+                || reviewed_authors
+                    .iter()
+                    .any(|(a, _, _)| logins_correspond(a, author))
+            {
+                continue;
+            }
+            if let Some((sha, fresh, _)) = clean_pass_review(comments, author, freshness) {
+                reviewed_authors.push((author.to_string(), sha, fresh));
             }
         }
         // (2) One verdict per unique configured login: reviewed if a
