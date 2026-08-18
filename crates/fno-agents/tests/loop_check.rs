@@ -6424,6 +6424,7 @@ if echo "$*" | grep -q "checks"; then
 fi
 if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
 if echo "$*" | grep -q "reviews"; then echo '{reviews}'; exit 0; fi
+if echo "$*" | grep -q -- "--json labels"; then echo 'false'; exit 0; fi
 if echo "$*" | grep -q "^api"; then echo "$*" >> "{record_s}"; echo '{{}}'; exit 0; fi
 exit 1
 "#,

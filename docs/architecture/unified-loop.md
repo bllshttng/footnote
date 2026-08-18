@@ -304,7 +304,7 @@ The residual hole was a human typing gh in a terminal. The required status conte
 
 The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
 
-Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head. If it is not applied, the workflows report and do not block.
+Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head. Do it before the change that adds `merge-coverage-audit.yml` merges: until the ruleset exists, that audit fails every push to main with `ruleset not found`, which is the same red it shows for a deleted or weakened gate.
 
 `merge-coverage-audit.yml` re-checks the live ruleset on every push to main. Weakening or deleting the gate in the GitHub UI fails the next push rather than passing silently.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.

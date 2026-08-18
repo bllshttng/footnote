@@ -122,8 +122,10 @@ jobs:
           # description must never masquerade as "no status", or the
           # invalidate arms would clobber a green verdict on a transient
           # 5xx - the same transient class post() retries for.
+          # No `-R` here: gh api has no repo flag, and the URL path already
+          # names the repository (pr view above needs -R; api never did).
           current_desc() {
-            gh api -R "${GITHUB_REPOSITORY}" \
+            gh api \
               "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
               --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\""
           }

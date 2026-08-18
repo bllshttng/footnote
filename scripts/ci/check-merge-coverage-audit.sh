@@ -115,6 +115,9 @@ commits="$(git log --first-parent --format=%H "${since}..HEAD")" || {
   exit 1
 }
 while read -r commit; do
+  # The here-string hands the loop one empty line when the range is empty;
+  # that is no commit, never a skipped one.
+  [ -n "$commit" ] || continue
   if head="$(git rev-parse --verify -q "$commit^2" 2>/dev/null)" && [ -n "$head" ]; then
     merges=$((merges + 1))
     audit_head "$head" "merge $(short "$commit")" || fail=1

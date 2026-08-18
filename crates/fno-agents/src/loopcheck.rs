@@ -2846,9 +2846,10 @@ fn is_code_review_reviewer(name: &str) -> bool {
 /// Whether the PR carries the `coverage-override` label. The label is durable
 /// shared state: EVERY writer of the coverage status re-reads it before
 /// posting, so a green stamped by the gate workflow's labeled arm survives a
-/// later stop-hook or verb fire instead of being clobbered red. One gh read,
-/// fail-closed to false (no label read -> no override -> the normal verdict).
-fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> bool {
+/// later stop-hook or verb fire instead of being clobbered red. One gh read;
+/// `None` means the read itself failed, which the caller must treat as "do
+/// not post" - an unreadable label state is neither held nor absent.
+fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
     let out = Command::new(gh_bin)
         .args([
             "pr",
@@ -2861,7 +2862,15 @@ fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> bool {
         ])
         .current_dir(cwd)
         .output();
-    matches!(out, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+    let o = out.ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&o.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// The one POST shape every coverage-status writer uses.
@@ -2903,10 +2912,7 @@ fn publish_coverage_status(
     // HEAD, the "unknown" sentinel from a failed git read) would POST to a
     // garbage path, or worse to the canonical checkout's default-branch tip -
     // a red marker on a commit whose coverage was never evaluated.
-    if pr_number <= 0
-        || pr_head_oid.len() != 40
-        || !pr_head_oid.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if pr_number <= 0 || !crate::verify_evidence::full_sha(pr_head_oid) {
         return;
     }
     // The lane predicate is the gate's, not a local variant: bots and
@@ -2931,19 +2937,26 @@ fn publish_coverage_status(
     // The override first, mirroring the Python publisher: the label outranks
     // the verdict, and its green must not be clobbered by this writer. The
     // actor is named by the workflow's labeled arm, which sees the event.
-    if pr_has_override_label(gh_bin, cwd, pr_number) {
-        post_coverage_status(
-            gh_bin,
-            cwd,
-            pr_head_oid,
-            "success",
-            "coverage-override label applied on the PR",
-        );
-        return;
+    // An unreadable label state posts NOTHING: falling through to the
+    // uncovered verdict would clobber the green the labeled arm stamped on
+    // this same head.
+    match pr_has_override_label(gh_bin, cwd, pr_number) {
+        Some(true) => {
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                "success",
+                "coverage-override label applied on the PR",
+            );
+            return;
+        }
+        None => return,
+        Some(false) => {}
     }
     let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
+    // event_head == pr_head_oid already holds; the early return above enforces it.
     let covered = coverage.coverage.is_covered()
-        && event_head == pr_head_oid
         && (!local_pass_required
             || coverage.verdicts.iter().any(|v| {
                 is_code_review_reviewer(&v.name)
@@ -2951,9 +2964,8 @@ fn publish_coverage_status(
                     && v.verdict == CoverageVerdict::Reviewed
             }));
     let (state, description) = if covered {
-        let n = match coverage.coverage {
-            Coverage::Covered(n) => n,
-            _ => 0,
+        let Coverage::Covered(n) = coverage.coverage else {
+            return;
         };
         (
             "success",

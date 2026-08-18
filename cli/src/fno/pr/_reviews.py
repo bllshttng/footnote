@@ -559,7 +559,7 @@ def _override_label_actor(
                 "--jq",
                 "[.[] | select(.event==\"labeled\" and .label.name==\""
                 + COVERAGE_OVERRIDE_LABEL
-                + "\")][-1].actor.login",
+                + "\")][-1].actor.login // empty",
             ],
             cwd=repo,
             timeout=30,
@@ -673,19 +673,22 @@ def publish_coverage_status(
             )
             description = _truncate_description(line)
 
-        res = runner(
-            [
-                "gh", "api", "--method", "POST",
-                f"repos/:owner/:repo/statuses/{head}",
-                "-f", f"state={state}",
-                "-f", f"context={COVERAGE_STATUS_CONTEXT}",
-                "-f", f"description={description}",
-            ],
-            cwd=gh_dir,
-            timeout=30,
-        )
-        if res.ok:
-            return True, ""
+        # Three attempts, the same transient-5xx policy the refresher workflow
+        # and the stacked-base guard apply to the same POST: once the ruleset
+        # makes the context required, one blip here must not cost the merge
+        # that follows it. A permanent 4xx costs two fast retries, no sleeps.
+        args = [
+            "gh", "api", "--method", "POST",
+            f"repos/:owner/:repo/statuses/{head}",
+            "-f", f"state={state}",
+            "-f", f"context={COVERAGE_STATUS_CONTEXT}",
+            "-f", f"description={description}",
+        ]
+        res = None
+        for _attempt in range(3):
+            res = runner(args, cwd=gh_dir, timeout=30)
+            if res.ok:
+                return True, ""
         why = (res.stderr or res.stdout or f"gh exited {res.returncode}").strip()
         return False, why[:200]
     except Exception as exc:  # noqa: BLE001 - a publisher must never raise

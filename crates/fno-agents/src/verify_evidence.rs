@@ -341,7 +341,7 @@ fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
     }
 }
 
-fn full_sha(value: &str) -> bool {
+pub(crate) fn full_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
