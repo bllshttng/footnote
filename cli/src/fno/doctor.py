@@ -972,12 +972,10 @@ def _auto_merge_armed_manifests() -> dict[str, int]:
     except Exception:  # noqa: BLE001 - advisory; never crash doctor
         pass
     try:
-        from fno import paths as _paths
-
-        repo = _paths.resolve_repo_root()
+        repo = _resolve_source(None)
         if repo:
             bases.append(Path(repo) / ".claude" / "worktrees")
-    except Exception:  # noqa: BLE001 - resolve_repo_root may shell out to git
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
         pass
 
     try:
@@ -2755,17 +2753,6 @@ def doctor_command(
     from fno import update
 
     src = _resolve_source(source)
-    if src is None:
-        # Bare-install degrade: the clone-only advisory legs (pre-push hook,
-        # preamble budget) cannot run without repo-root scripts, and the
-        # staleness verdict below goes to stdout. Say so on stderr so the
-        # no-script environment still gets an actionable message.
-        typer.echo(
-            "fno doctor: no fno source checkout resolved; clone-only legs "
-            "(pre-push hook, preamble budget) are skipped. Run from a clone "
-            "or pass --source.",
-            err=True,
-        )
     source_rev = _source_rev(src) if src is not None else None
     marker = _read_marker()
     capture_present = _probe_installed_verb()
