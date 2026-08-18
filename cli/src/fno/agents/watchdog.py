@@ -31,7 +31,7 @@ import json
 import re
 import subprocess
 import time
-from collections import namedtuple
+from collections import Counter, namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -70,7 +70,23 @@ LEAVE = "leave"
 #: ``_LIVE_STATUS_INPUT`` in harnesses/claude.py); missing it would read a
 #: ghost as a healthy leave.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
+#: ``stopped`` belongs here and reviewers keep asking why, since the ghost
+#: lane calls stopped "the operator's answer". Membership is candidacy, not a
+#: wake: the lane below wakes only on ``classify_tail == "stalled"``, the tail
+#: asserting the session went silent still OWING its next move. A worker an
+#: operator stopped after its turn reads not-stalled and is left alone, so
+#: dropping ``stopped`` here would delete the lane's whole population (a
+#: session that dies mid-turn is exactly a stopped row) to re-guard something
+#: the stalled check already guards.
 _WAKE_STATES = frozenset({"blocked", "stopped"})
+
+#: The roster enumeration budget. ``claude agents --json --all`` is a
+#: fleet-wide live-status probe, not a status line: measured at 3.4s /
+#: 1.1s / 3.4s on a 43-row fleet, so the shared 3.0s interactive default
+#: times out, returns zero rows, and trips ROSTER_REFUSAL on EVERY tick -
+#: a watchdog that never sweeps while reporting itself merely stale. The
+#: sweep runs on a tick with no human waiting, so it buys the whole fleet.
+ROSTER_TIMEOUT_S = 30.0
 
 #: Hard age ceiling on the wake lane (king ruling 2026-08-17): a session
 #: stopped for two months has a dead node, a stale branch, and a context that
@@ -202,6 +218,7 @@ def verdicts(
     a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
     returns the graph entry (``{"status", ...}``) or None."""
+    occupants = Counter(row.cwd for row in rows if row.cwd)
     out: list[Verdict] = []
     for row in rows:
         out.append(
@@ -212,6 +229,7 @@ def verdicts(
                 node_state_for=node_state_for,
                 now_s=now_s,
                 quiet_after_s=quiet_after_s,
+                cotenants=max(0, occupants[row.cwd] - 1) if row.cwd else 0,
             )
         )
     return out
@@ -236,6 +254,7 @@ def _verdict_one(
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
+    cotenants: int = 0,
 ) -> Verdict:
     facts = transcript_for(row.row_id)
 
@@ -271,6 +290,18 @@ def _verdict_one(
                 and not _GENERATED_HOLDER_RE.match(holder_sid)
             ):
                 reap_basis = f"claim held by {holder_sid}"
+        if reap_basis is not None and cotenants:
+            # Reap ends in `fno agents rm`, which deletes the WORKTREE, and a
+            # linked worktree proves its .git is a file, never that ONE
+            # session owns it. Measured on the live fleet: two rows working
+            # in one worktree on one node, so the quiet one earning a reap
+            # destroys the checkout the busy one is mid-task in. Occupancy is
+            # not a thing this lane may resolve, so the row goes to the
+            # needs-human bucket instead of the destructive one.
+            return Verdict(row.row_id, row.name, row.state, STALE,
+                           f"{reap_basis} but {cotenants} other session(s) "
+                           f"share {row.cwd}, never reaped on a shared "
+                           f"worktree", "report")
         if reap_basis is not None:
             if facts is None:
                 # No transcript: no process to kill mid-task.
@@ -515,9 +546,15 @@ def _ledger_nodes() -> dict[str, str]:
         node = str(e.get("graph_node_id") or "")
         if not node:
             continue
-        for sid in e.get("sessions") or []:
-            if sid:
-                out[str(sid)] = node
+        # `sessions` is the plural spelling; older entries record a single
+        # `session_id`, and a bare string under either key must not be
+        # SPREAD (that maps one node onto every character of the id).
+        # ledger_join.py guards both shapes; this join is worthless if it
+        # silently drops the rows that one keeps.
+        raw = e.get("sessions") or e.get("session_id") or []
+        for sid in ([raw] if isinstance(raw, str) else raw):
+            if sid and isinstance(sid, str):
+                out[sid] = node
     return out
 
 
@@ -530,7 +567,7 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
 
-    raw, warnings = claude_agents_rows()
+    raw, warnings = claude_agents_rows(timeout=ROSTER_TIMEOUT_S)
     by_sid: dict[str, Any] = {}
     try:
         for entry in load_registry():
@@ -574,7 +611,7 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
         out.append(Row(
             row_id=sid,
             name=name,
-            state=str(r.get("state") or ""),
+            state=_row_state(r),
             node=node,
             cwd=cwd,
         ))
@@ -584,6 +621,24 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
             f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
         ]
     return out, warnings
+
+
+def _row_state(r: dict) -> str:
+    """The row's state across its schema aliases, lowercased.
+
+    The sibling parser on these same rows reads ``("state", "status")`` in
+    that order (``_STATUS_KEYS`` in harnesses/claude.py - preferring
+    ``status`` once resolved a working session to Idle). Today's binary
+    emits ``state`` on every row, so this is drift-hardening: under a
+    rename a raw ``r["state"]`` reads "" on every row, and "" is in no
+    lane set, so the whole fleet classifies ``leave`` behind a fresh sweep
+    file and a clean status line - the silent all-clear this lane exists
+    to refuse."""
+    for key in ("state", "status"):
+        value = r.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
 
 
 def _is_linked_worktree(cwd: str) -> bool:
@@ -1165,16 +1220,31 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
         cwd=cwd or None,
     )
     if stopped.returncode != 0:
-        return "refused", f"stop exit {stopped.returncode}: {(stopped.stderr or '').strip()[:200]}"
+        # Exit 2 is the lifecycle verbs' "not found in registry". The roster
+        # is `claude agents --json --all`, which enumerates store-only rows
+        # the registry never recorded (24 of 43 on the measured fleet), so
+        # this is a permanent scope mismatch and not a transient failure -
+        # the receipt has to say so or a reader retries it forever.
+        why = (
+            "not in the registry, and reap resolves registry rows only"
+            if stopped.returncode == 2
+            else (stopped.stderr or "").strip()[:200]
+        )
+        return "refused", f"stop exit {stopped.returncode}: {why}"
     removed = runner(
         [*_fno(), "agents", "rm", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,
         cwd=cwd or None,
     )
     if removed.returncode != 0:
+        # The stop already landed, so "refused" ("declined to act") is a
+        # receipt that lies about a session which is now dead. Same partial
+        # application the reroute lane reports honestly.
         return (
-            "refused",
-            f"rm exit {removed.returncode} (registry row kept): "
+            "reported",
+            f"stopped, but rm exited {removed.returncode} so the registry row "
+            f"remains ({v.basis}). The session is already stopped - remove "
+            f"the row by hand, never re-run this as a stop: "
             f"{(removed.stderr or '').strip()[:200]}",
         )
     return "applied", f"stopped and removed ({v.basis})"

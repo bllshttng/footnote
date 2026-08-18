@@ -557,7 +557,7 @@ def test_rows_without_a_session_id_are_skipped_loudly(monkeypatch, tmp_path):
         {"sessionId": "baf9409a-2af5-444a-846c-059e8fa2f758", "state": "stopped",
          "cwd": "/tmp/w", "name": "tgt-stopped"},
     ]
-    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda: (raw, []))
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: (raw, []))
     monkeypatch.setattr(
         registry_mod, "load_registry", lambda: (_ for _ in ()).throw(OSError())
     )
@@ -805,7 +805,7 @@ def test_shared_checkout_rows_never_inherit_one_manifest_node(
     monkeypatch.setattr(
         registry_mod, "load_registry", lambda: (_ for _ in ()).throw(OSError())
     )
-    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda: ([
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([
         {"sessionId": "aaaa1111-0000", "state": "working", "cwd": str(shared)},
         {"sessionId": "bbbb2222-0000", "state": "working", "cwd": str(shared)},
         {"sessionId": "cccc3333-0000", "state": "working", "cwd": str(linked)},
@@ -1195,3 +1195,127 @@ def test_manual_apply_survives_one_crashing_row_and_emits_verdicts(
     assert by_row["bbbb2222-0000"]["outcome"] == "applied"
     # Verdict events fire in apply mode too, matching the tick's contract.
     assert events.count("watchdog_verdict") == 2
+
+
+# ---------------------------------------------------------------------------
+# Review round: the enumeration budget, shared worktrees, and honest receipts
+# ---------------------------------------------------------------------------
+
+def test_the_sweep_buys_the_whole_fleet_not_the_interactive_budget(monkeypatch):
+    """The measured P1: the roster probe outran its own timeout every tick.
+
+    ``claude agents --json --all`` is a fleet-wide live-status probe (3.4s /
+    1.1s / 3.4s on a 43-row fleet), and inheriting the 3.0s interactive
+    default returned zero rows, tripped ROSTER_REFUSAL, and left the lane
+    reporting itself stale forever. Asserting the constant alone would pass
+    while the call site kept the default, so this captures what is SPENT.
+    """
+    from fno.agents.harnesses import claude as claude_mod
+
+    spent = {}
+
+    def fake_rows(timeout=3.0):
+        spent["timeout"] = timeout
+        return [], []
+
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", fake_rows)
+    watchdog.fleet_rows()
+    assert spent["timeout"] == watchdog.ROSTER_TIMEOUT_S
+    # The interactive default is the value that broke it; any budget at or
+    # under it re-breaks the sweep on the same fleet that measured 3.4s.
+    assert spent["timeout"] > claude_mod._AGENTS_JSON_TIMEOUT_DEFAULT
+
+
+def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
+    """Reap ends in ``rm``, which deletes the worktree out from under a peer.
+
+    Measured on the live fleet: two sessions working in one linked worktree,
+    both resolving one node. When that node goes done the quiet one earns a
+    reap and destroys the checkout the busy one is mid-task in.
+    ``_is_linked_worktree`` cannot see this - a linked worktree's .git is a
+    file no matter how many sessions are standing in it.
+    """
+    rows = [
+        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5"),
+        Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5"),
+        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo"),
+    ]
+    vs = _run(
+        rows,
+        {
+            "aaaa1111-0000": _facts("done", age_min=30),
+            "bbbb2222-0000": _facts("tool_use Bash", age_min=0, kind="tool"),
+            "cccc3333-0000": _facts("done", age_min=30),
+        },
+        nodes={"x-done": {"status": "done"}},
+    )
+    assert vs[0].verdict == STALE, "a co-tenanted worktree must never reap"
+    assert "share /wt/x-bcb5" in vs[0].basis and vs[0].action == "report"
+    # The sole occupant is untouched: this narrows reap, it does not kill it.
+    assert vs[2].verdict == REAP
+
+
+def test_ledger_join_reads_the_singular_session_key_without_spreading_it(
+    monkeypatch, tmp_path
+):
+    """Older ledger entries record ``session_id`` (a bare string). Iterating
+    it spreads one node across every CHARACTER of the id; dropping it loses
+    the row entirely. ledger_join.py guards both shapes and so must this."""
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [
+        {"graph_node_id": "x-old", "session_id": "aaaa1111-0000"},
+    ]}))
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+    nodes = watchdog._ledger_nodes()
+    assert nodes == {"aaaa1111-0000": "x-old"}
+
+
+def test_row_state_survives_an_alias_rename_and_odd_casing():
+    """A raw ``r["state"]`` read reads "" under a rename, and "" is in no lane
+    set - the whole fleet would classify leave behind a fresh sweep file."""
+    assert watchdog._row_state({"status": "Working"}) == "working"
+    # `state` wins when both are present, matching _STATUS_KEYS' order.
+    assert watchdog._row_state({"state": "blocked", "status": "idle"}) == "blocked"
+    assert watchdog._row_state({}) == ""
+
+
+def test_a_failed_rm_after_a_successful_stop_reports_rather_than_refuses(
+    monkeypatch,
+):
+    """"refused" means "declined to act". The stop already landed, so that
+    receipt lies about a session which is now dead, and a reader who retries
+    it sends a stop to a stopped session."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    seen = []
+
+    def runner(argv, **kwargs):
+        seen.append(argv[-2])
+        failed = argv[-2] == "rm"
+        return subprocess.CompletedProcess(
+            argv, 1 if failed else 0, "", "registry locked" if failed else ""
+        )
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x-done done", "stop+rm")
+    outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
+    assert seen == ["stop", "rm"]
+    assert outcome == "reported"
+    assert "already stopped" in detail and "never re-run this as a stop" in detail
+
+
+def test_store_only_row_reap_names_the_scope_mismatch_not_just_an_exit_code(
+    monkeypatch,
+):
+    """24 of 43 enumerated rows are store-only, so reap's registry-scoped
+    resolution returns exit 2 permanently. A bare exit code reads as
+    transient and invites a retry loop."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+
+    def stop_not_found(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 2, "", "")
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x-done done", "stop+rm")
+    outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=stop_not_found)
+    assert outcome == "refused"
+    assert "registry" in detail, detail
