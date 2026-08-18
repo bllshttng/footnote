@@ -436,3 +436,26 @@ A bare `gh pr merge` from an agent tool call is a fourth reader of the same pred
 ### Zero rows vs a frozen streak: the discriminator
 
 Two symptoms read alike and are different defects. Count `loop_check` rows in the worktree's own `.fno/events.jsonl`. Zero rows means the producer never ran there. A manual `fno-agents review-coverage --cwd <worktree>` settles it. Rows present with `consecutive_unchanged` frozen below `MUTE_PROBE_N` is the streak-gated shape the merge recompute makes moot.
+
+## The bot identity: posting a verdict GitHub can count
+
+Every local review verdict lands in one place: `fno event emit -t review_attestation`. The script `skills/review/scripts/emit-attestation.sh` ends in that call. The same emit now also mirrors the verdict to GitHub under a second identity: `config.review.bot_identity`. A clean pass can then carry `APPROVED`.
+
+GitHub refuses an approving review from the PR author. With one account authoring and reviewing, `reviewDecision` reads empty. No number of review objects changes that.
+
+The mirror is fail-closed inside `publish_review` (`cli/src/fno/pr/_publish_review.py`). An unconfigured lane or token skips. A bot that is the PR author refuses. A stale head pin refuses. An unmappable verdict refuses. The result carries the `reviewDecision` GitHub reports back, never the POST receipt. One stderr receipt line prints on every branch: `bot-review: posted ...`, `bot-review: skipped (...)`, `bot-review: refused (...)`. The backfill door is the hidden verb `fno pr publish-review --pr N`. Its verdict defaults to the newest head-pinned attestation for HEAD.
+
+### Operator setup, in order
+
+The identity cannot be created by code. Four steps:
+
+1. Create a second GitHub account for the reviewer lane. A public repository costs it no seat.
+2. Add it to the repository as a collaborator with **write** access. Skipping write access is expensive. If the account is read-only, GitHub records and displays its review. That review never counts toward a required-approving-review rule. The setup looks green. When branch protection goes on, it fails.
+3. Mint a fine-grained PAT on that account. Scope it to this repository. Give it pull request read/write permission.
+4. Export it in the environment under the name `config.review.bot_token_env` gives (here: `GH_REVIEW_BOT_TOKEN`). Set `config.review.bot_identity` to the account's login.
+
+Verify live before you rely on it. Run `fno pr publish-review --pr <n>`. Then `gh pr view <n> --json reviewDecision --jq .reviewDecision` must print `APPROVED`. The empty string means the identity is not working.
+
+### Sequencing: after, never with
+
+Branch protection with required approving reviews goes on AFTER this feature lands and is verified live on a real PR. Never turn both on in the same change. If the identity is misconfigured, turning both on at once wedges the repository. No merge path is left to fix it. Required status checks are independent of this and must not wait for it.

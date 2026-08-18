@@ -151,6 +151,10 @@ peers = []
 # peer_identity = <unset>   # optional; no default
 # Optional legacy carrier: env var holding the PAT for peer_identity used to post peer reviews to the PR.
 # peer_token_env = <unset>   # optional; no default
+# The GitHub login the reviewer lane posts its verdict under, so a clean pass can land APPROVE instead of the COMMENTED an author account is structurally limited to. The account needs WRITE access on the repo: a read-only account's review displays but never counts toward a required-approving-review rule. Separate from peer_identity on purpose (a set peer_identity switches the merge coverage guard off). Operator setup steps: docs/architecture/review-lanes.md.
+# bot_identity = <unset>   # optional; no default
+# Env var holding the fine-grained PAT for bot_identity (pull-request write on this repo). Unset or empty disables bot review posting (skipped, never an error).
+# bot_token_env = <unset>   # optional; no default
 # Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. Also the escape for a required App you no longer want the gate to wait on: move its login here.
 optional_apps = []
 # Per-App override for the bot-review nudge, as [review.nudge.<login>] tables with {review_handle, wait_minutes, ceiling, enabled}. A github_apps bot that reviews on MENTION not on push never reviews unless something posts its trigger; the loop-check stop gate posts review_handle (default from the built-in profile), waits wait_minutes (default 15), and after ceiling (default 3) unanswered nudges gives up rather than idling to the budget ceiling. enabled=false opts a repo back into plain block-and-wait. Ships populated for chatgpt-codex-connector, which wears three distinct names for one bot: match the review-author login chatgpt-codex-connector, trigger a fresh review with '@codex review', and address an in-thread reply to '@chatgpt-codex-connector'.
