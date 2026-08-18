@@ -494,7 +494,9 @@ fn zero_viewer_identity_join_reads_fresh_registry_and_real_claim() {
             String::from_utf8_lossy(&located.stderr)
         );
         let location = stdout(&located);
-        assert!(location.contains(&format!(r#""fno_id":"{handle}""#)));
+        // (x-b80d) `where` forwards the row's EFFECTIVE identity to the
+        // server, so the reply names the full id even for a prefix query.
+        assert!(location.contains(&format!(r#""fno_id":"{full_id}""#)));
         assert!(location.contains(&format!(r#""panes":[{pane_id}]"#)));
     }
 
