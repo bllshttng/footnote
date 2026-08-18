@@ -204,7 +204,12 @@
         dirtyPicker = true;
       }
       if (upstreamUp) setBar("live", "live");
-      if (current == null) { current = pane_id; dirtyPicker = true; }
+      if (current == null) {
+        // A pasted pane link pins the first paint; once honoured (or the
+        // wanted pane died before a frame arrived) fall back to first-landed.
+        if (wanted != null && frames.has(wanted)) { current = wanted; wanted = null; dirtyPicker = true; }
+        else { current = pane_id; dirtyPicker = true; }
+      }
       if (dirtyPicker) renderPicker();
       if (pane_id === current) draw();
       return;
@@ -232,6 +237,11 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
+  // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
+  // instead of whichever frame lands first, then clear the want so the operator
+  // can still switch panes by hand afterwards.
+  let wanted = new URLSearchParams(location.search).get("pane");
+  if (wanted != null) { wanted = parseInt(wanted, 10); if (Number.isNaN(wanted)) wanted = null; }
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);

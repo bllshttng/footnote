@@ -1823,6 +1823,7 @@ pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no liv
 pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
 pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
 pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
+pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1897,6 +1898,31 @@ enum SendSource {
     Stdin,
 }
 
+/// What `pane focus` (and `mux view`) was pointed at (x-b80d): a pane id, a
+/// registry selector, or the interactive picker.
+#[derive(Debug, PartialEq, Eq)]
+enum FocusTarget {
+    Pane(u64),
+    Selector(String),
+    /// `--fzf` with no positional: open the filter list over pane-hosted rows.
+    Pick,
+}
+
+/// Parse one focus argument (already flag-split). All digits is the legacy
+/// pane id, byte-identical in behavior; anything else is a selector.
+fn parse_focus_target(raw: Option<&String>) -> Result<FocusTarget, String> {
+    let raw = raw.ok_or_else(|| "pane focus needs a pane id, a selector, or --fzf".to_string())?;
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("pane focus selector is empty".into());
+    }
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(FocusTarget::Pane(parse_u64(s, "pane id")?))
+    } else {
+        Ok(FocusTarget::Selector(s.to_string()))
+    }
+}
+
 /// A parsed `pane` verb (the wire-facing subset; `--session`/`--json` ride
 /// alongside on [`ParsedPane`]).
 #[derive(Debug, PartialEq, Eq)]
@@ -1925,8 +1951,12 @@ enum PaneCmd {
     /// (x-3e17) `pane focus <pane>`: move the OPERATOR's view to a pane, rather
     /// than acting on the pane for an agent. Every other `pane` verb is the
     /// latter; this is the one that points a human at something.
+    /// (x-b80d) The pane may be named by what a person remembers: an all-digit
+    /// argument is a pane id exactly as before; anything else is a selector
+    /// resolved against the agent registry, and `--fzf` (no argument) opens
+    /// the interactive picker.
     Focus {
-        pane: u64,
+        target: FocusTarget,
     },
     Run {
         cwd: Option<String>,
@@ -2165,6 +2195,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut command_done = false;
     let mut direction = None;
     let mut focus = false;
+    let mut fzf = false;
     let mut name = None;
     let mut fno_id = None;
     let mut positionals: Vec<String> = Vec::new();
@@ -2181,6 +2212,8 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 direction = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
             }
             "--focus" => focus = true,
+            // (x-b80d) focus-only: open the interactive pane picker.
+            "--fzf" => fzf = true,
             "--name" => name = Some(flag_value(args, &mut i, "--name")?),
             "--fno-id" => fno_id = Some(flag_value(args, &mut i, "--fno-id")?),
             "--pid" => pid = Some(parse_u64(&flag_value(args, &mut i, "--pid")?, "--pid")? as u32),
@@ -2235,9 +2268,18 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             pane: pane_arg("break")?,
             name: name.filter(|n| !n.trim().is_empty()),
         },
-        "focus" => PaneCmd::Focus {
-            pane: pane_arg("focus")?,
-        },
+        "focus" => {
+            if fzf && !positionals.is_empty() {
+                return Err("--fzf takes no pane id or selector".into());
+            }
+            PaneCmd::Focus {
+                target: if fzf {
+                    FocusTarget::Pick
+                } else {
+                    parse_focus_target(positionals.first())?
+                },
+            }
+        }
         "send" => {
             let pane = pane_arg("send")?;
             let source = match (text, stdin) {
@@ -2273,6 +2315,9 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         },
         other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),
     };
+    if fzf && verb != "focus" {
+        return Err("--fzf pairs only with pane focus".into());
+    }
     Ok(ParsedPane { session, json, cmd })
 }
 
@@ -2287,6 +2332,23 @@ pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
             return EXIT_USAGE;
         }
     };
+    // (x-b80d) focus by selector or picker resolves the HOST session from the
+    // registry row: FNO_SESSION names the session you sit in, not the one the
+    // target pane lives in. An explicit --session still wins, like `where`.
+    if let PaneCmd::Focus { target } = &parsed.cmd {
+        match target {
+            FocusTarget::Pane(_) => {} // the legacy integer path, below
+            FocusTarget::Selector(sel) => {
+                return focus_by_selector(
+                    "fno mux pane",
+                    sel,
+                    parsed.session.as_deref(),
+                    parsed.json,
+                );
+            }
+            FocusTarget::Pick => return view_picker("fno mux pane", parsed.json, false),
+        }
+    }
     let session = resolve_session(parsed.session.as_deref(), env_session);
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,
@@ -2810,6 +2872,560 @@ fn layout_graft_cli(
     )
 }
 
+/// One ambiguity-refusal line's worth of a candidate (x-b80d): exactly what
+/// the operator needs to disambiguate - the name to retype, the pane it
+/// hosts, and how stale the row is.
+#[derive(Debug, PartialEq, Eq)]
+struct Candidate {
+    name: String,
+    pane: Option<(String, u64)>,
+    /// Seconds since the row's freshest activity stamp; `None` = unstamped.
+    age_s: Option<u64>,
+}
+
+/// What shared selector resolution decided (x-b80d).
+#[derive(Debug, PartialEq, Eq)]
+enum Resolution {
+    Found(Box<crate::agents_view::RegistryAgent>),
+    Ambiguous(Vec<Candidate>),
+    NotFound,
+}
+
+/// The dedup key for "same candidate": the durable identity, else the name
+/// (every registry row carries a name). Two rows sharing a key are one agent
+/// listed twice, not an ambiguity.
+fn candidate_key(a: &crate::agents_view::RegistryAgent) -> &str {
+    a.effective_identity().unwrap_or(a.name.as_str())
+}
+
+/// The one selector resolver shared by `view`, `pane focus` and `where`
+/// (x-b80d, Locked Decision 2: a resolver wired into one door is the
+/// decorative-guard pitfall). Tiers, first non-empty tier wins; ambiguity
+/// inside the winning tier refuses and never falls through to a looser tier.
+///
+/// 1. Exact: the assembled name, or either session-id spelling.
+/// 2. Prefix: a session-id prefix - the rule `where` shipped with, unchanged.
+/// 3. Substring over the name, case-insensitive - the tier that makes a node
+///    id or slug resolve, because the name is the only node carrier the
+///    registry row has.
+fn resolve_selector(
+    rows: &[crate::agents_view::RegistryAgent],
+    selector: &str,
+    now: u64,
+) -> Resolution {
+    let mut tier: Vec<&crate::agents_view::RegistryAgent> = rows
+        .iter()
+        .filter(|a| {
+            a.name == selector
+                || a.session_id.as_deref() == Some(selector)
+                || a.harness_session_id.as_deref() == Some(selector)
+        })
+        .collect();
+    if tier.is_empty() {
+        tier = rows
+            .iter()
+            .filter(|a| {
+                a.session_id
+                    .as_deref()
+                    .is_some_and(|v| v.starts_with(selector))
+                    || a.harness_session_id
+                        .as_deref()
+                        .is_some_and(|v| v.starts_with(selector))
+            })
+            .collect();
+    }
+    if tier.is_empty() {
+        let needle = selector.to_lowercase();
+        tier = rows
+            .iter()
+            .filter(|a| a.name.to_lowercase().contains(&needle))
+            .collect();
+    }
+    if tier.is_empty() {
+        return Resolution::NotFound;
+    }
+    let mut keys: Vec<&str> = tier.iter().map(|a| candidate_key(a)).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.len() > 1 {
+        // One line per DISTINCT candidate, so a twice-listed row prints once.
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for a in &tier {
+            if candidates.iter().any(|c| c.name == a.name) {
+                continue;
+            }
+            candidates.push(Candidate {
+                name: a.name.clone(),
+                pane: a.mux.clone(),
+                age_s: a.updated_at.map(|t| now.saturating_sub(t)),
+            });
+        }
+        return Resolution::Ambiguous(candidates);
+    }
+    // One identity, possibly several rows: prefer the pane-hosted spelling so
+    // a paneless duplicate never masks the live pane.
+    let row = tier.iter().find(|a| a.mux.is_some()).unwrap_or(&tier[0]);
+    Resolution::Found(Box::new((*row).clone()))
+}
+
+/// The refusal listing: one line per candidate (x-b80d).
+fn print_candidates(verb: &str, selector: &str, candidates: &[Candidate]) {
+    eprintln!(
+        "{verb}: ambiguous selector {selector:?} matches {} agents",
+        candidates.len()
+    );
+    for c in candidates {
+        let pane = c
+            .pane
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |(s, p)| format!("{s}:{p}"));
+        let age = c.age_s.map_or_else(|| "-".to_string(), |a| format!("{a}s"));
+        eprintln!("  {}  pane {pane}  updated {age} ago", c.name);
+    }
+}
+
+/// Read the agent registry into derived rows (x-b80d). The shared head of
+/// every selector door; a read failure is EXIT_REGISTRY_UNAVAILABLE, never a
+/// silent "not found" (the rule `where` already shipped with).
+fn registry_rows_or(verb: &str) -> Result<(Vec<crate::agents_view::RegistryAgent>, u64), i32> {
+    let raw = match std::fs::read_to_string(crate::agents_view::registry_path()) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("{verb}: no agent registry");
+            return Err(EXIT_REGISTRY_UNAVAILABLE);
+        }
+        Err(e) => {
+            eprintln!("{verb}: registry unreadable: {e}");
+            return Err(EXIT_REGISTRY_UNAVAILABLE);
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match crate::agents_view::derive_rows(&raw, now) {
+        Some(rows) => Ok((rows, now)),
+        None => {
+            eprintln!("{verb}: registry malformed");
+            Err(EXIT_REGISTRY_UNAVAILABLE)
+        }
+    }
+}
+
+/// Resolve a selector to one row, printing the refusal and its exit code on
+/// any non-Found outcome (x-b80d).
+fn resolve_row_or_print(
+    verb: &str,
+    selector: &str,
+) -> Result<crate::agents_view::RegistryAgent, i32> {
+    let (rows, now) = registry_rows_or(verb)?;
+    match resolve_selector(&rows, selector, now) {
+        Resolution::Found(row) => Ok(*row),
+        Resolution::Ambiguous(candidates) => {
+            print_candidates(verb, selector, &candidates);
+            Err(EXIT_AMBIGUOUS)
+        }
+        Resolution::NotFound => {
+            eprintln!("{verb}: no agent matches {selector:?}");
+            Err(EXIT_NOT_FOUND)
+        }
+    }
+}
+
+/// Connect to one session's server and move the attached viewer to a pane
+/// (x-b80d): the shared tail of `view` and `pane focus`.
+fn focus_pane(verb: &str, session: &str, pane: u64, json: bool) -> i32 {
+    let sock = match proto::socket_path(session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{verb}: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{verb}: cannot reach session {session:?}: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    match send_control(
+        stream,
+        ControlVerb::PaneFocus { pane },
+        CONTROL_TIMEOUT,
+        CONTROL_REPLY_DEADLINE,
+        session,
+    ) {
+        Ok(reply) => render_reply(reply, json, false, None),
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("{verb}: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(ControlError::Fatal(e)) => {
+            eprintln!("{verb}: {e}");
+            EXIT_ERROR
+        }
+    }
+}
+
+/// Focus by selector (x-b80d): resolve, degrade a paneless row to a `peek`
+/// hint rather than an attach (Locked Decision 1: attaching creates a pane,
+/// and the server's fd ceiling makes that a wave-blocking side effect), then
+/// move the viewer. An explicit --session overrides the host like `where`.
+fn focus_by_selector(verb: &str, selector: &str, session_flag: Option<&str>, json: bool) -> i32 {
+    let row = match resolve_row_or_print(verb, selector) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let Some((host_session, pane)) = row.mux.clone() else {
+        eprintln!(
+            "{verb}: {} hosts no live pane; follow it with: fno agents peek {} --follow",
+            row.name, row.name
+        );
+        return EXIT_NOT_PANE_HOSTED;
+    };
+    let session = resolve_session(session_flag, Some(&host_session));
+    focus_pane(verb, &session, pane, json)
+}
+
+/// One pickable pane-hosted row for the interactive picker (x-b80d).
+struct PaneRow {
+    name: String,
+    session: String,
+    pane: u64,
+    age_s: Option<u64>,
+}
+
+impl PaneRow {
+    fn from_agent(a: &crate::agents_view::RegistryAgent, now: u64) -> Option<Self> {
+        let (session, pane) = a.mux.clone()?;
+        Some(PaneRow {
+            name: a.name.clone(),
+            session,
+            pane,
+            age_s: a.updated_at.map(|t| now.saturating_sub(t)),
+        })
+    }
+}
+
+/// What one focus-picker keystroke asks the IO loop to do (x-b80d). Parallel
+/// to [`PickAction`]; the payload is a pane ref, not a session name.
+#[derive(Debug, PartialEq, Eq)]
+enum FocusAction {
+    Redraw,
+    Focus { session: String, pane: u64 },
+    Quit,
+    Bell,
+}
+
+/// The filter-list state (x-b80d): every pane-hosted row, the typed filter,
+/// and a cursor over the FILTERED view. Pure [`FilterPicker::step`], so the
+/// state machine is unit-testable without a terminal, matching `Picker`.
+/// Letters are filter text here, so movement is arrows only - no j/k.
+struct FilterPicker {
+    rows: Vec<PaneRow>,
+    filter: String,
+    cursor: usize,
+}
+
+impl FilterPicker {
+    fn new(rows: Vec<PaneRow>) -> Self {
+        FilterPicker {
+            rows,
+            filter: String::new(),
+            cursor: 0,
+        }
+    }
+
+    fn visible(&self) -> Vec<&PaneRow> {
+        let needle = self.filter.to_lowercase();
+        self.rows
+            .iter()
+            .filter(|r| needle.is_empty() || r.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    fn step(&mut self, key: PickKey) -> FocusAction {
+        match key {
+            PickKey::Down => {
+                if self.cursor + 1 < self.visible().len() {
+                    self.cursor += 1;
+                }
+                FocusAction::Redraw
+            }
+            PickKey::Up => {
+                self.cursor = self.cursor.saturating_sub(1);
+                FocusAction::Redraw
+            }
+            PickKey::Enter => match self.visible().get(self.cursor) {
+                Some(r) => FocusAction::Focus {
+                    session: r.session.clone(),
+                    pane: r.pane,
+                },
+                None => FocusAction::Bell,
+            },
+            PickKey::Backspace => {
+                self.filter.pop();
+                self.cursor = 0;
+                FocusAction::Redraw
+            }
+            // Printable ASCII only, so a stray control byte cannot poison the
+            // filter (same rule as the naming buffer in `Picker`).
+            PickKey::Char(c) if (0x20..0x7f).contains(&c) => {
+                self.filter.push(c as char);
+                self.cursor = 0;
+                FocusAction::Redraw
+            }
+            PickKey::Esc => FocusAction::Quit,
+            _ => FocusAction::Bell,
+        }
+    }
+}
+
+/// Render the filter picker (x-b80d). Pure; the IO loop only writes this.
+fn render_filter_picker(p: &FilterPicker) -> String {
+    let mut out = String::new();
+    out.push_str("fno panes - type to filter, \u{2191}\u{2193} move, enter focus, esc quit\r\n");
+    out.push_str(&format!("filter: {}\r\n", p.filter));
+    for (i, row) in p.visible().iter().enumerate() {
+        let marker = if i == p.cursor { '>' } else { ' ' };
+        let age = row.age_s.map_or_else(|| "-".to_string(), |a| format!("{a}s"));
+        let (pre, post) = if i == p.cursor {
+            ("\x1b[7m", "\x1b[0m")
+        } else {
+            ("", "")
+        };
+        out.push_str(&format!(
+            "{marker} {pre}{}  {}/{}  updated {age} ago{post}\r\n",
+            row.name, row.session, row.pane
+        ));
+    }
+    out
+}
+
+/// The interactive focus picker (x-b80d): raw mode, no alt screen, one clear
+/// on every exit path - the `run_picker` skeleton with a filter state machine
+/// and a pane-ref payload. Returns the chosen pane ref, or `None` on quit.
+fn run_focus_picker(rows: Vec<PaneRow>) -> Option<(String, u64)> {
+    use crossterm::terminal;
+    use std::io::{Read, Write};
+
+    struct RawGuard;
+    impl Drop for RawGuard {
+        fn drop(&mut self) {
+            let _ = terminal::disable_raw_mode();
+        }
+    }
+    if let Err(e) = terminal::enable_raw_mode() {
+        // Unreachable in practice: the caller refuses a non-TTY stdin first.
+        // No fallback here - there is no default pane to focus.
+        eprintln!("fno mux view: terminal raw mode unavailable: {e}");
+        return None;
+    }
+    let _guard = RawGuard;
+
+    let mut picker = FilterPicker::new(rows);
+    let mut esc: Vec<u8> = Vec::new();
+    let mut prev_lines = 0usize;
+    let mut stdout = std::io::stdout();
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 64];
+
+    let redraw = |stdout: &mut std::io::Stdout, picker: &FilterPicker, prev: &mut usize| {
+        if *prev > 0 {
+            let _ = write!(stdout, "\r\x1b[{}A\x1b[J", *prev);
+        }
+        let frame = render_filter_picker(picker);
+        *prev = frame.matches("\r\n").count();
+        let _ = stdout.write_all(frame.as_bytes());
+        let _ = stdout.flush();
+    };
+    redraw(&mut stdout, &picker, &mut prev_lines);
+
+    let result = loop {
+        let n = match stdin.read(&mut buf) {
+            Ok(0) => break None,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break None,
+        };
+        let mut action = FocusAction::Redraw;
+        for key in pick_keys_from_read(&mut esc, &buf[..n]) {
+            action = picker.step(key);
+            match &action {
+                FocusAction::Focus { .. } | FocusAction::Quit => break,
+                FocusAction::Bell => {
+                    let _ = stdout.write_all(b"\x07");
+                    let _ = stdout.flush();
+                }
+                FocusAction::Redraw => {}
+            }
+        }
+        match action {
+            FocusAction::Focus { session, pane } => break Some((session, pane)),
+            FocusAction::Quit => break None,
+            _ => redraw(&mut stdout, &picker, &mut prev_lines),
+        }
+    };
+    if prev_lines > 0 {
+        let _ = write!(stdout, "\r\x1b[{prev_lines}A\x1b[J");
+        let _ = stdout.flush();
+    }
+    result
+}
+
+/// The `--fzf` door shared by `view` and `pane focus` (x-b80d): refuse a
+/// non-TTY stdin (a picker on a pipe would hang), refuse an empty roster,
+/// then run the picker. Esc is a clean exit 0 that focused nothing.
+fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
+    use crossterm::tty::IsTty;
+    if !std::io::stdin().is_tty() {
+        eprintln!("{verb}: --fzf needs an interactive terminal (stdin is not a TTY)");
+        return EXIT_USAGE;
+    }
+    let (rows, now) = match registry_rows_or(verb) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let pane_rows: Vec<PaneRow> = rows
+        .iter()
+        .filter_map(|a| PaneRow::from_agent(a, now))
+        .collect();
+    if pane_rows.is_empty() {
+        eprintln!("{verb}: no pane-hosted agents to pick");
+        return EXIT_NOT_PANE_HOSTED;
+    }
+    match run_focus_picker(pane_rows) {
+        Some((session, pane)) => {
+            if url {
+                print_pane_url(verb, &session, pane)
+            } else {
+                focus_pane(verb, &session, pane, json)
+            }
+        }
+        None => EXIT_OK,
+    }
+}
+
+/// Read a session's web-bridge state file (x-b80d) and build the pasteable
+/// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
+/// port no longer answers is a corpse, not a bridge, so the TCP probe - not
+/// the file's existence - decides liveness.
+fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
+    let path = proto::mux_dir().join(format!("web-{session}.json"));
+    let hint = format!(
+        "no web bridge for session {session}; start one with: fno mux serve --web --session {session}"
+    );
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        eprintln!("{verb}: {hint}");
+        return EXIT_ERROR;
+    };
+    let state: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("{verb}: {hint}");
+            return EXIT_ERROR;
+        }
+    };
+    let bind = state.get("bind").and_then(|v| v.as_str()).unwrap_or("127.0.0.1");
+    let port = match state.get("port").and_then(|v| v.as_u64()) {
+        Some(p) => p,
+        None => {
+            eprintln!("{verb}: {hint}");
+            return EXIT_ERROR;
+        }
+    };
+    let token = state
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    // A wide bind is reachable locally too; the pasteable URL says where THIS
+    // machine finds it, mirroring the bind-time print's host hint.
+    let host = if bind == "0.0.0.0" || bind == "::" {
+        "127.0.0.1"
+    } else {
+        bind
+    };
+    let probe = format!("{host}:{port}");
+    if let Ok(addr) = probe.parse::<std::net::SocketAddr>() {
+        let timeout = std::time::Duration::from_millis(300);
+        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
+            eprintln!("{verb}: {hint}");
+            return EXIT_ERROR;
+        }
+    }
+    println!("http://{host}:{port}/?t={token}&pane={pane}");
+    EXIT_OK
+}
+
+/// `fno mux view <selector> [--url] [--fzf] [--json]` (x-b80d): point the
+/// operator's view at the pane hosting an agent, selected by what a person
+/// remembers - the node id or slug inside the minted name - rather than a
+/// pane index. Resolution is shared with `where` and `pane focus`; a row
+/// that hosts no pane degrades to a `peek` hint (Locked Decision 1).
+pub fn view(args: &[OsString], _env_session: Option<&str>) -> i32 {
+    let verb = "fno mux view";
+    let (session_flag, json, rest) = match take_common_flags(args) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{verb}: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let mut url = false;
+    let mut fzf = false;
+    let mut selector: Option<String> = None;
+    for tok in &rest {
+        match tok.as_str() {
+            "--url" => url = true,
+            "--fzf" => fzf = true,
+            other if other.starts_with("--") => {
+                eprintln!("{verb}: unknown flag: {other}");
+                return EXIT_USAGE;
+            }
+            other => {
+                if selector.is_some() {
+                    eprintln!("{verb}: takes one selector");
+                    return EXIT_USAGE;
+                }
+                let s = other.trim().to_string();
+                if s.is_empty() {
+                    eprintln!("{verb}: selector is empty");
+                    return EXIT_USAGE;
+                }
+                selector = Some(s);
+            }
+        }
+    }
+    if fzf {
+        if selector.is_some() {
+            eprintln!("{verb}: --fzf takes no selector");
+            return EXIT_USAGE;
+        }
+        return view_picker(verb, json, url);
+    }
+    let Some(selector) = selector else {
+        eprintln!("{verb}: needs a selector (a node id, slug, or name), or --fzf");
+        return EXIT_USAGE;
+    };
+    let row = match resolve_row_or_print(verb, &selector) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let Some((host_session, pane)) = row.mux.clone() else {
+        eprintln!(
+            "{verb}: {} hosts no live pane; follow it with: fno agents peek {} --follow",
+            row.name, row.name
+        );
+        return EXIT_NOT_PANE_HOSTED;
+    };
+    if url {
+        return print_pane_url(verb, &host_session, pane);
+    }
+    let session = resolve_session(session_flag.as_deref(), Some(&host_session));
+    focus_pane(verb, &session, pane, json)
+}
+
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
 /// location. Reads the registry to find the hosting mux session, connects to
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
@@ -2836,65 +3452,35 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
 
     // Read the registry to locate the hosting mux session. A read failure is
     // REGISTRY_UNAVAILABLE, never a silent "not found" (Locked Decision 4).
-    let raw = match std::fs::read_to_string(crate::agents_view::registry_path()) {
+    let (rows, now) = match registry_rows_or("fno mux where") {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("fno mux where: no agent registry");
-            return EXIT_REGISTRY_UNAVAILABLE;
-        }
-        Err(e) => {
-            eprintln!("fno mux where: registry unreadable: {e}");
-            return EXIT_REGISTRY_UNAVAILABLE;
-        }
+        Err(code) => return code,
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let Some(rows) = crate::agents_view::derive_rows(&raw, now) else {
-        eprintln!("fno mux where: registry malformed");
-        return EXIT_REGISTRY_UNAVAILABLE;
-    };
-    let exact = |s: &Option<String>| s.as_deref() == Some(fno_id.as_str());
-    let prefix = |s: &Option<String>| s.as_deref().is_some_and(|v| v.starts_with(&fno_id));
-    let exact_rows: Vec<_> = rows
-        .iter()
-        .filter(|a| exact(&a.session_id) || exact(&a.harness_session_id))
-        .collect();
-    // Exact identity wins; a prefix must be unambiguous (a single distinct
-    // identity) or `where` refuses rather than report an unrelated pane (codex).
-    let matched: Vec<_> = if !exact_rows.is_empty() {
-        exact_rows
-    } else {
-        let prefix_rows: Vec<_> = rows
-            .iter()
-            .filter(|a| prefix(&a.session_id) || prefix(&a.harness_session_id))
-            .collect();
-        let mut ids: Vec<&str> = prefix_rows
-            .iter()
-            .filter_map(|a| a.effective_identity())
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        if ids.len() > 1 {
-            eprintln!(
-                "fno mux where: ambiguous prefix {fno_id:?} matches {} identities",
-                ids.len()
-            );
+    // (x-b80d) Shared selector resolution - the exact/prefix tiers `where`
+    // shipped with, plus the name tier. `where` keeps its own exit codes for
+    // not-found and not-pane-hosted; an ambiguous family is now its own code
+    // so a script can tell a typo from a family (Locked Decision 3).
+    let row = match resolve_selector(&rows, &fno_id, now) {
+        Resolution::Found(row) => *row,
+        Resolution::Ambiguous(candidates) => {
+            print_candidates("fno mux where", &fno_id, &candidates);
+            return EXIT_AMBIGUOUS;
+        }
+        Resolution::NotFound => {
+            eprintln!("fno mux where: no session matches {fno_id:?}");
             return EXIT_NOT_FOUND;
         }
-        prefix_rows
     };
-    if matched.is_empty() {
-        eprintln!("fno mux where: no session matches {fno_id:?}");
-        return EXIT_NOT_FOUND;
-    }
-    // The hosting mux session name from the first pane-hosted match.
-    let Some(host_session) = matched
-        .iter()
-        .find_map(|a| a.mux.as_ref().map(|(s, _)| s.clone()))
-    else {
-        eprintln!("fno mux where: {fno_id:?} hosts no live pane");
+    // The probe the server matches on: the row's own session id when the
+    // match came through the name tier, else the selector itself (which, in
+    // the id tiers, IS the id or its prefix).
+    let fno_id = row
+        .session_id
+        .clone()
+        .unwrap_or_else(|| fno_id.clone());
+    // The hosting mux session name.
+    let Some(host_session) = row.mux.as_ref().map(|(s, _)| s.clone()) else {
+        eprintln!("fno mux where: {} hosts no live pane", row.name);
         return EXIT_NOT_PANE_HOSTED;
     };
     // Prefer the explicit --session only if the caller gave one; else the host.
@@ -2958,7 +3544,16 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             CONTROL_TIMEOUT,
         ),
         PaneCmd::Break { pane, name } => (ControlVerb::PaneBreak { pane, name }, CONTROL_TIMEOUT),
-        PaneCmd::Focus { pane } => (ControlVerb::PaneFocus { pane }, CONTROL_TIMEOUT),
+        PaneCmd::Focus { target } => match target {
+            FocusTarget::Pane(pane) => (ControlVerb::PaneFocus { pane }, CONTROL_TIMEOUT),
+            // A selector/picker focus is resolved against the registry in
+            // `pane()` before any socket is opened, so only a concrete pane
+            // can reach dispatch.
+            FocusTarget::Selector(s) => {
+                unreachable!("selector {s:?} must be resolved in pane() first")
+            }
+            FocusTarget::Pick => unreachable!("--fzf must be run in pane() first"),
+        },
         PaneCmd::Read { pane, lines, block } => (
             ControlVerb::PaneRead { pane, lines, block },
             CONTROL_TIMEOUT,
@@ -3968,6 +4563,199 @@ mod tests {
         assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
     }
 
+    // -- shared selector resolution (x-b80d) --------------------------------
+
+    fn reg_row(name: &str, session_id: Option<&str>) -> crate::agents_view::RegistryAgent {
+        crate::agents_view::RegistryAgent {
+            name: name.to_string(),
+            cwd: "/x".into(),
+            session_id: session_id.map(str::to_string),
+            harness_session_id: None,
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: crate::agents_view::Liveness::Alive,
+        }
+    }
+
+    #[test]
+    fn resolve_selector_three_tiers_and_refusals() {
+        // Tier 3 substring over the name: the tier that makes a node id and a
+        // slug resolve, because change 3 puts both in the minted name.
+        let rows = vec![
+            reg_row("t-x919-sentinel-arms-glm53", Some("aaaa1111")),
+            reg_row("sweep-storm-fix", Some("bbbb2222")),
+        ];
+        match resolve_selector(&rows, "x919", 0) {
+            Resolution::Found(r) => assert_eq!(r.name, "t-x919-sentinel-arms-glm53"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+        // A slug fragment resolves the same way, case-insensitively.
+        match resolve_selector(&rows, "Sentinel", 0) {
+            Resolution::Found(r) => assert_eq!(r.name, "t-x919-sentinel-arms-glm53"),
+            other => panic!("expected Found, got {other:?}"),
+        }
+        // Ambiguity inside the winning tier refuses - never falls through to a
+        // looser tier, never picks a winner.
+        let rows2 = vec![
+            reg_row("sweep-storm-fix", Some("aaaa1111")),
+            reg_row("sweep-night-build", Some("bbbb2222")),
+        ];
+        match resolve_selector(&rows2, "sweep", 0) {
+            Resolution::Ambiguous(c) => {
+                assert_eq!(c.len(), 2, "one line per candidate");
+                assert!(c.iter().any(|x| x.name == "sweep-storm-fix"));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        // A row listed twice is ONE candidate (same effective identity).
+        let dup = vec![
+            reg_row("finish-925", Some("aaaa1111")),
+            reg_row("finish-925", Some("aaaa1111")),
+        ];
+        assert!(matches!(
+            resolve_selector(&dup, "finish", 0),
+            Resolution::Found(_)
+        ));
+        // Tier 1 exact: the name, or either session-id spelling.
+        assert!(matches!(
+            resolve_selector(&rows, "sweep-storm-fix", 0),
+            Resolution::Found(_)
+        ));
+        assert!(matches!(
+            resolve_selector(&rows, "aaaa1111", 0),
+            Resolution::Found(_)
+        ));
+        // Tier 2 prefix: the rule `where` shipped with, unchanged.
+        assert!(matches!(
+            resolve_selector(&rows, "aaaa", 0),
+            Resolution::Found(_)
+        ));
+        // No match at any tier.
+        assert_eq!(
+            resolve_selector(&rows, "zzz-nothing", 0),
+            Resolution::NotFound
+        );
+    }
+
+    #[test]
+    fn resolve_selector_prefers_the_pane_hosted_spelling() {
+        // One identity, two rows: the pane-hosted spelling wins so a paneless
+        // duplicate never masks the live pane.
+        let mut paneless = reg_row("wake-cac9965a", Some("aaaa1111"));
+        paneless.mux = None;
+        let mut hosted = reg_row("wake-cac9965a", Some("aaaa1111"));
+        hosted.mux = Some(("work".into(), 7));
+        match resolve_selector(&[paneless, hosted.clone()], "cac9965a", 0) {
+            Resolution::Found(r) => assert_eq!(r.mux, Some(("work".to_string(), 7))),
+            other => panic!("expected Found, got {other:?}"),
+        }
+        assert!(hosted.mux.is_some());
+    }
+
+    #[test]
+    fn pane_focus_target_parse_digits_vs_selector_vs_fzf() {
+        // All digits: the legacy integer door, byte-identical behavior.
+        assert_eq!(
+            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Pane(31)
+            }
+        );
+        // Anything else is a selector resolved against the registry.
+        assert_eq!(
+            parse_pane_args(&os(&["focus", "x919"])).unwrap().cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Selector("x919".into())
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["focus", "t-x919-sentinel"])).unwrap().cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Selector("t-x919-sentinel".into())
+            }
+        );
+        // --fzf with no positional opens the picker; with one it is usage.
+        assert_eq!(
+            parse_pane_args(&os(&["focus", "--fzf"])).unwrap().cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Pick
+            }
+        );
+        assert!(parse_pane_args(&os(&["focus", "--fzf", "31"])).is_err());
+        assert!(parse_pane_args(&os(&["focus", "--fzf", "x919"])).is_err());
+        assert!(parse_pane_args(&os(&["focus"])).is_err());
+        // --fzf pairs with focus only.
+        assert!(parse_pane_args(&os(&["ls", "--fzf"])).is_err());
+    }
+
+    fn pane_row(name: &str, session: &str, pane: u64) -> PaneRow {
+        PaneRow {
+            name: name.to_string(),
+            session: session.to_string(),
+            pane,
+            age_s: None,
+        }
+    }
+
+    #[test]
+    fn filter_picker_step_filters_moves_and_selects() {
+        let rows = vec![
+            pane_row("t-x919-sentinel-arms-glm53", "work", 3),
+            pane_row("sweep-storm-fix", "work", 4),
+            pane_row("finish-925", "main", 5),
+        ];
+        let mut p = FilterPicker::new(rows);
+        // Down moves within the FULL list first.
+        assert_eq!(p.step(PickKey::Down), FocusAction::Redraw);
+        assert_eq!(p.cursor, 1);
+        // Typing filters (letters are filter text; arrows are the only move).
+        for c in "storm".bytes() {
+            assert_eq!(p.step(PickKey::Char(c)), FocusAction::Redraw);
+        }
+        assert_eq!(p.visible().len(), 1);
+        // Cursor clamps to the filtered view: Enter picks the visible row.
+        assert_eq!(
+            p.step(PickKey::Enter),
+            FocusAction::Focus {
+                session: "work".into(),
+                pane: 4
+            }
+        );
+        // A filter matching nothing: Enter BELs rather than focusing stale state.
+        let mut q = FilterPicker::new(vec![
+            pane_row("a", "work", 1),
+            pane_row("b", "work", 2),
+        ]);
+        for c in "zzz".bytes() {
+            q.step(PickKey::Char(c));
+        }
+        assert_eq!(q.step(PickKey::Enter), FocusAction::Bell);
+        // Backspace rewidens the view; Esc quits.
+        q.step(PickKey::Backspace);
+        q.step(PickKey::Backspace);
+        q.step(PickKey::Backspace);
+        assert_eq!(q.visible().len(), 2);
+        assert_eq!(q.step(PickKey::Esc), FocusAction::Quit);
+    }
+
+    #[test]
+    fn mux_exit_codes_table_x_b80d() {
+        // Ambiguity is its own code (Locked Decision 3): a script can tell a
+        // typo (16) from a family (21).
+        assert_eq!(EXIT_NOT_FOUND, 16);
+        assert_eq!(EXIT_AMBIGUOUS, 21);
+    }
+
     // -- pre-attach picker (US5) -------------------------------------------
 
     fn live(name: &str) -> SessionRow {
@@ -4420,11 +5208,13 @@ mod tests {
                 name: Some("solo".into()),
             }
         );
-        // (x-3e17) `pane focus <pane>` takes the pane and nothing else; a missing
-        // id is usage, never a focus of pane 0.
+        // (x-3e17) `pane focus <pane>`: all digits is the legacy integer door.
+        // (x-b80d) The parse-level cases moved to pane_focus_target_parse.
         assert_eq!(
             parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
-            PaneCmd::Focus { pane: 31 }
+            PaneCmd::Focus {
+                target: FocusTarget::Pane(31)
+            }
         );
         assert!(parse_pane_args(&os(&["focus"])).is_err());
         assert_eq!(

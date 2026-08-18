@@ -74,6 +74,10 @@ enum Role {
     MuxLayout(Vec<OsString>),
     /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its location.
     MuxWhere(Vec<OsString>),
+    /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
+    /// operator's view at the pane hosting an agent, selected by node id,
+    /// slug, or name. Same carry-verbatim shape; `mux_cli::view` parses.
+    MuxView(Vec<OsString>),
     /// (x-a572) `mux workspace <verb> ...`: workspace-store maintenance
     /// (`workspace prune`). Same carry-verbatim shape as `mux pane`;
     /// `mux_cli::workspace` parses.
@@ -203,6 +207,13 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
+            // (x-b80d) view: focus a pane by node id/slug/name; --fzf picks.
+            // An explicit -h/--help prints the usage banner (the verb family's
+            // one self-teaching surface) rather than parsing as a selector.
+            Some("view") if args.len() > 2 => match args[2].to_str() {
+                Some("-h") | Some("--help") => Role::MuxUsage,
+                _ => Role::MuxView(args[2..].to_vec()),
+            },
             // `mux workspace prune ...`: a bare verb is usage. The retired
             // `squad` spelling was an unadvertised alias of this arm; it was
             // named by nothing but its own test and is gone.
@@ -289,6 +300,7 @@ fn main() {
                  | fno mux tab ls|create|rename|join ... \
                  | fno mux layout get|apply|graft ... \
                  | fno mux where <fno_id> \
+                 | fno mux view <selector> [--url] [--fzf] [--json] \
                  | fno mux workspace prune [--dry-run] [--include-named] [--json]"
             );
             std::process::exit(2);
@@ -316,6 +328,7 @@ fn main() {
         Role::MuxTab(rest) => std::process::exit(mux_cli::tab(&rest, env_session.as_deref())),
         Role::MuxLayout(rest) => std::process::exit(mux_cli::layout(&rest, env_session.as_deref())),
         Role::MuxWhere(rest) => std::process::exit(mux_cli::where_(&rest, env_session.as_deref())),
+        Role::MuxView(rest) => std::process::exit(mux_cli::view(&rest, env_session.as_deref())),
         Role::MuxWorkspace(rest) => std::process::exit(mux_cli::workspace(&rest)),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
@@ -556,6 +569,25 @@ mod tests {
             Role::MuxBlock(os(&["pipe", "--from", "4", "--to", "2"]))
         );
         assert_eq!(decide_role(&os(&["mux", "block"]), false), Role::MuxUsage);
+    }
+
+    #[test]
+    fn proto_role_mux_view_carries_rest_verbatim() {
+        // (x-b80d) `mux view <selector>` and `mux view --fzf` route to the
+        // shared-resolver focus door; a bare `mux view` is usage.
+        assert_eq!(
+            decide_role(&os(&["mux", "view", "x919"]), false),
+            Role::MuxView(os(&["x919"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "view", "--fzf"]), false),
+            Role::MuxView(os(&["--fzf"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "view", "x919", "--url", "--json"]), false),
+            Role::MuxView(os(&["x919", "--url", "--json"]))
+        );
+        assert_eq!(decide_role(&os(&["mux", "view"]), false), Role::MuxUsage);
     }
 
     #[test]
