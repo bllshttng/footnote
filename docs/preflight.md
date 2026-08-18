@@ -91,11 +91,7 @@ The workflow guard permits a sharded smoke job, but requires an aggregating job 
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
-One command to run before pushing. It validates the invoking checkout's
-**committed HEAD** inside a persistent, hermetic preflight worktree, then runs
-the changed packet, `fno-py test smoke --keep-going`, and the rust-ci legs
-(pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates,
-advisory `cargo audit`).
+One command to run before pushing. It validates the invoking checkout's **committed HEAD** inside a persistent, hermetic worktree keyed by the full SHA. It then runs the changed packet, `fno-py test smoke --keep-going`, and the rust-ci legs. Those legs include pinned formatting, both crates' tests, and advisory `cargo audit`. The bounded pool keeps four SHA-keyed worktrees by default. Unrelated candidates can run concurrently without creating an unbounded cache.
 
 The changed packet goes first and stops the whole run on its own failure, so a
 broken nearest-neighbour test costs seconds rather than a full suite. It is
@@ -106,18 +102,7 @@ nothing or cannot trust its diff falls through to the full gate instead of
 reporting a verdict it did not earn, and `--retry-failed` skips it as a
 different subset mode. Only the full legs can mint `mode=FULL`.
 
-Why a separate worktree with a scrubbed environment: the canonical checkout's
-`.fno/config.toml` otherwise leaks into the config reader's candidate chain and
-produces local-only failures, which is what pushes agents toward selective
-`-k` subset runs that then miss CI-only failures. The runner resets a dedicated
-worktree to your HEAD and runs it with an environment that mirrors a fresh CI
-checkout: a temp `HOME` (no `~/.fno`, `~/.claude`, or `~/.gitconfig`), `FNO_*`
-scrubbed, the ambient `HARNESS_SESSION_MARKERS` unset, `FNO_NO_CANONICAL_CONFIG=1`
-exported, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache
-directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`) are deliberately
-re-exported so builds stay warm; the worktree's `target/` and `cli/.venv`
-persist across runs. Hermeticity comes from environment isolation plus a hard
-reset, not from disposing the worktree.
+Why use a separate worktree with a scrubbed environment: the canonical checkout's `.fno/config.toml` otherwise leaks into the config reader's candidate chain. That leak produces local-only failures and encourages selective `-k` runs that miss CI-only failures. The runner resets the candidate SHA's dedicated slot to your HEAD. It uses an environment that mirrors a fresh CI checkout. Isolation includes a temp `HOME`, scrubbed `FNO_*`, unset harness markers, `FNO_NO_CANONICAL_CONFIG=1`, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache directories are re-exported so builds stay warm. Each slot's `target/` and `cli/.venv` persist across same-SHA runs. Hermeticity comes from environment isolation plus a hard reset, not from disposing the worktree.
 
 **Two ambient leaks a bare `FNO_*` scrub misses, and how they are sealed.** A
 temp `HOME` cannot hide either, because both travel through channels other than
@@ -158,9 +143,7 @@ temp `HOME` cannot hide either, because both travel through channels other than
 The smoke runner still names every failing step, so any genuine red stays
 visible and distinguishable.
 
-Worktree location follows `config.paths.worktrees_base`
-(`<base>/<repo>/preflight`), falling back to the harness-native
-`<repo>/.claude/worktrees/preflight` when the knob is unset.
+Worktree slots follow `config.paths.worktrees_base` at `<base>/<repo>/preflight-pool/<full-sha>`. When that knob is unset, slots use `<repo>/.claude/worktrees/preflight-pool/<full-sha>`. `PREFLIGHT_POOL_SIZE` sets a positive-integer cap for controlled runs and tests. The default is four.
 
 Behavior:
 
@@ -168,18 +151,15 @@ Behavior:
   preflight validates commits, which is how it catches the forgot-to-commit-
   the-fixture class of failure.
 - Refuses a stale base (exit 6). When the invoking HEAD is behind `origin/main`, the run cannot attest the merge head. The refusal fires before the cache check and before any lock or queue artifact. Rebase first.
-- Serializes with an atomic lock. A dead holder's lock is stolen so a crashed run never wedges you. The steal is a single atomic rename. When several runs find the same dead holder, exactly one wins.
-- Waits on a live holder instead of failing. Waiters queue FIFO by arrival. Tickets are atomic-mkdir directories beside the lock. Only the front ticket retries the real acquire. Dead tickets are reaped, so a crashed waiter never blocks the queue. A waiter cannot be lapped. A fresh arrival cannot snipe the lock ahead of a queued waiter.
+- Serializes callers for the same full SHA with an atomic per-SHA lock. Distinct SHAs can compute concurrently up to the pool cap. A dead holder's lock is stolen so a crashed run never wedges you. The steal is a single atomic rename. When several runs find the same dead holder, exactly one wins.
+- Waits on a live same-SHA holder instead of failing. Same-SHA waiters queue FIFO by arrival. Tickets are atomic-mkdir directories beside the SHA's lock. Only the front ticket retries the real acquire. Dead tickets are reaped, so a crashed waiter never blocks the queue. A waiter cannot be lapped. A fresh arrival cannot snipe the lock ahead of a queued waiter.
+- Holds a separate allocator lock only while pool membership changes. At capacity, it removes the oldest inactive slot. A slot's live execution lock protects it from reaping. When every slot is active, the candidate waits for capacity. That wait uses the execution queue's timeout and cancellation sentinel.
 - The wait is bounded by `--wait-timeout`. The default is 5400s (90m). A value of `0` restores the old immediate fail with exit 3. While waiting, the holder's pid, start time, and elapsed print every 60s. To cancel a queued wait, touch `.fno/preflight-cancel` in the invoking checkout. The sentinel is one-shot by atomic rename: one token cancels exactly one waiter, which exits 130 with its ticket removed. A sentinel older than one hour is stale. The next queued run discards it instead of obeying it. Signal traps stay armed as best effort. macOS bash 3.2 does not run INT/TERM traps while waiting on a child. Ctrl-C alone will not stop a wait on that platform. Use the sentinel.
 - Steals from a holder that is alive but not computing. The stall test: older than 20m with under 1s of tree CPU over a 2m window. The front waiter steals a stalled holder and reports the exception. The victim's own tripwire VOIDs its verdict. Neither side reports anything false.
 - Do NOT wrap this script in a retry loop. The wait is built in. Concurrent retry loops are the contention the queue exists to remove.
 - When local verification is not worth the wait, set `FNO_SKIP_PREFLIGHT=1` before `fno pr create` or `fno pr check`. That relies on CI instead.
 - Reuses a prior verdict: a FULL, non-VOID, all-legs-green run records a one-line attestation beside the lock. The attestation is bound to `(full SHA, host)`. The next caller on the same SHA + host reads it before taking the lock. It exits 0 in well under a second. A second caller is never blocked behind a run still holding the lock. The receipt prints its own evidence (the matched SHA, the attestation's age, the earning pid, the host). A GREEN printed by a process that ran no tests must be auditable. `--force` discards the attestation and re-runs every suite. A RED run deletes a matching attestation, so a stale green cannot outlive a real failure. A subset pass (fewer legs executed than the required scope) or a VOID mints nothing. The mode comes from coverage, not from the flag. A `--retry-failed` run with no usable failure record executes every leg and earns FULL. The SHA is a complete cache key because the runner hard-resets a dedicated worktree to it and scrubs the environment. The `host=` field closes the one cross-environment hole a SHA key alone leaves.
-- Exits 5 (VOID) if the shared preflight worktree or the lock changed hands
-  mid-run, printing which of the two it lost. The run earned no verdict, so it
-  prints neither GREEN nor RED. Treat 5 as re-run, never as a code failure:
-  the verdict it would otherwise have reported was earned by another checkout,
-  which is the misattribution this tripwire exists to catch.
+- If the candidate's SHA-keyed worktree or execution lock changes hands, the runner exits 5 (VOID). It prints which resource it lost. The run earned no verdict, so it prints neither GREEN nor RED. Treat 5 as re-run, never as a code failure. Another checkout earned the displaced verdict, which is the misattribution this tripwire prevents.
 - Exit 0 iff every non-advisory suite passed; `cargo audit` findings are shown
   in an advisory row and never flip the exit code.
 - `--retry-failed` re-runs only the legs named in `.fno/preflight-last-failed-legs.txt`, a fast SUBSET. The record is preflight's, never hand-edited, and a missing or corrupt record means every leg runs. Run a full preflight before the push you expect to settle green.
