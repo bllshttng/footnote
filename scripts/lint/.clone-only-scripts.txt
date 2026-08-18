@@ -36,6 +36,13 @@ scripts/generate-skill-bundles.sh :: bundle
 scripts/lint/check-skill-bundles-fresh.sh :: bundle check
 scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 
+# fno doctor - two advisory legs shell out to clone-only scripts (the legacy
+# pre-push-hook detector and the preamble-budget gate). Bare `fno doctor`
+# degrades: no resolvable source checkout, so it exits non-zero with its
+# staleness verdict and stderr text, no traceback.
+scripts/ci/check-preamble-budget.sh :: doctor
+scripts/install-pre-push-hook.sh :: doctor
+
 # fno lint flock-pattern - repository linting script remains clone-only and
 # degrades with an actionable error when the script is unavailable.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
