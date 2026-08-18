@@ -246,7 +246,9 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             // it out of the needs panel by construction rather than by a filter
             // someone can forget to apply. attended-miss stays a question:
             // there the operator IS the attended recipient.
-            let kind = if reason == "reachable-miss" {
+            // Named need_kind, not kind: the enclosing `kind` is the EVENT
+            // type, and shadowing it here reads as the same thing twice.
+            let need_kind = if reason == "reachable-miss" {
                 "mail_delivery_miss"
             } else {
                 "mail_question"
@@ -265,7 +267,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                         epoch,
                         seq,
                         NeedItem {
-                            kind: kind.to_string(),
+                            kind: need_kind.to_string(),
                             // No target session; the recipient handle is the row's
                             // stable identity (id_key) and the roster join key.
                             session_id: recipient.to_string(),
