@@ -197,6 +197,12 @@ def test_the_harness_surface_report_carries_and_gates_the_check(tmp_path, monkey
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     _write(tmp_path, configured=1000000)
 
+    # Opening the codex gate also opens the sibling plugin check, which shells
+    # out to the real `codex` binary.  Stub it so this stays a unit test.
+    import fno.setup.codex_plugin as codex_plugin
+
+    monkeypatch.setattr(codex_plugin, "inspect_freshness", lambda: {"status": "fresh"})
+
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
     assert "codex_context_window" not in doctor._harness_surface_report()
 
@@ -329,6 +335,33 @@ def test_a_non_finite_number_reports_a_reason_rather_than_raising(
     )
 
     assert "reason" in doctor._codex_context_window_report()
+
+
+def test_a_non_finite_or_out_of_range_percent_is_dropped(tmp_path, monkeypatch) -> None:
+    """NaN and inf raise inside the arithmetic, and the caller swallows that.
+    A negative or over-100 percent prints an impossible window as fact."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    for bad in (float("nan"), float("inf"), -50, 150):
+        _write(tmp_path, configured=1000000, percent=bad)
+        report = doctor._codex_context_window_report()
+        assert report.get("percent") is None, bad
+        assert report["effective"] == 272000, bad
+
+
+def test_a_missing_base_is_omitted_rather_than_filled_in(tmp_path, monkeypatch) -> None:
+    """Same contract as the cap: a consumer pricing a base-tier fetch off
+    context_window alone must not read a filled-in value worth zero loss."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=272000)
+    payload = json.loads((tmp_path / "models_cache.json").read_text())
+    del payload["models"][0]["context_window"]
+    (tmp_path / "models_cache.json").write_text(json.dumps(payload))
+
+    report = doctor._codex_context_window_report()
+
+    assert "context_window" not in report
+    assert report["base_synthesized"] is True
+    assert _emit(report)[0].count("272000") >= 1
 
 
 def test_absent_cache_provenance_is_not_invented(tmp_path, monkeypatch) -> None:

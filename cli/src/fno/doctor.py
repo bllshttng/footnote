@@ -1875,8 +1875,16 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
         base = cap
     # A missing percent must not silence a clamp that needs no percent to
     # compute.  Carry it as None and let the line omit the claim, rather than
-    # defaulting to a number upstream did not send.
-    if not isinstance(percent, (int, float)) or isinstance(percent, bool):
+    # defaulting to a number upstream did not send.  A float is legitimate
+    # here (95.0 is served), so this keeps the type but demands a finite value
+    # in range: NaN and inf raise in the arithmetic below, and a -50 prints an
+    # impossible window as fact.
+    if (
+        isinstance(percent, bool)
+        or not isinstance(percent, (int, float))
+        or not math.isfinite(percent)
+        or not 0 <= percent <= 100
+    ):
         percent = None
 
     effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
@@ -1887,7 +1895,9 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
         "configured": configured,
         "max_context_window": cap,
         "base_synthesized": base_synthesized,
-        "context_window": base,
+        # Omitted, not filled in, for the same reason the cap is: a consumer
+        # reading it alone to price a base-tier fetch would see a loss of zero.
+        **({} if base_synthesized else {"context_window": base}),
         "effective": effective,
         "percent": percent,
         # The footer lies whenever the effective window is short of the
@@ -1930,7 +1940,10 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
     # The cached cap is load-bearing whenever the configured value clears the
     # model's base, whether the cap clamped it or a raised cap spared it.
     if report.get("leans_on_cached_cap"):
-        cap, base = report["max_context_window"], report["context_window"]
+        cap = report["max_context_window"]
+        # Absent when the cache carried no base; the cap stands in for the
+        # arithmetic, and `base_synthesized` keeps it out of the prose.
+        base = report.get("context_window", cap)
         # Only claim a fetch time and a client when the cache recorded them:
         # an older or hand-written cache carries neither, and the clause was
         # printing "(fetched None by codex None)" as if it did.
