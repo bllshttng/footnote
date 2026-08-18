@@ -311,10 +311,13 @@ print("version=" + (md.get("Version") or ""))'
 		[ -n "$_f" ] && [ "$_f" != None ] || FNO_VERIFY_STABLE=
 	done
 	# A torn author lands as a PREFIX of the owner string: an instrument
-	# failure even when every field answered, so it clears the stable mark.
-	case "$_owner" in
-		"$_author"*) FNO_VERIFY_STABLE= ;;
-	esac
+	# failure even when every field answered, so it clears the stable mark. An
+	# exact owner is complete: only a proper shorter prefix is torn.
+	if [ "$_author" != "$_owner" ]; then
+		case "$_owner" in
+			"$_author"*) FNO_VERIFY_STABLE= ;;
+		esac
+	fi
 	# name must be `fno` (case-insensitive)...
 	case "$_name" in
 		fno|FNO|Fno) : ;;

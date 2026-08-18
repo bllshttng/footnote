@@ -1196,7 +1196,8 @@ fn refusal_is_stable(answered: bool, author: &str) -> bool {
     // `answered` already requires a present author, so emptiness needs no
     // separate conjunct here: it would only suggest a third case that the
     // completeness check already covers.
-    answered && OWNER_AUTHOR.strip_prefix(author).is_none()
+    let proper_prefix = author != OWNER_AUTHOR && OWNER_AUTHOR.starts_with(author);
+    answered && !proper_prefix
 }
 
 /// The audit line for a verified install (AC3-UI). A blank version must not
@@ -1535,6 +1536,16 @@ mod tests {
             "a torn prefix is an instrument failure: re-ask it"
         );
         assert!(!refusal_is_stable(false, "fno"));
+    }
+
+    #[test]
+    fn a_foreign_name_with_the_exact_owner_is_a_stable_refusal() {
+        let e = decide_identity("notfno", OWNER_AUTHOR).unwrap_err();
+        assert!(e.contains("name=notfno"), "{e}");
+        assert!(
+            refusal_is_stable(true, OWNER_AUTHOR),
+            "an exact owner is complete, not a torn prefix"
+        );
     }
 
     #[test]

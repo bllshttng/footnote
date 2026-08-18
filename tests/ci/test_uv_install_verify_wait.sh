@@ -29,7 +29,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # installer, so this extracts the one function under test by name; the predicate
 # it re-checks is stubbed below.
 helper="$(mktemp)"
-trap 'rm -f "$helper"' EXIT
+identity_helper="$(mktemp)"
+fake_python="$(mktemp)"
+trap 'rm -f "$helper" "$identity_helper" "$fake_python" "${tries_file:-}"' EXIT
 sed -n '/^uv_install_verifies_within() {/,/^}/p' "$SCRIPT" > "$helper"
 [[ -s "$helper" ]] || fail "could not extract uv_install_verifies_within from $SCRIPT"
 
@@ -65,7 +67,26 @@ elapsed=$((SECONDS - start))
 
 rm -f "$tries_file"
 
-# 3. The SAME bounded re-check, on every provisioning path, with the same 3s.
+# 3. A wrong package name with the exact owner author is a complete foreign
+#    answer, not a torn author prefix. The adopt guard reads this stable bit to
+#    decide between refusing the stranger and force-installing over it.
+sed -n '/^FNO_VERIFIED_VERSION=/,/^}/p' "$REPO/scripts/install/fno.sh" > "$identity_helper"
+[[ -s "$identity_helper" ]] || fail "could not extract verify_ours from scripts/install/fno.sh"
+cat > "$fake_python" <<'SH'
+#!/bin/sh
+printf '%s\n' 'name=notfno' 'author=Jason Noah Choi' 'version=0.3.1'
+SH
+chmod +x "$fake_python"
+(
+  # shellcheck disable=SC1090
+  source "$identity_helper"
+  FNO_VENV_PY="$fake_python"
+  verify_ours && fail "a foreign package name must not verify"
+  [[ "$FNO_VERIFY_REASON" == "name=notfno" ]] || fail "expected the foreign-name reason, got $FNO_VERIFY_REASON"
+  [[ -n "$FNO_VERIFY_STABLE" ]] || fail "an exact owner author is complete, not a torn prefix"
+) || exit 1
+
+# 4. The SAME bounded re-check, on every provisioning path, with the same 3s.
 #    A guard on one of N paths is decorative, and this one has been proven so
 #    twice: `scripts/install/fno.sh` and update.py's install verify both shipped
 #    single-shot while the other paths waited, and each refused a good install
