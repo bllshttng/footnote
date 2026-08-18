@@ -8365,6 +8365,30 @@ pub(crate) struct KingBoard {
     /// about what to do next.
     pub(crate) top_row: Option<String>,
     pub(crate) unreadable: i64,
+    /// Every actionable row identity on this board, `queue:id`.
+    ///
+    /// This is the progress signal. A row present on the previous fire and
+    /// absent now is something the king actually cleared, which is a positive
+    /// marker read from external truth rather than a self-report. The first cut
+    /// keyed progress solely on a `king_action` event, and nothing anywhere
+    /// emitted one, so the dry-fire counter climbed monotonically and every
+    /// king terminated NoProgress on its third fire no matter what it had
+    /// dispatched. A consumer with no producer is the corpus trap inverted.
+    ///
+    /// Note this is NOT board size. The board refills while the king works, so
+    /// the count can rise on the same fire that a row leaves, and that fire is
+    /// still progress.
+    pub(crate) actionable_ids: Vec<String>,
+}
+
+fn row_identity(queue: &str, row: &Value) -> String {
+    let id = row
+        .get("id")
+        .or_else(|| row.get("key"))
+        .or_else(|| row.get("number"))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| row.to_string());
+    format!("{queue}:{}", id.trim_matches('"'))
 }
 
 pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
@@ -8375,27 +8399,30 @@ pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
     let mut top_row = None;
+    let mut actionable_ids: Vec<String> = Vec::new();
     if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
         for queue in queues {
             let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
-                let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
-                top_row = Some(format!("{name} is unreadable: {err}"));
-                break;
+                if top_row.is_none() {
+                    let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                    top_row = Some(format!("{name} is unreadable: {err}"));
+                }
+                continue;
             }
             if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
                 continue;
             }
-            let rows = queue.get("rows").and_then(|v| v.as_array());
-            if let Some(first) = rows.and_then(|r| r.first()) {
-                let id = first
-                    .get("id")
-                    .or_else(|| first.get("key"))
-                    .or_else(|| first.get("number"))
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| first.to_string());
-                top_row = Some(format!("{name}: {}", id.trim_matches('"')));
-                break;
+            for row in queue
+                .get("rows")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&vec![])
+            {
+                let identity = row_identity(name, row);
+                if top_row.is_none() {
+                    top_row = Some(identity.clone());
+                }
+                actionable_ids.push(identity);
             }
         }
     }
@@ -8403,6 +8430,7 @@ pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
         actionable,
         top_row,
         unreadable,
+        actionable_ids,
     })
 }
 
@@ -8450,20 +8478,45 @@ fn king_output(
     .to_string()
 }
 
+/// What the dry-fire scan found: how many fires have landed with no new work
+/// done, and what was actionable on the most recent one.
+pub(crate) struct KingFireHistory {
+    pub(crate) dry: u64,
+    /// Actionable row identities recorded on the previous fire, or empty when
+    /// this is the first.
+    pub(crate) last_ids: Vec<String>,
+}
+
 /// Count how many king loop-check fires have landed with no NEW work done.
 ///
 /// Progress is a positive marker, never board size: the board refills while the
-/// king works, because dispatching and merging both create future work. So a
-/// fire counts as dry unless a `king_action` names a target id this run has not
-/// acted on before. Re-acting on the same id is not progress, which matters
-/// because `stalled_holder` rows can survive the only action a king has for
-/// them, and a counter that reset on a repeat would never converge.
-pub(crate) fn king_dry_fires(events_path: &Path, session_id: &str) -> u64 {
+/// king works, because dispatching and merging both create future work, so the
+/// actionable COUNT can rise on the very fire that clears a row.
+///
+/// Two things count as progress, and the first is the one that actually fires.
+///
+/// 1. A row identity present on the previous fire and absent now. That is
+///    external truth, read back off the board, and it needs no producer. The
+///    first cut had only rule 2, and NOTHING in this repo emitted the event it
+///    keyed on, so `dry` climbed monotonically and every king terminated
+///    NoProgress on its third fire regardless of how much it had dispatched.
+///    A consumer with zero producers is the corpus's path-uniqueness trap
+///    inverted, and it made the loop useless.
+/// 2. A `king_action` naming a target id this run has not acted on before.
+///    Kept so a real producer works the day one lands. Re-acting on the same id
+///    is deliberately NOT progress: `stalled_holder` rows can survive the only
+///    action a king has for them, and a counter that reset on a repeat would
+///    never converge.
+pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
     let Ok(content) = std::fs::read_to_string(events_path) else {
-        return 0;
+        return KingFireHistory {
+            dry: 0,
+            last_ids: Vec::new(),
+        };
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut dry: u64 = 0;
+    let mut last_ids: Vec<String> = Vec::new();
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -8486,11 +8539,35 @@ pub(crate) fn king_dry_fires(events_path: &Path, session_id: &str) -> u64 {
                     dry = 0;
                 }
             }
-            Some("king_loop_check") => dry += 1,
+            Some("king_loop_check") => {
+                dry += 1;
+                last_ids = data
+                    .and_then(|d| d.get("actionable_ids"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
             _ => {}
         }
     }
-    dry
+    KingFireHistory { dry, last_ids }
+}
+
+/// True when any row the previous fire called actionable is gone now.
+///
+/// Deliberately one-directional. Rows ARRIVING is the board refilling, which
+/// is not progress and not failure; only a row leaving is something the king
+/// cleared.
+pub(crate) fn king_cleared_a_row(last_ids: &[String], now_ids: &[String]) -> bool {
+    if last_ids.is_empty() {
+        return false;
+    }
+    let now: std::collections::HashSet<&str> = now_ids.iter().map(String::as_str).collect();
+    last_ids.iter().any(|id| !now.contains(id.as_str()))
 }
 
 /// Consecutive dry fires before the loop gives up on a board that will not
@@ -8552,7 +8629,8 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         );
     }
 
-    let dry = king_dry_fires(&project_events, &session_id);
+    let history = king_fire_history(&project_events, &session_id);
+    let dry = history.dry;
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd) {
         Ok(b) => b,
@@ -8597,11 +8675,17 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         return terminate(TerminationReason::NoWork, message, 0, dry);
     }
 
+    // A row the previous fire called actionable and this one does not is work
+    // the king cleared. That is the progress signal, read back off the board
+    // rather than self-reported, so it needs no producer to exist.
+    let cleared = king_cleared_a_row(&history.last_ids, &board.actionable_ids);
+    let dry = if cleared { 0 } else { dry };
+
     if dry + 1 >= KING_DRY_FIRE_CEILING {
         return terminate(
             TerminationReason::NoProgress,
             &format!(
-                "{} actionable rows unshrunk after {} fires with no new king_action",
+                "{} actionable rows unshrunk after {} fires with nothing cleared",
                 board.actionable,
                 dry + 1
             ),
@@ -8615,6 +8699,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         serde_json::json!({
             "session_id": session_id,
             "actionable": board.actionable,
+            "actionable_ids": board.actionable_ids,
         }),
     );
     let top = board

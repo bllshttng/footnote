@@ -1130,6 +1130,57 @@ fn king_queue_without_a_manifest_names_the_init_verb() {
 }
 
 #[test]
+fn king_queue_yields_one_unit_per_walk_then_stops() {
+    // The hot-loop regression. `run_loop`'s resume guard closes a unit WITHOUT
+    // dispatching and continues without incrementing iterations_used, so a
+    // queue that re-derived the same unit while the board stayed non-empty
+    // looped forever with Budget unable to trip. One unit per invocation is
+    // TargetQueue's shape and the contract that machinery actually has.
+    let tmp = TempDir::new().unwrap();
+    king_project(tmp.path(), "k-once");
+    let stub = king_board_stub(tmp.path(), r#"{"actionable":5,"queues":[]}"#, 0);
+
+    let mut q = KingQueue::from_manifest(tmp.path(), stub.display().to_string()).unwrap();
+    assert!(q.next().unwrap().is_some(), "first pass yields the unit");
+    assert!(
+        q.next().unwrap().is_none(),
+        "a still-non-empty board must NOT yield a second unit"
+    );
+}
+
+#[test]
+fn a_king_walk_with_a_preexisting_termination_terminates_rather_than_spinning() {
+    // The concrete hot loop: the king's own stop hook already wrote a
+    // termination under this session id, so the resume guard closes the unit
+    // on sight. The walk must end, not re-derive it forever.
+    let tmp = TempDir::new().unwrap();
+    king_project(tmp.path(), "k-resume");
+    let stub = king_board_stub(tmp.path(), r#"{"actionable":4,"queues":[]}"#, 0);
+    let journal_dir = TempDir::new().unwrap();
+    let project = journal_dir.path().join("events.jsonl");
+    let global = journal_dir.path().join("global.jsonl");
+    seed_termination_event(&project, "k-resume", "NoWork");
+    let journal = Journal::new_raw(project.clone(), global);
+
+    let mut q = KingQueue::from_manifest(tmp.path(), stub.display().to_string()).unwrap();
+    let dispatcher = MockDispatcher::new(project.clone(), vec![(None, 0)]);
+    let budget = LoopBudget::new(10).unwrap();
+    let outcome = run_loop(
+        &mut q,
+        &dispatcher,
+        &budget,
+        &journal,
+        &|| false,
+        Some(fno_agents::loop_king::KING_MAX_DISPATCHES),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome.reason, TerminationReason::NoWork));
+    assert_eq!(outcome.units.len(), 1, "exactly one unit, closed on resume");
+    assert_eq!(dispatcher.count(), 0, "the resume guard skips the dispatch");
+}
+
+#[test]
 fn a_king_walk_terminates_nowork_without_dispatching() {
     let tmp = TempDir::new().unwrap();
     king_project(tmp.path(), "k-nowork");

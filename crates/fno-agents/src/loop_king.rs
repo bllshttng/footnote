@@ -44,6 +44,8 @@ pub struct KingQueue {
     /// king's OWN stop hook emits, rather than inventing a second identity.
     session_id: String,
     scope: String,
+    /// One unit per walk invocation. See :meth:`Queue::next` for why.
+    yielded: bool,
 }
 
 impl KingQueue {
@@ -72,6 +74,7 @@ impl KingQueue {
             cwd: repo_root.to_path_buf(),
             session_id,
             scope,
+            yielded: false,
         })
     }
 
@@ -145,10 +148,31 @@ pub(crate) fn parse_king_fields(content: &str) -> Option<(String, String)> {
 }
 
 impl Queue for KingQueue {
+    /// One unit per walk invocation, then `None`. This is `TargetQueue`'s
+    /// degenerate shape and it is load-bearing, not laziness.
+    ///
+    /// `run_loop`'s resume guard closes a unit WITHOUT dispatching when the
+    /// journal already holds a termination for its session key, and it
+    /// `continue`s without incrementing `iterations_used` (the comment there
+    /// says so outright: "no dispatch happened"). Both king arms write exactly
+    /// that event under exactly this session id. A queue that re-derived the
+    /// same unit while the board stayed non-empty therefore span next, close,
+    /// continue, next forever, with Budget unable to trip because the counter
+    /// never moved.
+    ///
+    /// The counter is correct only because every queue before this one yielded
+    /// once. That is shared machinery under the target lane and is fixed
+    /// separately, so this queue matches the contract that machinery actually
+    /// has. The walk's job is to respawn a dead king, and one respawn per
+    /// invocation is a complete answer to it; something outside re-invokes.
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
+        if self.yielded {
+            return Ok(None);
+        }
         if self.actionable()? == 0 {
             return Ok(None);
         }
+        self.yielded = true;
         Ok(Some(Unit {
             id: self.session_id.clone(),
             title: if self.scope.is_empty() {

@@ -6652,6 +6652,26 @@ const BOARD_TWO_ACTIONABLE: &str = r#"{
   ]
 }"#;
 
+/// The same board with one row cleared, which is the progress signal.
+const BOARD_ONE_CLEARED: &str = r#"{
+  "actionable": 1, "unreadable": 0,
+  "queues": [
+    {"name":"undispatched","status":"ok","actionable":true,"count":1,
+     "rows":[{"id":"x-5678"}],"error":"","truncated":0,"note":"","source":"s"}
+  ]
+}"#;
+
+/// A row cleared while the board GREW. Progress, because progress is a row
+/// leaving, never board size.
+const BOARD_REFILLED: &str = r#"{
+  "actionable": 3, "unreadable": 0,
+  "queues": [
+    {"name":"undispatched","status":"ok","actionable":true,"count":3,
+     "rows":[{"id":"x-5678"},{"id":"x-9999"},{"id":"x-aaaa"}],
+     "error":"","truncated":0,"note":"","source":"s"}
+  ]
+}"#;
+
 const BOARD_CLEAN: &str = r#"{
   "actionable": 0, "unreadable": 0,
   "queues": [
@@ -6798,6 +6818,118 @@ fn king_event(events: &Path, event_type: &str, data: serde_json::Value) {
         .open(events)
         .unwrap();
     writeln!(f, "{row}").unwrap();
+}
+
+#[test]
+fn a_cleared_row_is_progress_and_needs_no_event_producer() {
+    // The defect this replaces: progress keyed ONLY on a king_action event, and
+    // nothing in the repo emitted one, so every king hit NoProgress on fire 3.
+    // A row leaving the board is external truth and needs no producer at all.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-cleared");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+
+    // Two dry fires that recorded both rows...
+    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-cleared", "actionable_ids": ids}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-cleared", "actionable_ids": ids}),
+    );
+
+    // ...then a board with x-1234 gone. That is work the king did.
+    let fno = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 2, "clearing a row must keep the loop running: {d}");
+    assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
+}
+
+#[test]
+fn a_row_cleared_while_the_board_grew_is_still_progress() {
+    // Progress is a row LEAVING, never board size. The board refills while the
+    // king works, so a count that went up can still carry real progress.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-refill");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+
+    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-refill", "actionable_ids": ids}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-refill", "actionable_ids": ids}),
+    );
+
+    let fno = king_board_bin(bin_dir.path(), BOARD_REFILLED, 0);
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 2, "a grown board that cleared a row is progress: {d}");
+    assert_eq!(d["actionable"], 3);
+    assert_eq!(d["fires"], 1);
+}
+
+#[test]
+fn an_unchanged_board_clears_nothing_and_still_reaches_noprogress() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-same");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+
+    let ids = serde_json::json!(["undispatched:x-1234", "undispatched:x-5678"]);
+    for _ in 0..2 {
+        king_event(
+            &events,
+            "king_loop_check",
+            serde_json::json!({"session_id": "k-same", "actionable_ids": ids}),
+        );
+    }
+
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "NoProgress");
+}
+
+#[test]
+fn a_fire_records_the_actionable_ids_the_next_fire_compares_against() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-record");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    king_fire(&state, cwd, &events, &fno);
+
+    let journal = fs::read_to_string(&events).unwrap();
+    let row: serde_json::Value = journal
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["type"] == "king_loop_check")
+        .expect("a blocking fire must record its board");
+    let ids = row["data"]["actionable_ids"].as_array().unwrap();
+    assert_eq!(
+        ids.len(),
+        2,
+        "without these the next fire cannot see a clear"
+    );
+    assert_eq!(ids[0], "undispatched:x-1234");
 }
 
 #[test]

@@ -4097,6 +4097,11 @@ event_types:
         actionable:
           type: integer
           description: "Actionable row count at this fire."
+        actionable_ids:
+          type: array
+          items:
+            type: string
+          description: "Every actionable row identity on this board, as queue:id. THIS is the progress signal: a row present here and absent on the next fire is work the king cleared, read back off the board rather than self-reported. Count alone cannot serve, because the board refills while the king works, so it can rise on the very fire that clears a row."
         board_error:
           type: string
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
