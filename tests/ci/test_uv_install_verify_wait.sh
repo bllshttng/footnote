@@ -109,5 +109,17 @@ have crates/fno/src/bootstrap.rs 'VERIFY_ATTEMPTS: u32 = 15' "15-retry ceiling"
 have crates/fno/src/bootstrap.rs 'VERIFY_POLL: Duration = Duration::from_millis(200)' "0.2s poll"
 have crates/fno/src/bootstrap.rs 'install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL)' "waited verify call"
 
+# The git-protection merge veto's timeout is sized off the doc's
+# per-invocation ceiling ("Size any harness budget that shells `fno` against
+# 21s"). When the wait budgets move, that number must be re-derived, and this
+# pin fails until the hook follows it. Without it the four 15-pins still catch
+# a budget change while this fifth consumer silently under-covers.
+_hook_veto=$(grep -oE 'timeout=25' "$REPO/hooks/git-protection.py" | head -n 1)
+_doc_ceiling=$(grep -oE 'against [0-9]+s' "$REPO/docs/architecture/cli-lazy-imports.md" | head -n 1)
+[ -n "$_hook_veto" ] || fail "git-protection.py lost its 25s veto timeout"
+[ -n "$_doc_ceiling" ] || fail "cli-lazy-imports.md lost its per-invocation sizing line"
+_h=${_hook_veto//[^0-9]/}; _c=${_doc_ceiling//[^0-9]/}
+[ "$_h" -ge "$_c" ] || fail "the veto timeout (${_h}s) sits under the doc's ${_c}s ceiling"
+
 echo "PASS: postinstall verify waits for a late artifact, still fails bounded on a broken one, and all four provisioning paths share the 3s budget"
 exit 0
