@@ -590,7 +590,7 @@ if [[ "$HOST_SEES_ORPHANS" -eq 0 ]]; then
     echo "  ok: orphan lanes skipped on this host (double-fork did not land on pid 1; the code correctly waits)"
 fi
 if [[ "$HOST_SEES_ORPHANS" -eq 1 ]]; then
-rm -f "$ATT"   # every steal section clears the attestation or reuse skips the lock
+rm -f "$(cur_att)"   # every steal section clears the attestation or reuse skips the lock
 orphan_pid="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] && break
@@ -624,7 +624,7 @@ for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$spin_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
 done
-rm -f "$ATT"   # the orphan-steal run just minted one for this same SHA
+rm -f "$(cur_att)"   # the orphan-steal run just minted one for this same SHA
 mkdir -p "$LOCKDIR"
 spin_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_orphan" "$spin_recent" > "$LOCKDIR/holder"
