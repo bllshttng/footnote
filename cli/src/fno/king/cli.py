@@ -27,7 +27,9 @@ def init_cmd(
     max_iterations: int = typer.Option(
         40, "--max-iterations", help="Iteration ceiling before the loop stops on Budget."
     ),
-    force: bool = typer.Option(False, "--force", help="Replace an existing manifest."),
+    force: bool = typer.Option(
+        False, "--force", "-F", help="Replace an existing manifest."
+    ),
 ) -> None:
     """Write ``.fno/king-state.md``, the manifest the king loop arms read.
 
