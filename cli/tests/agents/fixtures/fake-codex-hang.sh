@@ -28,6 +28,9 @@ HANG="${FAKE_HANG_SECS:-60}"
 case "$MODE" in
     create)
         echo '{"type":"thread.started","thread_id":"019e0000-fake-7000-aaaa-cccccccccccc"}'
+        if [[ -n "${FAKE_READY_FIFO:-}" ]]; then
+            printf 'ready\n' > "$FAKE_READY_FIFO"
+        fi
         sleep "$HANG"
         # If we somehow exit the sleep cleanly, emit a completion so the
         # parser doesn't deadlock on a real test run.

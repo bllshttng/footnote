@@ -13,30 +13,48 @@ from fno.pr._proc import Result, run
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
+_PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 
 def quota_lock_path() -> Path:
     return graphql_quota_lock()
 
 
+def _proxy_dirs() -> set[str]:
+    paths = set()
+    inherited = os.environ.get(_PROXY_DIR_ENV)
+    if inherited:
+        paths.add(str(Path(inherited).resolve()))
+    try:
+        paths.add(str(github_cli_proxy_dir().resolve()))
+    except Exception:
+        pass
+    return paths
+
+
 def delegate_environment() -> dict[str, str]:
     """Remove the quota proxy from PATH before invoking a preserved gh wrapper."""
     env = dict(os.environ)
-    proxy_dir = str(github_cli_proxy_dir().resolve())
+    proxy_dirs = _proxy_dirs()
     env["PATH"] = os.pathsep.join(
         part for part in env.get("PATH", "").split(os.pathsep)
-        if part and str(Path(part).resolve()) != proxy_dir
+        if part and str(Path(part).resolve()) not in proxy_dirs
     )
     env.pop("FNO_REAL_GH", None)
+    env.pop(_PROXY_DIR_ENV, None)
     return env
 
 
 def resolve_real_gh() -> Optional[str]:
     configured = os.environ.get("FNO_REAL_GH")
-    proxy = (github_cli_proxy_dir() / "gh").resolve()
+    proxy_dirs = _proxy_dirs()
     if configured:
         candidate = Path(configured)
-        if candidate.is_file() and os.access(candidate, os.X_OK) and candidate.resolve() != proxy:
+        if (
+            candidate.is_file()
+            and os.access(candidate, os.X_OK)
+            and str(candidate.parent.resolve()) not in proxy_dirs
+        ):
             return str(candidate.resolve())
     skipped_proxy = False
     for directory in os.environ.get("PATH", "").split(os.pathsep):
@@ -45,7 +63,7 @@ def resolve_real_gh() -> Optional[str]:
         candidate = Path(directory) / "gh"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        if candidate.resolve() == proxy:
+        if str(candidate.parent.resolve()) in proxy_dirs:
             skipped_proxy = True
             continue
         return str(candidate.resolve()) if skipped_proxy else "gh"

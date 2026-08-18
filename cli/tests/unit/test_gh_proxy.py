@@ -4,11 +4,46 @@ import os
 import sys
 
 import pytest
+from typer.testing import CliRunner
 
+from fno.cli import _protect_process_path as protect_process_path
 from fno.pr import gh_proxy
 from fno.pr._proc import Result
 from fno.pr.gh_proxy import Action, classify, command_args, delegate
 from fno.setup.github_cli import InstallResult, ensure_proxy, worker_environment
+
+
+def test_cli_root_callback_enters_process_proxy_boundary(monkeypatch):
+    from fno.cli import app
+
+    calls = []
+    monkeypatch.setattr("fno.cli._protect_process_path", lambda ctx: calls.append(ctx))
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_process_proxy_boundary_restores_path_on_close(monkeypatch, tmp_path):
+    original = "/original/bin"
+    proxy = str(tmp_path / "proxy")
+    monkeypatch.setenv("PATH", original)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**dict(base), "PATH": f"{proxy}{os.pathsep}{original}"},
+    )
+    closed = []
+
+    class Context:
+        def call_on_close(self, callback):
+            closed.append(callback)
+
+    protect_process_path(Context())
+    assert os.environ["PATH"].split(os.pathsep)[0] == proxy
+    assert os.environ["FNO_GH_PROXY_DIR"]
+    assert len(closed) == 1
+    closed[0]()
+    assert os.environ["PATH"] == original
+    assert "FNO_GH_PROXY_DIR" not in os.environ
 
 
 def test_proxy_classifies_every_graphql_gh_surface():
@@ -65,8 +100,11 @@ def test_worker_environment_prepends_proxy_and_pins_delegate(tmp_path, monkeypat
         "fno.setup.github_cli.ensure_proxy",
         lambda **_: InstallResult(proxy=proxy, delegate=real.resolve(), changed=False),
     )
-    env = worker_environment({"PATH": "/usr/bin", "KEEP": "yes"})
+    env = worker_environment(
+        {"PATH": "/usr/bin", "KEEP": "yes", "FNO_REAL_GH": str(real)}
+    )
     assert env["PATH"].split(os.pathsep)[0] == str(tmp_path / "proxy")
+    assert env["FNO_GH_PROXY_DIR"] == str(tmp_path / "proxy")
     assert "FNO_REAL_GH" not in env
     assert env["KEEP"] == "yes"
 
@@ -83,13 +121,36 @@ def test_nested_worker_reuses_the_pinned_real_delegate(tmp_path, monkeypatch):
     assert nested["PATH"].split(os.pathsep)[0] == str(proxy_dir)
 
 
-def test_worker_environment_surfaces_proxy_install_io_failure(monkeypatch):
+def test_worker_environment_surfaces_proxy_install_io_failure(monkeypatch, tmp_path):
+    real = tmp_path / "real-gh"
+    real.write_text("real")
+
     def fail(**kwargs):
         raise PermissionError("read-only state root")
 
     monkeypatch.setattr("fno.setup.github_cli.ensure_proxy", fail)
     with __import__("pytest").raises(PermissionError, match="read-only state root"):
-        worker_environment({"PATH": "/usr/bin"})
+        worker_environment({"PATH": "/usr/bin", "FNO_REAL_GH": str(real)})
+
+
+def test_worker_environment_uses_config_free_fallback(monkeypatch, tmp_path):
+    real = tmp_path / "real-gh"
+    real.write_text("real")
+    fallback = tmp_path / "fallback"
+    calls = []
+
+    def install(**kwargs):
+        calls.append(kwargs.get("directory"))
+        if kwargs.get("directory") is None:
+            raise AttributeError("settings stub has no state_dir")
+        return InstallResult(proxy=fallback / "gh", delegate=real, changed=True)
+
+    monkeypatch.setattr("fno.setup.github_cli.ensure_proxy", install)
+    monkeypatch.setattr("fno.setup.github_cli.fallback_proxy_dir", lambda: fallback)
+    env = worker_environment({"PATH": "/usr/bin", "FNO_REAL_GH": str(real)})
+    assert calls == [None, fallback]
+    assert env["PATH"].split(os.pathsep)[0] == str(fallback)
+    assert env["FNO_GH_PROXY_DIR"] == str(fallback)
 
 
 def test_worker_environment_inherits_env_when_config_layer_is_unimportable(monkeypatch):
