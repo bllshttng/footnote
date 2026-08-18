@@ -65,6 +65,11 @@ CEILING_BYTES=36830
 # than becoming headroom.
 #
 # Set the ceiling at measured + band/2, so both directions get the same room.
+# EXCEPTION, and it is the current state: 36830 is measured EXACTLY, with zero
+# spare, because the fund-by-trading lever it assumes is exhausted (see the
+# ceiling comment above and the refusal text below). Do not "restore" this to
+# measured + band/2 as a tidy-up; that silently undoes the zero-spare intent
+# and hands back the headroom the measurement was spent to remove.
 # Sitting just under the band instead leaves almost no slack for a cut, and the
 # gate then fires on the very edits it wants to encourage; sitting at
 # measured + band leaves none at all, since any cut at all trips it.
@@ -473,17 +478,19 @@ if (( ! QUIET && ! JSON_MODE )); then
     echo "  Every byte here is re-read on every turn of every session on every lane."
     echo "  Fix, in order of preference:"
     echo "    1. Trade: cut an equivalent amount from the same file."
-    echo "       READ THIS BEFORE TRYING IT ON AGENTS.md. The pitfalls corpus was"
-    echo "       measured on 2026-08-18 and holds roughly 181 tradeable bytes in"
-    echo "       6089. Three compression passes and two external reviews lost and"
-    echo "       recovered ELEVEN qualifiers, one of which reversed an entry's"
-    echo "       meaning. Everything past those 181 bytes carries a claim, so a"
-    echo "       further corpus trade is not a real option however it reads."
+    echo "       DO NOT TRY THIS ON THE AGENTS.md PITFALLS CORPUS. It was measured"
+    echo "       on 2026-08-18 at roughly 181 tradeable bytes in 6089, and those"
+    echo "       181 were ALREADY SPENT to set the current ceiling. The corpus is"
+    echo "       at its floor; there is no trade left there."
+    echo "       Getting those 181 took three compression passes and two external"
+    echo "       reviews, which lost and recovered ELEVEN qualifiers - one of them"
+    echo "       reversing an entry's meaning. Everything still in that corpus"
+    echo "       carries a claim, however much it reads like restatement."
     echo "       The corpus header still says to fund growth by trading here and"
     echo "       never by raising this ceiling. That instruction assumes tradeable"
-    echo "       restatement exists. It measurably does not. x-62e1 owns the"
-    echo "       policy decision; do not resolve it by quietly deleting a"
-    echo "       qualifier."
+    echo "       restatement exists, and it measurably does not. Reconciling the"
+    echo "       header with that measurement is an open policy question. Do not"
+    echo "       resolve it by quietly deleting a qualifier."
     echo "    2. Move it out of the preamble: docs/ and linked rule files that the"
     echo "       harness does not auto-load are not paid at startup."
     echo "    3. Raise CEILING_BYTES in this script, in this PR, with the reason in the PR body."

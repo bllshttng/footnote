@@ -166,7 +166,13 @@ PRE_SPARE=""
 PRE_FIT=""
 PREAMBLE_BUDGET_SH="$(dirname "${BASH_SOURCE[0]}")/check-preamble-budget.sh"
 if [[ -f "$PREAMBLE_BUDGET_SH" ]]; then
-  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet 2>/dev/null || true)"
+  # Pass the repo root explicitly. Without it the budget script measured $PWD,
+  # so running this from anywhere else produced no match below, left PRE_SPARE
+  # empty, and made the over-ceiling refusal silently no-op while still
+  # printing "all valid". An absence-shaped success condition, in the file that
+  # ships the entry warning against exactly that.
+  PRE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet "$PRE_ROOT" 2>/dev/null || true)"
   if [[ "$PRE_QUIET" =~ preamble:\ ([0-9]+)\ /\ ([0-9]+)\ B ]]; then
     PRE_TOTAL="${BASH_REMATCH[1]}"
     PRE_CEIL="${BASH_REMATCH[2]}"
