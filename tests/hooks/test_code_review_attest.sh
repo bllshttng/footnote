@@ -154,18 +154,25 @@ expect_attest "described-json-clean"
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$JSON_CLEAN")"
 expect_attest "headered-json-clean"
 
-# PR 922: three flagless forks returned findings JSON with NO header, and the
+# Three flagless forks once returned findings JSON with NO header, and the
 # description field carried nothing the matcher recognized. Zero attestations.
 run_hook "$(subagent_stop "code-review high" "$JSON_CLEAN")"
 expect_attest "described-with-level-json-clean"
 
-# PR 923: the low-level protocol's empty-findings marker is the literal
-# "(none)". No fence at all, so the fence parser could never read it.
+# The low-level protocol's empty-findings marker is the literal "(none)" as
+# the WHOLE final text. No fence at all, so the fence parser could never
+# read it.
 run_hook "$(subagent_stop "/code-review <level>" "(none)")"
 expect_attest "described-none-marker"
 
+# Prose around the marker is NOT the marker. The observed shape is the whole
+# final text equal to "(none)"; anything longer must never clear the gate,
+# an excuse line above the marker least of all.
 run_hook "$(subagent_stop "/code-review" $'Reviewed.\n\n(none)\n')"
-expect_attest "described-none-marker-with-prose"
+expect_silent "described-none-marker-buried-in-prose"
+
+run_hook "$(subagent_stop "/code-review" $'I could not inspect the diff.\n\n(none)')"
+expect_silent "described-none-marker-after-failure"
 
 echo "== SubagentStop: the forked-skill shape measured live =="
 # This is the exact payload that produced six unmergeable PRs. Nothing in it

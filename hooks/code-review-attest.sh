@@ -25,7 +25,8 @@
 # The clean-pass signal is an empty findings set, matching ReportFindings'
 # own contract ("empty array if nothing survived verification"). The two
 # review protocols spell it differently - an empty fenced JSON array, or a
-# bare "(none)" line - and both are accepted, by name, nothing else.
+# final text that is the bare "(none)" marker and nothing else - and both
+# are accepted, by name, nothing else.
 #
 # Fail direction: any parse problem, an event this script does not
 # recognize, or a NON-empty findings array emits nothing, so the reviewers
@@ -118,9 +119,10 @@ case "$event" in
 
     # The clean-pass verdict, positively enumerated over every shape observed
     # live. An empty fenced JSON array is the high-level protocol's marker; a
-    # bare "(none)" line is the low-level protocol's. Both mean the same
-    # thing, and a parser that reads only the first calls the second
-    # unparseable - which is a silence indistinguishable from "no review ran".
+    # final text that is the literal "(none)" and nothing else is the
+    # low-level protocol's. Both mean the same thing, and a parser that reads
+    # only the first calls the second unparseable - which is a silence
+    # indistinguishable from "no review ran".
     findings="$(printf '%s' "$message" | python3 -c '
 import json, re, sys
 text = sys.stdin.read()
@@ -138,9 +140,11 @@ print("[]" if data == [] else "nonempty")
     if [[ "$findings" == "[]" ]]; then
       is_clean=1
     elif [[ "$findings" == "absent" ]] \
-      && printf '%s\n' "$message" | grep -qE '^[[:space:]]*\(none\)[[:space:]]*$'; then
-      # Only when NO array was parsed. A run that reported real findings and
-      # also happens to contain a "(none)" line stays non-clean.
+      && [[ "$message" =~ ^[[:space:]]*\(none\)[[:space:]]*$ ]]; then
+      # Only when NO array was parsed and the ENTIRE final text is the bare
+      # marker - the observed protocol spells its whole verdict that way. A
+      # standalone "(none)" line inside longer output, an excuse line above
+      # it especially, attests nothing.
       is_clean=1
     fi
     ;;
