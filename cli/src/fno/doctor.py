@@ -1572,6 +1572,7 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno setup` to install it."
         )
+    _emit_codex_context_window(result, out=out)
     dupes = surf.get("codex_marketplace_duplicates") or []
     if dupes:
         out(
@@ -1770,6 +1771,74 @@ def _emit_human(
 # ---------------------------------------------------------------------------
 # Command
 # ---------------------------------------------------------------------------
+
+
+def _codex_context_window_report() -> dict[str, Any]:
+    """What context window a fresh codex thread will actually get.
+
+    Codex resolves the window as ``min(config.model_context_window,
+    max_context_window) * effective_context_window_percent / 100``, where both
+    right-hand values come from ``$CODEX_HOME/models_cache.json``.  The TUI
+    footer echoes the CONFIGURED number, so a config asking for 1M reads as 1M
+    while every turn runs clamped - the gap this reports.
+
+    The cached ``max_context_window`` is itself served per originator header,
+    yet the cache file records no originator and every launcher shares it.  So
+    whichever launcher fetched last decides the next thread's tier, and the
+    tier is the only readable trace of who that was.  Read-only, advisory."""
+    import tomllib
+
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    try:
+        with (codex_home / "config.toml").open("rb") as handle:
+            config = tomllib.load(handle)
+        cache = json.loads((codex_home / "models_cache.json").read_text())
+    except Exception:  # noqa: BLE001 - doctor stays advisory on any unreadable home
+        return {}
+
+    configured = config.get("model_context_window")
+    slug = config.get("model")
+    if not isinstance(configured, int) or not isinstance(slug, str):
+        return {}
+    entry = next(
+        (m for m in cache.get("models") or [] if m.get("slug") == slug),
+        None,
+    )
+    if entry is None:
+        return {}
+    cap = entry.get("max_context_window")
+    base = entry.get("context_window")
+    percent = entry.get("effective_context_window_percent")
+    if not isinstance(cap, int) or not isinstance(percent, int):
+        return {}
+
+    return {
+        "model": slug,
+        "configured": configured,
+        "max_context_window": cap,
+        "effective": min(configured, cap) * percent // 100,
+        "percent": percent,
+        "tier": "extended" if isinstance(base, int) and cap > base else "base",
+        "capped": configured > cap,
+        "cache_fetched_at": cache.get("fetched_at"),
+        "cache_client_version": cache.get("client_version"),
+    }
+
+
+def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
+    """Name the real window when the configured one is a promise codex drops."""
+    report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
+    if not report.get("capped"):
+        return
+    out(
+        f"fno doctor: codex model_context_window={report['configured']} is capped at "
+        f"{report['max_context_window']} for {report['model']}; the effective window is "
+        f"{report['effective']} ({report['percent']}%). The TUI footer shows the configured "
+        f"value, not this one. models_cache.json holds the {report['tier']} tier "
+        f"(fetched {report['cache_fetched_at']} by codex {report['cache_client_version']}); "
+        "it records no originator, and the cap is served per originator, so whichever "
+        "launcher fetched last set this tier for every thread started since."
+    )
 
 
 def _codex_hooks_report() -> dict[str, Any]:
@@ -2225,6 +2294,11 @@ def _harness_surface_report() -> dict[str, Any]:
     # sessions no spawn preflight can reach.
     try:
         report["codex_app_server"] = _codex_app_server_report()
+    except Exception:
+        pass
+
+    try:
+        report["codex_context_window"] = _codex_context_window_report()
     except Exception:
         pass
 
