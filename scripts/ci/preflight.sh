@@ -376,6 +376,8 @@ POOL_ADMIN_LOCK_ACQUIRED=0
 LOCAL_LOCK_STAMP=""
 GLOBAL_LOCK_STAMP=""
 POOL_ADMIN_LOCK_STAMP=""
+POOL_VICTIM_LOCKDIR=""
+POOL_VICTIM_LOCK_STAMP=""
 POOL_USAGE_MARKER="$POOL_STATE_DIR/$CANDIDATE_SHA.used"
 LOCKDIR="$LOCAL_LOCKDIR"
 stamp_holder() {
@@ -838,6 +840,28 @@ release_pool_admin() {
     POOL_ADMIN_LOCK_STAMP=""
 }
 
+reserve_pool_victim() {
+    local sha="$1" stamp
+    POOL_VICTIM_LOCKDIR="$LOCAL_LOCK_ROOT/$sha.d"
+    if ! mkdir "$POOL_VICTIM_LOCKDIR" 2>/dev/null; then
+        POOL_VICTIM_LOCKDIR=""
+        return 1
+    fi
+    stamp="pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown) host=$(hostname 2>/dev/null || echo unknown) sha=$sha role=pool-reaper"
+    if ! printf '%s\n' "$stamp" > "$POOL_VICTIM_LOCKDIR/holder"; then
+        rm -rf "$POOL_VICTIM_LOCKDIR"
+        POOL_VICTIM_LOCKDIR=""
+        return 1
+    fi
+    POOL_VICTIM_LOCK_STAMP="$stamp"
+}
+
+release_pool_victim() {
+    cleanup_lock "$POOL_VICTIM_LOCKDIR" "$POOL_VICTIM_LOCK_STAMP"
+    POOL_VICTIM_LOCKDIR=""
+    POOL_VICTIM_LOCK_STAMP=""
+}
+
 oldest_inactive_pool_slot() {
     local slot sha marker mtime oldest_mtime="" oldest_slot=""
     while IFS= read -r slot; do
@@ -882,16 +906,19 @@ ensure_pool_slot() {
             victim="$(oldest_inactive_pool_slot)"
             [[ -n "$victim" ]] || break
             victim_sha="${victim##*/}"
-            # The allocator lock prevents another reaper, and this second
-            # active check closes the scan-to-remove window for a same-SHA run.
-            if [[ -d "$LOCAL_LOCK_ROOT/$victim_sha.d" ]]; then
+            # Atomically reserve the execution-lock path before removal. The
+            # allocator lock excludes other reapers. This mkdir excludes a
+            # same-SHA caller that starts after the inactive scan.
+            if ! reserve_pool_victim "$victim_sha"; then
                 continue
             fi
             if ! git -C "$INVOKING_ROOT" worktree remove --force "$victim" >/dev/null 2>&1; then
+                release_pool_victim
                 echo "preflight: cannot reap inactive pool slot $victim" >&2
                 exit 1
             fi
             rm -f "$POOL_STATE_DIR/$victim_sha.used" 2>/dev/null || true
+            release_pool_victim
             count=$((count - 1))
             echo "preflight: reaped inactive pool slot ${victim_sha:0:12}"
         done
@@ -930,6 +957,7 @@ cleanup() {
     [[ -n "${TICKET:-}" ]] && rm -rf "$TICKET"
     [[ -n "${POOL_USAGE_MARKER:-}" && -d "${PREFLIGHT_WT:-}" ]] \
         && touch "$POOL_USAGE_MARKER" 2>/dev/null || true
+    [[ -n "${POOL_VICTIM_LOCKDIR:-}" ]] && cleanup_lock "$POOL_VICTIM_LOCKDIR" "${POOL_VICTIM_LOCK_STAMP:-}"
     [[ "${POOL_ADMIN_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${POOL_ADMIN_LOCKDIR:-}" "${POOL_ADMIN_LOCK_STAMP:-}"
     [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
     [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
