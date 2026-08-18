@@ -19,7 +19,11 @@ PASS=0
 FAIL=0
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
-skip() { echo "SKIP: $1" >&2; exit 0; }
+# The runner has no skip state: it scores 77 as a red failure and 0 as a
+# green pass. A machine missing git or python3 is broken for this suite, so
+# red is the honest outcome; a 0 would report every case green having
+# asserted nothing.
+skip() { echo "SKIP: $1" >&2; exit 77; }
 
 command -v git     >/dev/null 2>&1 || skip "git not on PATH"
 command -v python3 >/dev/null 2>&1 || skip "python3 not on PATH"

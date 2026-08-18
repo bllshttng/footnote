@@ -23,7 +23,11 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 if ! command -v jq >/dev/null 2>&1; then
-  echo "SKIP: jq not available"; exit 0
+  # The runner has no skip state: it scores 77 as a red failure and a 0 as a
+  # green pass. A jq-less machine is broken for this suite, so red is the
+  # honest outcome; a 0 would report every case green having asserted
+  # nothing.
+  echo "SKIP: jq not available"; exit 77
 fi
 
 SIDECAR="$TMP/.fno/.pending-plan.md"
