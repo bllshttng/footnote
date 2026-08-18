@@ -193,6 +193,12 @@ FIELD_META: dict[str, Meta] = {
     "review.peer_token_env": Meta(
         "advanced", "Optional legacy carrier: env var holding the PAT for peer_identity used to post peer reviews to the PR.",
     ),
+    "review.bot_identity": Meta(
+        "advanced", "The GitHub login the reviewer lane posts its verdict under, so a clean pass can land APPROVE instead of the COMMENTED an author account is structurally limited to. Must be a distinct account with WRITE access on the repo (a read-only account's review displays but never counts toward a required-approving-review rule). Separate from peer_identity on purpose: setting peer_identity switches the merge coverage guard off, and these keys must not.",
+    ),
+    "review.bot_token_env": Meta(
+        "advanced", "Env var holding the fine-grained PAT for review.bot_identity (pull-request write on this repo). Unset or empty disables bot review posting (skipped, never an error).",
+    ),
     "review.external_reviewers": Meta(
         "always", "Which AI reviewers /pr requests a review from (the INVOCATION list).",
         question="Which external reviewer(s) should review your PRs (gemini/codex/none)?",

@@ -343,6 +343,42 @@ def test_peers_without_identity_selects_local_attestation(
     assert settings.review.peer_identity is None
 
 
+# --- review.bot_identity / bot_token_env (x-93ea) ---
+
+
+def test_bot_identity_keys_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n"
+        '    bot_identity: fno-review-bot\n    bot_token_env: GH_REVIEW_BOT_TOKEN\n',
+    )
+    assert settings.review.bot_identity == "fno-review-bot"
+    assert settings.review.bot_token_env == "GH_REVIEW_BOT_TOKEN"
+
+
+def test_bot_identity_defaults_none_and_leaves_lane_predicate_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent keys read None, and setting them must not touch any input
+    _review_lane_configured reads (peer_identity above all: a set
+    peer_identity switches the merge coverage guard off)."""
+    for content in (
+        "schema_version: 1\n",
+        "schema_version: 1\nconfig:\n  review:\n"
+        "    bot_identity: fno-review-bot\n    bot_token_env: GH_REVIEW_BOT_TOKEN\n",
+    ):
+        settings = _load(tmp_path, monkeypatch, content)
+        assert settings.review.peer_identity is None
+        assert settings.review.peers == []
+        assert settings.review.required_bots is None
+        assert settings.review.optional_apps == []
+    assert _load(tmp_path, monkeypatch, "schema_version: 1\n").review.bot_identity is None
+    assert _load(tmp_path, monkeypatch, "schema_version: 1\n").review.bot_token_env is None
+
+
 def test_routed_claude_peer_without_identity_loads_for_local_attestation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

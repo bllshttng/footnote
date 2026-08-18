@@ -789,6 +789,16 @@ class ReviewBlock(BaseModel):
     # the env var holding that identity's PAT.
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
+    # The reviewer lane's own posting identity (x-93ea): the login
+    # `fno event emit -t review_attestation` mirrors its verdict to GitHub as,
+    # plus the env var holding that account's fine-grained PAT. An author
+    # account can never carry an approving review (GitHub records COMMENTED),
+    # so reviewDecision stays empty until a distinct identity posts. Distinct
+    # keys, NOT peer_identity reuse: _review_lane_configured treats a set
+    # peer_identity as "already matched by the bot sets" and returns False,
+    # which would silently switch the merge coverage guard off.
+    bot_identity: Optional[str] = None
+    bot_token_env: Optional[str] = None
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
