@@ -1178,7 +1178,10 @@ def _mesh_env_wrapper(
         if _incoherent:
             unset += incoherent_model_env_unset_args()
             print(
-                incoherent_model_env_notice([_k for _k, _v in _incoherent]),
+                incoherent_model_env_notice(
+                    [_k for _k, _v in _incoherent],
+                    routed=bool(account_env or resolved_route),
+                ),
                 file=sys.stderr,
             )
     # Set-or-clear the whole triple, never merge. A pane spawned from a

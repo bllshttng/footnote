@@ -84,6 +84,7 @@ MODEL_ENV_VARS=(
 # Collect every var naming a foreign model. Anthropic ids start with "claude-"
 # and the bare tier aliases resolve to Anthropic models, so both are coherent.
 OFFENDERS=""
+FIRST_FOREIGN_MODEL=""
 for VAR in "${MODEL_ENV_VARS[@]}"; do
   VAL="${!VAR:-}"
   [[ -z "$VAL" ]] && continue
@@ -91,6 +92,7 @@ for VAR in "${MODEL_ENV_VARS[@]}"; do
     claude-*|opus|sonnet|haiku|fable) continue ;;
   esac
   OFFENDERS+="${OFFENDERS:+, }${VAR}='${VAL}'"
+  [[ -z "$FIRST_FOREIGN_MODEL" ]] && FIRST_FOREIGN_MODEL="$VAL"
 done
 
 # A foreign model only drifts when the endpoint is Anthropic's: empty base or
@@ -104,15 +106,14 @@ fi
 
 # Routed to a real non-Anthropic base. Flag an Anthropic OAuth token where the
 # routed provider expects its own API key (the x-db50 OAuth-scrub failure).
-if [[ -n "$MODEL" ]]; then
-  case "$MODEL" in
-    claude-*) ;;
-    *)
-      case "$TOKEN" in
-        sk-ant-oat*)
-          echo "⚠️  MODEL ROUTING WARNING: routed to '${MODEL}' at ${BASE_HOST} but ANTHROPIC_AUTH_TOKEN looks like an Anthropic OAuth token (sk-ant-oat…). A routed lane usually needs that provider's API key; verify the token was swapped for this lane."
-          ;;
-      esac
+# Checked across all five model vars, not just ANTHROPIC_MODEL: a
+# tier-default-only route (ANTHROPIC_MODEL unset, e.g.
+# ANTHROPIC_DEFAULT_HAIKU_MODEL foreign) is the same shape the drift scan
+# above was already extended to cover.
+if [[ -n "$FIRST_FOREIGN_MODEL" ]]; then
+  case "$TOKEN" in
+    sk-ant-oat*)
+      echo "⚠️  MODEL ROUTING WARNING: routed to '${FIRST_FOREIGN_MODEL}' at ${BASE_HOST} but ANTHROPIC_AUTH_TOKEN looks like an Anthropic OAuth token (sk-ant-oat…). A routed lane usually needs that provider's API key; verify the token was swapped for this lane."
       ;;
   esac
 fi

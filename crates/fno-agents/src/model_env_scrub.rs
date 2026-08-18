@@ -41,12 +41,17 @@ fn env_truthy(value: Option<&str>) -> bool {
 }
 
 /// Host of a base URL with scheme, path, and port stripped; empty when unset.
+/// Splits on the FIRST "://" (mirrors Python's `split("://", 1)[-1]`), not
+/// the last: a proxy URL that embeds a second URL in its path
+/// (`https://gateway.corp/proxy/https://api.anthropic.com`) must resolve to
+/// the proxy's own host, not the embedded one.
 fn base_url_host(base: &str) -> String {
-    base.trim()
-        .to_ascii_lowercase()
-        .rsplit("://")
-        .next()
-        .unwrap_or("")
+    let lower = base.trim().to_ascii_lowercase();
+    let after_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(lower.as_str());
+    after_scheme
         .split('/')
         .next()
         .unwrap_or("")
@@ -193,6 +198,25 @@ mod tests {
     #[test]
     fn an_anthropic_tier_pin_is_coherent() {
         let get = env_of(&[("ANTHROPIC_DEFAULT_OPUS_MODEL", "claude-opus-4-1")]);
+        assert!(incoherent_model_env(&get).is_empty());
+    }
+
+    #[test]
+    fn a_proxy_url_with_an_embedded_url_resolves_the_proxys_own_host() {
+        // base_url_host must split on the FIRST "://", matching Python's
+        // split("://", 1)[-1]: a proxy URL that carries a second URL in its
+        // path (https://gateway.corp/proxy/https://api.anthropic.com) is a
+        // foreign endpoint at gateway.corp, not api.anthropic.com. Splitting
+        // on the LAST "://" (rsplit) resolved the embedded host instead and
+        // wrongly stripped a working routed model var.
+        let get = env_of(&[
+            ("ANTHROPIC_MODEL", "glm-5.2[1m]"),
+            (
+                "ANTHROPIC_BASE_URL",
+                "https://gateway.corp.com/proxy/https://api.anthropic.com",
+            ),
+        ]);
+        assert!(!base_url_is_anthropic(&get));
         assert!(incoherent_model_env(&get).is_empty());
     }
 }

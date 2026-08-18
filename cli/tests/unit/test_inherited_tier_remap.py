@@ -426,6 +426,21 @@ def test_a_lookalike_host_is_a_foreign_endpoint():
     assert base_url_is_anthropic(lookalike) is False
 
 
+def test_a_proxy_url_with_an_embedded_url_resolves_the_proxys_own_host():
+    # base_url_host splits on the FIRST "://" (split("://", 1)[-1]): a proxy
+    # URL carrying a second URL in its path
+    # (https://gateway.corp.com/proxy/https://api.anthropic.com) is a foreign
+    # endpoint at gateway.corp.com, not api.anthropic.com. This pins the
+    # behavior the Rust mirror's rsplit variant got wrong - the two
+    # implementations must agree, not just share a var-name list.
+    proxied = {
+        **POISON_ENV,
+        "ANTHROPIC_BASE_URL": "https://gateway.corp.com/proxy/https://api.anthropic.com",
+    }
+    assert base_url_is_anthropic(proxied) is False
+    assert incoherent_model_env(proxied) == ()
+
+
 def test_dict_scrub_and_argv_args_drop_the_same_names():
     # Seam parity asserted on the resulting NAME SETS, not on both calling one
     # helper: asserting shared plumbing pins the call, not the destination.

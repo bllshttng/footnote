@@ -113,6 +113,15 @@ OUT="$(run_hook "glm-4.6" "https://open.bigmodel.cn/api/anthropic" "sk-ant-oat-x
 echo "$OUT" | grep -q "OAuth" && pass "oat token on routed lane -> OAuth warning" \
   || fail "expected OAuth warning, got: $OUT"
 
+# 5b. Tier-default-only route: ANTHROPIC_MODEL unset, only
+#     ANTHROPIC_DEFAULT_HAIKU_MODEL routed, real foreign base, Anthropic OAuth
+#     token. The OAuth check must scan all five model vars, not just
+#     ANTHROPIC_MODEL - a check gated on $MODEL alone would skip this case.
+OUT="$(run_hook_env "" "https://open.bigmodel.cn/api/anthropic" "sk-ant-oat-xxxx" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air 2>/dev/null)"
+echo "$OUT" | grep -q "OAuth" && pass "oat token on tier-default-only route -> OAuth warning" \
+  || fail "expected OAuth warning on tier-default-only route, got: $OUT"
+
 # 6. Sidecar recorded the intended identity.
 [[ -f "$HOME/.fno/attest/${SID}.json" ]] && pass "sidecar written" || fail "sidecar missing"
 

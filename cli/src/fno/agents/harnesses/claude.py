@@ -414,7 +414,10 @@ def headless_create(
         # Strip before the overlay below so a real route still wins.
         dropped = scrub_incoherent_model_env(spawn_env)
         if dropped:
-            print(incoherent_model_env_notice(dropped), file=sys.stderr)
+            print(
+                incoherent_model_env_notice(dropped, routed=bool(account_env or route_env)),
+                file=sys.stderr,
+            )
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials
 
@@ -568,7 +571,10 @@ def bg_create(
 
     dropped = scrub_incoherent_model_env(spawn_env)
     if dropped:
-        print(incoherent_model_env_notice(dropped), file=sys.stderr)
+        print(
+            incoherent_model_env_notice(dropped, routed=bool(account_env or route_env)),
+            file=sys.stderr,
+        )
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not

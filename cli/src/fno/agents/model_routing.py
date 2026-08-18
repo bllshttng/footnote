@@ -467,21 +467,32 @@ def incoherent_model_env_unset_args(env: Optional[Mapping[str, str]] = None) -> 
     return flags
 
 
-def incoherent_model_env_notice(dropped: Sequence[str]) -> str:
+def incoherent_model_env_notice(dropped: Sequence[str], *, routed: bool = False) -> str:
     """The one stderr line, shared by every seam: names the dropped vars, the
-    cause, and both remedies (the settings.json pin and the daemon restart)."""
+    cause, and both remedies (the settings.json pin and the daemon restart).
+
+    `routed` must be True when an account/route overlay is composed right
+    after this scrub: that overlay re-supplies these same vars from the
+    route, so "falls back to its account's own default" would be false for
+    that spawn. Pass routed=True whenever account_env or route_env is
+    active at the call site."""
+    fallback = (
+        "The child receives that route's own model instead."
+        if routed
+        else "The child falls back to its account's own default."
+    )
     return (
         "fno: dropped "
         + ", ".join(dropped)
         + " from this child's env: they name a non-Anthropic model while "
         "ANTHROPIC_BASE_URL is unset or names an anthropic.com host, so the "
         "child would ask Anthropic for a model it does not serve and every "
-        "call on that tier would error. The child falls back to its account's "
-        "own default. This env was inherited, usually from a long-lived "
-        "`claude` background daemon started from a shell that held those "
-        "exports; no config edit clears a running daemon. Pin the tier "
-        "defaults in ~/.claude/settings.json `env` (that wins over an "
-        "inherited value) or restart the daemon."
+        "call on that tier would error. " + fallback + " This env was "
+        "inherited, usually from a long-lived `claude` background daemon "
+        "started from a shell that held those exports; no config edit "
+        "clears a running daemon. Pin the tier defaults in "
+        "~/.claude/settings.json `env` (that wins over an inherited value) "
+        "or restart the daemon."
     )
 
 

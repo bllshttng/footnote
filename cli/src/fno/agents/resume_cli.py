@@ -312,7 +312,10 @@ def _default_wake_fn(
 
     dropped = scrub_incoherent_model_env(env)
     if dropped:
-        print(incoherent_model_env_notice(dropped), file=sys.stderr)
+        print(
+            incoherent_model_env_notice(dropped, routed=bool(route_env)),
+            file=sys.stderr,
+        )
     # Scrub only when there is something to restore, matching
     # bg_create/headless_create (harnesses/claude.py): a route-less row (the
     # common default-account case) keeps its ambient auth untouched rather
