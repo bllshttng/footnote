@@ -566,6 +566,54 @@ grep <<<"$out" -q "stalled holder" && fail "stole from a healthy holder" || ok "
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+echo "== orphan steal: a reparented holder is stolen before the stall floor =="
+rm -f "$ATT"   # every steal section clears the attestation or reuse skips the lock
+# Double-fork: the intermediate bash exits, the sleeper reparents to pid 1 -
+# the exact shape of the 2026-08-18 incident holder (live, orphaned, 0% CPU).
+orphan_pid="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+for _i in $(seq 1 40); do
+    [[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] && break
+    sleep 0.2
+done
+[[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] \
+    && ok "fixture: the sleeper is a real orphan (ppid=1)" \
+    || fail "fixture: sleeper never reparented (ppid=$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' '))"
+# Stamp 12s old against a 600s floor: only the orphan bypass can reach the
+# CPU probe. The stamp sits within the recycle slop of the young process.
+orphan_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$LOCKDIR"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$orphan_pid" "$orphan_recent" > "$LOCKDIR/holder"
+out="$(PREFLIGHT_STALL_MIN_AGE=600 PREFLIGHT_STALL_PROBE_SPACING=2 run_pf --wait-timeout 30 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "stole from an orphaned holder before the 600s floor and ran to GREEN" || fail "orphan steal failed rc=$rc: $out"
+grep <<<"$out" -q "orphaned holder" && ok "the steal names the orphan condemnation" || fail "no orphan exception line: $out"
+if ! kill -0 "$orphan_pid" 2>/dev/null; then
+    ok "the orphaned holder's tree was TERMed on the steal"
+else
+    fail "the orphan survived the steal"; kill "$orphan_pid" 2>/dev/null
+fi
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
+echo "== orphan guard: an orphan that is computing keeps its lock =="
+# LD3 pinned: the bypass removes the age floor and never the CPU probe. Floor 0
+# makes condemnation unreachable by arithmetic, so an orphan that spins must be
+# waited on to the timeout like any healthy holder.
+spin_orphan="$(bash -c 'while :; do :; done >/dev/null 2>&1 & echo $!')"
+for _i in $(seq 1 40); do
+    [[ "$(ps -o ppid= -p "$spin_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
+    sleep 0.2
+done
+rm -f "$ATT"   # the orphan-steal run just minted one for this same SHA
+mkdir -p "$LOCKDIR"
+spin_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf 'pid=%s started=%s host=x sha=deadbee\n' "$spin_orphan" "$spin_recent" > "$LOCKDIR/holder"
+spin_stamp="$(cat "$LOCKDIR/holder")"
+out="$(PREFLIGHT_STALL_MIN_AGE=600 PREFLIGHT_STALL_PROBE_SPACING=2 PREFLIGHT_STALL_CPU_FLOOR=0 run_pf --wait-timeout 6 2>&1)"; rc=$?
+[[ $rc -eq 3 ]] && ok "an orphan under floor 0 is waited on, not stolen" || fail "expected 3 got $rc: $out"
+grep <<<"$out" -q "orphaned holder" && fail "stole from a computing orphan (the bypass skipped the probe)" || ok "no orphan condemnation under floor 0"
+[[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$spin_stamp" ]] && ok "the computing orphan kept its lock" || fail "holder stamp changed"
+kill "$spin_orphan" 2>/dev/null
+rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
 old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
 rm -f "$(cur_att)"
@@ -678,7 +726,7 @@ echo "== stall predicate: floor and turnover are arithmetic, not host load =="
 # condemnation branch unreachable by arithmetic (delta >= 0 can never be < 0).
 eval "$(sed -n -e '/^cputime_to_s() {/,/^}/p' -e '/^holder_tree_pids() {/,/^}/p' \
     -e '/^holder_tree_cpu() {/,/^}/p' -e '/^process_age_s() {/,/^}/p' \
-    -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
+    -e '/^holder_is_orphaned() {/,/^}/p' -e '/^holder_is_stalled() {/,/^}/p' "$PREFLIGHT_SRC")"
 STALL_MIN_AGE=10; STALL_PROBE_SPACING=1; STALL_CPU_FLOOR=0
 unit_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
 sleep 600 & unit_a=$!
@@ -713,7 +761,26 @@ for _p in $unit_spin_pids; do kill "$_p" 2>/dev/null; wait "$_p" 2>/dev/null; do
 [[ $(( unit_sum_end - unit_sum_start )) -ge 1 ]] \
     && ok "the tree-CPU sampler measures real progress (delta=$(( unit_sum_end - unit_sum_start ))s)" \
     || fail "sampler read no progress from a busy tree (delta=$(( unit_sum_end - unit_sum_start ))s)"
-unset -f cputime_to_s holder_tree_pids holder_tree_cpu process_age_s holder_is_stalled
+unset -f cputime_to_s holder_tree_pids holder_tree_cpu process_age_s holder_is_orphaned holder_is_stalled
+
+echo "== orphan predicate: parentage, not existence =="
+# holder_is_orphaned must read WHO launched the pid, not whether the pid is
+# alive: $$ has a live parent, an unreadable pid must bias toward keeping the
+# lock (never steal on what cannot be measured), and a real orphan reads true.
+eval "$(sed -n '/^holder_is_orphaned() {/,/^}/p' "$PREFLIGHT_SRC")"
+holder_is_orphaned "$$" && fail "condemned the suite itself (it has a live parent)" \
+    || ok "a parented pid is not an orphan"
+holder_is_orphaned "99999999" && fail "condemned a pid nothing can read" \
+    || ok "an unreadable pid reads as not-orphan (waited on, never stolen)"
+unit_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+for _i in $(seq 1 40); do
+    [[ "$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
+    sleep 0.2
+done
+holder_is_orphaned "$unit_orphan" && ok "a reparented pid reads as orphaned" \
+    || fail "failed to see a real orphan (ppid=$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' '))"
+kill "$unit_orphan" 2>/dev/null
+unset -f holder_is_orphaned
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done
