@@ -38,7 +38,7 @@ It does NOT ask for a retry. The durable event has already landed by then, so a 
 
 The event stays project-local because it is durable there. `cli/src/fno/events/gc.py` refuses to compact the global journal but does compact project journals, and it deletes rows classified `retention: ephemeral`. `operator_decision` carries an explicit `retention: durable` key, so the GC keeps it.
 
-That key changes no behavior today, and it is not decoration. The schema default is already `durable`, so the record survived by inheriting it. A record the whole recall promise rests on was one schema edit away from not surviving, and the key is what makes the guarantee readable at the entry rather than inferred from a default three thousand lines away.
+That key changes no behavior today, and it is not decoration. The schema default is already `durable`, so the record survived by inheriting it. The whole recall promise rested on a default three thousand lines away, one edit from not holding. The key states the guarantee at the entry instead.
 
 Recall needs one machine-wide file, and two candidates were rejected.
 
