@@ -1170,28 +1170,28 @@ const GH_PR_358_LOGGING: &str = "#!/bin/sh\n\
 const GH_OPTIONAL_REVIEWED: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$*\" in\n\
-       *reviews,comments*) echo '{\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\"}],\"comments\":[]}' ;;\n\
+       *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"abc123def456abc123def456abc123def456abc1\"}}],\"comments\":[]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
      esac\n";
 
 const GH_OPTIONAL_OUTSTANDING: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$*\" in\n\
-       *reviews,comments*) echo '{\"reviews\":[],\"comments\":[]}' ;;\n\
+       *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
      esac\n";
 
 const GH_OPTIONAL_USAGE_LIMITED: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$*\" in\n\
-       *reviews,comments*) echo '{\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
+       *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
      esac\n";
 
 const GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$*\" in\n\
-       *reviews,comments*) echo '{\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\"}],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
+       *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"abc123def456abc123def456abc123def456abc1\"}}],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
      esac\n";
 
@@ -1408,6 +1408,64 @@ fn finalize_optional_review_read_failure_withholds_arm() {
             Some("optional-review-read-failed")
         );
     }
+}
+
+/// Round 3, PR 917: a review object on a commit that is not the PR head is
+/// Stale under the shared predicate, and arming on it re-arms the post-green
+/// race this gate exists to close. The old scan counted any non-empty state
+/// review regardless of commit, so finalize armed where loop-check's coverage
+/// refused - the reader-divergence class. The cwd is not a git repo, so the
+/// resolver's non-exact-head arm fails closed to Stale, which is precisely the
+/// behavior under test.
+#[test]
+fn finalize_withholds_arm_when_optional_review_is_stale() {
+    let env = setup("S-optional-stale", false);
+    set_posture(&env, "S-optional-stale", true);
+    configure_optional_codex(&env);
+    let gh = "#!/bin/sh\n\
+         echo \"gh $*\" >> calls.log\n\
+         case \"$*\" in\n\
+           *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\",\"commit\":{\"oid\":\"9999999999999999999999999999999999999999\"}}],\"comments\":[]}' ;;\n\
+           *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+         esac\n";
+    let out = run_finalize_shimmed(&env, "DonePRGreen", gh);
+    assert!(out.status.success());
+    assert!(!calls(&env).contains("gh pr merge"));
+    let event = finalized_event(&env, "S-optional-stale");
+    assert_eq!(
+        event
+            .pointer("/data/auto_merge_blocked_reason")
+            .and_then(|v| v.as_str()),
+        Some("optional-review-stale:chatgpt-codex-connector")
+    );
+}
+
+/// Round 3, PR 917: the clean-pass comment lane. Codex posts its clean pass as
+/// a pinned ISSUE comment, not a review object (measured PR #947); the old
+/// scan never read comments for a pass, so a flawlessly-reviewed PR withheld
+/// arming forever while loop-check counted the same comment. The pinned sha
+/// equals the PR head, so the pass is Fresh without a git call.
+#[test]
+fn finalize_arms_when_optional_clean_pass_comment_pins_the_head() {
+    let env = setup("S-optional-clean-pass", false);
+    set_posture(&env, "S-optional-clean-pass", true);
+    configure_optional_codex(&env);
+    let gh = "#!/bin/sh\n\
+         echo \"gh $*\" >> calls.log\n\
+         case \"$*\" in\n\
+           *reviews,comments*) echo '{\"headRefOid\":\"abc123def456abc123def456abc123def456abc1\",\"baseRefName\":\"main\",\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"createdAt\":\"2026-08-17T00:00:00Z\",\"body\":\"Codex Review: Didn’t find any major issues. Bravo. Reviewed commit: abc123def456abc123def456abc123def456abc1\"}]}' ;;\n\
+           *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+         esac\n";
+    let out = run_finalize_shimmed(&env, "DonePRGreen", gh);
+    assert!(out.status.success());
+    assert!(
+        calls(&env).contains("gh pr merge 358 --auto --merge"),
+        "a pinned clean-pass comment must satisfy the optional check: {}",
+        calls(&env)
+    );
+    let event = finalized_event(&env, "S-optional-clean-pass");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
 }
 
 /// The configured merge strategy reaches the argv. Before this, `--merge`

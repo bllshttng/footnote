@@ -250,8 +250,8 @@ That is what makes a rebase carry and a one-line code fix die.
 | `github_app` | the review object's `.commit.oid` | none, already in the `gh pr view --json reviews` payload |
 | `local_attestation` | the attestation's own `data.head_sha` | none, already emitted |
 
-Three separate places ask "has this reviewer reviewed this code", and all three go through the predicate.
-They are the coverage count, the `config.review.reviewers` attestation scan, and the required-bot presence check that drives `missing_bots`.
+Four separate places ask "has this reviewer reviewed this code", and all four go through the predicate.
+They are the coverage count, the `config.review.reviewers` attestation scan, the required-bot presence check that drives `missing_bots`, and `finalize`'s optional-app auto-merge arming check.
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
 

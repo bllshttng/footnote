@@ -478,6 +478,11 @@ def read_review_coverage(
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": _stale_verdicts(latest),
     }
+    # The raw verdict list rides along when present (older events carry none):
+    # the local-pass conjunct scans it, and dropping it here made `fno pr
+    # status` refuse forever on a row `fno pr merge` accepted (round 3, PR 917).
+    if latest.get("verdicts") is not None:
+        shaped["verdicts"] = latest["verdicts"]
     if note:
         shaped["recompute"] = note
     return shaped

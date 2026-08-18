@@ -771,6 +771,106 @@ def test_ready_does_not_crash_on_a_non_integer_reviewed_count(monkeypatch, capsy
     assert out["ready_blockers"] == []
 
 
+def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
+    monkeypatch, capsys, tmp_path
+):
+    """Round 3, PR 917: read_review_coverage's shaped row dropped `verdicts`,
+    so the local-pass conjunct saw an empty list forever on this repo's config
+    while merge, reading the raw row, accepted - the two-readers-disagree shape.
+    This drives run_status through the REAL reader (only the repo root is
+    pointed at the fixture), so the conjunct is proven on the wire, not on the
+    stubbed shapes the other tests pin."""
+    import json
+
+    _lane_fetch(monkeypatch)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: True,
+    )
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    covered_row = {
+        "ts": "2026-08-17T00:00:00Z",
+        "type": "review_coverage",
+        "data": {
+            "pr": 42,
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "h1",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "reviewed_sha": "h1",
+                    "freshness": "fresh",
+                }
+            ],
+        },
+    }
+    events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    _status.run_status("42", cwd=str(tmp_path))
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True, out["ready_blockers"]
+    assert out["review_coverage"]["verdicts"][0]["name"] == "code-review"
+
+    # Same wire, no local pass in the verdicts: the conjunct fails BY NAME, so
+    # the negative direction is also proven on the reader, not the stub.
+    bot_only = json.loads(json.dumps(covered_row))
+    bot_only["data"]["verdicts"] = [
+        {"name": "chatgpt-codex-connector", "producer": "github_app",
+         "verdict": "reviewed", "reviewed_sha": "h1", "freshness": "fresh"}
+    ]
+    events.write_text(json.dumps(bot_only) + "\n", encoding="utf-8")
+    _status.run_status("42", cwd=str(tmp_path))
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_no_local_pass" in out["ready_blockers"]
+
+
+def test_closed_pr_skips_the_probes_and_the_coverage_conjunct(monkeypatch, capsys):
+    """Round 3, PR 917: a terminal PR (CLOSED here, MERGED already exempt) has
+    no would-merge left, yet the optional-review read, the lane probes, and the
+    coverage recompute still fired against it - live reads a closed PR burns
+    for a conjunct that guards nothing. Every probe here RAISES: reaching any
+    of them fails the test, which is the assertion."""
+    import json
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": "CLOSED",
+                "headRefOid": "h1",
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+            },
+            "",
+        ),
+    )
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("a probe fired on a closed PR")
+
+    monkeypatch.setattr(_status, "read_optional_review_state", _must_not_run)
+    monkeypatch.setattr(_status, "read_review_coverage", _must_not_run)
+    monkeypatch.setattr(_status, "_review_lane", _must_not_run)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required", _must_not_run
+    )
+    code = _status.run_status("42")
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["ready_blockers"] == []
+    # The no-pending answers, not `unknown`: nothing failed, it was not asked.
+    assert out["optional_reviews"] == []
+    assert out["optional_reviews_unresolved"] == 0
+
+
 def test_read_review_coverage_from_events(tmp_path):
     """x-0eaf: read_review_coverage consumes the latest review_coverage event
     for the PR from the project events log; no event -> unknown (fail-open)."""

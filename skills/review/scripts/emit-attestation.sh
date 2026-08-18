@@ -76,23 +76,30 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
 # refuses two worktrees on one branch), and a reviewer worktree created from
 # the PR branch tracks it - so the upstream names the branch GitHub reports
 # as headRefName and the LOCAL name never would. But an fno AUTHOR worktree
-# is created off origin/main and tracks IT until `push -u` fires at PR
-# create, so an upstream of `main` names the BASE, not the PR: recording it
-# would mis-scope every pre-push emit and kill the branch-arm carry this
-# field exists to preserve. `main` keeps the local name (the author's
-# feature branch, which IS the PR branch). A detached HEAD names no branch
-# at all: refuse rather than record "" - the empty string is byte-identical
-# to the pre-branch-field backlog, so a live emit would mint a fresh legacy
-# member no later carry can scope. git rev-parse is local and free; do NOT
-# reach for `gh pr view` here - a network call on the emit path turns a
-# review receipt into something that fails when GitHub is slow.
+# is created off the repo's default branch and tracks IT until `push -u`
+# fires at PR create, so an upstream naming the BASE, not the PR, would
+# mis-scope every pre-push emit and kill the branch-arm carry this field
+# exists to preserve. The base is whatever `refs/remotes/origin/HEAD`
+# actually points at (round 3, PR 917: a literal `main` comparison recorded
+# `branch=develop` on every develop-based repo, scoping the author's
+# feature-branch attestation to a branch no PR would ever carry), falling
+# back to `main` only when the symbolic ref is unset - a fresh clone without
+# it behaves exactly as before. A detached HEAD names no branch at all:
+# refuse rather than record "" - the empty string is byte-identical to the
+# pre-branch-field backlog, so a live emit would mint a fresh legacy member
+# no later carry can scope. git rev-parse is local and free; do NOT reach
+# for `gh pr view` here - a network call on the emit path turns a review
+# receipt into something that fails when GitHub is slow.
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
   echo "emit-attestation: detached HEAD names no PR branch (an empty branch field would read as a pre-branch-field event and never carry past a head move); no event emitted" >&2
   exit 1
 fi
+base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+base="${base#*/}"
+base="${base:-main}"
 upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-if [[ "$upstream" == */* && "${upstream#*/}" != "main" ]]; then
+if [[ "$upstream" == */* && "${upstream#*/}" != "$base" ]]; then
   branch="${upstream#*/}"
 fi
 

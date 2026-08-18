@@ -124,6 +124,33 @@ got="$(stored '.branch')"
   && pass "a main-tracking branch keeps its local PR-branch name" \
   || fail "main-tracking branch: want feature/x-e601 (local), got '$got'"
 
+# 6. A develop-based repo (round 3, PR 917): origin/HEAD names develop, and
+#    the author branch tracks the BASE origin/develop pre-push. A literal
+#    `main` comparison recorded branch=develop here - scoping the author's
+#    feature-branch attestation to a base branch no PR ever carries. The base
+#    must resolve through refs/remotes/origin/HEAD, and the local name wins.
+git -C "$REPO" update-ref refs/remotes/origin/develop "$HEAD_SHA"
+git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
+git -C "$REPO" branch --set-upstream-to=origin/develop feature/x-e601 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "a develop-tracking branch on a develop-based repo keeps its local name" \
+  || fail "develop-tracking branch: want feature/x-e601 (local), got '$got'"
+
+# 7. Same develop-based repo, reviewer shape: the upstream names the PR branch
+#    (develop is now the base), so the upstream short name must still win -
+#    the base resolution must not swallow the reviewer lane it exists for.
+git -C "$REPO" checkout -q -b wt/r-2
+git -C "$REPO" branch --set-upstream-to=origin/feature/x-e601 wt/r-2 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "develop-based repo still records a reviewer upstream PR branch" \
+  || fail "develop-based reviewer worktree: want feature/x-e601 (upstream), got '$got'"
+
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

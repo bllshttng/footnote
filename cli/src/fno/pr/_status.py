@@ -324,55 +324,71 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     verdict, code, counts = verdict_for(rollup)
     green = verdict == "green"
 
-    # Additive review signal (x-705b): computed AFTER the authoritative CI verdict
-    # so a slow/failed review read can never delay or corrupt it. Any failure
-    # degrades to "unknown"/None and leaves the CI verdict + exit code untouched.
-    reader = review_reader or read_optional_review_state
-    try:
-        reviews = reader(pr, cwd)
-    except Exception:
-        reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
-    unresolved = reviews.get("optional_reviews_unresolved")
-
-    # x-0eaf: coverage signal, same additive/fail-open discipline as the optional
-    # review read above. Read from the review_coverage event so a human and the
-    # loop see one number (Ownership: Rust computes, Python reads). Recomputed
-    # once when no usable row exists (x-3a3f), so a human report and the merge
-    # gate act on the same number instead of status saying "no coverage" for a
-    # PR merge would clear after one recompute. The PR head rides in from
-    # _fetch: without it the verb would pin the emitted row to the LOCAL
-    # checkout's HEAD, planting a wrong-head row both gates then disagree on.
-    # The lane answer comes BEFORE the coverage read, not beside it: on a
-    # no-lane repo the read's recompute is a 120s subprocess that appends
-    # coverage rows nobody acts on - the exact cost `fno pr merge` skips on
-    # this same boundary - so a conjunct ready ignores must not fire it either.
-    #
-    # ONE probe chain where two ran: required implies lane (a configured
-    # code-review reviewer IS a lane, and the self-review floor that makes a
-    # code payload required is the same floor that makes the lane exist), so
-    # the required probe answers both when true and only a clean not-required
-    # verdict pays for the lane probe. Each predicate keeps its own
-    # fail-closed direction on a thrown probe.
-    code_review_required = False
-    try:
-        from fno.pr import _merge
-
-        code_review_required = bool(
-            _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
-        )
-    except Exception:  # noqa: BLE001 - fail closed, like the gate
-        code_review_required = True
-    review_lane = code_review_required or _review_lane(pr, cwd)
-    try:
-        coverage = read_review_coverage(
-            int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
-        )
-    except Exception:
-        # The producer's own sentinel, not a copy of it: a second literal here
-        # is a shape that drifts the moment a key is added on one side only.
-        coverage = dict(_UNKNOWN_COVERAGE)
-
     merged = (pr_json.get("state") or "").upper() == "MERGED"
+    # A terminal PR (round 3) has no would-merge left: the coverage conjunct
+    # guards what WOULD merge, and the probes that feed it are live reads a
+    # closed PR can still burn - `gh pr view --json reviews` and a 120s
+    # recompute against a PR that will never merge again. Skip all of them;
+    # the report prints the no-pending answers ([] / 0) rather than `unknown`,
+    # because nothing was failed, it was deliberately not asked.
+    if (pr_json.get("state") or "").upper() in ("MERGED", "CLOSED"):
+        reviews = {"optional_reviews": [], "optional_reviews_unresolved": 0}
+        unresolved = 0
+        coverage = dict(_UNKNOWN_COVERAGE)
+        review_lane = False
+        code_review_required = False
+    else:
+        # Additive review signal (x-705b): computed AFTER the authoritative CI
+        # verdict so a slow/failed review read can never delay or corrupt it.
+        # Any failure degrades to "unknown"/None and leaves the CI verdict +
+        # exit code untouched.
+        reader = review_reader or read_optional_review_state
+        try:
+            reviews = reader(pr, cwd)
+        except Exception:
+            reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+        unresolved = reviews.get("optional_reviews_unresolved")
+
+        # x-0eaf: coverage signal, same additive/fail-open discipline as the
+        # optional review read above. Read from the review_coverage event so a
+        # human and the loop see one number (Ownership: Rust computes, Python
+        # reads). Recomputed once when no usable row exists (x-3a3f), so a
+        # human report and the merge gate act on the same number instead of
+        # status saying "no coverage" for a PR merge would clear after one
+        # recompute. The PR head rides in from _fetch: without it the verb
+        # would pin the emitted row to the LOCAL checkout's HEAD, planting a
+        # wrong-head row both gates then disagree on. The lane answer comes
+        # BEFORE the coverage read, not beside it: on a no-lane repo the
+        # read's recompute is a 120s subprocess that appends coverage rows
+        # nobody acts on - the exact cost `fno pr merge` skips on this same
+        # boundary - so a conjunct ready ignores must not fire it either.
+        #
+        # ONE probe chain where two ran: required implies lane (a configured
+        # code-review reviewer IS a lane, and the self-review floor that makes
+        # a code payload required is the same floor that makes the lane
+        # exist), so the required probe answers both when true and only a
+        # clean not-required verdict pays for the lane probe. Each predicate
+        # keeps its own fail-closed direction on a thrown probe.
+        code_review_required = False
+        try:
+            from fno.pr import _merge
+
+            code_review_required = bool(
+                _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
+            )
+        except Exception:  # noqa: BLE001 - fail closed, like the gate
+            code_review_required = True
+        review_lane = code_review_required or _review_lane(pr, cwd)
+        try:
+            coverage = read_review_coverage(
+                int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
+            )
+        except Exception:
+            # The producer's own sentinel, not a copy of it: a second literal
+            # here is a shape that drifts the moment a key is added on one
+            # side only.
+            coverage = dict(_UNKNOWN_COVERAGE)
+
     blockers = _ready_blockers(
         green,
         verdict,
