@@ -184,6 +184,11 @@ impl Queue for TargetQueue {
         Ok(self.unit.take())
     }
 
+    /// The degenerate walk holds at most one unit.
+    fn has_pending(&mut self) -> Result<bool, LoopError> {
+        Ok(self.unit.is_some())
+    }
+
     /// Inert close: see module doc for why this does nothing.
     ///
     /// The session's loop-check stop hook already emitted the termination event.

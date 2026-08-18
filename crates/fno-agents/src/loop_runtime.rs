@@ -153,6 +153,13 @@ pub trait Queue {
     /// Return the next unit, or `None` if the queue is empty.
     fn next(&mut self) -> Result<Option<Unit>, LoopError>;
 
+    /// Answer whether `next` would return a unit right now, without taking
+    /// one. Must be side-effect free: no claim acquisition, no cursor
+    /// advance. The outer budget check probes this before dequeuing so an
+    /// unaffordable unit is never taken - a claiming Queue acquires in
+    /// `next()`, and a unit taken then dropped strands its claim.
+    fn has_pending(&mut self) -> Result<bool, LoopError>;
+
     /// Mark a unit as closed (done/parked/refused) given the termination
     /// evidence extracted from the journal.
     fn close(&mut self, unit: &Unit, evidence: &Evidence) -> Result<CloseOutcome, LoopError>;
@@ -563,8 +570,8 @@ fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
 /// ```text
 /// loop:
 ///   check cancel -> Interrupted
+///   check budget via has_pending -> pending: Budget / drained: NoWork
 ///   unit = queue.next()  -> None: NoWork
-///   check budget -> Budget
 ///   resume guard: if journal has a termination event for unit.session_key,
 ///     close the unit without dispatching, journal node_closed,
 ///     iterations_used += 1, and continue.
@@ -621,6 +628,45 @@ pub fn run_loop(
             });
         }
 
+        // ── budget check (outer loop, before the dequeue) ─────────────────
+        // A dequeue is not free: a claiming Queue (megawalk) acquires the
+        // node claim inside next(), so taking a unit this pass can only drop
+        // strands the claim until its TTL expires. Probe emptiness without
+        // side effects instead: a drained queue reports NoWork - the work is
+        // finished, which is not the same news as running out of room - while
+        // a pending unit the walk cannot afford reports Budget, untaken.
+        if iterations_used >= budget.max_iterations {
+            if queue.has_pending()? {
+                journal.append(
+                    "loop_terminated",
+                    json!({
+                        "reason": "Budget",
+                        "iterations_used": iterations_used,
+                        "units_closed": units.len(),
+                        "axis": "iterations",
+                    }),
+                )?;
+                return Ok(LoopOutcome {
+                    reason: TerminationReason::Budget,
+                    iterations_used,
+                    units,
+                });
+            }
+            journal.append(
+                "loop_terminated",
+                json!({
+                    "reason": "NoWork",
+                    "iterations_used": iterations_used,
+                    "units_closed": units.len(),
+                }),
+            )?;
+            return Ok(LoopOutcome {
+                reason: TerminationReason::NoWork,
+                iterations_used,
+                units,
+            });
+        }
+
         // ── dequeue next unit ─────────────────────────────────────────────
         // queue.next() may return:
         //   Ok(None)  -> backlog empty -> NoWork
@@ -645,29 +691,6 @@ pub fn run_loop(
             Ok(Some(u)) => u,
             Err(e) => return Err(e),
         };
-
-        // ── budget check (outer loop) ──────────────────────────────────────
-        // After the dequeue so an exhausted budget over an empty queue still
-        // reports NoWork: the work is finished, which is not the same news as
-        // running out of room. Only a real unit we cannot afford reports
-        // Budget. Reachable from the resume-guard path, which `continue`s
-        // past the inner loop's own check.
-        if iterations_used >= budget.max_iterations {
-            journal.append(
-                "loop_terminated",
-                json!({
-                    "reason": "Budget",
-                    "iterations_used": iterations_used,
-                    "units_closed": units.len(),
-                    "axis": "iterations",
-                }),
-            )?;
-            return Ok(LoopOutcome {
-                reason: TerminationReason::Budget,
-                iterations_used,
-                units,
-            });
-        }
 
         // ── resume guard (AC1-FR): check for pre-existing termination ─────
         // If a prior session for this unit already terminated (e.g. the walk

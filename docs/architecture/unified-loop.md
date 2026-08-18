@@ -31,8 +31,9 @@ All drivers share one loop body. The driver supplies a `Queue` impl and a `Dispa
 ```
 outer loop:
   check cancel -> Interrupted
+  budget check via queue.has_pending()
+                       -> pending: Budget / drained: NoWork
   unit = queue.next()   -> None: NoWork (terminate)
-  budget check          -> Budget (axis: "iterations")
   resume guard: journal has termination for unit.session_key?
     yes -> close without dispatch (AC1-FR), journal node_closed,
            iterations_used += 1, continue
@@ -60,9 +61,12 @@ outer loop:
 ```rust
 pub trait Queue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError>;
+    fn has_pending(&mut self) -> Result<bool, LoopError>;
     fn close(&mut self, unit: &Unit, evidence: &Evidence) -> Result<CloseOutcome, LoopError>;
 }
 ```
+
+`has_pending` answers whether `next` would return a unit right now, without taking one. It must be side-effect free: no claim acquisition, no cursor advance. The outer budget check probes it before any dequeue, so a unit the walk cannot afford is never taken (a claiming Queue acquires in `next()`; a unit taken then dropped would strand its claim).
 
 `&mut self` is deliberate (locked decision F8): the group-2 megawalk Queue carries cursor state and consecutive-failure counters that are inherently sequential. Using `&self` would require pointless `Mutex`-wrapping for single-threaded walk state. `run_loop` is always called from one thread.
 
@@ -176,9 +180,9 @@ Target = one unit, re-dispatch until a terminal event.
 
 After `next()` returns the unit and `close()` is called, subsequent `next()` calls return `None` - the outer loop exits with `NoWork`. The CLI reports the unit's evidence reason as the headline exit code, not the walk-level `NoWork`.
 
-**Watchdog synthesis:** if a dispatched session exits and `find_termination` finds no matching event, the runtime emits `node_failed` with the exit code (including `128+N` for signal deaths) and re-dispatches on the next inner iteration.
+**Watchdog synthesis:** a dispatched session that exits without a matching `find_termination` event gets a `node_failed` event with its exit code (including `128+N` for signal deaths). The runtime then re-dispatches on the next inner iteration.
 
-**Iteration ceiling -> Budget:** the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event at `iterations_used >= budget.max_iterations`. The outer-loop check sits after the dequeue. A drained queue reports `NoWork` even at an exhausted budget. Only a real unit the walk cannot afford reports `Budget`, and that unit is left unclosed. A claiming `Queue` (megawalk) must not strand a dequeued unit beyond its tolerance. It can run at a budget with headroom, make an unaffordable dequeue cheap to abandon, or release in `close()`. Parking holds the claim, so a park-shaped close does not release it.
+**Iteration ceiling -> Budget:** the walk terminates with `TerminationReason::Budget` and `axis: "iterations"` in the journal event at `iterations_used >= budget.max_iterations`. The outer-loop check sits before the dequeue, behind a side-effect-free `Queue::has_pending()` probe. A drained queue reports `NoWork` even at an exhausted budget. A pending unit the walk cannot afford reports `Budget` and is never dequeued: a claiming `Queue` (megawalk) acquires the node claim in `next()`, and the probe does not acquire, so an unaffordable unit never has its claim taken. Parking holds the claim, so a park-shaped close does not release it.
 
 **Resume guard (AC1-FR):** a pre-existing `termination` event for the manifest's `session_key` on the first `next()` call closes the unit without dispatch. This handles the case where the loop process was killed after the session completed but before the walk recorded the close. The close pass consumes one iteration. A budget counts work, not dispatches. A queue that re-derives the same unit must not spin for free. No duplicate dispatch occurs.
 
@@ -348,7 +352,9 @@ Applying it is an operator step: run `--apply` once, after a PR proves a green s
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.
 The `guard` job therefore skips fork PRs outright rather than running and failing on the POST, which would have hung a permanently red check on every external contribution.
 Marking it required while fork PRs are accepted blocks every one of them permanently, waiting on a context no run can produce, so the setting is safe only on a repo that takes no fork PRs; covering forks needs a privileged second workflow, which is a security decision this PR does not make.
+
 The in-process callers fail OPEN on a probe that could not evaluate (a gh outage must not wedge a merge, matching `_merge._behind_by`), while CI fails CLOSED on the same condition, because a check that could not run has verified nothing.
+
 `FNO_PR_BASE_LINEAGE_OK=stale-acknowledged` bypasses a refusal and records a `gate_escape`.
 
 ---
@@ -443,7 +449,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 - **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory | DoneDelivery` evidence. Exit 0 yields `CloseOutcome::Closed`; exit 5 (PR OPEN, not merged) yields `CloseOutcome::AwaitingMerge`; other nonzero yields `CloseOutcome::Parked(stderr)`. `DoneAwaitingMerge` evidence maps directly to `CloseOutcome::AwaitingMerge` WITHOUT shelling `fno backlog done` (the reason already carries the fact - this fixes its earlier mis-handling as a held-claim Park). Other non-done evidence returns `CloseOutcome::Parked` without calling `fno backlog done`.
 
-**Claims.** Before returning a unit from `next()`, the queue calls `fno claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1 (`ClaimHeldByOther`) lets the live-claims filter inside `fno backlog next` exclude the node on the next retry; the walker never needs a skip-set - claims and selection compose without walker-side coordination. Exit 2 or other non-zero codes surface immediately as a `LoopError::Queue` (sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors). The retry bound is `MAX_CLAIM_RETRIES = 5`; exhaustion is a `LoopError::Queue`.
+**Claims.** Before returning a unit from `next()`, the queue calls `fno claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1 (`ClaimHeldByOther`) lets the live-claims filter inside `fno backlog next` exclude the node on the next retry; the walker never needs a skip-set - claims and selection compose without walker-side coordination. Exit 2 or other non-zero codes surface immediately as a `LoopError::Queue` (sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors). The retry bound is `MAX_CLAIM_RETRIES = 5`; exhaustion is a `LoopError::Queue`. `has_pending()` answers from the same live selection without acquiring: the outer budget check probes it before any dequeue, so a unit the walk cannot afford never has its claim taken.
 
 **Park-exclusion.** On `CloseOutcome::Parked` or `Refused`, the claim is held (not released). The live-claims filter continues to exclude the parked node so the walker moves on to other ready work rather than re-picking the same stuck node. The claim TTL is refreshed via a same-holder re-acquire immediately after parking - the worker's `init-target-state.sh` rewrites `acquired_at` with the worker's (now-dead) pid, so the walker re-acquires to reset the window from the current time.
 

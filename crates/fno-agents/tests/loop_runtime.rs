@@ -129,6 +129,10 @@ impl Queue for FixedQueue {
         }
     }
 
+    fn has_pending(&mut self) -> Result<bool, LoopError> {
+        Ok(!self.units.lock().unwrap().is_empty())
+    }
+
     fn close(&mut self, unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
         self.closed.lock().unwrap().push(unit.id.clone());
         // Return a clone of the stored outcome.
@@ -169,8 +173,63 @@ impl Queue for RepeatQueue {
         Ok(Some(make_unit(&self.id, &self.session_key)))
     }
 
+    fn has_pending(&mut self) -> Result<bool, LoopError> {
+        Ok(true) // the queue re-derives the unit forever
+    }
+
     fn close(&mut self, unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
         self.closed.lock().unwrap().push(unit.id.clone());
+        Ok(CloseOutcome::Closed)
+    }
+}
+
+/// A Queue that models the documented megawalk claim contract: `next()`
+/// acquires the node claim before returning a unit, `close()` releases it.
+/// The walk must never dequeue a unit it cannot afford to process - the
+/// claim for a dropped unit strands the node until its TTL expires.
+struct ClaimingQueue {
+    units: Mutex<Vec<Unit>>,
+    acquired: Mutex<u64>,
+    released: Mutex<u64>,
+}
+
+impl ClaimingQueue {
+    fn new(units: Vec<Unit>) -> Self {
+        Self {
+            units: Mutex::new(units),
+            acquired: Mutex::new(0),
+            released: Mutex::new(0),
+        }
+    }
+
+    /// Claims taken via next() and not yet given back via close().
+    fn claims_held(&self) -> u64 {
+        *self.acquired.lock().unwrap() - *self.released.lock().unwrap()
+    }
+
+    /// Units handed out by next().
+    fn dequeue_count(&self) -> u64 {
+        *self.acquired.lock().unwrap()
+    }
+}
+
+impl Queue for ClaimingQueue {
+    fn next(&mut self) -> Result<Option<Unit>, LoopError> {
+        let mut units = self.units.lock().unwrap();
+        if units.is_empty() {
+            Ok(None)
+        } else {
+            *self.acquired.lock().unwrap() += 1;
+            Ok(Some(units.remove(0)))
+        }
+    }
+
+    fn has_pending(&mut self) -> Result<bool, LoopError> {
+        Ok(!self.units.lock().unwrap().is_empty())
+    }
+
+    fn close(&mut self, _unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
+        *self.released.lock().unwrap() += 1;
         Ok(CloseOutcome::Closed)
     }
 }
@@ -538,6 +597,43 @@ fn exhausted_budget_then_empty_queue_reports_nowork() {
     assert_eq!(outcome.reason, TerminationReason::NoWork);
     assert_eq!(outcome.iterations_used, 1);
     assert_eq!(outcome.units.len(), 1);
+}
+
+// ── test 5d: an unaffordable unit is never dequeued (claim safety) ────────────
+
+#[test]
+fn unaffordable_unit_is_not_dequeued_no_claim_stranded() {
+    let dir = TempDir::new().unwrap();
+    let project_events = dir.path().join("events.jsonl");
+    let global_events = dir.path().join("global-events.jsonl");
+
+    // The resume-guard close of ab-1 spends the whole budget while ab-2 is
+    // still pending. The next outer pass cannot afford ab-2: dequeuing it
+    // would acquire its claim and then drop it, locking ab-2 away from every
+    // other walker until the claim TTL expires.
+    seed_termination_event(&project_events, "sess-1", "DoneAdvisory");
+    let mut queue = ClaimingQueue::new(vec![
+        make_unit("ab-1", "sess-1"),
+        make_unit("ab-2", "sess-2"),
+    ]);
+    let dispatcher = PanicDispatcher; // no dispatch may happen
+    let budget = LoopBudget::new(1).unwrap();
+    let journal = Journal::new_raw(project_events.clone(), global_events);
+
+    let outcome = run_loop(&mut queue, &dispatcher, &budget, &journal, &|| false, None).unwrap();
+
+    assert_eq!(outcome.reason, TerminationReason::Budget);
+    assert_eq!(outcome.iterations_used, 1);
+    assert_eq!(
+        queue.dequeue_count(),
+        1,
+        "the walk may dequeue only the unit it can afford; ab-2 must stay queued"
+    );
+    assert_eq!(
+        queue.claims_held(),
+        0,
+        "a claim taken for a unit the walk then drops strands the node for the next worker"
+    );
 }
 
 // ── test 6: cancel returns Interrupted ────────────────────────────────────────
