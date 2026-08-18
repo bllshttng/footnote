@@ -4,6 +4,7 @@
 #   cap        more than 10 active `###` entries fails (context-cost budget)
 #   fields     every entry needs a `graduates-to:` and an `added:` line
 #   staleness  an `added:` date older than 60 days fails (graduate or evict)
+#   qualifier  a pinned claim-bearing phrase deleted from a live entry fails
 #
 # Why a cap at all: AGENTS.md is injected at every SessionStart on every
 # harness, so each entry is paid on every session on every lane. An entry too
@@ -124,6 +125,28 @@ if [[ -n "$TITLES" && -f "$REGISTRY" ]]; then
     done < <(printf '%s\n' "$probe" | grep -oE '(^|[^a-zA-Z])fno +[a-z][a-z0-9-]*' | sed -E 's/.*fno +//')
   done <<< "$TITLES"
 fi
+
+# Claim-bearing qualifiers: the words a structural check cannot see. Every
+# check above counts something - headings, fields, dates, backticked tokens -
+# and a qualifier is none of those. So a prose diet deletes the one word
+# carrying an entry's claim and every count still passes. Measured on the
+# corpus diet: eleven qualifiers went missing, and two of them REVERSED an
+# entry into the defect it exists to teach against ("only the lockfile"
+# says presence proves ownership; "evidenced only by mail" rejects a
+# worker's own autonomous evidence).
+#
+# Each pin is entry-key<TAB>required-phrase, matched byte-exact. A pin binds
+# only while its own entry is present, so evicting or graduating an entry
+# releases its phrase instead of wedging this gate on prose the corpus is
+# supposed to have dropped.
+PINNED_PHRASES=$'liveness probes\tlive lockfile\ncapability probe\tmail probe'
+
+while IFS=$'\t' read -r entry_key phrase; do
+  [[ -z "$entry_key" || -z "$phrase" ]] && continue
+  printf '%s' "$TITLES" | grep -qF -- "$entry_key" || continue
+  printf '%s' "$SECTION" | grep -qF -- "$phrase" && continue
+  add_violation "entry '${entry_key}' no longer carries the pinned qualifier '${phrase}'; that word carries the claim, and every structural check above passes without it. Restore it, or drop its pin in this PR when the entry deliberately stops making that claim"
+done <<< "$PINNED_PHRASES"
 
 # Staleness: one python3 pass over the collected dates (portable date math).
 if [[ -n "$STALE_DATES" ]]; then
