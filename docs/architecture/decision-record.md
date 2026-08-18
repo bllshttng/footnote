@@ -49,7 +49,9 @@ The subject is any string. When a node exists, use its id. Otherwise use `pr-<n>
 
 The reader takes every subject the writer takes. That is the defect this page was written for. The writer accepted free text while the reader resolved a graph node first, so a ruling about `pr-923` was written, receipted, and lost.
 
-Matching is exact set membership on the recorded string. A subject that resolves to a node also answers to that node's id and slug. A decision about `pr-92` never answers a query for `pr-921`.
+Both sides expand, not just the query. A subject that names a node answers to every spelling of that node: the id, the slug, any case. The operator records under whatever was in front of them. The receipt then prints the canonical id as the way back. A reader that expands only the query sends them to a command that returns nothing.
+
+A subject that names no node matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
 
 A decision with no subject at all is reachable only through `fno decide list` with no `--subject`. When the question names no node, that is what `fno outstanding clear --answer` writes.
 

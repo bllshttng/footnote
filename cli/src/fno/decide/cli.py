@@ -69,7 +69,7 @@ def record(
         )
         raise typer.Exit(1)
 
-    from fno.decide import record_decision
+    from fno.decide import IndexWriteError, record_decision
 
     try:
         result = record_decision(
@@ -82,6 +82,17 @@ def record(
             options=list(option) or None,
             supersedes=supersedes,
         )
+    except IndexWriteError as exc:
+        # Exit 1, because the ruling is not recoverable yet. But name the right
+        # remedy: the durable event HAS landed, so re-running this command
+        # mints a second id for one ruling.
+        typer.echo(
+            f"decide: recorded {exc.decision_id} to the project journal, but the "
+            f"recall index write failed: {exc}. Run `fno decide reindex` to "
+            f"recover it. Do NOT re-run decide; that records it twice.",
+            err=True,
+        )
+        raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
         typer.echo(f"decide: failed to record: {exc}", err=True)
         raise typer.Exit(1)
@@ -116,7 +127,7 @@ def list_cmd(
         "Omit it to see the recent decisions across every subject.",
     ),
     limit: int = typer.Option(
-        20, "--limit", help="Most recent N. 0 means no cap."
+        20, "--limit", help="Most recent N. 0 or less means no cap."
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
@@ -125,12 +136,28 @@ def list_cmd(
     """Recover the decision history for a subject, newest first."""
     from fno.decide import list_decisions
 
-    label, decisions = list_decisions(subject, limit=limit)
+    try:
+        # No cap on the read. The cap is applied HERE so the total is known,
+        # and a truncated answer can say so - a silent cut on a recall verb is
+        # the same lie as a missing record.
+        label, found = list_decisions(subject, limit=None)
+    except OSError as exc:
+        typer.echo(f"decide list: cannot read the decision index: {exc}", err=True)
+        raise typer.Exit(1)
+
+    decisions = found[:limit] if limit > 0 else found
+    truncated = len(decisions) < len(found)
 
     if as_json:
         typer.echo(
             json.dumps(
-                {"subject": label, "decisions": decisions}, separators=(",", ":")
+                {
+                    "subject": label,
+                    "decisions": decisions,
+                    "total": len(found),
+                    "truncated": truncated,
+                },
+                separators=(",", ":"),
             )
         )
         return
@@ -160,6 +187,13 @@ def list_cmd(
         if d.get("supersedes"):
             typer.echo(f"    supersedes: {d['supersedes']}")
 
+    if truncated:
+        typer.echo(
+            f"decide list: showing {len(decisions)} of {len(found)}; "
+            f"--limit 0 for all.",
+            err=True,
+        )
+
 
 @decide_app.command("reindex")
 def reindex_cmd() -> None:
@@ -177,6 +211,8 @@ def reindex_cmd() -> None:
         raise typer.Exit(1)
 
     note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
+    if counts.get("repaired"):
+        note += f", {counts['repaired']} damaged row(s) dropped from the index"
     if counts.get("invalid"):
         note += f", {counts['invalid']} unreadable rows skipped"
     typer.echo(note, err=True)

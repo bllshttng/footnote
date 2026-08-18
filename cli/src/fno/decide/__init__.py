@@ -38,6 +38,21 @@ PROJECTION_FIELDS = (
 )
 
 
+class IndexWriteError(RuntimeError):
+    """The ruling is durable but not yet recoverable.
+
+    Separate from a plain failure because the remedy is the opposite one: the
+    project journal already holds the event, so the operator must NOT re-run
+    `fno decide` (that mints a second id for one ruling) and must run
+    `fno decide reindex` instead.
+    """
+
+    def __init__(self, decision_id: str, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.decision_id = decision_id
+        self.cause = cause
+
+
 def mint_decision_id() -> str:
     """A stable handle in the q-/fu- family: d-<hex>."""
     return f"d-{secrets.token_hex(4)}"
@@ -65,9 +80,10 @@ def record_decision(
     still lands, because a record that only exists when the subject resolves is
     a record the operator cannot rely on.
 
-    An index write that fails is not a success. The exception propagates to
-    ``decide/cli.py``, which prints ``decide: failed to record`` and exits 1 - a
-    write the operator cannot read back is worse than a refusal.
+    An index write that fails is not a success, so it raises
+    :class:`IndexWriteError`. That error carries the decision_id, because by
+    then the durable event HAS landed: re-running the command would mint a
+    second id for one ruling, and `fno decide reindex` is the recovery.
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
@@ -95,7 +111,10 @@ def record_decision(
     append_event(event, events_path=events_path(events_root))
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
-    append_event(event, events_path=_index_path())
+    try:
+        append_event(event, events_path=_index_path())
+    except Exception as exc:  # noqa: BLE001 - re-raised with what the caller must know
+        raise IndexWriteError(decision_id, exc) from exc
     node_id = _project(event)
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
 
@@ -159,13 +178,17 @@ def _index_path() -> Path:
     return paths.decisions_jsonl()
 
 
-def _read_index(path: Path) -> "list[dict]":
+def _read_index(path: Path, *, warn: bool = True) -> "list[dict]":
     """Flatten the index into decision rows, in file order.
 
     A MISSING index reads as zero decisions - the common case before the first
     write. An index that exists and cannot be read raises: an unreadable store
     answering "no decisions" is the absence-as-success failure this verb exists
     to prevent.
+
+    ``warn=False`` silences the damaged-row notice for the reader that is about
+    to REPAIR them, so a backfill does not tell the operator to run the command
+    they are already running.
     """
     if not path.exists():
         return []
@@ -174,64 +197,104 @@ def _read_index(path: Path) -> "list[dict]":
     damaged = 0
     with path.open(encoding="utf-8") as fh:
         for line in fh:
-            # Substring prefilter before json.loads, the same shape as
-            # outstanding/core.py: this file only ever holds decisions today,
-            # but the check costs nothing and keeps a foreign line harmless.
-            if DECISION_EVENT not in line:
+            if not line.strip():
                 continue
+            # This file holds decisions and nothing else, so a line that is not
+            # one is damage. No substring prefilter here, deliberately: a torn
+            # append can end before the type string ever appears, and a
+            # prefilter would drop exactly that line without counting it.
             try:
                 rec = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 damaged += 1
                 continue
-            if not isinstance(rec, dict) or rec.get("type") != DECISION_EVENT:
-                continue
-            data = rec.get("data")
-            if not isinstance(data, dict) or not data.get("decision_id"):
+            data = rec.get("data") if isinstance(rec, dict) else None
+            if (
+                not isinstance(rec, dict)
+                or rec.get("type") != DECISION_EVENT
+                or not isinstance(data, dict)
+                or not data.get("decision_id")
+            ):
                 damaged += 1
                 continue
             row = dict(data)
             row["ts"] = rec.get("ts")
             rows.append(row)
 
-    if damaged:
+    if damaged and warn:
         # One bad row must not cost the others, so the row is skipped. But it
         # is never skipped SILENTLY: a truncated append would otherwise make an
         # unreadable record and an empty one look the same, which is the
         # absence-as-success failure this index exists to prevent.
         print(
-            f"decide: {damaged} damaged row(s) in {path} were skipped; "
-            f"run `fno decide reindex` to recover them from the journals.",
+            f"decide: {damaged} damaged row(s) in {path} were skipped. "
+            f"Run `fno decide reindex` to recover them and rewrite the index.",
             file=sys.stderr,
         )
     return rows
 
 
-def _subject_keys(subject: str) -> "set[str]":
-    """The strings a query for ``subject`` matches, exactly.
+def _graph_entries() -> "list[dict]":
+    """The machine-wide graph, archive included, or [] if it cannot be read.
 
-    A subject that resolves to a node also answers to its id and slug, because
-    the operator may have recorded under any of the three. Everything else
-    matches itself and nothing more: a decision on ``pr-92`` must not answer a
-    query for ``pr-921``, so this is set membership, never a fuzzy match.
+    The path is passed EXPLICITLY: read_graph's default argument froze at
+    import, so a redirected graph is the one read here.
     """
-    keys = {subject}
     try:
         from fno.graph import store as graph_store
-        from fno.graph.fuzzy import resolve_node
 
-        entries = graph_store.entries_with_archive(
+        return graph_store.entries_with_archive(
             graph_store.read_graph(graph_store.GRAPH_JSON)
         )
-        match = resolve_node(subject, entries)
     except Exception:  # noqa: BLE001 - the graph is advisory to a string query
-        return keys
-    if match.kind == "exact" and match.id:
-        keys.add(str(match.id))
-        candidate = match.candidates[0] if match.candidates else None
-        if isinstance(candidate, dict) and candidate.get("slug"):
-            keys.add(str(candidate["slug"]))
-    return keys
+        return []
+
+
+def _resolved_node(subject: str, entries: "list[dict]") -> str | None:
+    """The node id ``subject`` names EXACTLY, or None.
+
+    Exact only. A decision on ``pr-92`` must never answer a query for
+    ``pr-921``, so a near match is no match.
+    """
+    if not subject or not entries:
+        return None
+    try:
+        from fno.graph.fuzzy import resolve_node
+
+        match = resolve_node(subject, entries)
+    except Exception:  # noqa: BLE001
+        return None
+    return str(match.id) if match.kind == "exact" and match.id else None
+
+
+def _subject_matcher(subject: str):
+    """A predicate over a recorded subject string, matching the same node.
+
+    BOTH sides expand, not just the query. The operator records under whatever
+    spelling was in front of them - the id, the slug, the bare hex, a different
+    case - and a reader that expands only the query answers nothing for every
+    other spelling. That is the PR's own defect wearing a different word, and
+    the receipt makes it worse by printing the canonical id as the way back.
+
+    A subject that names no node matches itself and nothing more.
+    """
+    entries = _graph_entries()
+    node_id = _resolved_node(subject, entries)
+    if node_id is None:
+        return lambda recorded: recorded == subject
+
+    # Resolved per DISTINCT recorded subject by the caller's cache, never per
+    # row: the graph read is the expensive part and it already happened.
+    seen: "dict[str, str | None]" = {}
+
+    def matches(recorded: str) -> bool:
+        if recorded == subject:
+            return True
+        if recorded not in seen:
+            seen[recorded] = _resolved_node(recorded, entries)
+        return seen[recorded] == node_id
+
+    return matches
 
 
 def list_decisions(
@@ -254,10 +317,10 @@ def list_decisions(
         if target:
             superseded_by[str(target)] = str(row.get("decision_id"))
 
-    keys = _subject_keys(subject) if subject else None
+    matches = _subject_matcher(subject) if subject else None
     out: "list[dict]" = []
     for row in rows:
-        if keys is not None and str(row.get("subject") or "") not in keys:
+        if matches is not None and not matches(str(row.get("subject") or "")):
             continue
         row = dict(row)
         row["superseded_by"] = superseded_by.get(str(row.get("decision_id")))
@@ -297,8 +360,10 @@ def _projection_events() -> "list[dict]":
             # this the recovered decision answers no query at all.
             kwargs.setdefault("subject", entry.get("id"))
             event = operator_decision(**kwargs)
-            if row.get("ts"):
-                event["ts"] = row["ts"]
+            # A row with no ts is older than anything that records one. The
+            # builder would stamp NOW, which floats a legacy ruling to the top
+            # of a list whose whole promise is newest-first.
+            event["ts"] = row.get("ts") or "1970-01-01T00:00:00.000000Z"
             events.append(event)
     return events
 
@@ -391,20 +456,27 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
     from fno.events import append_event
 
     index = _index_path()
-    known = {str(row["decision_id"]) for row in _read_index(index)}
+    repaired = _compact_index(index)
+    known = {str(row["decision_id"]) for row in _read_index(index, warn=False)}
+    preexisting = set(known)
     already = 0
     invalid = 0
     added = 0
 
-    journals = _journal_events(
-        list(sources) if sources is not None else _default_journals()
-    )
-    for event in journals + _projection_events():
+    paths = list(sources) if sources is not None else _default_journals()
+    if len(paths) > 1:
+        # 83 project roots is a slow enough fold that a silent terminal reads
+        # as a wedged one.
+        print(f"reindex: folding {len(paths)} journal(s)...", file=sys.stderr)
+    for event in _journal_events(paths) + _projection_events():
         did = str(event["data"].get("decision_id") or "")
         if not did:
             continue
         if did in known:
-            already += 1
+            # Counted only against what the index already held. A journal row
+            # and its own projection are one decision seen twice in one run,
+            # not a record that was "already indexed".
+            already += did in preexisting
             continue
         try:
             append_event(event, events_path=index)
@@ -414,4 +486,65 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         known.add(did)
         added += 1
 
-    return {"added": added, "already": already, "invalid": invalid, "total": len(known)}
+    return {
+        "added": added,
+        "already": already,
+        "invalid": invalid,
+        "repaired": repaired,
+        "total": len(known),
+    }
+
+
+def _compact_index(path: Path) -> int:
+    """Rewrite the index without its damaged rows. Returns how many were dropped.
+
+    Without this the recovery the warning names cannot succeed: the index is
+    never rotated, so a torn line stays forever and every read reprints the
+    same notice. Runs BEFORE the fold, so a decision lost with the damaged row
+    is re-appended from the journals in the same command.
+
+    Under the same mkdir mutex ``append_event`` uses, so a concurrent write
+    cannot land between the read and the replace.
+    """
+    if not path.exists():
+        return 0
+    raw = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    good = [line for line in raw if _is_index_line(line)]
+    if len(good) == len(raw):
+        return 0
+
+    from fno.mutex import acquire_dir_mutex, release_dir_mutex
+
+    resolved = path.resolve()
+    lock_dir = resolved.parent / (resolved.name + ".lock.d")
+    token = acquire_dir_mutex(lock_dir, 30)
+    if token is None:
+        raise TimeoutError(f"decisions.jsonl lock timeout: {lock_dir}")
+    try:
+        # Re-read under the lock: a writer may have appended since the check.
+        raw = [
+            line
+            for line in resolved.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        good = [line for line in raw if _is_index_line(line)]
+        tmp = resolved.with_suffix(resolved.suffix + ".compact")
+        tmp.write_text("".join(line + "\n" for line in good), encoding="utf-8")
+        tmp.replace(resolved)
+    finally:
+        release_dir_mutex(lock_dir, token)
+    return len(raw) - len(good)
+
+
+def _is_index_line(line: str) -> bool:
+    try:
+        rec = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    data = rec.get("data") if isinstance(rec, dict) else None
+    return (
+        isinstance(rec, dict)
+        and rec.get("type") == DECISION_EVENT
+        and isinstance(data, dict)
+        and bool(data.get("decision_id"))
+    )

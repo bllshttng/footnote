@@ -233,6 +233,41 @@ def test_recall_answers_every_subject_shape_the_help_promises(
     assert did in [d["decision_id"] for d in payload["decisions"]]
 
 
+@pytest.mark.parametrize(
+    "recorded_as,queried_as",
+    [
+        ("Fold-The-Inbox", "x-7d94"),
+        ("fold-the-inbox", "x-7d94"),
+        ("x-7d94", "fold-the-inbox"),
+    ],
+    ids=["mixed-case-slug", "slug", "id-queried-by-slug"],
+)
+def test_two_spellings_of_one_node_answer_each_other(
+    root: Path, tmp_graph: Path, index: Path, recorded_as: str, queried_as: str
+):
+    """BOTH sides expand, not just the query.
+
+    The operator records under whatever spelling was in front of them, and the
+    receipt then prints the canonical id as the way back. A reader that expands
+    only the query sends them to a command that returns nothing, which is this
+    PR's own defect wearing a different word.
+
+    Both sides run through the SAME resolver, so whichever spellings it accepts,
+    the writer and the reader accept the same set. The bare-hex tier is left out
+    here on purpose: it depends on the configured node prefix, so it would test
+    the resolver's config rather than this symmetry.
+    """
+    written = runner.invoke(
+        decide_app, ["--subject", recorded_as, "--decision", "one ruling"]
+    )
+    did = written.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", queried_as, "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == [did]
+
+
 def test_recall_is_exact_never_a_prefix_match(root: Path, tmp_graph: Path, index: Path):
     """A decision about pr-92 must not answer a query for pr-921. Set
     membership on the recorded string, never a fuzzy match."""
@@ -419,16 +454,26 @@ def test_reindex_folds_every_project_root_the_graph_names(
     assert [d["decision_id"] for d in payload["decisions"]] == [did]
 
 
+@pytest.mark.parametrize(
+    "torn",
+    ['{"type":"operator_decision","data":{"decision_id":"d-tru', '{"ts":"2026-'],
+    ids=["tear-after-the-type", "tear-before-the-type"],
+)
 def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
-    root: Path, tmp_graph: Path, index: Path, capsys
+    root: Path, tmp_graph: Path, index: Path, capsys, torn: str
 ):
     """A truncated append must not make an unreadable record and an empty one
-    look the same. The good rows still come back."""
+    look the same. The good rows still come back.
+
+    Both tear points, because a crash can end the line before the type string
+    ever appears, and a substring prefilter would drop exactly that one without
+    ever counting it.
+    """
     from fno.decide import _read_index
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     with index.open("a", encoding="utf-8") as fh:
-        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+        fh.write(torn + "\n")
 
     capsys.readouterr()
     rows = _read_index(index)
@@ -436,6 +481,99 @@ def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
     assert [r["decision"] for r in rows] == ["merged"], "one bad row costs no others"
     assert "1 damaged row(s)" in err
     assert "fno decide reindex" in err
+
+
+def test_reindex_drops_the_damaged_row_so_the_warning_can_clear(
+    root: Path, tmp_graph: Path, index: Path, capsys
+):
+    """The index never rotates, so a torn line stays forever and reprints the
+    same notice on every read. The recovery the notice names must succeed."""
+    from fno.decide import _read_index, reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert counts["repaired"] == 1, counts
+
+    capsys.readouterr()
+    rows = _read_index(index)
+    assert [r["decision"] for r in rows] == ["merged"]
+    assert "damaged row(s)" not in capsys.readouterr().err
+
+
+def test_reindex_counts_a_journal_row_and_its_own_projection_once(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A first backfill must not report rows as already indexed. The journal
+    row and its projection are one decision seen twice in one run."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
+    index.unlink()
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert (counts["added"], counts["already"]) == (1, 0), counts
+
+
+def test_a_failed_index_write_names_reindex_and_never_a_retry(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """By the time the index write fails, the durable event has landed. Telling
+    the operator to re-run would record one ruling twice."""
+    import fno.events as events_mod
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    assert res.exit_code == 1
+    assert "fno decide reindex" in res.output
+    assert "Do NOT re-run decide" in res.output
+    assert "recorded d-" in res.output, "the id it already holds"
+
+
+def test_a_legacy_projection_row_with_no_ts_sorts_oldest(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The event builder stamps NOW, which would float a legacy ruling to the
+    top of a list whose whole promise is newest-first."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "recent"])
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"].append(
+        {"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}
+    )
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    assert reindex(sources=[])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["recent", "ancient"]
+
+
+def test_limit_says_so_when_it_truncates(root: Path, tmp_graph: Path, index: Path):
+    """A silent cut on a recall verb is the same lie as a missing record."""
+    for n in range(3):
+        runner.invoke(decide_app, ["--subject", "pr-900", "--decision", f"call {n}"])
+
+    payload = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "2", "--json"]
+        ).stdout
+    )
+    assert (payload["total"], payload["truncated"]) == (3, True)
+
+    human = runner.invoke(decide_app, ["list", "--subject", "pr-900", "--limit", "2"])
+    assert "showing 2 of 3" in human.output
 
 
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
