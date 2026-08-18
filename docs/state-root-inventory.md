@@ -78,6 +78,7 @@ One file per session, per day, or per throttle window.
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |
 | `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
+| `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
 
 `.preflight-receipt-locks/` is the shape to copy. It derives from `dirname "$GLOBAL_EVENTS_PATH"`, so it already follows the resolver, and it sits at the root because the events file does.
 

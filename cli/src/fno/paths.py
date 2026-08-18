@@ -432,6 +432,11 @@ def state_dir() -> Path:
     return _resolve(settings.state_dir)
 
 
+def graphql_quota_lock() -> Path:
+    """Machine-wide lock held from GraphQL quota probe through command."""
+    return state_dir() / "locks" / "github-graphql-quota.lock"
+
+
 def locks_dir() -> Path:
     """Advisory-lock sidecar directory (``~/.fno/locks``).
 

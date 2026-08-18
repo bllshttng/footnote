@@ -33,6 +33,11 @@ class VerifyKind(str, enum.Enum):
     reviews = "reviews"
 
 
+class GraphqlPurpose(str, enum.Enum):
+    discretionary = "discretionary"
+    coverage = "coverage"
+
+
 @pr_app.command(
     "merge",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -145,6 +150,25 @@ def info(
         typer.echo(json.dumps({"pr": pr_number, "error": reason}, separators=(",", ":")))
         raise typer.Exit(code=4)
     typer.echo(json.dumps(payload, separators=(",", ":")))
+
+
+@pr_app.command(
+    "graphql-exec",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def graphql_exec(
+    ctx: typer.Context,
+    purpose: GraphqlPurpose = typer.Option(..., "--purpose"),
+) -> None:
+    from fno.pr import _quota
+
+    result = _quota.execute_graphql(purpose.value, list(ctx.args))
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, err=True)
+    raise typer.Exit(code=result.returncode)
 
 
 @pr_app.command(

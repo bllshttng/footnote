@@ -1,0 +1,106 @@
+"""One serialized quota policy for every Footnote GraphQL caller."""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Optional, Sequence
+
+from fno.paths import graphql_quota_lock
+from fno.pr._proc import Result, run
+
+GRAPHQL_RESERVE = 200
+REFUSED = 75
+
+
+def quota_lock_path() -> Path:
+    return graphql_quota_lock()
+
+
+def resolve_real_gh() -> Optional[str]:
+    configured = os.environ.get("FNO_REAL_GH")
+    if configured:
+        return configured
+    return shutil.which("gh")
+
+
+def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
+    try:
+        row = json.loads(payload)["resources"]["graphql"]
+        remaining, reset = row["remaining"], row["reset"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None, None
+    if not isinstance(remaining, int) or not isinstance(reset, int):
+        return None, None
+    return remaining, reset
+
+
+def _pr_number(args: Sequence[str]) -> str:
+    for index, arg in enumerate(args):
+        if arg in {"view", "checks"} and index + 1 < len(args) and args[index + 1].isdigit():
+            return args[index + 1]
+    return "<n>"
+
+
+def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = False) -> str:
+    pr = _pr_number(args)
+    if unavailable:
+        window = "quota instrument unavailable"
+    elif reset is None:
+        window = "the current quota window resets"
+    else:
+        stamp = datetime.fromtimestamp(reset, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        window = f"reset at {stamp}"
+    return (
+        f"GraphQL discretionary read refused: {window}. Use `fno pr info {pr}` for "
+        f"state/head/mergeability and `fno pr status {pr}` for CI; stop retrying GraphQL "
+        "until reset. `fno pr status` still contains optional review-thread and coverage reads "
+        "that are GraphQL; those reads preserve the reserved coverage budget."
+    )
+
+
+def execute_graphql(
+    purpose: str,
+    gh_args: Sequence[str],
+    *,
+    runner: Callable = run,
+    real_gh: Optional[str] = None,
+    lock_path: Optional[Path] = None,
+) -> Result:
+    """Probe and execute under one machine-wide lock from probe through command."""
+    if purpose not in {"discretionary", "coverage"}:
+        return Result(2, "", "purpose must be discretionary or coverage")
+    if not gh_args:
+        return Result(2, "", "graphql-exec needs gh arguments after --")
+    gh = real_gh or resolve_real_gh()
+    if not gh:
+        return Result(127, "", "gh not found on PATH")
+    lock = lock_path or quota_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            probe = runner([gh, "api", "rate_limit"], timeout=30)
+            remaining, reset = _quota(probe.stdout) if probe.ok else (None, None)
+            if purpose == "discretionary":
+                if remaining is None:
+                    return Result(REFUSED, "", _refusal(gh_args, reset=None, unavailable=True))
+                if remaining <= GRAPHQL_RESERVE:
+                    return Result(REFUSED, "", _refusal(gh_args, reset=reset))
+            return runner([gh, *gh_args], timeout=120)
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def coverage_main() -> None:
+    """Internal executable used only by the review-coverage producer."""
+    result = execute_graphql("coverage", sys.argv[1:])
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr + ("" if result.stderr.endswith("\n") else "\n"))
+    raise SystemExit(result.returncode)
