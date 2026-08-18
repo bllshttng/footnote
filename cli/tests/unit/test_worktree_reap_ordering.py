@@ -91,9 +91,15 @@ def test_sweep_never_keys_on_zero_commits_ahead() -> None:
     holds the only copy of its PR's attestation.
 
     `rev-list --count` is legitimate for REPORTING, so the refusal is narrow:
-    no comparison of a commit count against zero may decide a removal.
+    no comparison of a commit count against zero may decide a removal. The
+    detached-HEAD decision routes through wt_unpushed_count, so the scan covers
+    the helper where the count is computed; the sound key there is "no commit
+    absent from EVERY remote" (a finished-but-unpushed session reads > 0), and
+    this scan is what forces a future narrowing back to one default branch to
+    show up as a diff here.
     """
-    src = _lifecycle_source()
+    unpushed_lib = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
+    src = _lifecycle_source() + "\n" + unpushed_lib.read_text()
 
     # Find any `-eq 0` / `== 0` test in the same line as a rev-list count.
     for line in src.splitlines():

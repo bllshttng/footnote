@@ -386,6 +386,15 @@ case "${1:-status}" in
                 continue
             fi
 
+            # Permanent by design on BOTH removal paths: the preflight tree
+            # resets to a fresh candidate per run (so its commit age reads
+            # zero while active) and goes 7+ days stale the moment preflight
+            # stops running, which is exactly when this age sweep fires.
+            if [[ "$(basename "$wt")" == "preflight" ]]; then
+                echo "  SKIP: $wt (permanent preflight worktree)"
+                continue
+            fi
+
             # Check age
             LAST_COMMIT=$(cd "$wt" 2>/dev/null && git log -1 --format="%ct" 2>/dev/null || echo 0)
             NOW=$(date +%s)
