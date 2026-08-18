@@ -231,6 +231,100 @@ def test_git_writable_args_empty_for_missing_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# plan_writable_args — a bounded worker also can't write a blueprint into the
+# configured plan directory without an explicit grant (x-6163): `fno target
+# init` always writes there before a target run can do anything else. Same
+# shape as git_writable_args: repeatable --add-dir, fail-soft on any
+# resolution error.
+# ---------------------------------------------------------------------------
+
+
+def test_plan_writable_args_returns_add_dir_for_resolved_plan_dir(tmp_path, monkeypatch):
+    """AC1-HP: a resolvable plan dir yields --add-dir <plan-dir>."""
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+
+    assert codex_mod.plan_writable_args(tmp_path) == ["--add-dir", str(plan_dir)]
+
+
+def test_plan_writable_args_empty_on_resolution_failure(tmp_path, monkeypatch):
+    """AC3-ERR: a grant we cannot resolve must never break the spawn."""
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
+
+    assert codex_mod.plan_writable_args(tmp_path) == []
+
+
+def test_resolve_plan_dir_matches_fno_plan_path(tmp_path):
+    """AC1-HP: mirrors `fno plan path`'s own resolver (plans_content_dir)."""
+    from fno.paths import plans_content_dir
+
+    assert codex_mod._resolve_plan_dir(tmp_path) == str(
+        plans_content_dir(project_root=tmp_path)
+    )
+
+
+def test_resolve_plan_dir_empty_on_any_failure(tmp_path, monkeypatch):
+    def boom(*, project_root):
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr("fno.paths.plans_content_dir", boom)
+
+    assert codex_mod._resolve_plan_dir(tmp_path) == ""
+
+
+def test_create_argv_carries_add_dir_for_plan_dir(tmp_path, monkeypatch):
+    """AC2-HP (the reported case): create() grants the plan dir beside the
+    git grant, so `fno target init` can write a blueprint under a bounded
+    sandbox instead of dying with 'sandbox rejected the write'."""
+    import pathlib
+
+    repo = _init_repo(tmp_path / "repo")
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+    seen = []
+
+    def fake_run(*, argv, output_path, timeout, expect_session, popen_cwd,
+                 agent_self=None, route_env=None):
+        seen.append(argv)
+        return None
+
+    monkeypatch.setattr(codex_mod, "_run_codex", fake_run)
+
+    codex_mod.create(
+        cwd=repo, prompt="go", from_name="me", yolo=False,
+        output_path=tmp_path / "out.jsonl", headless_yolo=False,
+    )
+
+    argv = seen[0]
+    add_dir_values = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+    assert pathlib.Path(add_dir_values[0]).resolve() == (repo / ".git").resolve()
+    assert str(plan_dir) in add_dir_values
+
+
+def test_create_argv_omits_add_dir_grants_on_full_yolo(tmp_path, monkeypatch):
+    """A fully-bypassed spawn is already unsandboxed - no grant needed."""
+    repo = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(
+        codex_mod, "_resolve_plan_dir", lambda cwd: str(tmp_path / "plans")
+    )
+    seen = []
+
+    def fake_run(*, argv, output_path, timeout, expect_session, popen_cwd,
+                 agent_self=None, route_env=None):
+        seen.append(argv)
+        return None
+
+    monkeypatch.setattr(codex_mod, "_run_codex", fake_run)
+
+    codex_mod.create(
+        cwd=repo, prompt="go", from_name="me", yolo=True,
+        output_path=tmp_path / "out.jsonl", headless_yolo=False,
+    )
+
+    assert "--add-dir" not in seen[0]
+
+
+# ---------------------------------------------------------------------------
 # sandbox_flag_resume (resume path — restricted surface)
 # ---------------------------------------------------------------------------
 
@@ -266,10 +360,11 @@ def test_sandbox_flag_resume_never_emits_sandbox_flag():
 # ---------------------------------------------------------------------------
 
 
-def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path):
+def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path, monkeypatch):
     import json
     import pathlib
 
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
     repo = _init_repo(tmp_path / "repo")
     out = codex_mod.sandbox_config_args_resume(repo)
 
@@ -283,12 +378,38 @@ def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path):
     ]
 
 
-def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_path):
+def test_sandbox_config_args_resume_pins_mode_and_both_writable_roots(
+    tmp_path, monkeypatch
+):
+    """x-6163: a bounded worker needs BOTH roots in ONE `-c`, never two -
+    `writable_roots` is a whole-value override, so a second `-c` here would
+    silently replace the git grant instead of adding the plan grant to it."""
+    import json
+    import pathlib
+
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+    repo = _init_repo(tmp_path / "repo")
+
+    out = codex_mod.sandbox_config_args_resume(repo)
+
+    assert out.count("-c") == 2
+    key, _, value = out[3].partition("=")
+    assert key == "sandbox_workspace_write.writable_roots"
+    roots = json.loads(value)
+    assert pathlib.Path(roots[0]).resolve() == (repo / ".git").resolve()
+    assert roots[1] == str(plan_dir)
+
+
+def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(
+    tmp_path, monkeypatch
+):
     """The reported case: the worktree's gitdir lives under the COMMON dir."""
     import json
     import pathlib
     import subprocess
 
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
     repo = _init_repo(tmp_path / "repo")
     subprocess.run(
         ["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
@@ -308,11 +429,22 @@ def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_pa
     assert (repo / ".git" / "worktrees" / "wt").is_relative_to(granted)
 
 
-def test_sandbox_config_args_resume_empty_outside_a_repo(tmp_path):
+def test_sandbox_config_args_resume_empty_when_neither_root_resolves(
+    tmp_path, monkeypatch
+):
     """A posture we cannot resolve must never break the resume."""
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
     outside = tmp_path / "plain"
     outside.mkdir()
     assert codex_mod.sandbox_config_args_resume(outside) == []
+
+
+def test_git_writable_config_args_empty_when_neither_root_resolves(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(codex_mod, "_git_common_dir", lambda cwd: "")
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
+    assert codex_mod.git_writable_config_args(tmp_path) == []
 
 
 def test_resume_argv_repins_bounded_posture_but_not_yolo(tmp_path, monkeypatch):

@@ -939,8 +939,11 @@ def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
     assert claude.index("--add-dir") < claude.index("--agent") < \
         claude.index("--allowedTools") < claude.index("--disallowedTools")
 
+    # codex also carries the git and plan-directory grants (x-6163) ahead of
+    # the user's own --add-dir, so locate "/extra" by value, not by the first
+    # --add-dir token.
     codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
-    assert codex[codex.index("--add-dir") + 1] == "/extra"
+    assert codex[codex.index("/extra") - 1] == "--add-dir"
     agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
     assert agy[agy.index("--add-dir") + 1] == "/extra"
     opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
@@ -994,14 +997,29 @@ def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path)
 
 
 def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Path) -> None:
-    """AC-EDGE: --add-dir is repeatable; a caller's own grant survives."""
+    """AC-EDGE: --add-dir is repeatable; a caller's own grant survives
+    alongside both the git and plan-directory grants (x-6163)."""
     from fno.agents.mux_spawn import build_pane_argv
 
     repo = _pane_repo(tmp_path)
     argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
 
-    assert argv.count("--add-dir") == 2
+    assert argv.count("--add-dir") == 3
     assert "/extra" in argv
+
+
+def test_build_pane_argv_codex_grants_plan_directory_write(tmp_path: Path) -> None:
+    """x-6163: a sandboxed codex pane also carries --add-dir <plan-dir>, so
+    `/fno:target` run interactively in the pane can write a blueprint."""
+    from fno.agents.mux_spawn import build_pane_argv
+    from fno.paths import plans_content_dir
+
+    repo = _pane_repo(tmp_path)
+    argv = build_pane_argv("codex", "t", repo, False, None)
+
+    expected_plan_dir = str(plans_content_dir(project_root=repo))
+    add_dir_values = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+    assert expected_plan_dir in add_dir_values
 
 
 def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
@@ -1025,7 +1043,12 @@ def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
     # fail-closed guard even on a no-equivalent provider (gemini review finding).
     for provider, kw in closed:
         argv = build_pane_argv(provider, "t", tmp_path, False, None, **{k: "" for k in kw})
-        assert "--add-dir" not in argv and "--agent" not in argv
+        assert "--agent" not in argv
+        # codex always carries its own git + plan-directory --add-dir grants
+        # (x-6163) regardless of any tier3 kwarg, so it is excluded from this
+        # check; the other providers here have no such baseline grant.
+        if provider != "codex":
+            assert "--add-dir" not in argv
 
 
 def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:

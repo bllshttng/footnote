@@ -953,12 +953,15 @@ def build_pane_argv(
             )
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
-        # cannot commit without the grant. Only the two bypass postures skip it.
-        from fno.agents.harnesses.codex import git_writable_args
+        # cannot commit without the grant, and also can't write a blueprint
+        # into the plan directory without the plan grant. Only the two
+        # bypass postures skip both.
+        from fno.agents.harnesses.codex import git_writable_args, plan_writable_args
 
         bounded = (permission_mode != "yolo") if permission_mode else not yolo
         if bounded:
             argv += git_writable_args(cwd)
+            argv += plan_writable_args(cwd)
         if model:
             argv += ["--model", model]
         if effort:
