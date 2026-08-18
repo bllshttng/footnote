@@ -360,22 +360,33 @@ fi
 # Execution ownership follows the full-SHA worktree slot. Same-SHA callers
 # retain the FIFO/cancellation contract; distinct SHAs have independent locks
 # and queues, matching the already per-SHA canonical receipt lock below.
-LOCAL_LOCKDIR="$COMMON_DIR/.preflight-locks.d/$CANDIDATE_SHA.d"
+LOCAL_LOCK_ROOT="$COMMON_DIR/.preflight-locks.d"
+LOCAL_LOCKDIR="$LOCAL_LOCK_ROOT/$CANDIDATE_SHA.d"
 GLOBAL_LOCKDIR="$(dirname "$GLOBAL_EVENTS_PATH")/.preflight-receipt-locks/$CANDIDATE_SHA.d"
+POOL_STATE_DIR="$COMMON_DIR/.preflight-pool.d"
+POOL_ADMIN_LOCKDIR="$COMMON_DIR/.preflight-pool-admin.lock.d"
+PREFLIGHT_POOL_SIZE="${PREFLIGHT_POOL_SIZE:-4}"
+if [[ ! "$PREFLIGHT_POOL_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    echo "preflight: PREFLIGHT_POOL_SIZE must be a positive integer (got '$PREFLIGHT_POOL_SIZE')" >&2
+    exit 2
+fi
 LOCAL_LOCK_ACQUIRED=0
 GLOBAL_LOCK_ACQUIRED=0
+POOL_ADMIN_LOCK_ACQUIRED=0
 LOCAL_LOCK_STAMP=""
 GLOBAL_LOCK_STAMP=""
+POOL_ADMIN_LOCK_STAMP=""
+POOL_USAGE_MARKER="$POOL_STATE_DIR/$CANDIDATE_SHA.used"
 LOCKDIR="$LOCAL_LOCKDIR"
 stamp_holder() {
     local stamp
     stamp="pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown) host=$(hostname 2>/dev/null || echo unknown) sha=$CANDIDATE_SHA"
     printf '%s\n' "$stamp" > "$LOCKDIR/holder" || return 1
-    if [[ "$LOCKDIR" == "$LOCAL_LOCKDIR" ]]; then
-        LOCAL_LOCK_STAMP="$stamp"
-    else
-        GLOBAL_LOCK_STAMP="$stamp"
-    fi
+    case "$LOCKDIR" in
+        "$LOCAL_LOCKDIR") LOCAL_LOCK_STAMP="$stamp" ;;
+        "$GLOBAL_LOCKDIR") GLOBAL_LOCK_STAMP="$stamp" ;;
+        "$POOL_ADMIN_LOCKDIR") POOL_ADMIN_LOCK_STAMP="$stamp" ;;
+    esac
 }
 finish_lock_acquire() {
     if stamp_holder; then
@@ -798,8 +809,128 @@ cleanup_lock() {
     observed="$(cat "$path/holder" 2>/dev/null || true)"
     [[ "$observed" == "$expected" ]] && rm -rf "$path"
 }
+
+pool_worktree_is_registered() {
+    # grep, not grep -q: -q exits on the first match and SIGPIPEs the producer
+    # under pipefail, turning a registered slot into a false cache miss.
+    git -C "$INVOKING_ROOT" worktree list --porcelain \
+        | grep -xF "worktree $1" >/dev/null
+}
+
+pool_worktrees() {
+    local line
+    git -C "$INVOKING_ROOT" worktree list --porcelain | while IFS= read -r line; do
+        [[ "$line" == "worktree $PREFLIGHT_POOL_ROOT/"* ]] || continue
+        printf '%s\n' "${line#worktree }"
+    done
+}
+
+acquire_pool_admin() {
+    LOCKDIR="$POOL_ADMIN_LOCKDIR"
+    acquire_lock
+    POOL_ADMIN_LOCK_ACQUIRED=1
+    LOCKDIR="$LOCAL_LOCKDIR"
+}
+
+release_pool_admin() {
+    cleanup_lock "$POOL_ADMIN_LOCKDIR" "$POOL_ADMIN_LOCK_STAMP"
+    POOL_ADMIN_LOCK_ACQUIRED=0
+    POOL_ADMIN_LOCK_STAMP=""
+}
+
+oldest_inactive_pool_slot() {
+    local slot sha marker mtime oldest_mtime="" oldest_slot=""
+    while IFS= read -r slot; do
+        sha="${slot##*/}"
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+        [[ -d "$LOCAL_LOCK_ROOT/$sha.d" ]] && continue
+        marker="$POOL_STATE_DIR/$sha.used"
+        mtime="$(path_mtime_s "$marker")"
+        [[ -n "$mtime" ]] || mtime=0
+        if [[ -z "$oldest_mtime" || "$mtime" -lt "$oldest_mtime" ]]; then
+            oldest_mtime="$mtime"
+            oldest_slot="$slot"
+        fi
+    done < <(pool_worktrees)
+    [[ -n "$oldest_slot" ]] && printf '%s\n' "$oldest_slot"
+}
+
+ensure_pool_slot() {
+    local waited=0 last_print=0 count slot victim victim_sha
+    mkdir -p "$PREFLIGHT_POOL_ROOT" "$POOL_STATE_DIR" "$LOCAL_LOCK_ROOT" || {
+        echo "preflight: cannot create the preflight pool directories" >&2
+        exit 1
+    }
+    mkdir -p "$INVOKING_ROOT/.fno" 2>/dev/null || true
+    while :; do
+        acquire_pool_admin
+        git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true
+        if pool_worktree_is_registered "$PREFLIGHT_WT"; then
+            touch "$POOL_USAGE_MARKER" 2>/dev/null || true
+            release_pool_admin
+            return 0
+        fi
+        if [[ -e "$PREFLIGHT_WT" ]]; then
+            echo "preflight: $PREFLIGHT_WT exists but is not a registered worktree - recreating" >&2
+            rm -rf "$PREFLIGHT_WT"
+            git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true
+        fi
+
+        count=0
+        while IFS= read -r slot; do count=$((count + 1)); done < <(pool_worktrees)
+        while (( count >= PREFLIGHT_POOL_SIZE )); do
+            victim="$(oldest_inactive_pool_slot)"
+            [[ -n "$victim" ]] || break
+            victim_sha="${victim##*/}"
+            # The allocator lock prevents another reaper, and this second
+            # active check closes the scan-to-remove window for a same-SHA run.
+            if [[ -d "$LOCAL_LOCK_ROOT/$victim_sha.d" ]]; then
+                continue
+            fi
+            if ! git -C "$INVOKING_ROOT" worktree remove --force "$victim" >/dev/null 2>&1; then
+                echo "preflight: cannot reap inactive pool slot $victim" >&2
+                exit 1
+            fi
+            rm -f "$POOL_STATE_DIR/$victim_sha.used" 2>/dev/null || true
+            count=$((count - 1))
+            echo "preflight: reaped inactive pool slot ${victim_sha:0:12}"
+        done
+
+        if (( count < PREFLIGHT_POOL_SIZE )); then
+            mkdir -p "$(dirname "$PREFLIGHT_WT")"
+            if ! git -C "$INVOKING_ROOT" worktree add --detach "$PREFLIGHT_WT" "$CANDIDATE_SHA" >/dev/null 2>&1; then
+                emit_setup_unavailable "git worktree add failed" || true
+                echo "preflight: git worktree add failed" >&2
+                exit 1
+            fi
+            touch "$POOL_USAGE_MARKER" 2>/dev/null || true
+            release_pool_admin
+            return 0
+        fi
+        release_pool_admin
+
+        if [[ "$LOCK_SIGNAL" -eq 1 ]] || cancel_requested; then
+            echo "preflight: cancelled while waiting for preflight pool capacity" >&2
+            exit 130
+        fi
+        if (( waited >= WAIT_TIMEOUT )); then
+            echo "preflight: gave up waiting ${WAIT_TIMEOUT}s for a free preflight pool slot" >&2
+            exit 3
+        fi
+        if (( waited - last_print >= 60 )); then
+            echo "preflight: waiting for pool capacity (${waited}s elapsed, limit=$PREFLIGHT_POOL_SIZE)" >&2
+            last_print=$waited
+        fi
+        sleep "$QUEUE_POLL_INTERVAL"
+        waited=$((waited + QUEUE_POLL_INTERVAL))
+    done
+}
+
 cleanup() {
     [[ -n "${TICKET:-}" ]] && rm -rf "$TICKET"
+    [[ -n "${POOL_USAGE_MARKER:-}" && -d "${PREFLIGHT_WT:-}" ]] \
+        && touch "$POOL_USAGE_MARKER" 2>/dev/null || true
+    [[ "${POOL_ADMIN_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${POOL_ADMIN_LOCKDIR:-}" "${POOL_ADMIN_LOCK_STAMP:-}"
     [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
     [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
     [[ -n "$TMPHOME" ]] && rm -rf "$TMPHOME"
@@ -837,24 +968,7 @@ fi
 
 # --- ensure / reset the preflight worktree ----------------------------------
 echo "preflight: repo=$REPO_NAME candidate=$CANDIDATE_SHORT worktree=$PREFLIGHT_WT"
-# grep, not grep -q: -q exits on first match and SIGPIPEs `git worktree list`,
-# which under pipefail returns 141 (false) and would falsely recreate the wt.
-is_registered() { git -C "$INVOKING_ROOT" worktree list --porcelain | grep -xF "worktree $PREFLIGHT_WT" >/dev/null; }
-
-git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true  # drop dangling admin entries from a prior rm -rf
-if is_registered; then
-    : # exists and registered; reset below
-elif [[ -e "$PREFLIGHT_WT" ]]; then
-    echo "preflight: $PREFLIGHT_WT exists but is not a registered worktree - recreating" >&2
-    rm -rf "$PREFLIGHT_WT"
-    git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true
-fi
-if ! is_registered; then
-    mkdir -p "$(dirname "$PREFLIGHT_WT")"
-    git -C "$INVOKING_ROOT" worktree add --detach "$PREFLIGHT_WT" "$CANDIDATE_SHA" >/dev/null 2>&1 || {
-        emit_setup_unavailable "git worktree add failed" || true
-        echo "preflight: git worktree add failed" >&2; exit 1; }
-fi
+ensure_pool_slot
 
 # Sync to candidate; keep caches. Worktrees share the object DB, so no fetch.
 if ! git -C "$PREFLIGHT_WT" reset --hard "$CANDIDATE_SHA" >/dev/null 2>&1; then
