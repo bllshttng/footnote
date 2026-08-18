@@ -280,6 +280,56 @@ def sync_canonical(
 
 
 @pr_app.command(
+    "publish-review",
+    hidden=True,
+    help=(
+        "Post a review verdict to GitHub as config.review.bot_identity "
+        "(--pr N required; --verdict defaults to the newest head-pinned "
+        "review_attestation for HEAD; --dry-run resolves and refuse-checks "
+        "but makes no POST). Prints one bot-review: receipt line; exit 0 "
+        "posted, 1 skipped|refused|failed, 2 no attestation to default from."
+    ),
+)
+def publish_review_cmd(
+    pr_number: int = typer.Option(..., "--pr", help="GitHub PR number"),
+    verdict: Optional[str] = typer.Option(
+        None, "--verdict", help="pass | fail; default: newest head-pinned attestation for HEAD."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Resolve and refuse-check, but make no POST."
+    ),
+) -> None:
+    from fno.pr import _publish_review as pub
+
+    cwd = os.getcwd()
+    attestation = pub.newest_head_attestation(cwd)
+    if verdict is None:
+        if not attestation:
+            typer.echo(
+                "publish-review: no head-pinned attestation for HEAD; "
+                "pass --verdict explicitly",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        verdict = str(attestation.get("verdict") or "")
+    if verdict not in ("pass", "fail"):
+        typer.echo(f"publish-review: --verdict must be pass|fail, got {verdict!r}", err=True)
+        raise typer.Exit(code=2)
+    reviewer = str((attestation or {}).get("reviewer") or "manual")
+    head_sha = str((attestation or {}).get("head_sha") or pub._git_head(cwd) or "")
+    result = pub.publish_review(
+        pr_number=pr_number,
+        head_sha=head_sha,
+        verdict=verdict,
+        reviewer=reviewer,
+        cwd=cwd,
+        dry_run=dry_run,
+    )
+    typer.echo(result.receipt, err=True)
+    raise typer.Exit(code=0 if result.ok or (dry_run and result.status == "skipped") else 1)
+
+
+@pr_app.command(
     "rebase",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(

@@ -324,3 +324,53 @@ def _publish_review(
         review_decision=review_decision,
         receipt=_receipt("posted", detail),
     )
+
+
+def newest_head_attestation(cwd: str) -> Optional[dict]:
+    """The newest ``review_attestation`` whose head_sha equals git HEAD.
+
+    Backs the ``fno pr publish-review`` default verdict: re-posting should
+    mirror the verdict a local reviewer actually recorded, not one typed from
+    memory. Reads the project log and the cross-checkout global log (the
+    attestation lands in both), last-wins on ts; None when nothing pins HEAD.
+    """
+    import json as _json
+
+    head = _git_head(cwd)
+    if not head:
+        return None
+    root = _resolve_repo_root(cwd)
+    candidates = [root / ".fno" / "events.jsonl"]
+    try:
+        from fno.paths import global_events_json
+
+        candidates.append(global_events_json())
+    except Exception:  # noqa: BLE001 - the global log is an augmentation, not a dep
+        pass
+    newest: Optional[dict] = None
+    newest_ts = ""
+    for path in candidates:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                row = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if row.get("type") != "review_attestation":
+                continue
+            data = row.get("data") or {}
+            if data.get("head_sha") != head:
+                continue
+            ts = row.get("ts") or ""
+            if ts >= newest_ts:  # >= : a same-second re-emit is the newer verdict
+                newest_ts, newest = ts, data
+    return newest
+
+
+def _git_head(cwd: str) -> Optional[str]:
+    res = run(["git", "rev-parse", "HEAD"], cwd=cwd, timeout=_GH_TIMEOUT)
+    out = res.stdout.strip() if res.ok else ""
+    return out or None
