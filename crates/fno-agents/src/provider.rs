@@ -449,41 +449,63 @@ impl CodexProvider {
     }
 }
 
-/// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
-/// bounded codex worker can commit. workspace-write marks
-/// `<project_root>/.git` read-only, so without this every `git add` fails on
-/// index.lock - and in a linked worktree the gitdir is outside the workspace
-/// entirely. The common dir is `<repo>/.git` in both shapes and holds the
-/// per-worktree gitdir plus the shared objects/ and refs/ a commit writes.
+/// Mirror of `codex.py::git_writable_args` + `plan_writable_args`: grant the
+/// git COMMON dir (so a bounded codex worker can commit) and the plan
+/// directory (so `fno target init` can write a blueprint - x-6163) as two
+/// repeatable `--add-dir` tokens. workspace-write marks `<project_root>/.git`
+/// AND the plan directory read-only by default; without the git grant every
+/// `git add` fails on index.lock (and in a linked worktree the gitdir is
+/// outside the workspace entirely - the common dir is `<repo>/.git` in both
+/// shapes and holds the per-worktree gitdir plus the shared objects/ and
+/// refs/ a commit writes); without the plan grant `fno target init` dies at
+/// the first write before a target run can do anything else.
 ///
 /// Shared by every Rust codex argv builder (headless create here, the `ask`
 /// lane in codex_ask.rs) so the grant cannot land on one path and miss another.
-/// Empty on any failure: a grant we cannot resolve must never break the spawn.
+/// Each half is independently empty on its own resolution failure - a grant
+/// we cannot resolve must never break the spawn.
 pub(crate) fn codex_git_writable_args(cwd: &std::path::Path) -> Vec<String> {
-    match git_common_dir(cwd) {
-        Some(common) => vec!["--add-dir".into(), common],
-        None => vec![],
+    let mut argv = Vec::new();
+    if let Some(common) = git_common_dir(cwd) {
+        argv.push("--add-dir".into());
+        argv.push(common);
     }
+    if let Some(plan_dir) = plan_dir(cwd) {
+        argv.push("--add-dir".into());
+        argv.push(plan_dir);
+    }
+    argv
 }
 
-/// Mirror of `codex.py::sandbox_config_args_resume`: re-pin a BOUNDED posture
-/// across `codex exec resume`, which takes neither `--sandbox` nor `--add-dir`
-/// and re-resolves the sandbox from config instead of inheriting the
-/// create-time one. `-c` is the only carrier, so it pins both the mode and the
-/// git writable root that `--add-dir` grants on create.
+/// Mirror of `codex.py::sandbox_config_args_resume` / `git_writable_config_args`:
+/// re-pin a BOUNDED posture across `codex exec resume`, which takes neither
+/// `--sandbox` nor `--add-dir` and re-resolves the sandbox from config instead
+/// of inheriting the create-time one. `-c` is the only carrier, so it pins
+/// both the mode and the writable roots (git common dir + plan directory,
+/// x-6163) that `--add-dir` grants on create, in ONE `writable_roots` list -
+/// it is a whole-value config override, not a repeatable flag, so a second
+/// `-c` here would silently replace the first instead of adding to it.
 ///
 /// Empty on any failure: a posture we cannot resolve must never break a resume.
 pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<String> {
-    let Some(common) = git_common_dir(cwd) else {
+    let roots: Vec<String> = [git_common_dir(cwd), plan_dir(cwd)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if roots.is_empty() {
         return vec![];
-    };
+    }
     // TOML string literal: the only characters needing escape here are `\` and `"`.
-    let quoted = common.replace('\\', "\\\\").replace('"', "\\\"");
+    let quoted = roots
+        .iter()
+        .map(|r| format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(",");
     vec![
         "-c".into(),
         "sandbox_mode=workspace-write".into(),
         "-c".into(),
-        format!("sandbox_workspace_write.writable_roots=[\"{quoted}\"]"),
+        format!("sandbox_workspace_write.writable_roots=[{quoted}]"),
     ]
 }
 
@@ -500,6 +522,26 @@ fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
         .ok()?;
     let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!common.is_empty()).then_some(common)
+}
+
+/// Absolute plan directory for `cwd`'s project; `None` on any failure.
+///
+/// Shells to `fno plan dir` (run with `cwd` as the child's working directory)
+/// rather than reimplementing the `settings.local.json` -> `settings.json` ->
+/// `config.toml` resolution order in Rust - `fno.paths.plans_content_dir` is
+/// the one place that logic lives, matching the "same code that computes the
+/// others" grant contract this mirrors from `codex.py::_resolve_plan_dir`.
+fn plan_dir(cwd: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("fno")
+        .current_dir(cwd)
+        .args(["plan", "dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!dir.is_empty()).then_some(dir)
 }
 
 impl Provider for CodexProvider {

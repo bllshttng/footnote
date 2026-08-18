@@ -224,6 +224,7 @@ paths shell-stub	T1	paths shell-stub	20
 paths verify	T1	paths verify	7
 phase	KEEP	phase	16	single-leaf group
 plan brief	T1	plan brief	4
+plan dir	T1	plan dir	0
 plan fidelity	T1	plan fidelity	5
 plan folder-audit	T1	plan folder-audit	0
 plan graduate	T1	plan graduate	2

@@ -8,6 +8,7 @@ Verbs:
     reconcile-status  - normalize drifted plan frontmatter status in place
     folder-audit      - count folder plans owned by a non-terminal graph node
     path              - print the save path for a NEW plan/design doc (config.plans_filename)
+    dir               - print the resolved plan DIRECTORY only (no filename)
 
 stamp and graduate forward all unknown args + propagate exit codes from the
 in-package ``fno.plan._stamp`` module. brief is implemented in fno.plan.brief.
@@ -103,6 +104,22 @@ def path(
     from fno.paths import plan_doc_filename, plan_doc_path
 
     print(plan_doc_filename(slug, node) if name_only else plan_doc_path(slug, node))
+
+
+@plan_app.command(
+    "dir",
+    hidden=True,
+    help=(
+        "Print the resolved plan directory (plansDirectory -> config.plans_dir), "
+        "no filename. The single source of truth non-Python callers (the Rust "
+        "codex sandbox grant) shell out to instead of reimplementing the "
+        "settings.local.json -> settings.json -> config.toml resolution order."
+    ),
+)
+def plan_dir() -> None:
+    from fno.paths import plans_content_dir
+
+    print(plans_content_dir())
 
 
 # Update the module docstring's verb list when adding verbs above.
