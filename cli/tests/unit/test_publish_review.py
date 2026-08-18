@@ -51,6 +51,8 @@ class FakeGh:
         self.saw_envs.append(env)
         if argv[:3] == ["git", "rev-parse", "--show-toplevel"]:
             return _ok(str(cwd))
+        if argv[:3] == ["git", "rev-parse", "HEAD"]:
+            return _ok(HEAD)
         if argv[:2] == ["gh", "pr"] and "--json" in argv:
             field = argv[argv.index("--json") + 1]
             if "number" in field.split(",") and "reviewDecision" not in field:
@@ -251,3 +253,65 @@ def test_unconfigured_lane_makes_no_network_calls(tmp_path, monkeypatch):
     assert result.reason == "review.bot_identity unset"
     # git rev-parse (repo-root resolution) is allowed; gh is not.
     assert all(c[0] == "git" for c in calls)
+
+
+# --- the fno pr publish-review verb (change 4) ---
+
+
+def _write_attestation(repo: Path, verdict: str = "pass", reviewer: str = "sigma") -> None:
+    import time
+
+    row = (
+        '{"ts": "%s", "type": "review_attestation", "source": "target", '
+        '"data": {"reviewer": "%s", "head_sha": "%s", "verdict": "%s", '
+        '"session_id": "s"}}\n'
+        % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), reviewer, HEAD, verdict)
+    )
+    with (repo / ".fno" / "events.jsonl").open("a") as fh:
+        fh.write(row)
+
+
+def _invoke_verb(repo: Path, fake: FakeGh, monkeypatch, *args: str):
+    from typer.testing import CliRunner
+
+    from fno.pr.cli import pr_app
+
+    # The verb anchors on os.getcwd(); without the chdir it would read the
+    # REAL worktree's config and events instead of the fixture's.
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(pr_mod, "run", fake)
+    return CliRunner().invoke(pr_app, ["publish-review", "--pr", "931", *args])
+
+
+def test_verb_defaults_to_newest_head_attestation(repo, monkeypatch):
+    _write_attestation(repo)
+    fake = FakeGh()
+    result = _invoke_verb(repo, fake, monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert len(fake.posts) == 1
+    assert "event=APPROVE" in fake.posts[0]["argv"]
+    assert f"bot-review: posted APPROVE as {IDENTITY} on #931" in result.output
+
+
+def test_verb_dry_run_makes_no_post(repo, monkeypatch):
+    _write_attestation(repo)
+    fake = FakeGh()
+    result = _invoke_verb(repo, fake, monkeypatch, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert fake.posts == []
+    assert "would post APPROVE" in result.output
+
+
+def test_verb_no_attestation_no_verdict_exits_2(repo, monkeypatch):
+    fake = FakeGh()
+    result = _invoke_verb(repo, fake, monkeypatch)
+    assert result.exit_code == 2
+    assert fake.posts == []
+
+
+def test_verb_explicit_verdict_overrides_attestation(repo, monkeypatch):
+    _write_attestation(repo, verdict="pass")
+    fake = FakeGh(review_decision="CHANGES_REQUESTED")
+    result = _invoke_verb(repo, fake, monkeypatch, "--verdict", "fail")
+    assert result.exit_code == 0, result.output
+    assert "event=REQUEST_CHANGES" in fake.posts[0]["argv"]
