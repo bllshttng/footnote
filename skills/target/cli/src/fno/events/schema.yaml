@@ -2110,6 +2110,10 @@ event_types:
         message:
           type: string
           description: "Human-readable termination message."
+        driver:
+          type: string
+          enum: [target, king]
+          description: "Which driver's done() produced this terminal. Absent on a target fire (the historical default); 'king' on a board-empty fire, which is also what the king freshness probe reads."
     consumers: [operator, megawalk]
 
   - name: mail_escalation
@@ -4061,6 +4065,41 @@ event_types:
         harness_session_id:
           type: string
           description: "The codex rollout session id the late bind resolved."
+    consumers: [operator]
+
+  - name: king_action
+    description: "A king shrank one of its own board queues: dispatched an undispatched node, woke a stalled claim holder, reaped a stale claim, or merged a green PR. This is the king loop's PROGRESS MARKER, and it is a positive marker on purpose. Board size cannot serve, because a king's board refills while it works: dispatching and merging both create future work. Progress is therefore a target_id this run has not acted on before; re-emitting the same target_id is not progress and does not reset the dry-fire counter, which is what keeps a stalled_holder row that survives its only available action from holding the loop open forever."
+    sources: [target]
+    data:
+      required: [session_id, kind, target_id]
+      properties:
+        session_id:
+          type: string
+          description: "The king session's fno_id, from .fno/king-state.md."
+        kind:
+          type: string
+          enum: [dispatch, wake, reap, merge]
+          description: "Which queue the action shrank."
+        target_id:
+          type: string
+          description: "What the action was against: a node id, a claim key, or a PR number. The dry-fire counter keys on this, so it must identify the thing acted on, never the action."
+    consumers: [operator]
+
+  - name: king_loop_check
+    description: "One king loop-check fire that found actionable work and blocked. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    sources: [hook]
+    data:
+      required: [session_id]
+      properties:
+        session_id:
+          type: string
+          description: "The king session's fno_id."
+        actionable:
+          type: integer
+          description: "Actionable row count at this fire."
+        board_error:
+          type: string
+          description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
     consumers: [operator]
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose

@@ -29,6 +29,12 @@ from typing import Optional
 #: A non-converging king should cost a ceiling, not a night.
 DEFAULT_MAX_ITERATIONS = 40
 
+#: Both king arms end a walk, so both satisfy the freshness probe. The walk arm
+#: emits the runtime's ``loop_terminated``; the in-session stop arm emits
+#: ``termination``. Reading only one would report "no king walk in 24h" right
+#: after a king had in fact drained its board and exited.
+_TERMINAL_TYPES = frozenset({"loop_terminated", "termination"})
+
 _WINDOW = re.compile(r"^(\d+)([smhd]?)$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 1}
 
@@ -153,13 +159,13 @@ def last_run_is_fresh(
     newest: Optional[float] = None
     for line in text.splitlines():
         line = line.strip()
-        if not line or "loop_terminated" not in line:
+        if not line or not any(t in line for t in _TERMINAL_TYPES):
             continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "loop_terminated":
+        if event.get("type") not in _TERMINAL_TYPES:
             continue
         if (event.get("data") or {}).get("driver") != "king":
             continue

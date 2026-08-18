@@ -118,6 +118,34 @@ def test_a_corrupt_line_does_not_hide_a_real_termination(tmp_path):
     assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is True
 
 
+def test_the_in_session_arms_termination_also_counts_as_a_walk(tmp_path):
+    """Both arms end a king walk. Reading only the runtime's event would report
+    no king walk right after a king drained its board and exited."""
+    path = _journal(
+        tmp_path,
+        {
+            "ts": "2026-08-18T02:00:00Z",
+            "type": "termination",
+            "source": "hook",
+            "data": {"driver": "king", "reason": "NoWork", "session_id": "k-1"},
+        },
+    )
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is True
+
+
+def test_a_target_termination_event_does_not_count(tmp_path):
+    path = _journal(
+        tmp_path,
+        {
+            "ts": "2026-08-18T02:00:00Z",
+            "type": "termination",
+            "source": "hook",
+            "data": {"reason": "DonePRGreen", "session_id": "t-1"},
+        },
+    )
+    assert last_run_is_fresh(path, since_s=24 * 3600, now_iso=NOW) is False
+
+
 def test_a_missing_journal_is_not_fresh(tmp_path):
     assert last_run_is_fresh(tmp_path / "absent.jsonl", since_s=3600, now_iso=NOW) is False
 
