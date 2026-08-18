@@ -1857,11 +1857,21 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     cap = entry.get("max_context_window")
     base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    def _number(value: object) -> Optional[int]:
-        # json.loads parses bare Infinity and NaN, and int() raises on both.
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    def _number(value: object, *, keep_float: bool = False) -> Optional[float]:
+        """The ONE gate every cached number goes through.
+
+        Per-field guards were the recurring defect here: bool, then non-finite,
+        then out-of-range each got closed on one field and left open on its
+        neighbour, and every miss raised into a caller that swallows it.  The
+        int branch returns before any float coercion, because `math.isfinite`
+        coerces and an oversized JSON integer raises `OverflowError` there."""
+        if isinstance(value, bool):
             return None
-        return int(value) if math.isfinite(value) else None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value):
+            return value if keep_float else int(value)
+        return None
 
     cap = _number(cap)
     base = _number(base)
@@ -1876,15 +1886,10 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     # A missing percent must not silence a clamp that needs no percent to
     # compute.  Carry it as None and let the line omit the claim, rather than
     # defaulting to a number upstream did not send.  A float is legitimate
-    # here (95.0 is served), so this keeps the type but demands a finite value
-    # in range: NaN and inf raise in the arithmetic below, and a -50 prints an
-    # impossible window as fact.
-    if (
-        isinstance(percent, bool)
-        or not isinstance(percent, (int, float))
-        or not math.isfinite(percent)
-        or not 0 <= percent <= 100
-    ):
+    # here (95.0 is served), so keep the type and add the one bound the shared
+    # gate cannot know: a -50 prints an impossible window as fact.
+    percent = _number(percent, keep_float=True)
+    if percent is not None and not 0 <= percent <= 100:
         percent = None
 
     effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
@@ -1908,8 +1913,11 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
         # cap 1000000: a configured 400000 escapes the clamp solely because the
         # last fetch won the raised cap, and reverts to 258400 without it.
         # With no base in the entry, the cap alone carries the clamp, so
-        # measure against whichever of the two the cache actually gave.
-        "leans_on_cached_cap": configured > base,
+        # measure against whichever of the two the cache actually gave.  Both
+        # halves are needed: a cap BELOW the base clamps while `configured >
+        # base` stays False, and the operator then loses tokens to a stale cap
+        # with nothing in the line to say so.
+        "leans_on_cached_cap": configured > base or cap < configured,
         # Every app-server fetch lands the base cap, whatever clientInfo name
         # it presents, so a live daemon keeps pulling a raised cap back down.
         "app_server_running": (

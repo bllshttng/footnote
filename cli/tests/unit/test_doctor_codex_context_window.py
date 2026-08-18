@@ -348,6 +348,40 @@ def test_a_non_finite_or_out_of_range_percent_is_dropped(tmp_path, monkeypatch) 
         assert report["effective"] == 272000, bad
 
 
+def test_an_oversized_integer_reports_a_reason_rather_than_raising(
+    tmp_path, monkeypatch
+) -> None:
+    """math.isfinite coerces to float, and an oversized JSON integer raises
+    OverflowError there.  Every cached number goes through one gate now, so
+    the int branch must return before any coercion."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000)
+    huge = "9" * 400
+    (tmp_path / "models_cache.json").write_text(
+        '{"models": [{"slug": "gpt-5.6-sol", "context_window": 272000, '
+        f'"max_context_window": {huge}, "effective_context_window_percent": {huge}}}]}}'
+    )
+
+    report = doctor._codex_context_window_report()
+
+    assert report["percent"] is None
+    assert report["effective"] == 1000000
+
+
+def test_a_cap_below_the_base_still_names_the_cache(tmp_path, monkeypatch) -> None:
+    """A cap under the base clamps while `configured > base` stays False, so
+    the whole cache clause vanished and the operator could not tell that a
+    stale cap, not the percent, is what cost them the tokens."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=250000, cached_max=200000)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["effective"] == 190000
+    assert report["leans_on_cached_cap"] is True
+    assert "models_cache.json puts gpt-5.6-sol at 200000" in _emit(report)[0]
+
+
 def test_a_missing_base_is_omitted_rather_than_filled_in(tmp_path, monkeypatch) -> None:
     """Same contract as the cap: a consumer pricing a base-tier fetch off
     context_window alone must not read a filled-in value worth zero loss."""
