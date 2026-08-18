@@ -199,14 +199,18 @@ def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -
 
 
 def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypatch) -> None:
-    """The no-overlay, no-marker path still omits the env kwarg (inherits parent
-    byte-identical). Pins that the identity scrub did not force env construction
-    on every headless spawn - only when there is something to scrub."""
+    """The no-overlay path preserves parent values and adds the GraphQL proxy."""
     from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+    )
 
     captured = _capture_subprocess_env(monkeypatch, claude_mod)
     cwd = tmp_path / "wd"
     cwd.mkdir()
     claude_mod.headless_create(message="hi", cwd=cwd)
     explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
-    assert not explicit_envs, "no-overlay headless spawn passed an explicit env"
+    assert explicit_envs
+    assert explicit_envs[-1]["FNO_REAL_GH"] == "/real/gh"

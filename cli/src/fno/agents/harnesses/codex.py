@@ -535,7 +535,9 @@ def _run_codex(
 
     from fno.setup.github_cli import worker_environment
 
-    spawn_env = worker_environment(spawn_env or os.environ)
+    proxy_env = worker_environment(spawn_env or os.environ)
+    if spawn_env is not None or proxy_env != dict(os.environ):
+        spawn_env = proxy_env
 
     try:
         try:
