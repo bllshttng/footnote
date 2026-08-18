@@ -45,32 +45,50 @@ The fetch is the point: a stale local `origin/main` ref answers zero for a branc
 
 ## Fleet lifecycle
 
-There is no kill verb on either surface: not `fno agents kill`, not `fno-agents kill`. The reap sequence is stop, then rm.
+There is no kill verb on either surface: not `fno agents kill`, not `fno-agents kill`. The reap sequence depends on the substrate.
+
+A pane worker, the default `--substrate pane`, is reaped with `fno mux pane kill <session>:<pane_id>`. The ref comes from the row's `mux` field in `fno agents list --json`. A mux row carries no transport short id, so `fno agents stop` cannot address it.
+
+Killing the pane does not touch the registry row. A row that lingers after the pane is gone still goes through `fno agents rm`.
+
+A bg or daemon worker is reaped stop first, then rm.
 
 | Step | Verb | The gotcha |
 |---|---|---|
-| 1 | `fno agents stop <name>` | Stops the underlying session. For claude agents it shells `claude stop` with the short id. |
+| 1 | `fno agents stop <name>` | Reaches a session on claude rows only. Codex and gemini answer `stop is a no-op between asks`, registry unchanged. |
 | 2 | `fno agents rm <name>` | On teardown failure the registry row is KEPT for retry. `--force` drops it anyway and names the orphan left in the harness store. |
 
 `rm` alone never stops a running session. Removing a row and stopping a session are separate verbs by design.
+
+Measured on a live registry: `fno agents rm` lands the registry removal, then hangs on harness teardown. A timeout is not a failed removal. Re-read the registry before you believe the receipt.
 
 Driven directly, the claude-native verbs key on the SHORT ID: `claude rm <short_id>`, `claude stop <short_id>`. A name does not match there, so a direct reap by name silently no-ops and leaves the row the operator sees.
 
 The `fno agents` verbs resolve the name to the short id for you. Reach for those.
 
+`fno agents rm` talks to the Rust daemon, and a wedged daemon takes the verb down with it. When the daemon is wedged, the working reap path is the in-process call. It skips the daemon and returns at once: `python -c "from fno.agents.dispatch import rm_agent; rm_agent('<name>', force=True)"`.
+
 `fno agents list` reads every transcript to derive per-row state. On a fleet of dozens it has taken over 120 seconds. Budget for that before you block a reign on the read.
+
+`claude agents` lists claude sessions only. Diffing it against the fno registry as a death test marks every live codex worker dead.
 
 The registry carries `last_message_at` and not `last_message`: a timestamp is available and the content is not. Read the content with `fno agents peek`.
 
 For a fleet-wide sweep, `fno agents watchdog` reads transcript truth and prints one verdict per row (wake, reroute, reap, ghost).
 
-It is a dry run by default. `--apply` executes the wake lane only, the one action that cannot destroy work. `--apply-all` adds reap and reroute, and both stop sessions.
+It is a dry run by default. `--apply` executes the wake lane only, the one action that cannot destroy work.
+
+`--apply-all` adds reroute and reap. The reap lane has its own opt-in: `config.recovery.watchdog_reap`, false by default. An unreadable config reads the same as false. With reap off, `--apply-all` still runs wake and reroute and still reports the reap verdict as `frozen`. That verdict names a dead row. It does not clear it. Clear the row by hand with stop and rm, or set the config to arm the lane.
 
 ## Delivery to a live session
 
-`fno-agents resume <name> -m <text>` is the reliable channel.
+`fno-agents resume <name> -m <text>` forwards the text on exactly one path: a live, non-mux Claude row.
 
-Its warning `timed out after 3.0s, falling back to registry-only view` is noise: the roster probe times out, the command falls back to the registry view, and the message still lands.
+Every other resume parses `-m` and drops the value: a dead Claude relaunch, a mux pane relaunch, every non-Claude harness. The resume succeeds and the instruction never lands.
+
+On the one path that forwards it, the warning `timed out after 3.0s, falling back to registry-only view` is noise. The roster probe times out, the command falls back to the registry view, and the message still lands.
+
+Everywhere else, resume first and deliver the instruction with `fno mail send <handle>`, then confirm it in the transcript.
 
 `fno mail send` can hang for minutes. A send that has not returned is pending, not failed.
 
