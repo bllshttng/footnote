@@ -960,6 +960,23 @@ def test_superseding_an_id_nobody_recorded_says_so(
     assert "no decision d-1234657 is on record" in res.output
 
 
+def test_an_install_with_no_index_is_told_to_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The upgrade path. Every decision on an existing install lives in the
+    graph projection this reader no longer consults, so a bare "none recorded"
+    would be the absence-reads-as-success shape on this verb's own rollout."""
+    assert not index.exists()
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "fno decide reindex" in listed.output
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    after = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
+    assert "fno decide reindex" not in after.output, "only while the index is missing"
+
+
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
     """It behaved this way only because it named no retention and the default
     is durable. The record the recall promise rests on is then one schema edit

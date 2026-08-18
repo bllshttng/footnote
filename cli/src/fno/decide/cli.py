@@ -193,7 +193,20 @@ def list_cmd(
     if not decisions:
         # Exit 0: a read that answered "none" is a successful read. Only a read
         # that could not run is a failure.
-        typer.echo(f"decide list: no decisions recorded for '{label}'", err=True)
+        #
+        # But an install that predates the index has NO index, and every
+        # decision it holds lives in the graph projection this reader no longer
+        # consults. "None recorded" would then be the absence-reads-as-success
+        # shape this verb exists to police, on its own upgrade path. So the
+        # empty answer names the backfill whenever the index is missing.
+        from fno.decide import _index_path
+
+        hint = (
+            "" if _index_path().exists()
+            else " (no index yet on this machine - run `fno decide reindex` to "
+            "backfill what is already on disk)"
+        )
+        typer.echo(f"decide list: no decisions recorded for '{label}'{hint}", err=True)
         return
 
     for d in decisions:
