@@ -101,7 +101,8 @@ have scripts/install/fno.sh '[ -x "$FNO_REAL" ] && return 0' "waited executable 
 lacks scripts/install/fno.sh '] && [ -x "$FNO_REAL" ] && verify_ours_within' "single-shot adopt executable gate"
 lacks scripts/install/fno.sh 'if [ ! -x "$FNO_REAL" ]; then' "single-shot post-install executable gate"
 have scripts/install/fno.sh 'fno-bootstrap" ] || [ -d "${FNO_REAL%/*}" ]' "two-dir adopt discriminator"
-have scripts/install/fno.sh 'refusing to install over it' "adopt refusal instead of a force reinstall"
+have scripts/install/fno.sh 'refusing to install over a foreign fno' "stable-stranger adopt refusal"
+lacks scripts/install/fno.sh 'refusing to install over it' "over-broad adopt refusal"
 have scripts/install/fno.sh '(version unreadable)' "receipt never prints a blank version"
 
 have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1; sleep 0.2' "15-retry ceiling and 0.2s poll"

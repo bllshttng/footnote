@@ -453,11 +453,16 @@ main() {
 					report_success
 					return 0
 				fi
-				# The Rust adopt arm propagates this refusal out of run()
-				# rather than falling through to provision: a package that
-				# answers the probe is never --force-installed over, and a
-				# torn read reports instead of reinstalling blindly.
-				die "cannot verify the installed fno ($FNO_VERIFY_REASON); refusing to install over it."
+				# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
+				# invariant: a complete foreign answer is never
+				# --force-installed over). An instrument failure - torn
+				# metadata, a missing venv python - falls through on purpose:
+				# the force install below is this script's repair path for a
+				# broken-but-ours install, and refusing here would leave a
+				# half-removed install with no automated repair.
+				if [ -n "$FNO_VERIFY_STABLE" ]; then
+					die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to install over a foreign fno."
+				fi
 			fi
 		fi
 	fi
