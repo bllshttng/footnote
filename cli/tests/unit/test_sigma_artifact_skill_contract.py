@@ -145,8 +145,9 @@ def test_pr_check_inspects_sigma_before_zero_reviewer_return() -> None:
     assert "--inspect-sigma" in window
     assert "EXTERNAL_REVIEW_ENABLED=0" in window
     assert 'if [[ "$EXTERNAL_REVIEW_ENABLED" == "1" ]]' in window
-    assert "OWNER=$(gh repo view" in window
-    assert "REPO=$(gh repo view" in window
+    assert "REPO_SLUG=$(git config --get remote.origin.url" in window
+    assert "OWNER=${REPO_SLUG%%/*}" in window
+    assert "REPO=${REPO_SLUG#*/}" in window
 
 
 def test_pr_check_reuses_badge_and_response_sequence() -> None:

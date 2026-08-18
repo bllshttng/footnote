@@ -576,7 +576,7 @@ def test_headless_create_strips_incoherent_inherited_model_env(
 
 
 def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) -> None:
-    """No --account -> no explicit env (byte-identical to today: inherits parent)."""
+    """No --account preserves parent values while adding the GraphQL proxy."""
     from fno.agents.harnesses import claude as claude_mod
 
     # The "inherits verbatim" property holds for a COHERENT parent env: a
@@ -599,10 +599,14 @@ def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) ->
         return result
 
     monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+    )
     cwd = tmp_path / "wd"
     cwd.mkdir()
     claude_mod.headless_create(message="hi", cwd=cwd)
-    assert captured["has_env"] is False
+    assert captured["has_env"] is True
 
 
 def test_headless_create_forwards_json_output_format(tmp_path: Path, monkeypatch) -> None:

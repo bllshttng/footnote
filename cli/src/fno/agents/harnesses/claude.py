@@ -425,7 +425,9 @@ def headless_create(
             )
     from fno.setup.github_cli import worker_environment
 
-    spawn_env = worker_environment(spawn_env or os.environ)
+    proxy_env = worker_environment(spawn_env or os.environ)
+    if spawn_env is not None or proxy_env != dict(os.environ):
+        spawn_env = proxy_env
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -435,7 +437,8 @@ def headless_create(
         "text": True,
         "timeout": timeout,
     }
-    run_kwargs["env"] = spawn_env
+    if spawn_env is not None:
+        run_kwargs["env"] = spawn_env
     # Emit the spawn receipt BEFORE the synchronous blocking claude -p. A
     # one-shot holds this process until claude -p returns (potentially long),
     # so without an up-front line a watcher sees nothing and may assume the

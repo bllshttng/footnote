@@ -61,10 +61,13 @@ def ensure_proxy(
 
 def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     inherited_delegate = base.get("FNO_REAL_GH")
-    result = ensure_proxy(
-        real_gh=Path(inherited_delegate) if inherited_delegate else None
-    )
     env = dict(base)
+    try:
+        result = ensure_proxy(
+            real_gh=Path(inherited_delegate) if inherited_delegate else None
+        )
+    except (FileNotFoundError, OSError, RuntimeError):
+        return env
     old_path = env.get("PATH", "")
     env["PATH"] = str(result.proxy.parent) + (os.pathsep + old_path if old_path else "")
     env["FNO_REAL_GH"] = str(result.delegate)

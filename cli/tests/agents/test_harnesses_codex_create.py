@@ -381,8 +381,11 @@ def test_create_routed_openai_provider_injects_config_and_env(
 
 
 def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monkeypatch):
-    """No role -> no codex route -> argv/env byte-identical to today (no -c,
-    inherit parent env)."""
+    """No role leaves argv unchanged and adds only the GraphQL proxy env."""
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+    )
     codex_mod.create(
         cwd=Path("/tmp/work"),
         prompt="do this",
@@ -395,8 +398,8 @@ def test_create_unrouted_leaves_argv_and_env_default(tmp_path, fake_popen, monke
     argv = call_args.args[0]
     assert "-c" not in argv
     assert argv[:2] == ["codex", "--ask-for-approval"]
-    # No agent_self, no route -> env is None (inherit parent unchanged).
-    assert call_args.kwargs["env"] is None
+    assert call_args.kwargs["env"]["PATH"].startswith("/proxy:")
+    assert call_args.kwargs["env"]["FNO_REAL_GH"] == "/real/gh"
 
 
 def test_create_yolo_swaps_sandbox_for_dangerous_bypass(tmp_path, fake_popen):

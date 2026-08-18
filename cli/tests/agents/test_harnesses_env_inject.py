@@ -101,7 +101,7 @@ def test_codex_create_threads_agent_self_to_run_codex(
 def test_codex_create_without_agent_self_skips_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When agent_self=None, env=None so the child inherits parent env unchanged."""
+    """Without agent identity, the child still receives the GraphQL proxy."""
     from fno.agents.harnesses import codex as codex_mod
 
     captured: Dict[str, Any] = {}
@@ -111,6 +111,10 @@ def test_codex_create_without_agent_self_skips_injection(
         raise codex_mod.CodexInvocationError(1)
 
     monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+    )
 
     output_path = tmp_path / "out.jsonl"
     output_path.touch()
@@ -125,7 +129,7 @@ def test_codex_create_without_agent_self_skips_injection(
             # agent_self omitted
         )
 
-    assert captured["env"] is None
+    assert captured["env"]["FNO_REAL_GH"] == "/real/gh"
 
 
 # ---------------------------------------------------------------------------
