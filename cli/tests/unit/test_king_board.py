@@ -276,6 +276,63 @@ def test_a_healthy_board_exits_zero_and_is_json_serialisable():
     json.dumps(board)
 
 
+# --- the PR filter ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "check,expected",
+    [
+        # A check run still in flight carries a NULL conclusion. Reading only
+        # `conclusion` would score it as neither failed nor pending, so a PR
+        # with CI running would read green and the king would merge it.
+        ({"conclusion": None, "status": "IN_PROGRESS"}, 0),
+        ({"conclusion": None, "status": "QUEUED"}, 0),
+        ({"conclusion": "FAILURE", "status": "COMPLETED"}, 0),
+        ({"state": "PENDING"}, 0),
+        ({"state": "FAILURE"}, 0),
+        ({"conclusion": "SUCCESS", "status": "COMPLETED"}, 1),
+        ({"state": "SUCCESS"}, 1),
+    ],
+)
+def test_only_a_finished_green_pr_counts_as_mergeable(check, expected, monkeypatch):
+    from fno.king import board as board_mod
+
+    listing = [
+        {
+            "number": 1,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [check],
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    assert len(read.rows()) == expected
+
+
+def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
+    from fno.king import board as board_mod
+
+    listing = [
+        {"number": 1, "title": "t", "mergeable": "CONFLICTING", "statusCheckRollup": []}
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    assert read.rows() == []
+
+
+def test_capping_the_per_pr_reads_is_reported_not_swallowed(monkeypatch):
+    from fno.king import board as board_mod
+
+    listing = [
+        {"number": n, "title": "t", "mergeable": "MERGEABLE", "statusCheckRollup": []}
+        for n in range(30)
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+    _, warnings = board_mod._read_prs(timeout=1, max_pr_reads=5)
+    assert any("capped at 5 of 30" in w for w in warnings)
+
+
 # --- truncation -------------------------------------------------------------
 
 

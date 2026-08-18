@@ -367,13 +367,21 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
     for pr in rows:
         if pr.get("mergeable") != "MERGEABLE":
             continue
-        rollup = pr.get("statusCheckRollup") or []
-        states = {
-            (c.get("conclusion") or c.get("state") or "").upper() for c in rollup
-        }
-        if states & {"FAILURE", "CANCELLED", "TIMED_OUT", "ERROR"}:
+        # A rollup row is either a check run (conclusion + status, where a
+        # running one has a NULL conclusion) or a status context (state). Reading
+        # `conclusion` alone would score a check that is still running as
+        # neither failed nor pending, so a PR with CI in flight would read
+        # green. Every field each shape carries is collected, and a green
+        # verdict needs the absence of every unfinished and failed marker.
+        states: set[str] = set()
+        for check in pr.get("statusCheckRollup") or []:
+            for field in ("conclusion", "status", "state"):
+                value = check.get(field)
+                if value:
+                    states.add(str(value).upper())
+        if states & {"FAILURE", "CANCELLED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED"}:
             continue
-        if "PENDING" in states or "IN_PROGRESS" in states or "QUEUED" in states:
+        if states & {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED"}:
             continue
         ready.append({"number": pr.get("number"), "title": pr.get("title")})
     return SourceRead(payload=ready), warnings
