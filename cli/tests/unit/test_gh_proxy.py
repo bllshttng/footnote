@@ -133,6 +133,18 @@ def test_worker_environment_surfaces_proxy_install_io_failure(monkeypatch, tmp_p
         worker_environment({"PATH": "/usr/bin", "FNO_REAL_GH": str(real)})
 
 
+def test_worker_environment_survives_a_binary_delegate(tmp_path, monkeypatch):
+    real = tmp_path / "gh"
+    real.write_bytes(b"\x7fELF\x02" + b"\x90" * 120)
+    proxy = tmp_path / "proxy" / "gh"
+    monkeypatch.setattr(
+        "fno.setup.github_cli.ensure_proxy",
+        lambda **_: InstallResult(proxy=proxy, delegate=real, changed=True),
+    )
+    env = worker_environment({"PATH": "/usr/bin", "FNO_REAL_GH": str(real)})
+    assert env["PATH"].split(os.pathsep)[0] == str(tmp_path / "proxy")
+
+
 def test_worker_environment_uses_config_free_fallback(monkeypatch, tmp_path):
     real = tmp_path / "real-gh"
     real.write_text("real")

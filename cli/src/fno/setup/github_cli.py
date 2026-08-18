@@ -30,6 +30,14 @@ def fallback_proxy_dir() -> Path:
     return Path(tempfile.gettempdir()) / f"fno-{uid}" / "github-cli"
 
 
+def _is_wrapper(path: Path) -> bool:
+    # A stock CI runner's gh is a compiled binary, not utf-8 text.
+    try:
+        return path.read_text() == _WRAPPER
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def ensure_proxy(
     *,
     directory: Optional[Path] = None,
@@ -47,7 +55,7 @@ def ensure_proxy(
         raise RuntimeError("resolved gh delegate points back to the Footnote proxy")
 
     backup = None
-    changed = not proxy.exists() or proxy.read_text() != _WRAPPER
+    changed = not proxy.exists() or not _is_wrapper(proxy)
     if changed:
         if proxy.exists():
             backup = proxy.with_name("gh.pre-fno")
@@ -76,7 +84,7 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
         return env
     delegate = Path(found)
     try:
-        if delegate.is_file() and delegate.read_text() == _WRAPPER:
+        if delegate.is_file() and _is_wrapper(delegate):
             env[_PROXY_DIR_ENV] = str(delegate.parent.resolve())
             env.pop("FNO_REAL_GH", None)
             return env
