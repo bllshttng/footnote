@@ -476,7 +476,7 @@ def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
         fh.write(torn + "\n")
 
     capsys.readouterr()
-    rows = _read_index(index)
+    rows, _ = _read_index(index)
     err = capsys.readouterr().err
     assert [r["decision"] for r in rows] == ["merged"], "one bad row costs no others"
     assert "1 damaged row(s)" in err
@@ -498,7 +498,7 @@ def test_reindex_drops_the_damaged_row_so_the_warning_can_clear(
     assert counts["repaired"] == 1, counts
 
     capsys.readouterr()
-    rows = _read_index(index)
+    rows, _ = _read_index(index)
     assert [r["decision"] for r in rows] == ["merged"]
     assert "damaged row(s)" not in capsys.readouterr().err
 
@@ -743,6 +743,86 @@ def test_a_non_node_subject_is_case_insensitive_but_still_exact(
         runner.invoke(decide_app, ["list", "--subject", "pr-92", "--json"]).stdout
     )
     assert miss["decisions"] == [], "folding case is not a prefix match"
+
+
+def test_reindex_exits_nonzero_when_the_index_cannot_be_written(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The per-row counter cannot tell one unusable legacy row from a dead
+    store, and exit 0 on the second says the recovery ran while every decision
+    stayed unrecoverable."""
+    import fno.events as events_mod
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "every attempted write failed" in res.output
+
+
+def test_an_unreadable_graph_says_recall_degraded(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Without the graph a subject only matches its literal spelling, so a
+    ruling recorded under a slug stops answering the id the receipt printed.
+    Degrading in silence is indistinguishable from no such decision."""
+    import fno.graph.store as gs
+
+    runner.invoke(decide_app, ["--subject", "fold-the-inbox", "--decision", "fold"])
+
+    def unreadable(*a, **kw):
+        raise OSError("graph.json is mid-write")
+
+    monkeypatch.setattr(gs, "read_graph", unreadable)
+    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "the graph could not be read" in listed.output
+
+
+def test_the_newest_superseder_wins_the_mark(root: Path, tmp_graph: Path, index: Path):
+    """One ruling can be overturned twice, and a backfill interleaves journals
+    with projections, so file order is not recency."""
+    first = runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "merge it"]
+    ).stdout.strip().splitlines()[-1]
+    runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "hold it", "--supersedes", first]
+    )
+    newest = runner.invoke(
+        decide_app,
+        ["--subject", "pr-922", "--decision", "hold it again", "--supersedes", first],
+    ).stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-922", "--json"]).stdout
+    )
+    by_id = {d["decision_id"]: d for d in payload["decisions"]}
+    assert by_id[first]["superseded_by"] == newest
+
+
+def test_the_json_surface_reports_damaged_rows(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A machine-first surface must not under-report a total that looks
+    complete: that is the lie "truncated" was added to prevent."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert payload["damaged"] == 1
+    assert payload["total"] == 1
 
 
 def test_operator_decision_retention_is_durable_by_an_explicit_key():

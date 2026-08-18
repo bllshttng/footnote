@@ -192,8 +192,8 @@ def _index_path() -> Path:
     return paths.decisions_jsonl()
 
 
-def _read_index(path: Path, *, warn: bool = True) -> "list[dict]":
-    """Flatten the index into decision rows, in file order.
+def _read_index(path: Path, *, warn: bool = True) -> "tuple[list[dict], int]":
+    """Flatten the index into decision rows plus a damaged-row count.
 
     A MISSING index reads as zero decisions - the common case before the first
     write. An index that exists and cannot be read raises: an unreadable store
@@ -213,7 +213,7 @@ def _read_index(path: Path, *, warn: bool = True) -> "list[dict]":
         try:
             path.lstat()
         except OSError:
-            return []  # nothing there at all: the case before the first write
+            return [], 0  # nothing there: the case before the first write
         raise  # a symlink whose target is gone is UNREACHABLE, not absent
 
     rows: "list[dict]" = []
@@ -252,12 +252,18 @@ def _read_index(path: Path, *, warn: bool = True) -> "list[dict]":
         # is never skipped SILENTLY: a truncated append would otherwise make an
         # unreadable record and an empty one look the same, which is the
         # absence-as-success failure this index exists to prevent.
+        #
+        # The text names the sidecar rather than promising recovery. reindex
+        # re-folds the journals, so a row whose source journal is gone (a
+        # deleted repo, another machine) is NOT recovered; it is moved aside
+        # where a human can still read it.
         print(
             f"decide: {damaged} damaged row(s) in {path} were skipped. "
-            f"Run `fno decide reindex` to recover them and rewrite the index.",
+            f"`fno decide reindex` re-folds the journals and moves the rest to "
+            f"{path.name}.corrupt.",
             file=sys.stderr,
         )
-    return rows
+    return rows, damaged
 
 
 def _graph_entries() -> "list[dict]":
@@ -272,7 +278,16 @@ def _graph_entries() -> "list[dict]":
         return graph_store.entries_with_archive(
             graph_store.read_graph(graph_store.GRAPH_JSON)
         )
-    except Exception:  # noqa: BLE001 - the graph is advisory to a string query
+    except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
+        # Advisory, but NOT silent. Without the graph the reader falls back to
+        # literal matching, so a ruling recorded under a slug stops answering
+        # the canonical id the receipt printed. A degraded read that says
+        # nothing is indistinguishable from no such decision.
+        print(
+            f"decide: the graph could not be read ({exc}), so a subject only "
+            f"matches the exact string it was recorded under.",
+            file=sys.stderr,
+        )
         return []
 
 
@@ -331,23 +346,33 @@ def _subject_matcher(subject: str):
 
 def list_decisions(
     subject: str | None = None, limit: int | None = None
-) -> "tuple[str, list[dict]]":
+) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
+
+    Returns the query label, the rows, and the number of DAMAGED index rows the
+    read skipped. That third value travels so the machine-readable surface can
+    say the answer is short, rather than under-reporting a total that looks
+    complete.
 
     ``subject=None`` returns every decision, which is the only way to reach a
     record written with no subject at all - what ``fno outstanding clear
     --answer`` writes for a question that names no node.
     """
-    rows = _read_index(_index_path())
+    rows, damaged = _read_index(_index_path())
 
     # The graph projection stamped superseded_by at write time under the lock.
     # The index cannot (it is append-only), so the reader derives it, across
-    # the whole scanned set rather than the filtered one.
-    superseded_by: "dict[str, str]" = {}
+    # the whole scanned set rather than the filtered one. Newest superseder
+    # wins: an operator can overturn one ruling twice, and file order is not
+    # recency once a backfill has interleaved journals and projections.
+    superseded_by: "dict[str, tuple[str, str]]" = {}
     for row in rows:
         target = row.get("supersedes")
-        if target:
-            superseded_by[str(target)] = str(row.get("decision_id"))
+        if not target:
+            continue
+        rank = (str(row.get("ts") or ""), str(row.get("decision_id") or ""))
+        if rank > superseded_by.get(str(target), ("", ""))[0:2]:
+            superseded_by[str(target)] = rank
 
     matches = _subject_matcher(subject) if subject else None
     out: "list[dict]" = []
@@ -355,7 +380,8 @@ def list_decisions(
         if matches is not None and not matches(str(row.get("subject") or "")):
             continue
         row = dict(row)
-        row["superseded_by"] = superseded_by.get(str(row.get("decision_id")))
+        winner = superseded_by.get(str(row.get("decision_id")))
+        row["superseded_by"] = winner[1] if winner else None
         out.append(row)
 
     # decision_id breaks the tie. A stable sort keeps file order for equal
@@ -367,7 +393,7 @@ def list_decisions(
     )
     if limit and limit > 0:
         out = out[:limit]
-    return subject or "(all)", out
+    return subject or "(all)", out, damaged
 
 
 def _projection_events() -> "list[dict]":
@@ -506,7 +532,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
 
     index = _index_path()
     repaired = _compact_index(index)
-    known = {str(row["decision_id"]) for row in _read_index(index, warn=False)}
+    known = {str(row["decision_id"]) for row in _read_index(index, warn=False)[0]}
     preexisting = set(known)
     counted: "set[str]" = set()
     already = 0

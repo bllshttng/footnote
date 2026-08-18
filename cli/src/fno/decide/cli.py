@@ -140,7 +140,7 @@ def list_cmd(
         # No cap on the read. The cap is applied HERE so the total is known,
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
-        label, found = list_decisions(subject, limit=None)
+        label, found, damaged = list_decisions(subject, limit=None)
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
@@ -158,6 +158,9 @@ def list_cmd(
                     "decisions": decisions,
                     "total": len(found),
                     "truncated": truncated,
+                    # This surface is machine-first, so an under-count that
+                    # looks complete is the same lie "truncated" prevents.
+                    "damaged": damaged,
                 },
                 separators=(",", ":"),
             )
@@ -206,17 +209,33 @@ def reindex_cmd() -> None:
     """
     from fno.decide import reindex
 
+    from fno.decide import _index_path
+
     try:
         counts = reindex()
     except Exception as exc:  # noqa: BLE001 - a partial backfill must not read as done
-        typer.echo(f"decide reindex: failed: {exc}", err=True)
+        typer.echo(
+            f"decide reindex: failed on the index at {_index_path()}: {exc}", err=True
+        )
         raise typer.Exit(1)
 
     note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
     if counts.get("repaired"):
-        note += f", {counts['repaired']} damaged row(s) dropped from the index"
+        note += f", {counts['repaired']} damaged row(s) moved aside"
     if counts.get("invalid"):
-        note += f", {counts['invalid']} unreadable rows skipped"
+        note += f", {counts['invalid']} rows could not be written"
     typer.echo(note, err=True)
     # stdout carries the value: the number of decisions now recoverable.
     typer.echo(counts["total"])
+
+    # Exit 1 when nothing landed and writes failed. The per-row `invalid`
+    # counter cannot tell one unusable legacy row from an unwritable store, and
+    # exiting 0 on the second would tell the operator the documented recovery
+    # ran while every decision stayed unrecoverable.
+    if counts.get("invalid") and not counts.get("added"):
+        typer.echo(
+            "decide reindex: nothing was added and every attempted write "
+            f"failed. Check that {_index_path()} is writable.",
+            err=True,
+        )
+        raise typer.Exit(1)
