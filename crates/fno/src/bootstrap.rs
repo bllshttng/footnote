@@ -311,9 +311,14 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // `install_verified` proves the console script and the bytecode landed; it
     // does not prove the venv python can answer for its own metadata yet.
     if let Err(e) = verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL) {
-        // Same reasoning: a foreign package at our path is a stable condition, so
-        // re-downloading 18 packages to reach the same refusal helps nobody.
-        write_failure_stamp(&source, &e.msg);
+        // Only a STABLE refusal is remembered, for the reason install_wheel's
+        // typed flag gives: a stranger's answer is settled, an instrument
+        // failure that outlasted the budget is not, and stamping it would
+        // replay "refusing to run a foreign fno" for the whole cooldown over
+        // an install that settles moments later.
+        if e.stable {
+            write_failure_stamp(&source, &e.msg);
+        }
         return Err(e);
     }
     Err(record_and_exec(&real, args))
