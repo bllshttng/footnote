@@ -341,7 +341,7 @@ fn git_show_toplevel(git_bin: &str) -> Option<PathBuf> {
     }
 }
 
-fn full_sha(value: &str) -> bool {
+pub(crate) fn full_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -533,87 +533,6 @@ fn gate_eligible_receipt(event: &Value) -> bool {
                         .iter()
                         .any(|item| item.as_str() == Some("squads-leak-guard:fno")))
         })
-}
-
-fn git_common_dir(git_bin: &str) -> Option<PathBuf> {
-    let output = Command::new(git_bin)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!path.is_empty()).then(|| PathBuf::from(path))
-}
-
-struct VerificationReadLock {
-    path: PathBuf,
-    stamp: String,
-    released: bool,
-}
-
-impl VerificationReadLock {
-    fn acquire(common_dir: &Path) -> Result<Self, String> {
-        let path = common_dir.join(".preflight.lock.d");
-        std::fs::create_dir(&path)
-            .map_err(|error| format!("verification lock unavailable: {error}"))?;
-        let stamp = format!("pid={} kind=evidence-reader", std::process::id());
-        if let Err(error) = std::fs::write(path.join("holder"), format!("{stamp}\n")) {
-            return Err(Self::cleanup_partial_acquisition(&path, &error.to_string()));
-        }
-        Ok(Self {
-            path,
-            stamp,
-            released: false,
-        })
-    }
-
-    fn cleanup_partial_acquisition(path: &Path, cause: &str) -> String {
-        let mut cleanup_errors = Vec::new();
-        if let Err(error) = std::fs::remove_file(path.join("holder")) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                cleanup_errors.push(error.to_string());
-            }
-        }
-        if let Err(error) = std::fs::remove_dir(path) {
-            cleanup_errors.push(error.to_string());
-        }
-        let mut detail = format!("verification lock unavailable: {cause}");
-        if !cleanup_errors.is_empty() {
-            detail.push_str("; partial acquisition cleanup failed: ");
-            detail.push_str(&cleanup_errors.join("; "));
-        }
-        detail
-    }
-
-    fn release(mut self) -> Result<(), String> {
-        let holder = self.path.join("holder");
-        let observed = std::fs::read_to_string(&holder)
-            .map_err(|error| format!("verification lock release failed: {error}"))?;
-        if observed.trim() != self.stamp {
-            return Err("verification lock ownership changed".to_string());
-        }
-        std::fs::remove_file(&holder)
-            .map_err(|error| format!("verification lock release failed: {error}"))?;
-        std::fs::remove_dir(&self.path)
-            .map_err(|error| format!("verification lock release failed: {error}"))?;
-        self.released = true;
-        Ok(())
-    }
-}
-
-impl Drop for VerificationReadLock {
-    fn drop(&mut self) {
-        if self.released {
-            return;
-        }
-        let holder = self.path.join("holder");
-        if std::fs::read_to_string(&holder).is_ok_and(|value| value.trim() == self.stamp) {
-            let _ = std::fs::remove_file(holder);
-            let _ = std::fs::remove_dir(&self.path);
-        }
-    }
 }
 
 fn receipt_decision_all(candidate_sha: &str, paths: &[String]) -> Value {
@@ -1015,40 +934,11 @@ fn run(args: &[String]) -> (i32, String, String) {
                         .to_string(),
                 );
             }
-            let Some(common_dir) = git_common_dir(&git_bin) else {
-                let decision = json!({
-                    "satisfied": false,
-                    "mode": Value::Null,
-                    "result": "unavailable",
-                    "receipt": Value::Null,
-                    "coverage": {"complete": false, "lock_error": "git common directory unavailable"},
-                });
-                return (1, format!("{decision}\n"), String::new());
-            };
-            let guard = match VerificationReadLock::acquire(&common_dir) {
-                Ok(guard) => guard,
-                Err(error) => {
-                    let decision = json!({
-                        "satisfied": false,
-                        "mode": Value::Null,
-                        "result": "unavailable",
-                        "receipt": Value::Null,
-                        "coverage": {"complete": false, "lock_error": error},
-                    });
-                    return (1, format!("{decision}\n"), String::new());
-                }
-            };
+            // The journal is append-only, so a read excludes nobody: writers
+            // append single lines without holding any lock. Taking the
+            // preflight writer lock here made every fleet verification
+            // unavailable for the duration of any preflight run.
             let decision = receipt_decision(&rest[0], &rest[1..]);
-            if let Err(error) = guard.release() {
-                let unavailable = json!({
-                    "satisfied": false,
-                    "mode": Value::Null,
-                    "result": "unavailable",
-                    "receipt": Value::Null,
-                    "coverage": {"complete": false, "lock_error": error},
-                });
-                return (1, format!("{unavailable}\n"), String::new());
-            }
             let code = if decision["satisfied"] == Value::Bool(true) {
                 0
             } else {
@@ -1504,30 +1394,50 @@ mod tests {
     }
 
     #[test]
-    fn reader_lock_release_failure_is_reported() {
+    #[cfg(unix)]
+    fn receipt_read_succeeds_while_preflight_write_lock_is_held() {
         let common = tempfile::tempdir().unwrap();
-        let guard = VerificationReadLock::acquire(common.path()).unwrap();
+        // A preflight run holds the writer lock on the shared common dir.
+        std::fs::create_dir(common.path().join(".preflight.lock.d")).unwrap();
+
+        // Hermetic git_common_dir: the FNO_VERIFY_GIT_BIN seam answers the
+        // one rev-parse the receipt verb makes, pointing at the temp dir.
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("git");
         std::fs::write(
-            common.path().join(".preflight.lock.d").join("unexpected"),
-            "x",
+            &script,
+            format!("#!/bin/sh\necho {}\n", common.path().display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut journal = tempfile::NamedTempFile::new().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        writeln!(
+            journal,
+            "{}",
+            receipt_event("2026-07-26T03:00:00Z", sha, "full", "passed")
         )
         .unwrap();
 
-        let error = guard.release().unwrap_err();
+        std::env::set_var("FNO_VERIFY_GIT_BIN", &script);
+        let (code, stdout, stderr) = run(&[
+            "receipt".to_string(),
+            sha.to_string(),
+            journal.path().display().to_string(),
+        ]);
+        std::env::remove_var("FNO_VERIFY_GIT_BIN");
 
-        assert!(error.contains("verification lock release failed"));
-    }
-
-    #[test]
-    fn reader_partial_acquisition_cleanup_failure_is_reported() {
-        let common = tempfile::tempdir().unwrap();
-        let lock = common.path().join(".preflight.lock.d");
-        std::fs::create_dir(&lock).unwrap();
-        std::fs::write(lock.join("unexpected"), "x").unwrap();
-
-        let error = VerificationReadLock::cleanup_partial_acquisition(&lock, "holder write failed");
-
-        assert!(error.contains("partial acquisition cleanup failed"));
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        let decision: Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(decision["satisfied"], true);
+        assert!(
+            decision.pointer("/coverage/lock_error").is_none(),
+            "coverage carried a lock error: {decision}"
+        );
     }
 
     #[test]

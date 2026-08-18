@@ -40,7 +40,8 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | `fno-agents wait --agent <name> --state done --timeout-ms <n>` (harness-tracked, one per unreconciled teammate; never `idle`, never `&`) |
 | Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --crown <scope>` (a king running a court belongs in its own mission workspace). Repeat `--crown`/`-k` for a portfolio; the rung is derived from what you name |
-| Hand your crown to a successor | Spawn the heir over your OWN scope: the crown transfers instead of being refused as a duplicate. There is no coronate-in-place verb |
+| Crown an existing session as a human | The target runs `fno agents register`; from another attended terminal run `fno agents crown <printed-handle> --scope <scope>`. It preserves the target's transcript and placement and refuses agent-originated calls |
+| Hand your crown to a successor | Spawn the heir over your OWN scope: the crown transfers instead of being refused as a duplicate. The attended in-place verb grants only and cannot perform succession |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno mail send <handle> "<msg>" --from-self` |
 | Resolve a handle you lost | `fno agents discovered-json` · `fno agents top` |

@@ -24,6 +24,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 | Gate | Read its section when |
 |------|-----------------------|
 | Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
 | Schema Citation Gate | the codemap has a `## Database Schema` section AND the plan touches the DB |
 | Executor Lock Transcription | a design doc supplies a Locked Decision (executor) |
 | Model Pin / Model Routing | the plan frontmatter sets `model:` or `model_tier:` |
@@ -141,6 +142,20 @@ fi
    Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
    For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
 
+2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`) and `closure` for the resolved node (`status`, `pr_number`, `superseded_by`). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions.
+
+   When `graph.closure.status` is `done` or `superseded`, halt before compiling. Report the closure fields. Do not finalize `status: ready` onto work that already shipped.
+
+   **Judge the candidates (the three-titles lesson).** Weigh what actually identifies a family over title words: the same file-and-line pair and the verbatim error string. Three sessions filed one bug as three titles sharing almost no words. The file and the error string were the identity. A familiar file alone is not family. A genuinely new bug in a familiar file gets its own node. The failure mode to avoid is a gate so strict that it swallows new work into an old node.
+
+   **Record exactly one outcome** in the plan frontmatter as a `consolidation:` block. The schema is [references/quick-template.md](references/quick-template.md). `validate-plan.sh` refuses a plan written after 2026-08-17 without a well-formed one. Plans created before the gate warn until backfilled:
+
+   - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --reason "<recorded reason>"`. Record the reversal (`fno backlog unsupersede <other>`) in the block.
+   - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The validator rejects an append outcome inside a written plan, because the file contradicts the decision. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
+   - **proceed_alone** - record every id considered under `proceed_alone_against:` with the reason each is not the same work. An empty candidate list is a legal `proceed_alone`.
+
+   Silence is not an outcome. A plan that ignores its sibling is the failure this gate exists to prevent. Do not build a second consolidator here: `fno backlog groom` already owns the daily levers-only pass and its allowlist already carries `supersede`. This gate is the pre-write half only.
+
 3. **Write** the plan.
 
    - **A design doc was supplied** (mutate-in-place, the common path): keep its
@@ -243,8 +258,12 @@ Load [references/quick-template.md](references/quick-template.md) for the full t
 ---
 status: ready
 kind: quick-plan
+created: <YYYY-MM-DD>      # required; the consolidation gate reads it
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
 # executor: do             # transcribed from a Locked Decision, if any
+consolidation:             # step 2d, exactly one outcome (see 2d above)
+  outcome: proceed_alone
+  proceed_alone_against: []
 kill_criteria:
   - name: iteration_ceiling
     predicate: iteration > 15

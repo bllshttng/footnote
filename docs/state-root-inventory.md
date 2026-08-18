@@ -28,11 +28,15 @@ One file per install. These belong at the root.
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated by `scripts/lib/hook-events.sh` | rotated |
+| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs` | rotated |
+| `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
+| `decisions.jsonl.corrupt` | `decide/__init__.py::_compact_index` | permanent; the only copy of a row whose source journal is gone |
+| `decisions.jsonl.compact` | `decide/__init__.py::_compact_index` | transient; replaced onto `decisions.jsonl` in the same call |
 | `evals-history.jsonl` | `paths.evals_history()` | append-only |
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
+| `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |

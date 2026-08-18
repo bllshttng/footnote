@@ -61,7 +61,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 331, (
+    assert len(mapped) == 334, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

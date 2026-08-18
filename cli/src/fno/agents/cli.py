@@ -12,6 +12,8 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
+
 import typer
 
 from fno.agents.rust_runtime import make_agents_group_cls
@@ -350,6 +352,46 @@ def cmd_watch(
         print("\n  -- watch stopped", file=sys.stderr)
         rc = 0
     raise typer.Exit(rc)
+
+
+@agents_app.command("crown", hidden=True)
+def cmd_crown(
+    handle: str = typer.Argument(
+        ...,
+        help="Existing registered session handle to crown in place.",
+    ),
+    scopes: list[str] = typer.Option(
+        ...,
+        "--scope",
+        help=(
+            "Territory to grant. Repeat for a multi-project portfolio; the "
+            "crown level is derived and cannot be supplied."
+        ),
+    ),
+) -> None:
+    """Crown an existing session from an attended shell.
+
+    Run `fno agents register` inside the target session, then run this command
+    with its printed handle from another terminal. Agent-originated calls are
+    refused; subordinate grants and succession stay on `spawn --crown`.
+    """
+    from fno.agents import events
+    from fno.agents.crown import CrownPromotionError, promote_existing_session
+
+    try:
+        receipt = promote_existing_session(handle, scopes)
+    except CrownPromotionError as exc:
+        print(f"crown: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+
+    events.emit(
+        "agent_crowned",
+        name=receipt["crowned"],
+        level=receipt["level"],
+        scope=receipt["scope"],
+        grantor=receipt["grantor"],
+    )
+    print(json.dumps(receipt))
 
 
 
@@ -2619,6 +2661,199 @@ def cmd_truth(
         "resolver-error",
     ):
         raise typer.Exit(code=13)
+
+
+@agents_app.command("watchdog")
+def cmd_watchdog(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the machine-readable payload."
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help=(
+            "Execute the wake lane only - the one action that cannot destroy "
+            "work. A ghost never auto-acts at any level."
+        ),
+    ),
+    apply_all: bool = typer.Option(
+        False,
+        "--apply-all",
+        help=(
+            "Execute every lane: wake plus reap and reroute, which both stop "
+            "a session. Implies --apply."
+        ),
+    ),
+    only: Optional[str] = typer.Option(
+        None, "--only",
+        help="Filter to one verdict: wake|reroute|reap|ghost|stale|leave.",
+    ),
+    mail_to: Optional[str] = typer.Option(
+        None,
+        "--mail",
+        help=(
+            "Mail the digest to this handle (an agent name, short id, or "
+            "project:<slug>). Defaults to config.recovery.watchdog_mail_to. "
+            "Skipped when the non-leave verdict set is unchanged."
+        ),
+    ),
+) -> None:
+    """Sweep the fleet from transcript truth and decide, per row: wake,
+    reroute, reap, or leave.
+
+    The transcript is the truth source (keyed by session id); the registry
+    and claude's agent view are hints. Dry run (default) prints every row
+    with its verdict and the measurement that decided it, and emits one
+    watchdog_verdict event per non-leave row.
+    """
+    import time as _time
+
+    from fno.agents import watchdog as wd
+
+    if only is not None and only not in (
+        wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.STALE, wd.LEAVE,
+    ):
+        print(f"fno agents watchdog: unknown verdict {only!r}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    now = _time.time()
+    payload, rows = wd.run_sweep(now_s=now)
+    if payload.get("refused"):
+        # x-4c87: a zero-row roster is an unreadable instrument, not an empty
+        # fleet. Write no sweep file and advance no gate, so staleness reads
+        # loud instead of certifying a healthy quiet fleet that was never read.
+        print(f"fno agents watchdog: {payload['refused']}", file=sys.stderr)
+        # The refusal says the roster was unreadable; the warnings say WHY
+        # (timed out, binary missing, non-zero exit, budget headroom).
+        # Dropping them leaves the one actionable line on the floor.
+        for warning in payload.get("warnings") or []:
+            print(f"  {warning}", file=sys.stderr)
+        raise typer.Exit(code=3)
+    pairs = [
+        (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
+    ]
+    shown_counts = payload["counts"]
+    if only is not None:
+        pairs = [p for p in pairs if p[0].verdict == only]
+        # A filtered view must not report the full sweep's counts: anything
+        # cross-checking the rows it was handed against the counts would
+        # disagree with both.
+        shown_counts = {}
+        for v, _row in pairs:
+            shown_counts[v.verdict] = shown_counts.get(v.verdict, 0) + 1
+
+    # Push, not pull: a verdict the king has to remember to fetch goes
+    # unread. Mail before writing the sweep file, so the change gate compares
+    # against the PREVIOUS sweep's signature - and only a delivered digest
+    # advances it (mail_gate), or a transient send failure would permanently
+    # swallow the verdict behind an unchanged signature.
+    recipient = mail_to
+    if recipient is None:
+        try:
+            from fno.config import load_settings
+
+            recipient = str(getattr(
+                load_settings().recovery, "watchdog_mail_to", "") or ""
+            )
+        except Exception:  # noqa: BLE001 - config read miss means no mail
+            recipient = ""
+    signature = ""
+    try:
+        ok, receipt, signature = wd.mail_gate(payload, recipient or "")
+        if not ok:
+            print(f"watchdog mail: {receipt}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
+        print(f"watchdog mail failed: {exc}", file=sys.stderr)
+    # A filtered run publishes only its own rows, so it must not stamp the
+    # whole non-leave set: doing so tells the next tick that ghost/wake rows
+    # it never emitted were already published.
+    events_payload = (
+        payload if only is None
+        else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
+    )
+    # A filtered run publishes a SUBSET, so its stamp has to be the union of
+    # what it just published and what was already published. Stamping the
+    # subset alone drops every filtered-out row from the record, and the next
+    # tick re-emits all of them.
+    prev_events_sig = wd._last_events_signature()
+    signature_to_stamp = wd.union_signature(
+        prev_events_sig, wd.verdict_signature(events_payload)
+    ) if only is not None else wd.verdict_signature(events_payload)
+    wd.write_sweep_file(
+        "manual", payload["counts"], now, signature,
+        events_signature=signature_to_stamp,
+    )
+
+    # Classification events ride every mode: a verdict emitted only under a
+    # dry run left apply modes with no event record at all, while the tick
+    # emits per non-leave row regardless of mode. The two lanes must not
+    # diverge on what the record shows - and that cuts both ways. Emitting
+    # ungated here duplicated every row the tick had already published, and
+    # the stamp above then told the next tick they were all published, so a
+    # filtered hand-run made the tick re-emit most of the fleet.
+    fresh_ids = wd.fresh_non_leave(events_payload, prev_events_sig)
+    for v, _row in pairs:
+        if v.verdict != wd.LEAVE and v.row_id in fresh_ids:
+            wd.emit_event(
+                "watchdog_verdict",
+                {"row_id": v.row_id, "name": v.name,
+                 "verdict": v.verdict, "basis": v.basis},
+            )
+
+    if not apply and not apply_all:
+        if json_out:
+            filtered = {
+                **payload,
+                "verdicts": [v._asdict() for v, _ in pairs],
+                "counts": shown_counts,
+            }
+            sys.stdout.write(json.dumps(filtered) + "\n")
+            sys.stdout.flush()
+            return
+        for v, _row in pairs:
+            typer.echo(f"{v.name:34} {v.state:9} {v.verdict:8} {v.basis}")
+        for warning in payload["warnings"]:
+            print(f"warning: {warning}", file=sys.stderr)
+        counts = " ".join(f"{k}={v}" for k, v in sorted(shown_counts.items()))
+        typer.echo(f"{len(pairs)} row(s): {counts}")
+        return
+
+    lanes = "all" if apply_all else "wake"
+    results = []
+    # One global provider rotation per sweep, shared across every row.
+    rotation = wd.RotationBudget()
+    for v, row in pairs:
+        try:
+            outcome, detail = wd.apply_verdict(
+                v, lanes=lanes, cwd=row.cwd, rotation=rotation
+            )
+        except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
+            outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
+        results.append({"row_id": v.row_id, "verdict": v.verdict,
+                        "outcome": outcome, "detail": detail})
+        if outcome == wd.SKIPPED:
+            # The ONE silent outcome: a verdict outside the lane (every leave
+            # row on a bare --apply). Printing one line per healthy row
+            # drowns the few that acted. Everything else surfaces, so a new
+            # outcome cannot go silent by not being listed here.
+            continue
+        line = f"{outcome:9} {v.name:34} {detail}"
+        if outcome != "applied":
+            print(line, file=sys.stderr)
+        elif not json_out:
+            # Human lines on stdout ahead of the JSON object make the whole
+            # document unparseable; the dry-run path already guards this.
+            typer.echo(line)
+        # Every non-skipped outcome emits: the `outcome` field carries which
+        # one it was, so no list here decides what is worth recording.
+        wd.emit_event(
+            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+            {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
+             "outcome": outcome},
+        )
+    if json_out:
+        sys.stdout.write(json.dumps({"results": results}) + "\n")
+        sys.stdout.flush()
 
 
 @agents_app.command("ping", hidden=True)

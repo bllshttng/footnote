@@ -2184,7 +2184,8 @@ event_types:
     consumers: [operator, fno-agents needs]
 
   - name: operator_decision
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Folded by `fno decide list` through the graph projection on the subject node, which inherits the archive read-through."
+    retention: durable
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno decide list` reads. See docs/architecture/decision-record.md."
     sources: [target, hook, subagent, test]
     data:
       required: [decision_id, decision]
@@ -3182,7 +3183,7 @@ event_types:
           description: "Wall-clock seconds from tick entry to this record."
         phase:
           type: string
-          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, catchup."
+          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, watchdog, catchup."
         sweep_failures:
           type: integer
           description: "Repo listing failures (present when a sweep ran)."
@@ -3250,6 +3251,57 @@ event_types:
         short_id:
           type: string
           description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
+
+  - name: watchdog_verdict
+    description: "The external fleet watchdog classified a fleet row outside every session and the verdict is not 'leave': a ghost, a reapable, a reroute, or a wake candidate. The basis names the measurement that decided it so a reader can falsify the call."
+    sources: [daemon]
+    data:
+      required: [row_id, verdict]
+      properties:
+        row_id:
+          type: string
+          description: "The row's recorded session id (transcript join key)."
+        name:
+          type: string
+          description: "The row's name."
+        verdict:
+          type: string
+          description: "ghost | reap | stale | reroute | wake."
+        basis:
+          type: string
+          description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."
+
+  - name: watchdog_applied
+    description: "The fleet watchdog executed a verdict's action: a wake whose message landed in the recipient transcript, a redispatch, or a stop+rm on a clean worktree."
+    sources: [daemon]
+    data:
+      required: [row_id, verdict, detail]
+      properties:
+        row_id:
+          type: string
+          description: "The row's recorded session id."
+        verdict:
+          type: string
+          description: "wake | reroute | reap."
+        detail:
+          type: string
+          description: "What was done, including the mechanism's receipt."
+
+  - name: watchdog_refused
+    description: "The fleet watchdog declined to act on a verdict: a resume that never verified, a message absent from the transcript after a 'successful' wake, a dirty worktree blocking a reap, or a redispatch that declined. The reason is named."
+    sources: [daemon]
+    data:
+      required: [row_id, verdict, detail]
+      properties:
+        row_id:
+          type: string
+          description: "The row's recorded session id."
+        verdict:
+          type: string
+          description: "wake | reroute | reap."
+        detail:
+          type: string
+          description: "The named reason the action was refused."
 
   - name: operator_initiated
     retention: durable

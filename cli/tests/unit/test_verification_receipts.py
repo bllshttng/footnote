@@ -495,14 +495,11 @@ def test_canonical_generation_ignores_unreadable_optional_mirror(
 
 
 def test_independent_checkout_accepts_canonical_global_receipt_without_local_mirror(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     clone = tmp_path / "clone-b"
-    common = clone / ".git"
-    common.mkdir(parents=True)
     global_events = tmp_path / "global-events.jsonl"
     write(global_events, receipt(generation=4))
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
 
     decision = check_verification_evidence(
         cwd=str(clone), candidate_sha=SHA, event_paths=[global_events]
@@ -574,9 +571,6 @@ def test_optional_squads_guard_absence_keeps_actual_five_step_scope_eligible(
 def test_delivery_journal_discovery_failure_fails_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
     monkeypatch.setattr(
@@ -594,14 +588,11 @@ def test_delivery_journal_discovery_failure_fails_closed(
     assert decision["satisfied"] is False
 
 
-def test_reader_refuses_during_preflight_transition(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_reader_succeeds_while_preflight_write_lock_is_held(tmp_path: Path) -> None:
     common = tmp_path / ".git"
     lock = common / ".preflight.lock.d"
     lock.mkdir(parents=True)
     (lock / "holder").write_text("pid=42 sha=" + SHA + "\n")
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
     journal = tmp_path / "events.jsonl"
     write(journal, receipt())
 
@@ -609,58 +600,9 @@ def test_reader_refuses_during_preflight_transition(
         cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
     )
 
-    assert decision["satisfied"] is False
-    assert decision["result"] == "unavailable"
-    assert decision["coverage"]["lock_error"] == "preflight transition in progress"
-
-
-def test_reader_release_failure_invalidates_verdict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    monkeypatch.setattr(
-        Path,
-        "rmdir",
-        lambda _path: (_ for _ in ()).throw(OSError("simulated release failure")),
-    )
-    journal = tmp_path / "events.jsonl"
-    write(journal, receipt())
-
-    decision = check_verification_evidence(
-        cwd=str(tmp_path), candidate_sha=SHA, event_paths=[journal]
-    )
-
-    assert decision["satisfied"] is False
-    assert decision["result"] == "unavailable"
-    assert "release failed" in decision["coverage"]["lock_error"]
-
-
-def test_reader_partial_acquisition_cleanup_failure_is_reported(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    common = tmp_path / ".git"
-    common.mkdir()
-    monkeypatch.setattr("fno.pr._preflight._git_common_dir", lambda _repo: common)
-    original_write = Path.write_text
-
-    def fail_holder_write(path: Path, *args, **kwargs):
-        if path.name == "holder":
-            raise OSError("simulated holder write failure")
-        return original_write(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "write_text", fail_holder_write)
-    monkeypatch.setattr(
-        Path,
-        "rmdir",
-        lambda _path: (_ for _ in ()).throw(OSError("simulated cleanup failure")),
-    )
-
-    decision = check_verification_evidence(cwd=str(tmp_path), candidate_sha=SHA)
-
-    assert decision["result"] == "unavailable"
-    assert "partial acquisition cleanup failed" in decision["coverage"]["lock_error"]
+    assert decision["satisfied"] is True
+    assert decision["result"] == "passed"
+    assert "lock_error" not in decision["coverage"]
 
 
 def test_local_verification_policy_preserves_explicit_exemptions(

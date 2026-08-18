@@ -151,6 +151,7 @@ def test_design_template_actually_validates() -> None:
         .replace("<YYYY-MM-DD>", "2026-07-28")
         .replace("light|standard|deep", "standard")
         .replace("[<artifacts actually read>]", "[probe.py]")
+        .replace("<absorb | append | proceed_alone>", "proceed_alone")
     )
     assert "<" not in filled, (
         "the frontmatter template grew a placeholder this test does not fill, "

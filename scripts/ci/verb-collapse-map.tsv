@@ -3,6 +3,7 @@ agents adopt	T1	agents adopt	6
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
+agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents drive-authority	T1	agents drive-authority	9
@@ -244,6 +245,7 @@ posture apply	KEEP	posture apply	1	single-leaf group
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
 pr coverage-check	T1	pr coverage-check	1
+pr coverage-publish	T1	pr coverage-publish	0
 pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
@@ -330,3 +332,4 @@ worktree overlaps	T1	worktree overlaps	5
 worktree policy	T1	worktree policy	9
 worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
+agents watchdog	T1	agents watchdog	4

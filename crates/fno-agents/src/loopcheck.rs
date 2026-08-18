@@ -2884,6 +2884,183 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
         .find(|n| n.class == NudgeClass::Unresponsive)
 }
 
+/// The commit-status context the merge ruleset requires. One const for
+/// both emitter call sites and the standalone verb arm; the Python publisher,
+/// the refresher workflow, and the post-merge audit pin the same name from
+/// their own surfaces, and a context string that splits in two is a green
+/// marker on nothing.
+const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+
+/// Whether `name` is the local reviewer Python's gate demands a pass from,
+/// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
+fn is_code_review_reviewer(name: &str) -> bool {
+    normalize_reviewer(name) == "code-review"
+}
+
+/// Publish the just-emitted `review_coverage` verdict as a commit status on
+/// the PR head, so every path that can WRITE the row also leaves the
+/// server-visible marker `gh pr merge`, the web button, and the auto-merge
+/// queue are judged by. Direct `gh api` POST on the same `gh_bin` seam as the
+/// nudge comment; the outcome never gates the caller - the durable verdict is
+/// the event row, and a failed POST leaves the status absent, which the
+/// ruleset reads as not-passing (fail-closed).
+///
+/// The success conjunction MIRRORS `coverage_verdict` in
+/// cli/src/fno/pr/_coverage_gate.py: covered count > 0, the row pinned to the PR head
+/// (not merely the local HEAD), and - when `code-review` is a configured
+/// reviewer - a head-pinned local pass from it. The two must agree, because
+/// this status is exactly what lets a merge through where `fno pr merge`
+/// already looked; the post-merge audit on main is what catches a drift.
+///
+/// Skipped entirely when no review lane is configured: a stock install has no
+/// ruleset requiring the context, and a permanent failure status there would
+/// be noise that teaches readers to ignore the check.
+/// Whether the PR carries the `coverage-override` label. The label is durable
+/// shared state: EVERY writer of the coverage status re-reads it before
+/// posting, so a green stamped by the gate workflow's labeled arm survives a
+/// later stop-hook or verb fire instead of being clobbered red. One gh read;
+/// `None` means the read itself failed, which the caller must treat as "do
+/// not post" - an unreadable label state is neither held nor absent.
+fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
+    let out = Command::new(gh_bin)
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "labels",
+            "--jq",
+            "[.labels[].name] | index(\"coverage-override\") != null",
+        ])
+        .current_dir(cwd)
+        .output();
+    let o = out.ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&o.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// The one POST shape every coverage-status writer uses.
+fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+    let target = format!("repos/:owner/:repo/statuses/{head}");
+    let state_arg = format!("state={state}");
+    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let description_arg = format!("description={description}");
+    let _ = Command::new(gh_bin)
+        .args([
+            "api",
+            "--method",
+            "POST",
+            target.as_str(),
+            "-f",
+            state_arg.as_str(),
+            "-f",
+            context_arg.as_str(),
+            "-f",
+            description_arg.as_str(),
+        ])
+        .current_dir(cwd)
+        .output();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    pr_number: i64,
+    pr_head_oid: &str,
+    event_head: &str,
+    coverage: &CoverageReport,
+    required_bots: &[String],
+    optional_bots: &[String],
+    reviewers: &[String],
+) {
+    // A status target that is not a real 40-hex sha (an unresolved local
+    // HEAD, the "unknown" sentinel from a failed git read) would POST to a
+    // garbage path, or worse to the canonical checkout's default-branch tip -
+    // a red marker on a commit whose coverage was never evaluated.
+    if pr_number <= 0 || !crate::verify_evidence::full_sha(pr_head_oid) {
+        return;
+    }
+    // The lane predicate is the gate's, not a local variant: bots and
+    // reviewers, never external_reviewers (the /pr invocation list, not a
+    // gate axis). Counting it made this writer post failure on configs the
+    // Python merge gate answers "no lane" to - two writers of one context
+    // posting opposite states.
+    let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
+    if !lane {
+        return;
+    }
+    // The verdict describes event_head. A marker on pr_head_oid built from a
+    // different sha - an unpushed local HEAD at stop time, the canonical
+    // checkout's default-branch tip - aims at a commit the row never
+    // described; the refresher owns head moves, this writer only speaks for
+    // the head it evaluated.
+    if event_head != pr_head_oid {
+        return;
+    }
+    // The override first, mirroring the Python publisher: the label outranks
+    // the verdict, and its green must not be clobbered by this writer. The
+    // actor is named by the workflow's labeled arm, which sees the event.
+    // An unreadable label state posts NOTHING: falling through to the
+    // uncovered verdict would clobber the green the labeled arm stamped on
+    // this same head.
+    match pr_has_override_label(gh_bin, cwd, pr_number) {
+        Some(true) => {
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                "success",
+                "coverage-override label applied on the PR",
+            );
+            return;
+        }
+        None => return,
+        Some(false) => {}
+    }
+    let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
+    // event_head == pr_head_oid already holds; the early return above enforces it.
+    let covered = coverage.coverage.is_covered()
+        && (!local_pass_required
+            || coverage.verdicts.iter().any(|v| {
+                is_code_review_reviewer(&v.name)
+                    && v.producer == CoverageProducer::LocalAttestation
+                    && v.verdict == CoverageVerdict::Reviewed
+            }));
+    let (state, description) = if covered {
+        let Coverage::Covered(n) = coverage.coverage else {
+            return;
+        };
+        (
+            "success",
+            format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
+        )
+    } else if matches!(coverage.coverage, Coverage::Unknown) {
+        (
+            "failure",
+            format!(
+                "coverage unknown (gh read failed) at {}; retry the review verb",
+                short_sha(pr_head_oid)
+            ),
+        )
+    } else {
+        (
+            "failure",
+            format!(
+                "no covered review at {}; run the review verb at HEAD",
+                short_sha(pr_head_oid)
+            ),
+        )
+    };
+    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+}
+
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
 /// two questions ("will it finish, must I act") answered in one line.
 fn nudge_giveup_message(n: &BotNudge) -> String {
@@ -7460,7 +7637,7 @@ fn run_done(
     repo_slug: &str,
     author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
-    read_pr_info(
+    let info = read_pr_info(
         gh_bin,
         git_bin,
         cwd,
@@ -7477,7 +7654,29 @@ fn run_done(
         repo_slug,
         author_session,
         None,
-    )
+    )?;
+    // read_pr_info stays read-only against GitHub; the CALLER owns
+    // the write. A row was just emitted for this PR, so the publisher has the
+    // same evidence the merge gate will read, and the status targets the live
+    // PR head the row is compared against - not merely the local HEAD. Only
+    // an OPEN PR: read_pr_info short-circuits a MERGED PR to the
+    // Covered(0) sentinel, and publishing that as failure would flip the
+    // latest status on the merged head red and fail the post-merge audit for
+    // a merge that passed the gate.
+    if matches!(info.state, PrState::Open) {
+        publish_coverage_status(
+            gh_bin,
+            cwd,
+            info.number,
+            &info.head_oid,
+            head_sha,
+            &info.coverage,
+            required_bots,
+            optional_bots,
+            reviewers,
+        );
+    }
+    Ok(info)
 }
 
 /// Slack added beyond the declared watch window so the claim lease outlives the
@@ -8687,7 +8886,32 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // local HEAD; --head overrides with a caller that knows the PR head. A
     // --head sha the local repository does not contain leaves freshness
     // unresolvable, which resolves stale and refuses - the safe direction.
+    // Whether the caller supplied it decides the exit-4 publish below: a
+    // caller that knows the PR head gets the visible failure status; a
+    // derived-from-local-HEAD sha does not (it may be the canonical
+    // checkout's default-branch tip, a commit this row never described).
+    let head_explicit = head.is_some();
     let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
+
+    // The self-review floor, exactly as decide() applies it for the stop
+    // hook: a code payload on a lane-less stock install owes a local
+    // code-review pass. Without the floor here the verb's publish computed
+    // "no lane" and posted nothing on the install shape whose only publisher
+    // is this verb (a session with no stop hook), and the emitted row
+    // disagreed with the stop hook's floored row for the same PR.
+    let mut required_reviewers = inputs.required_reviewers;
+    let lane_configured = !(inputs.required_bots.is_empty()
+        && inputs.optional_bots.is_empty()
+        && required_reviewers.is_empty());
+    if !lane_configured
+        && inputs.settings.self_review_required.unwrap_or(true)
+        && harness_can_self_review(inputs.author_harness.as_deref())
+    {
+        let payload = classify_payload(&git_bin, &cwd);
+        if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
+            required_reviewers.push(floored);
+        }
+    }
 
     // Authorship: --session-id, else the manifest's harness_session_id when one
     // exists, else None. None leaves every local verdict's attestation_origin
@@ -8714,7 +8938,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         &inputs.required_bots,
         &inputs.optional_bots,
         &inputs.settings.external_reviewers,
-        &inputs.required_reviewers,
+        &required_reviewers,
         &inputs.nudge_configs,
         &head_sha,
         &inputs.project_events,
@@ -8738,7 +8962,24 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 );
             }
             // read_pr_info already emitted this exact payload to both logs;
-            // print the same object so stdout and the logs agree.
+            // print the same object so stdout and the logs agree. And publish
+            // the same verdict as the commit status, so the standalone
+            // verb satisfies the server-side gate for every session shape that
+            // has no stop hook at all. Open PRs only: a MERGED PR carries the
+            // Covered(0) sentinel, not evidence.
+            if matches!(pr_info.state, PrState::Open) {
+                publish_coverage_status(
+                    &gh_bin,
+                    &cwd,
+                    pr_info.number,
+                    &pr_info.head_oid,
+                    &head_sha,
+                    &pr_info.coverage,
+                    &inputs.required_bots,
+                    &inputs.optional_bots,
+                    &required_reviewers,
+                );
+            }
             (
                 0,
                 coverage_event_data(
@@ -8774,6 +9015,29 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
+                // The unknown row is a failure the server must SEE,
+                // never an absence: publish it as a failing status so the
+                // ruleset refuses rather than silently waiting. Only when the
+                // caller PASSED --head (the merge recompute always does): an
+                // explicit head is the PR head a caller that knows; a derived
+                // local HEAD can be the canonical checkout's default-branch
+                // tip, and a red marker there is a refusal aimed at nothing.
+                if head_explicit {
+                    publish_coverage_status(
+                        &gh_bin,
+                        &cwd,
+                        pr_num,
+                        &head_sha,
+                        &head_sha,
+                        &CoverageReport {
+                            coverage: Coverage::Unknown,
+                            verdicts: Vec::new(),
+                        },
+                        &inputs.required_bots,
+                        &inputs.optional_bots,
+                        &required_reviewers,
+                    );
+                }
                 // The persisted row above is schema-gated (the pr_num == 0
                 // comment below applies here too); the quota diagnosis rides
                 // stdout only. Without it, exit 4's unknown row is

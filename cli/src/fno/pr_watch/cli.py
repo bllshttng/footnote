@@ -210,6 +210,22 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
+#: A roster probe needs at least this much budget to be worth starting. The
+#: probe measured 3.4s on a 43-row fleet, so anything under this buys a
+#: certain timeout rather than a smaller answer.
+_ROSTER_FLOOR_S = 8.0
+
+
+class _WatchdogBudgetSpent(Exception):
+    """The tick has too little left to sweep. Not a failure of the sweep."""
+
+
+#: A wake apply needs this much tick left before it may start: `fno
+#: agents resume` waits up to 180s and the landing confirmation polls
+#: after it. Starting one with less is how the watchdog leg eats the
+#: legs behind it.
+_WAKE_APPLY_FLOOR_S = 200
+
 
 class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
@@ -394,6 +410,133 @@ def tick() -> None:
                 typer.echo(f"recovery sweep: candidates={n}")
             except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
                 log.warning("pr-watch: recovery sweep failed: %s", exc)
+
+        set_tick_phase("watchdog")
+        # Imported here, not at module scope: the watchdog package pulls the
+        # harness layer and this module is on the launchd hot path.
+        from fno.agents.watchdog import lane_armed as _wd_lane_armed
+
+        # Fleet watchdog, same cadence, same non-fatal wrap: classify
+        # every fleet row from transcript truth and act per
+        # config.recovery.watchdog. "report" emits one watchdog_verdict event per
+        # non-leave row; "wake" additionally applies the wake lane. No tick value
+        # reaps or reroutes - those stop a session and stay behind a manual
+        # `fno agents watchdog --apply-all`.
+        # getattr with the modeled default: a settings stub or a partially-loaded
+        # config must never crash the tick - "off" is the no-op that fails safe.
+        if _wd_lane_armed(settings):
+            try:
+                import time as _time
+
+                from fno.agents import watchdog as _wd
+
+                now = _time.time()
+                # The tick's deadline is the shorter budget and it is fatal:
+                # a roster probe that outlives it exits 75 and kills every
+                # later leg, so this lane spends at most half of what is
+                # left rather than its own standalone budget.
+                left = deadline - (time.monotonic() - started)
+                budget = left / 2
+                if budget < _ROSTER_FLOOR_S:
+                    # A budget under the probe's measured cost does not buy a
+                    # smaller answer, it buys a guaranteed timeout: zero rows,
+                    # a refusal that blames the instrument, and a sweep file
+                    # withheld. Skipping says the same thing honestly and
+                    # costs the fleet nothing - the next tick sweeps.
+                    raise _WatchdogBudgetSpent(
+                        f"{budget:.1f}s left, under the {_ROSTER_FLOOR_S:.0f}s "
+                        f"a roster probe costs"
+                    )
+                payload, rows = _wd.run_sweep(now_s=now, roster_timeout=budget)
+                # Read BEFORE any write and defaulted here: the refused branch
+                # writes nothing, and an unbound read after the if/else crashed
+                # every refused tick into the outer except.
+                prev_events_sig = ""
+                if payload.get("refused"):
+                    # x-4c87: zero rows read is an instrument failure, not an
+                    # empty fleet. No sweep file, no mail, no gate advance - the
+                    # missing write turns into loud staleness within two ticks.
+                    log.warning(
+                        "pr-watch: watchdog sweep refused: %s (%s)",
+                        payload["refused"],
+                        "; ".join(payload.get("warnings") or []) or "no cause given",
+                    )
+                else:
+                    # Mail before the sweep file write: the change gate compares
+                    # against the PREVIOUS sweep's signature (push, not pull), and
+                    # only a delivered digest advances it (mail_gate) so a transient
+                    # send failure retries on the next tick instead of vanishing.
+                    mail_to = str(getattr(
+                        settings.recovery, "watchdog_mail_to", ""
+                    ) or "")
+                    signature = ""
+                    try:
+                        _ok, receipt, signature = _wd.mail_gate(payload, mail_to)
+                        if not _ok:
+                            log.warning("pr-watch: watchdog mail failed: %s", receipt)
+                    except Exception:  # noqa: BLE001 - mail never breaks the tick
+                        log.warning("pr-watch: watchdog mail failed", exc_info=True)
+                    prev_events_sig = _wd._last_events_signature()
+                    _wd.write_sweep_file(
+                        "tick", payload["counts"], now, signature,
+                        events_signature=_wd.verdict_signature(payload),
+                    )
+                fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
+                acted = 0
+                for d, row in zip(payload["verdicts"], rows):
+                    verdict = _wd.Verdict(**d)
+                    if verdict.verdict == _wd.LEAVE:
+                        continue
+                    if verdict.row_id in fresh_ids:
+                        _wd.emit_event(
+                            "watchdog_verdict",
+                            {
+                                "row_id": verdict.row_id,
+                                "name": verdict.name,
+                                "verdict": verdict.verdict,
+                                "basis": verdict.basis,
+                            },
+                        )
+                    if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
+                        # Budgeting only the PROBE left the expensive half
+                        # unbounded: one resume waits up to 180s and the
+                        # confirmation polls after it, so a few stuck rows
+                        # walk past the tick deadline and SIGALRM kills every
+                        # leg behind this one. A row skipped here is not
+                        # lost - the next tick re-classifies it.
+                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                            log.warning(
+                                "pr-watch: watchdog wake budget spent, "
+                                "%s left for the next tick", verdict.row_id,
+                            )
+                            continue
+                        try:
+                            outcome, detail = _wd.apply_verdict(
+                                verdict, lanes="wake", cwd=row.cwd
+                            )
+                        except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+                            # The outer except would end the loop, and the
+                            # sweep file already stamped the whole set, so the
+                            # remaining rows' events would be suppressed for
+                            # good.
+                            outcome, detail = "refused", f"wake crashed: {exc!r}"
+                        acted += 1
+                        _wd.emit_event(
+                            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+                            {
+                                "row_id": verdict.row_id,
+                                "verdict": verdict.verdict,
+                                "detail": detail,
+                            },
+                        )
+                counts = " ".join(
+                    f"{k}={v}" for k, v in sorted(payload["counts"].items())
+                )
+                typer.echo(f"watchdog sweep: {counts} acted={acted}")
+            except _WatchdogBudgetSpent as exc:
+                log.info("pr-watch: watchdog leg skipped: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
+                log.warning("pr-watch: watchdog sweep failed: %s", exc)
 
         # Canonical-sync catch-up. The dispatch above is event-time-only:
         # it acts on merges it DETECTS, so a merge that landed while the daemon was

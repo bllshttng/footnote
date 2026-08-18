@@ -6,12 +6,12 @@ binary for the verbs that exist only on the Rust side (``spawn``, ``status``,
 ``drive``, the ``*-channel`` verbs) whenever an *installed* binary is present.
 Following the full thin-wrapper rewire (ab-d82655d7) and the client-side
 ``ask`` ports (claude ab-cc926b4e, codex ab-0429c6e1, gemini ab-73da4ac2),
-EVERY dispatchable verb auto-routes to the binary — including ``ask`` for all
-providers. ``PYTHON_AGENT_VERBS`` is now empty, so ``AUTO_ROUTE_VERBS`` equals
-``RUST_CLIENT_VERBS`` and that identity is the whole routing contract. The
-Python implementations all stay registered as the ``FNO_AGENTS_RUNTIME=python``
-fallback (and serve when no installed binary is present). See
-:data:`AUTO_ROUTE_VERBS`.
+Every Rust-backed verb auto-routes to the binary — including ``ask`` for all
+providers. ``crown`` is Python-owned because it mutates the shared registry
+without a daemon RPC; ``AUTO_ROUTE_VERBS`` is therefore ``RUST_CLIENT_VERBS``
+minus ``PYTHON_AGENT_VERBS``. Python implementations of Rust-backed verbs stay
+registered as the ``FNO_AGENTS_RUNTIME=python`` fallback (and serve when no
+installed binary is present). See :data:`AUTO_ROUTE_VERBS`.
 
 ``FNO_AGENTS_RUNTIME`` selects the runtime explicitly (see :func:`runtime_mode`):
 
@@ -178,6 +178,9 @@ RUST_CLIENT_VERBS = frozenset(
 #: ``_resolve_ask_provider``) is gone; the ``AUTO_ROUTE_VERBS`` identity below is
 #: now the whole routing contract except for ``send``.
 PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
+    # Human-attended in-place crown grant. Pure shared-registry transaction;
+    # spawn-time grant and succession remain on the Rust-backed spawn path.
+    "crown",
     # G2 Task 2.3: injection gate management; uses Python _daemon_rpc; no Rust port planned.
     "gate",
     # Messaging (send/inbox/ack) moved OUT of `fno agents` into the dedicated
@@ -252,14 +255,18 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # pane's open rollout fd); no Rust port, so it must never auto-route to
     # the daemon.
     "codex-session-for-pid",
+    # x-55c3: the external fleet watchdog. Pure Python (transcript tail reads +
+    # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
+    # port, so it must never auto-route to the daemon.
+    "watchdog",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
-#: MINUS the verbs Python still owns. Since ab-73da4ac2 ``PYTHON_AGENT_VERBS`` is
-#: empty, so this equals :data:`RUST_CLIENT_VERBS` exactly — every dispatchable
-#: verb (incl. ``ask`` for all providers) auto-routes when an *installed* binary
-#: is present. A forced ``FNO_AGENTS_RUNTIME=rust`` still routes every verb; a
-#: forced ``=python`` (or no installed binary) keeps the mature Python dispatch.
+#: MINUS the verbs Python still owns. Every Rust-backed verb (including ``ask``
+#: for all providers) auto-routes when an installed binary is present; an
+#: attended ``crown`` always stays in Python. A forced
+#: ``FNO_AGENTS_RUNTIME=rust`` still routes every verb; a forced ``=python`` (or
+#: no installed binary) keeps the mature Python dispatch.
 AUTO_ROUTE_VERBS = RUST_CLIENT_VERBS - PYTHON_AGENT_VERBS
 
 #: Short help for the verbs that exist ONLY on the Rust client (no

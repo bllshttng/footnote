@@ -129,6 +129,13 @@ def _fmt_default(value: Any) -> str:
     return f"`{value}`"
 
 
+def _cell(text: str) -> str:
+    """Escape pipe characters for a Markdown table cell. A literal ``|`` in a
+    doc blurb splits one row into extra columns (recovery.watchdog shipped
+    exactly that), so every free-text field passes through here."""
+    return text.replace("|", "\\|")
+
+
 def render_markdown() -> str:
     """Render the COMPLETE settings reference as Markdown.
 
@@ -160,8 +167,9 @@ def render_markdown() -> str:
         wizard = meta.wizard if meta else "never"
         doc = meta.doc if meta else ""
         lines.append(
-            f"| `{leaf.path}` | {leaf.type_str} | {_fmt_default(leaf.default)} "
-            f"| {wizard} | {doc} |"
+            f"| `{leaf.path}` | {_cell(leaf.type_str)} "
+            f"| {_cell(_fmt_default(leaf.default))} "
+            f"| {_cell(wizard)} | {_cell(doc)} |"
         )
     lines.append("")
     return "\n".join(lines)

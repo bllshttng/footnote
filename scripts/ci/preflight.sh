@@ -294,11 +294,15 @@ next_receipt_generation() {
 # A (full SHA, host) pair is a complete cache key: preflight hard-resets a
 # dedicated worktree to CANDIDATE_SHA, clean -fdx's it, and scrubs the env, so
 # the checked-out tree is a pure function of the SHA. A FULL GREEN records one
-# attestation line; the next caller on the same SHA + host reuses it. The check
-# runs BEFORE acquire_lock so a cache hit never contends for the lock - that is
-# the whole point: a second caller blocked behind a still-running preflight is
-# the 'exit 3' failure this exists to remove.
-ATTEST="$COMMON_DIR/.preflight-attestation"   # sibling of .preflight.lock.d
+# attestation line in that SHA's own slot; the next caller on the same SHA +
+# host reuses it. The check runs BEFORE acquire_lock so a cache hit never
+# contends for the lock - that is the whole point: a second caller blocked
+# behind a still-running preflight is the 'exit 3' failure this exists to remove.
+# One slot per candidate SHA (keyed like the per-SHA receipt locks below): a
+# shared single file let concurrently active worktrees erase each other's
+# greens, degrading the hit rate to 1/N.
+ATTEST_DIR="$COMMON_DIR/.preflight-attestations.d"   # sibling of .preflight.lock.d
+ATTEST="$ATTEST_DIR/$CANDIDATE_SHA"
 # Pull one space-separated `key=value` field out of the attestation line. Empty
 # on no match, which callers treat as "not a hit" (corrupt file -> full run).
 _attest_field() { printf '%s\n' "$1" | sed -n "s/.*$2=\([^ ]*\).*/\1/p"; }
@@ -313,7 +317,7 @@ reuse_attestation() {
     # Only a FULL green verdict satisfies the gate: a hand-edited or
     # future-different line must not pass just because its sha + host match.
     [[ "$(_attest_field "$line" mode)" == "FULL" && "$(_attest_field "$line" verdict)" == "green" ]] || return 1
-    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 1
+    # No sha-equality check: the slot path IS the key ($ATTEST_DIR/$CANDIDATE_SHA).
     att_host="$(_attest_field "$line" host)"
     if [[ "$att_host" != "$(_this_host)" ]]; then
         echo "preflight: attestation for $CANDIDATE_SHORT rejected (foreign host: recorded=$att_host) - running full suite"
@@ -975,15 +979,23 @@ record_attestation() {
     local now iso tmp
     now="$(date +%s 2>/dev/null || echo 0)"
     iso="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+    mkdir -p "$ATTEST_DIR" 2>/dev/null
     tmp="${ATTEST}.$$"
     # Temp file + rename: a concurrent reader never sees a half line, and two
     # runs finishing on the same SHA make the last writer's identical content
-    # harmless. An unwritable common dir warns and continues (AC1-ERR error
-    # boundary): the run is still green, reuse just stays off until writable.
+    # harmless. Different SHAs write different slots, so a second worktree's
+    # green no longer erases the first's. An unwritable common dir warns and
+    # continues (AC1-ERR error boundary): the run is still green, reuse just
+    # stays off until writable.
     if printf 'sha=%s mode=FULL verdict=green at=%s iso=%s host=%s pid=%s\n' \
             "$CANDIDATE_SHA" "$now" "$iso" "$(_this_host)" "$$" > "$tmp" 2>/dev/null \
        && mv -f "$tmp" "$ATTEST" 2>/dev/null; then
-        :
+        # Disk bound, not a validity limit: reuse authority is the typed event
+        # journal, so reaping an aged slot only costs a re-run. The mtime sweep
+        # also drops temp files left by crashed writers, and the rm clears the
+        # pre-per-SHA single-file carrier, which nothing reads anymore.
+        find "$ATTEST_DIR" -maxdepth 1 -type f -mtime +14 -delete 2>/dev/null || true
+        rm -f "$COMMON_DIR/.preflight-attestation" 2>/dev/null
     else
         rm -f "$tmp" 2>/dev/null
         echo "preflight: WARN attestation write failed ($ATTEST); reuse unavailable until writable" >&2
@@ -991,10 +1003,6 @@ record_attestation() {
 }
 invalidate_attestation() {
     [[ -f "$ATTEST" ]] || return 0
-    local line att_sha
-    line="$(cat "$ATTEST" 2>/dev/null)" || return 0
-    att_sha="$(_attest_field "$line" sha)"
-    [[ "$att_sha" == "$CANDIDATE_SHA" ]] || return 0
     rm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
 }
 # --- suites ------------------------------------------------------------------

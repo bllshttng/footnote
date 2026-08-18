@@ -7073,3 +7073,215 @@ fn floor_watching_fire_without_lease_still_blocks() {
         d.message
     );
 }
+
+// ── coverage commit-status publish (x-6352) ─────────────────────────────────
+//
+// AC8: both emitters of the review_coverage row (the stop-hook decide path and
+// the standalone verb) also publish the commit status, and the load-bearing
+// assert is the POSTED TARGET SHA + CONTEXT - never merely that a helper ran.
+// A status on the wrong sha or under a mistyped context is a green marker on
+// nothing, which is worse than no marker: the ruleset reads one exact name on
+// one exact commit.
+
+/// The PR head the green mock reports; the git mock echoes the same sha as
+/// local HEAD, so the emitted row is pinned to the head it publishes on.
+const PUB_HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
+
+/// green()-shaped gh mock that additionally tees every `gh api` invocation to
+/// `record`, so a test can assert on what was POSTED, not just that gh ran.
+fn recording_green_gh(dir: &Path, record: &Path, reviewed: bool) -> PathBuf {
+    let reviews = if reviewed {
+        format!(
+            r#"{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-08-14T01:00:00Z","commit":{{"oid":"{PUB_HEAD}"}}}}],"comments":[]}}"#
+        )
+    } else {
+        r#"{"reviews":[],"comments":[]}"#.to_string()
+    };
+    let record_s = record.display().to_string();
+    make_script(
+        dir,
+        "gh",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"{PUB_HEAD}","mergeable":"MERGEABLE","baseRefName":"main"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "reviews"; then echo '{reviews}'; exit 0; fi
+if echo "$*" | grep -q -- "--json labels"; then echo 'false'; exit 0; fi
+if echo "$*" | grep -q "^api"; then echo "$*" >> "{record_s}"; echo '{{}}'; exit 0; fi
+exit 1
+"#,
+        ),
+    )
+}
+
+fn pub_git(dir: &Path) -> PathBuf {
+    make_script(
+        dir,
+        "git",
+        r#"case "$*" in
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
+    )
+}
+
+fn pub_fixture(cwd: &Path, review_config: &str) {
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::write(cwd.join(".fno/config.toml"), review_config).unwrap();
+}
+
+/// Run the standalone verb against `cwd`, returning its (exit code, stdout).
+fn fire_verb(cwd: &Path, gh: &Path, git: &Path, project: &Path, global: &Path) -> (i32, String) {
+    fno_agents::loopcheck::run_review_coverage_capture(&[
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ])
+}
+
+fn status_posts(record: &Path) -> Vec<String> {
+    fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("/statuses/"))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+const BOT_LANE: &str = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
+
+/// Covered fixture: BOTH emitters post one status each, to the same PR head
+/// sha, under the one context string, green because the review is at HEAD.
+#[test]
+fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let manifest = cwd.join("target-state.md");
+    fs::write(
+        &manifest,
+        new_manifest("sess-pub", "2026-08-14T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(cwd.join("transcript.jsonl"), transcript_with_promise()).unwrap();
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &record, true);
+    let git = pub_git(bins.path());
+    std::env::set_var("FNO_NUDGE_DISABLED", "1");
+    std::env::set_var("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS", "0");
+
+    // Emitter 1: the stop-hook path (decide -> run_done).
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest.to_str().unwrap(),
+        "--transcript",
+        cwd.join("transcript.jsonl").to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-08-14T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        project.to_str().unwrap(),
+        "--global-events",
+        global.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "loop-check must allow: {:?}", d);
+
+    // Emitter 2: the standalone verb.
+    let (vcode, vjson) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
+
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 2, "one POST per emitter, got: {posts:?}");
+    for post in &posts {
+        assert!(
+            post.contains(&format!("statuses/{PUB_HEAD}")),
+            "posted to the wrong sha: {post}"
+        );
+        assert!(
+            post.contains("context=fno/review-coverage"),
+            "posted under the wrong context: {post}"
+        );
+        assert!(
+            post.contains("state=success")
+                && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
+            "covered fixture must post a success naming count+sha: {post}"
+        );
+    }
+}
+
+/// Unreviewed fixture: both the row and the status say failure. The status is
+/// the refusal a human reads on the GitHub side, so it must never say green
+/// for a head nothing reviewed.
+#[test]
+fn coverage_status_publish_posts_failure_when_unreviewed() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = recording_green_gh(bins.path(), &record, false);
+    let git = pub_git(bins.path());
+
+    let (vcode, vjson) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
+
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
+    assert!(posts[0].contains("state=failure"), "got: {}", posts[0]);
+    assert!(posts[0].contains("context=fno/review-coverage"));
+}
+
+/// A configured local `code-review` reviewer with no head-pinned local pass:
+/// the status stays failure even though a GitHub review exists, mirroring the
+/// merge gate's conjunction (the row alone is not enough).
+#[test]
+fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, "[review]\nreviewers = [\"code-review\"]\n");
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    // A passing GitHub review exists, but no local attestation does.
+    let gh = recording_green_gh(bins.path(), &record, true);
+    let git = pub_git(bins.path());
+
+    let (vcode, vjson) = fire_verb(&cwd, &gh, &git, &project, &global);
+    assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
+
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
+    assert!(
+        posts[0].contains("state=failure"),
+        "a bot review must not satisfy the local code-review lane: {}",
+        posts[0]
+    );
+}

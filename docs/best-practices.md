@@ -53,6 +53,20 @@ That harvest is manual by design.
 Only `fno retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you.
 Run `fno outstanding` to see what has piled up.
 
+## Record a ruling, so the next session can read it back
+
+A decision stated in chat dies with the context. Weeks later the operator asks what happened with the thing you discussed, and the only answer is a transcript export. So record it while it is still in front of you.
+
+```bash
+fno decide --subject <node|pr-N|area> --decision "<what was chosen>" --rationale "<why>"
+fno decide list --subject <same>        # newest first, superseded rows marked
+fno decide list                         # the recent decisions across every subject
+```
+
+When a node exists, its id is the subject. Otherwise use `pr-<n>`, or the area. When a ruling changes what a worker does next, record it. An answered question is already recorded for you, because `fno outstanding clear --answer` writes the decision on the same call.
+
+Full contract in [decision-record](architecture/decision-record.md).
+
 ## One worktree per feature, in the right place
 
 Isolate parallel work in its own worktree so sessions do not fight over the same checkout or shared state.
@@ -64,7 +78,7 @@ The implementation-entry gates will refuse a write on a protected branch and poi
 
 ## Route ships through the fno verbs
 
-Drive merges and PR operations through `fno pr merge` and the ship gate rather than raw `gh`/`git`. The dangerous-command guards block merge and force-push commands (by their text, even inside an echo or a commit body), so hand-running them tends to get blocked anyway. Writing PR and commit bodies with `--body-file` avoids tripping the same guards.
+Drive merges and PR operations through `fno pr merge` and the ship gate. Do not reach for raw `gh`/`git`. The server enforces the same rule where no guard can reach. If the merge ruleset is applied, GitHub itself refuses a merge with no passing `fno/review-coverage` status on the head. Run `bash scripts/ci/apply-merge-ruleset.sh --apply` to apply it. Every path is covered: the web button, raw REST, `gh pr merge`, and the auto-merge queue. The only way past an uncovered head is the `coverage-override` label. The dangerous-command guards block merge and force-push commands by their text, even inside an echo or a commit body. Hand-running them tends to get blocked anyway. Writing PR and commit bodies with `--body-file` avoids tripping the same guards.
 
 ## Trust external truth for "done"
 

@@ -8,6 +8,21 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_decision_index(tmp_path, monkeypatch):
+    """Keep the machine-wide decision index out of the developer's ~/.fno.
+
+    ``record_decision`` writes to ``paths.decisions_jsonl()`` on every call, and
+    that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
+    so without this every test that records a decision appends to the real
+    index and reads back another test's rows. Autouse rather than opt-in
+    because the write happens two layers down from any test that calls
+    ``fno outstanding clear --answer``, which is not where anyone looks for it.
+    """
+    sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
+    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
+
+
 @pytest.fixture
 def _no_global_tick_events(monkeypatch):
     """Capture pr-watch tick emissions instead of hitting the live events log.

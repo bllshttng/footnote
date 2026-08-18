@@ -623,6 +623,36 @@ def status(
         detail = f" ({', '.join(bits)})" if bits else ""
         typer.echo(f"Last tick outcome: {end['outcome']}{detail}")
 
+    # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
+    # fires, and its silence is indistinguishable from a healthy fleet. When
+    # the lane is armed and the last sweep is older than two intervals, say so
+    # LOUD - absence is never evidence, so status never reads clean here. The
+    # threshold is two CONFIGURED tick intervals: a cadence slower than the
+    # 600s default would read stale while its next tick is merely not due.
+    try:
+        from fno.agents.watchdog import lane_armed, sweep_staleness
+        from fno.config import load_settings
+
+        settings = load_settings()
+        if lane_armed(settings):
+            interval = settings.pr_watch.interval_seconds
+            s = sweep_staleness(stale_after_s=2 * interval)
+            age = "?" if s["age_s"] is None else f"{int(s['age_s']) // 60}m"
+            if s["stale"]:
+                typer.echo(
+                    f"FLEET WATCHDOG STALE: last sweep {age} old "
+                    f"(interval {interval}s, source {s['source'] or 'none'}). "
+                    "A dead cadence reads as a healthy fleet. "
+                    "Sweep manually: fno agents watchdog",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    f"Watchdog:     fresh ({age} old, source {s['source']})"
+                )
+    except Exception:  # noqa: BLE001 - status never crashes on the watchdog read
+        pass
+
     # Open PRs
     open_count = _observed_open_pr_count(state_path)
     typer.echo(f"Open PRs:     {open_count}")
@@ -816,7 +846,8 @@ def liveness_report_live(
     """
     from fno.config import load_settings
 
-    cfg = load_settings().pr_watch
+    settings = load_settings()
+    cfg = settings.pr_watch
     plist_path = (launch_agents_dir or _LAUNCH_AGENTS_DIR) / _PLIST_FILENAME
     plist_exists = plist_path.exists()
     plist_mtime = plist_path.stat().st_mtime if plist_exists else None
@@ -824,7 +855,7 @@ def liveness_report_live(
         marks["last_tick"] if marks is not None else _tick_watermarks(events_path)["last_tick"]
     )
 
-    return liveness_report(
+    report = liveness_report(
         enabled=cfg.enabled,
         interval_seconds=cfg.interval_seconds,
         loaded=_launchctl_is_loaded(),
@@ -833,3 +864,17 @@ def liveness_report_live(
         plist_mtime=plist_mtime,
         now=time.time(),
     )
+    # Fleet watchdog freshness rides the SAME report the --json path emits:
+    # the SessionStart hook and the doctor read this dict, and a sweep starved
+    # while the pr_watch tick stayed healthy must read loud there too, not
+    # only in the human-readable status lines.
+    try:
+        from fno.agents.watchdog import lane_armed, sweep_staleness
+
+        if lane_armed(settings):
+            report["watchdog"] = sweep_staleness(
+                stale_after_s=2 * cfg.interval_seconds
+            )
+    except Exception:  # noqa: BLE001 - liveness never crashes on the watchdog read
+        pass
+    return report

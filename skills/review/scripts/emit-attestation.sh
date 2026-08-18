@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Emit a head-pinned review_attestation event (x-e703, Phase 2).
 #
+# WHAT THIS CERTIFIES: a CLEAN review at the current head. It is a hand-run of
+# a producer that missed, never a way past an open finding. Running it over
+# unresolved findings makes the gate the whole board trusts tell a lie, and
+# nothing downstream can tell that apart from a real pass.
+#
 # This is the single producer surface for the config.review.reviewers gate: a
 # local reviewer that leaves NO GitHub review object emits this event so
 # `fno-agents loop-check` can read it as gate evidence. The reviewer name is

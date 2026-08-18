@@ -1224,6 +1224,16 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
+    if note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX):
+        # A waived merge says so on its own receipt. A covered merge and an
+        # overridden one both exit 0, and a receipt that cannot tell them apart
+        # is how a 3am override disappears from the record.
+        print(
+            "coverage waived: "
+            + note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :],
+            file=sys.stderr,
+        )
+
     # covered_head (from the gate) pins the merge so a racing push after the
     # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The
     # staleness check inside the gate already refused a current mismatch; this
@@ -1313,7 +1323,9 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                 f"pr-merge: stacked-base probe unavailable ({why}); "
                 "merging without the lineage guard\n"
             )
-        return _do_merge(pr_number, auto_merge, repo, covered_head)
+        return _do_merge(
+            pr_number, auto_merge, repo, covered_head, (state, refusal, covered_head, note)
+        )
 
 
 def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
@@ -1375,7 +1387,13 @@ def _already_armed(pr_number: int, repo: str) -> bool:
     return res.ok and res.stdout.strip() == "true"
 
 
-def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> int:
+def _do_merge(
+    pr_number: int,
+    auto_merge,
+    repo: str,
+    covered_head: str = "",
+    gate_verdict: Optional[tuple] = None,
+) -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # AC5-CON (x-9d11): exactly one arming path. finalize.rs owns GitHub's
     # auto-merge queue; if the PR is already armed there, merging here would
@@ -1467,6 +1485,33 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
         cmd += ["--match-head-commit", covered_head]
     elif verified_head:
         cmd += ["--match-head-commit", verified_head]
+
+    # Server-visible receipt of the verdict the gate acted on: the commit
+    # status the repo ruleset requires is written from the SAME answer that
+    # satisfied the gate here (gate_verdict, threaded down), never a fresh
+    # read - the label or the row can change while this merge waits on the
+    # lock, and a receipt that flips to failure on a head the merge then lands
+    # is a false red the post-merge audit cannot repair. Posted only now,
+    # after every local refusal - armed-check, checks verdict, unreadable
+    # head - has said yes: a success status stamped before a later refusal
+    # would green the head for the web button - which enforces only the
+    # coverage context - against exactly what this verb just refused.
+    # Best-effort and reported, never blocking: the gate lives on the GitHub
+    # side, where a missing status already reads as not-passing (fail-closed).
+    try:
+        from fno.pr._reviews import publish_coverage_status
+
+        _posted, _note = publish_coverage_status(
+            pr_number,
+            head=covered_head or None,
+            cwd=repo,
+            repo=repo,
+            gate_verdict=gate_verdict,
+        )
+        if not _posted:
+            sys.stderr.write(f"pr-merge: coverage status not posted: {_note}\n")
+    except Exception as exc:  # noqa: BLE001 - a receipt must never block the merge
+        sys.stderr.write(f"pr-merge: coverage status publish failed: {exc}\n")
 
     # (4) Run + classify.
     try:

@@ -35,6 +35,60 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
 )
 
 
+class ConsolidationEntry(BaseModel):
+    """One candidate id judged by blueprint's step 2d gate, with its reason."""
+
+    id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("id")
+    @classmethod
+    def _id_is_a_node_id(cls, v: str) -> str:
+        # Same predicate the graph mints against, imported rather than
+        # re-spelled: a reason pointing at a typo'd id is a decision no later
+        # reader can check, which is the one thing this block exists to give.
+        # Imported HERE, not at module scope: `fno.graph` costs 126ms of this
+        # module's 219ms import, and every plan read would pay it for a key
+        # most plans carry once.
+        from fno.graph._constants import is_wellformed_node_id
+
+        if not is_wellformed_node_id(v):
+            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)")
+        return v
+
+
+class ConsolidationBlock(BaseModel):
+    """The step 2d Consolidation Gate's recorded outcome.
+
+    Sole shape authority. `validate-plan.sh` loads the frontmatter with
+    PyYAML and validates the block THROUGH this model rather than walking it
+    in awk, so there is no second implementation to diverge from. The bash
+    gate keeps only what is not shape: whether a block is present at all
+    (grandfathering pre-gate plans is a policy date), and the contradiction
+    between an `append` outcome and a plan file existing to carry it.
+    """
+
+    outcome: Literal["absorb", "append", "proceed_alone"]
+    absorbed: list[ConsolidationEntry] = Field(default_factory=list)
+    appended_to: list[ConsolidationEntry] = Field(default_factory=list)
+    proceed_alone_against: list[ConsolidationEntry] = Field(default_factory=list)
+    # Scalar OR list: one reversing command, or the several an absorb of
+    # several nodes needs. The bash gate accepts both, and a model that
+    # took only a scalar produced the 'plan is unreadable or invalid'
+    # divergence downstream rather than a validation error here.
+    reversal: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def _outcome_has_its_decision(self) -> "ConsolidationBlock":
+        # An outcome that records no decision is an empty block wearing a
+        # label - the same rule the bash gate enforces on its side.
+        if self.outcome == "absorb" and not self.absorbed:
+            raise ValueError("outcome absorb requires at least one absorbed entry")
+        if self.outcome == "append" and not self.appended_to:
+            raise ValueError("outcome append requires at least one appended_to entry")
+        return self
+
+
 class PlanFrontmatter(BaseModel):
     """The canonical shape of a single-doc plan's YAML frontmatter.
 
@@ -79,6 +133,9 @@ class PlanFrontmatter(BaseModel):
     # (237 list vs 17 scalar in the corpus). The dead `## Kill Criteria`
     # markdown-heading form stays out of scope (Locked Decision 3).
     kill_criteria: str | list[Any] | None = None
+    # Step 2d gate decision; shape-validated above. Absent on plans created
+    # before the gate shipped (the bash validator warns, not errors, there).
+    consolidation: ConsolidationBlock | None = None
     updated: datetime | None = None
     # compiled-v1 marks a plan whose Acceptance Criteria Blueprint compiled and
     # whose task acceptance references all resolve (x-f905). Absent on historical

@@ -17,6 +17,9 @@ type: blueprint
 node: <node id>
 claims: <node id>
 sources: [<artifacts actually read>]
+consolidation:
+  outcome: <absorb | append | proceed_alone>
+  proceed_alone_against: []   # or absorbed: / appended_to:, each entry an id with its reason
 ---
 
 # <Title>
@@ -69,6 +72,7 @@ BLUEPRINT_WRITE_ALLOWLIST = frozenset({
     "File Ownership Map",
     "Patterns to Reuse",
     "kill_criteria",
+    "consolidation",
 })
 ```
 

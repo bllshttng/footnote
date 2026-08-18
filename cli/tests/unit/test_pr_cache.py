@@ -106,6 +106,26 @@ def test_ttl_expiry_rereads(cache_env, monkeypatch, capsys):
     assert calls["n"] == 2, "an expired row must be re-read"
 
 
+def test_ttl_hit_calls_review_thread_reader_once(cache_env, monkeypatch, capsys):
+    """Two `cached_status` calls inside the TTL window must invoke the
+    review-thread reader exactly once - the coalescing this module exists
+    to do must cover the reviewThreads read, not just the CI fetch."""
+    calls = {"n": 0}
+
+    def counting_reader(pr, cwd):
+        calls["n"] += 1
+        return {"optional_reviews": [], "optional_reviews_unresolved": 0}
+
+    monkeypatch.setattr(_status, "read_optional_review_state", counting_reader)
+    fetch, _ = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+
+    assert _cache.cached_status("42") == 0
+    capsys.readouterr()
+    assert _cache.cached_status("42") == 0
+    assert calls["n"] == 1, "TTL hit must not re-invoke the review-thread reader"
+
+
 def test_new_verdict_replaces_the_row(cache_env, monkeypatch, capsys):
     results = [_GREEN, (dict(_GREEN[0], statusCheckRollup=[
         {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}

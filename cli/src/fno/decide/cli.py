@@ -18,9 +18,13 @@ import typer
 decide_app = typer.Typer(
     help=(
         "Record an operator decision so it survives the session, and recover "
-        "the decision history for a subject. `fno decide --subject <node> "
-        "--decision \"...\"` records; `fno decide list --subject <node>` "
-        "recovers, newest first, including superseded ones (marked, not hidden)."
+        "the decision history for a subject. `fno decide --subject <subject> "
+        "--decision \"...\"` records; `fno decide list --subject <subject>` "
+        "recovers, newest first, including superseded ones (marked, not "
+        "hidden). The subject is any string - a node id/slug, a PR (`pr-923`), "
+        "a file, an area - and the reader takes every one the writer takes. "
+        "`fno decide list` with no subject shows the recent ones; "
+        "`fno decide reindex` backfills decisions recorded before the index."
     ),
 )
 
@@ -55,6 +59,12 @@ def record(
         "--decided-by",
         help="Who decided. Defaults to the operator; name the agent under a beastmode grant.",
     ),
+    authority: Optional[str] = typer.Option(
+        None,
+        "--authority",
+        help="How the decider was entitled to decide: 'operator' (default) or "
+        "'beastmode'. Pass it when an agent decided under a grant.",
+    ),
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if ctx.invoked_subcommand is not None:
@@ -65,7 +75,7 @@ def record(
         )
         raise typer.Exit(1)
 
-    from fno.decide import record_decision
+    from fno.decide import IndexWriteError, record_decision
 
     try:
         result = record_decision(
@@ -73,20 +83,52 @@ def record(
             subject=subject,
             question_id=question_id,
             decided_by=decided_by or "operator",
-            authority_source="operator" if not decided_by else "beastmode",
+            # Stated, never inferred. Reading `--decided-by "J.N. Choi"` as a
+            # beastmode grant writes wrong provenance into the one field a
+            # reader months later trusts to say how a ruling was entitled.
+            authority_source=authority or "operator",
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
         )
+    except IndexWriteError as exc:
+        # Exit 1, because the ruling is not recoverable yet. But name the right
+        # remedy: the durable event HAS landed, so re-running this command
+        # mints a second id for one ruling.
+        typer.echo(
+            f"decide: recorded {exc.decision_id} to the project journal, but the "
+            f"recall index write failed: {exc}. Run `fno decide reindex` to "
+            f"recover it. Do NOT re-run decide; that records it twice.",
+            err=True,
+        )
+        raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
         typer.echo(f"decide: failed to record: {exc}", err=True)
         raise typer.Exit(1)
 
     did = result["decision_id"]
+    if supersedes:
+        # A transposed digit is otherwise a silent no-op: the older ruling
+        # keeps reading as current, in a verb whose contract is that a reader
+        # of an overturned decision can tell it is not.
+        from fno.decide import list_decisions
+
+        _, everything, _ = list_decisions()
+        if supersedes not in {d.get("decision_id") for d in everything}:
+            typer.echo(
+                f"decide: warning - no decision {supersedes} is on record, so "
+                f"nothing was marked superseded. Check the id with "
+                f"`fno decide list --subject {subject}`.",
+                err=True,
+            )
+    # The receipt names the recall command in BOTH branches. A subject that
+    # names no node loses only the graph projection; it is indexed and
+    # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
             f"decide: recorded {did}; subject names no graph node, so no "
-            f"projection was written (the event is the record).",
+            f"projection was written (the event and the index are the record). "
+            f"Recover with: fno decide list --subject {subject}",
             err=True,
         )
     else:
@@ -101,8 +143,14 @@ def record(
 
 @decide_app.command("list")
 def list_cmd(
-    subject: str = typer.Option(
-        ..., "--subject", help="Node id/slug whose decision history to recover."
+    subject: Optional[str] = typer.Option(
+        None,
+        "--subject",
+        help="What the decision governs: a node id/slug, a PR, a file, an area. "
+        "Omit it to see the recent decisions across every subject.",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="Most recent N. 0 or less means no cap."
     ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
@@ -112,29 +160,64 @@ def list_cmd(
     from fno.decide import list_decisions
 
     try:
-        node_id, decisions = list_decisions(subject)
-    except LookupError as exc:
-        typer.echo(f"decide list: {exc}", err=True)
+        # No cap on the read. The cap is applied HERE so the total is known,
+        # and a truncated answer can say so - a silent cut on a recall verb is
+        # the same lie as a missing record.
+        label, found, damaged = list_decisions(subject, limit=None)
+    except (OSError, ValueError) as exc:
+        # ValueError covers UnicodeDecodeError, which a torn multi-byte append
+        # raises and which is NOT an OSError.
+        typer.echo(f"decide list: cannot read the decision index: {exc}", err=True)
         raise typer.Exit(1)
+
+    decisions = found[:limit] if limit > 0 else found
+    truncated = len(decisions) < len(found)
 
     if as_json:
         typer.echo(
             json.dumps(
-                {"subject": node_id, "decisions": decisions}, separators=(",", ":")
+                {
+                    "subject": label,
+                    "decisions": decisions,
+                    "total": len(found),
+                    "truncated": truncated,
+                    # This surface is machine-first, so an under-count that
+                    # looks complete is the same lie "truncated" prevents.
+                    "damaged": damaged,
+                },
+                separators=(",", ":"),
             )
         )
         return
 
     if not decisions:
-        typer.echo(f"decide list: {node_id} has no recorded decisions", err=True)
+        # Exit 0: a read that answered "none" is a successful read. Only a read
+        # that could not run is a failure.
+        #
+        # But an install that predates the index has NO index, and every
+        # decision it holds lives in the graph projection this reader no longer
+        # consults. "None recorded" would then be the absence-reads-as-success
+        # shape this verb exists to police, on its own upgrade path. So the
+        # empty answer names the backfill whenever the index is missing.
+        from fno.decide import _index_path
+
+        hint = (
+            "" if _index_path().exists()
+            else " (no index yet on this machine - run `fno decide reindex` to "
+            "backfill what is already on disk)"
+        )
+        typer.echo(f"decide list: no decisions recorded for '{label}'{hint}", err=True)
         return
 
     for d in decisions:
         superseded = str(d.get("superseded_by") or "")
         marker = f"  [superseded by {superseded}]" if superseded else ""
+        # Across subjects the subject IS the column that tells the rows apart;
+        # scoped to one it is the same word on every line.
+        scope = "" if subject else f"{d.get('subject') or '(none)'}  "
         typer.echo(
-            f"{d.get('decision_id')}  {d.get('ts', '')}  {d.get('decided_by', '')}  "
-            f"{d.get('decision', '')}{marker}"
+            f"{d.get('decision_id')}  {d.get('ts', '')}  {scope}"
+            f"{d.get('decided_by', '')}  {d.get('decision', '')}{marker}"
         )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
@@ -144,3 +227,55 @@ def list_cmd(
             typer.echo(f"    options: {', '.join(str(o) for o in d['options'])}")
         if d.get("supersedes"):
             typer.echo(f"    supersedes: {d['supersedes']}")
+
+    if truncated:
+        typer.echo(
+            f"decide list: showing {len(decisions)} of {len(found)}; "
+            f"--limit 0 for all.",
+            err=True,
+        )
+
+
+@decide_app.command("reindex")
+def reindex_cmd() -> None:
+    """Backfill the recall index from the graph projections and the journals.
+
+    A decision recorded before the index existed is durable but unreadable
+    until this runs. Idempotent by decision id, so running it twice is free.
+    """
+    from fno.decide import reindex
+
+    from fno.decide import _index_path
+
+    try:
+        counts = reindex()
+    except Exception as exc:  # noqa: BLE001 - a partial backfill must not read as done
+        typer.echo(
+            f"decide reindex: failed on the index at {_index_path()}: {exc}", err=True
+        )
+        raise typer.Exit(1)
+
+    note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
+    if counts.get("repaired"):
+        note += f", {counts['repaired']} damaged row(s) moved aside"
+    if counts.get("unusable"):
+        note += f", {counts['unusable']} row(s) the schema will not accept"
+    if counts.get("invalid"):
+        note += f", {counts['invalid']} rows could not be written"
+    typer.echo(note, err=True)
+    # stdout carries the value: the number of decisions now recoverable.
+    typer.echo(counts["total"])
+
+    # Exit 1 on ANY write failure, not only on a total one. The counter cannot
+    # tell an unusable legacy row from a store that went unwritable partway
+    # through, and a caller gating on the exit code (`fno decide reindex && ...`,
+    # or an agent following the recovery an IndexWriteError named) must not read
+    # success while decisions stay unrecoverable. Fail safe on the ambiguity.
+    if counts.get("invalid"):
+        typer.echo(
+            f"decide reindex: {counts['invalid']} row(s) could not be written, "
+            f"so the backfill is incomplete. Check that {_index_path()} is "
+            f"writable, then run it again.",
+            err=True,
+        )
+        raise typer.Exit(1)

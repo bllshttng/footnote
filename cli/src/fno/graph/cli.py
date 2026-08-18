@@ -4922,35 +4922,15 @@ session_app = typer.Typer(
 
 
 def _plan_claims(plan_path: str) -> "set[str]":
-    """The node ids a plan's frontmatter declares ownership of, as a set.
+    """Delegate to the single parser (``_intake.plan_claims``).
 
-    Reads both ``claims:`` (a list) and ``node:`` (a single id). 330 of 807 plans
-    carry ``node:`` instead of ``claims:``, so reading only ``claims:`` left G3
-    unevaluable on roughly 41% of plans and the leniency was invisible.
-
-    Empty means "no claim declared" -- including every unreadable-plan case, since
-    ``_read_plan_frontmatter`` returns ``{}`` on all of them. The caller treats
-    empty as agreement, so only a positive disagreement can skip a stamp.
+    Kept as a thin alias because the stamp-guard call site reads better with
+    a local name; the implementation lives in one place so this reader and
+    collision's self-exclusion default cannot diverge.
     """
-    from fno.graph._intake import _read_plan_frontmatter
+    from fno.graph._intake import plan_claims
 
-    fm = _read_plan_frontmatter(plan_path)
-    out: "set[str]" = set()
-
-    claims = fm.get("claims")
-    if isinstance(claims, str):
-        claims = [claims]
-    if isinstance(claims, list):
-        out.update(
-            c.strip() for c in claims
-            if isinstance(c, str) and c.strip() not in ("", "null")
-        )
-
-    node = fm.get("node")
-    if isinstance(node, str) and node.strip() not in ("", "null"):
-        out.add(node.strip())
-
-    return out
+    return plan_claims(plan_path)
 
 
 @session_app.callback()
