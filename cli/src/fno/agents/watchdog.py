@@ -74,15 +74,26 @@ LEAVE = "leave"
 #: because ``verdicts`` is a pure function anyone can hand a raw row, and a
 #: caller that skips the fold must not silently lose the ghost lane.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
-#: ``stopped`` belongs here and reviewers keep asking why, since the ghost
-#: lane calls stopped "the operator's answer". Membership is candidacy, not a
-#: wake: the lane below wakes only on ``classify_tail == "stalled"``, the tail
-#: asserting the session went silent still OWING its next move. A worker an
-#: operator stopped after its turn reads not-stalled and is left alone, so
-#: dropping ``stopped`` here would delete the lane's whole population (a
-#: session that dies mid-turn is exactly a stopped row) to re-guard something
-#: the stalled check already guards.
-_WAKE_STATES = frozenset({"blocked", "stopped"})
+#: Membership here is CANDIDACY, not a wake. The lane below wakes only on
+#: ``classify_tail == "stalled"``, the tail asserting the session went silent
+#: while still OWING its next move, so a row that is genuinely mid-task
+#: cannot slip through whatever word the roster wears.
+#:
+#: That is why ``working`` belongs here, and leaving it out was the bug this
+#: module was built to fix. A state word is what a session CLAIMS, and this
+#: lane exists because that claim lies: on 2026-08-18 a row read live and
+#: ``working`` while its last transcript message was an API error 56 minutes
+#: old, and woken by hand it opened a PR fifteen minutes later. The eight
+#: stale-``working`` rows named in the module docstring are that same
+#: population. A word a dead session still wears is no reason to skip it.
+#:
+#: ``stopped`` belongs for the mirror reason, and reviewers keep asking why,
+#: since the ghost lane calls stopped "the operator's answer". A worker an
+#: operator stopped after its turn reads not-stalled and is left alone;
+#: dropping it would delete the lane's population (a session that dies
+#: mid-turn is exactly a stopped row) to re-guard what the stalled check
+#: already guards.
+_WAKE_STATES = frozenset({"working", "blocked", "stopped"})
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe, not a status line: measured at 3.4s /

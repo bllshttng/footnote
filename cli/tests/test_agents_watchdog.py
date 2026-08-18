@@ -81,9 +81,11 @@ def test_healthy_injectable_row_is_leave():
     rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")]
     [v] = _run(rows, {"aaaa1111-0000": _facts("still on it")})
     assert v.verdict == LEAVE
-    # The basis states what was measured (state + last-write age), never
-    # "reachable" - nothing here probes reachability.
-    assert "no lane applies" in v.basis
+    # A healthy working row is a wake CANDIDATE and leaves at the stalled
+    # gate, so its basis names the tail reading that decided it rather than
+    # the generic no-lane line. The basis states what was measured either
+    # way, never "reachable" - nothing here probes reachability.
+    assert "does not owe a move" in v.basis
 
 
 def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
@@ -1816,6 +1818,46 @@ def test_reroute_refuses_a_shared_manifest_it_would_respawn_from(monkeypatch):
     )
     assert outcome == "refused"
     assert "not a linked worktree" in detail
+
+
+def test_a_row_claiming_working_still_wakes_when_its_tail_stalled():
+    """The measured case, 2026-08-18: a row read live and `working` while its
+    last transcript message was an API error 56 minutes old. The lane never
+    touched it; woken by hand it opened a PR fifteen minutes later.
+
+    A state word is what a session CLAIMS, and this module exists because
+    that claim lies. Candidacy is the state; the wake itself still needs the
+    tail to say the session owes a move.
+    """
+    row = Row("aaaa1111-0000", "t-live-but-dead", "working", None, "/wt/w1")
+    dead = _facts("API Error 500: internal server error", age_min=180)
+    [v] = _run([row], {"aaaa1111-0000": dead})
+    assert v.verdict == WAKE, v.basis
+    assert "180m silent" in v.basis
+
+    # But candidacy is not the whole story, and this is the half the ruling's
+    # own evidence lands on. `classify_tail` only calls a tail stalled past
+    # STALLED_AFTER_S, which is two hours, so the measured row at 56 minutes
+    # is still `working` to the classifier and this lane leaves it. Adding
+    # `working` here makes that row reachable; it does not make it reachable
+    # at 56 minutes. Anyone expecting the sweep to catch it sooner has to
+    # move that threshold, not this set.
+    [early] = _run(
+        [row],
+        {"aaaa1111-0000": _facts("API Error 500: internal server error", age_min=56)},
+    )
+    assert early.verdict == LEAVE
+    assert "does not owe a move" in early.basis
+
+    # And the claim cuts both ways: a working row whose tail is still moving
+    # is left alone, so the state word never wakes anything on its own.
+    [healthy] = _run([row], {"aaaa1111-0000": _facts("mid refactor", age_min=1)})
+    assert healthy.verdict == LEAVE
+
+    # A working row with NO transcript stays a ghost: that lane outranks wake
+    # and a row with nothing to read must never reach an action.
+    [ghost] = _run([row], {})
+    assert ghost.verdict == GHOST
 
 
 def test_only_the_lane_skip_is_silent(monkeypatch, tmp_path):
