@@ -713,12 +713,28 @@ def _read_disk_payload(state_path: Path) -> dict[str, Any] | None:
 def _drop_stale(
     health: dict[str, ProviderHealth], now: float
 ) -> tuple[dict[str, ProviderHealth], int]:
-    """Return (kept_entries, dropped_count)."""
+    """Return (kept_entries, dropped_count).
+
+    An entry with a LIVE lock is never stale, whatever its age. The TTL exists
+    to garbage-collect a long-quiet provider's backoff level, and it was
+    written when every lock was a seconds-scale backoff step, so "an hour since
+    the error" implied "the lock is long gone". A harvested reset breaks that
+    implication: a nine-hour lock is still binding at t+1h, and dropping the
+    record there turns EXHAUSTED back into UNKNOWN for the remaining eight
+    hours - which never means exhausted, so dispatch walks straight back into
+    the capped provider. The lock outlives the record's age by design now, so
+    the predicate has to say so.
+    """
     cutoff = now - PROVIDER_HEALTH_TTL_SECONDS
     kept: dict[str, ProviderHealth] = {}
     dropped = 0
     for pid, h in health.items():
-        if h.last_error_at is not None and h.last_error_at < cutoff:
+        # Only the PROVIDER-level lock earns the reprieve. A model lock is a
+        # seconds-scale backoff, and ProviderHealth documents its TTL as
+        # record-level on purpose: when last_error_at ages out, every
+        # model_locks entry goes with it.
+        locked = h.rate_limited_until is not None and h.rate_limited_until > now
+        if not locked and h.last_error_at is not None and h.last_error_at < cutoff:
             dropped += 1
             continue
         kept[pid] = h

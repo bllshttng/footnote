@@ -301,7 +301,8 @@ def recovery_sweep(
         # wait behind either. Both inputs are already in hand, so this costs no
         # extra read.
         refusal = classify_worker_refusal(
-            getattr(snap, "output_result", None), truth.get("last_message")
+            getattr(snap, "output_result", None), truth.get("last_message"),
+            _active_reset_timezone(c.cwd),
         )
         refusal_acts = refusal is None or refusal[1] == "output_result"
         if refusal is not None:
@@ -514,7 +515,9 @@ def _safe_read_state(jobs_dir):
 # 429. So the watchdog is the sole integration point. (cv-59ef0909)
 # ---------------------------------------------------------------------------
 
-def classify_session_error(output_result: Optional[str]):
+def classify_session_error(
+    output_result: Optional[str], reset_timezone: Optional[str] = None
+):
     """Classify a dead session's last ``output.result`` into a ``NormalizedError``.
 
     Returns the ``NormalizedError`` (callers check ``.triggers_swap``) or None
@@ -527,7 +530,10 @@ def classify_session_error(output_result: Optional[str]):
         return None
     from fno.adapters.providers.error_taxonomy import normalize
 
-    return normalize(http_status=None, exit_code=None, body=output_result)
+    return normalize(
+        http_status=None, exit_code=None, body=output_result,
+        reset_timezone=reset_timezone,
+    )
 
 
 #: How much of a live worker's last turn counts as its refusal.
@@ -549,9 +555,38 @@ def classify_session_error(output_result: Optional[str]):
 _REFUSAL_LEAD_CHARS = 120
 
 
+def _active_reset_timezone(cwd: Optional[str]) -> Optional[str]:
+    """``reset_timezone`` for the account the candidate is running on, or None.
+
+    Without it the ``worker_refused`` event always reports ``resets_at: null``
+    for a provider that quotes a naive local stamp, which is precisely the
+    z.ai shape the event exists to carry. The later lock write reparses with
+    the record's zone, but it cannot repair an event already on disk.
+
+    Best-effort and project-rooted: the roster is global, so a foreign
+    candidate's active account lives in its own repository.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        from fno.adapters.providers.loader import effective_active, load_providers
+
+        root = _Path(cwd) if cwd else None
+        active = effective_active(repo_root=root)
+        if not active:
+            return None
+        for rec in load_providers(repo_root=root).records:
+            if rec.id == active:
+                return getattr(rec, "reset_timezone", None) or None
+    except Exception:  # noqa: BLE001 - an unresolved zone refuses the stamp, not the event
+        return None
+    return None
+
+
 def classify_worker_refusal(
     output_result: Optional[str],
     last_message: Optional[str],
+    reset_timezone: Optional[str] = None,
 ):
     """The provider refusal a candidate is carrying, as ``(err, source)``, or None.
 
@@ -571,11 +606,11 @@ def classify_worker_refusal(
     ``_REFUSAL_LEAD_CHARS``. A dead session's own error text cannot be prose
     about someone else's cap, so it is read whole.
     """
-    err = classify_session_error(output_result)
+    err = classify_session_error(output_result, reset_timezone)
     if err is not None and err.triggers_swap:
         return err, "output_result"
     lead = last_message[:_REFUSAL_LEAD_CHARS] if last_message else last_message
-    err = classify_session_error(lead)
+    err = classify_session_error(lead, reset_timezone)
     if err is not None and err.triggers_swap:
         return err, "transcript"
     return None
@@ -741,7 +776,12 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
 
     tried = fleet_state.links_tried(node)
     try:
-        chain = resolve_fallback_chain(_node_size(node), exclude=tried)
+        # Rooted at the CANDIDATE's worktree. The roster is global and a
+        # candidate can belong to another project, whose chain, whose settings
+        # and whose provider health are all different from the daemon's.
+        chain = resolve_fallback_chain(
+            _node_size(node), exclude=tried, repo_root=cwd,
+        )
     except Exception as exc:  # noqa: BLE001 - a malformed chain REFUSES, loudly
         # Locked Decision 11. Degrading open here would spawn a worker at an
         # unintended vendor and bill it, so the worker stays alive, the node
@@ -769,14 +809,12 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
     # vendor again and the chain loops. A chain that loops is a worse failure
     # than a chain that ends.
     fleet_state.record_link(node, link_id(link))
+    # No emit here. The sweep emits exactly one `failover_swapped` for the
+    # "swapped" outcome, and a second one from in here would record two swaps
+    # for one replacement worker. Which link was taken stays readable in the
+    # walk this just wrote, and `failover_exhausted` names them all when the
+    # chain ends.
     if _redispatch(candidate, flags=link_to_spawn_flags(link)):
-        _emit_recovery_event("failover_swapped", {
-            "short_id": candidate.short_id,
-            "node": node,
-            "link": link_id(link),
-            "redispatched": True,
-            "reason": reason,
-        })
         return "swapped"
     return "rotated-no-worker"
 

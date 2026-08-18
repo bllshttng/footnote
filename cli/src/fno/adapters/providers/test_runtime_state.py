@@ -1229,3 +1229,46 @@ class TestHarvestedStampDoesNotClobberTheWarnFlag:
         )
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         assert set(raw["windows_opened"]["zai"]) == {"weekly", rs.WINDOW_LABEL}
+
+
+class TestALiveLockOutlivesTheHealthTTL:
+    """The TTL was written when every lock was a seconds-scale backoff.
+
+    A harvested reset breaks that assumption: a nine-hour lock is still binding
+    an hour after the error, and dropping the record there turns EXHAUSTED back
+    into UNKNOWN for the remaining eight hours.
+    """
+
+    def test_a_nine_hour_lock_survives_an_unrelated_write_an_hour_later(
+        self, state_path: Path
+    ) -> None:
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+
+        now = time.time()
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=now + 9 * 3600,
+        )
+        # Any later writer runs _drop_stale. An hour on, the record's
+        # last_error_at is past the TTL while its lock is still binding.
+        later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
+        write_usage_snapshot(
+            UsageSnapshot(
+                provider_id="other",
+                windows=(UsageWindow(label="5h", used_pct=1.0, resets_at=later + 900),),
+                probed_at=later,
+                source="test",
+            ),
+            now=later,
+        )
+        assert headroom("zai", now=later).state is HeadroomState.EXHAUSTED
+
+    def test_an_expired_lock_still_ages_out(self, state_path: Path) -> None:
+        # The reprieve is for a LIVE lock only; the TTL still garbage-collects
+        # a long-quiet provider's backoff level.
+        now = time.time()
+        update_provider_health("P", ErrorRule(status=429, backoff=True), now=now)
+        later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
+        assert "P" not in read_state(now=later).provider_health

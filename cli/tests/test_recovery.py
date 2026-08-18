@@ -690,6 +690,39 @@ class TestTranscriptRefusalNeedsCorroboration:
         self._sweep(h2, tmp_path, counts)
         assert h2.failover_calls == []
 
+    def test_the_event_carries_a_resolvable_naive_stamp(self, tmp_path, monkeypatch):
+        # Without the record's zone the event always reported resets_at null
+        # for a provider that quotes a naive local stamp - which is exactly the
+        # shape the event exists to carry. The later lock write reparses, but
+        # it cannot repair an event already on disk.
+        monkeypatch.setattr(
+            recovery, "_active_reset_timezone",
+            lambda cwd: "Asia/Singapore", raising=True,
+        )
+        h = _StaleRefusalHarness(
+            "Claude usage limit reached. Resets 2036-01-01 07:19:38"
+        )
+        self._sweep(h, tmp_path, {})
+        payload = dict(h.events[h.event_types().index("worker_refused")][1])
+        # The stamp is a decade out, so the horizon refuses it - but it is
+        # NAMED rather than silently absent, which is the distinction.
+        assert payload["reset_stamp_unparsed"] == "2036-01-01 07:19:38"
+
+    def test_an_in_window_naive_stamp_resolves_with_the_records_zone(
+        self, tmp_path, monkeypatch
+    ):
+        import time as _t
+
+        soon = _t.strftime("%Y-%m-%d %H:%M:%S", _t.gmtime(_t.time() + 4 * 3600))
+        monkeypatch.setattr(
+            recovery, "_active_reset_timezone", lambda cwd: "UTC", raising=True,
+        )
+        h = _StaleRefusalHarness(f"Claude usage limit reached. Resets {soon}")
+        self._sweep(h, tmp_path, {})
+        payload = dict(h.events[h.event_types().index("worker_refused")][1])
+        assert payload["resets_at"] is not None
+        assert payload["reset_stamp_unparsed"] is None
+
     def test_a_dead_sessions_own_error_still_acts_at_once(self, tmp_path):
         # output_result is the session's own error text, not prose about
         # someone else's cap, so its path is unchanged.
@@ -1943,13 +1976,17 @@ class TestChainRedispatch:
         chain = [_FakeLink("codex", "gpt-5.6-sol", effort="high"),
                  _FakeLink("claude", "sonnet", substrate="bg")]
         spawned, events, _hb = self._wire(monkeypatch, tmp_path, chain)
+        _hb = _hb
         c = _stale_candidate(tmp_path)
 
         assert recovery._chain_redispatch(c, reason="queue-exhausted") == "swapped"
         assert spawned == [["-H", "codex", "-m", "gpt-5.6-sol",
                            "--effort", "high", "--substrate", "pane"]]
-        assert [t for t, _ in events] == ["failover_swapped"]
-        assert events[0][1]["link"] == "codex/gpt-5.6-sol"
+        # ONE event per swap, and it is the sweep's. A second emit from in here
+        # would record two swaps for one replacement worker.
+        assert events == []
+        from fno import fleet_state
+        assert fleet_state.links_tried("x-test", path=_hb) == ["codex/gpt-5.6-sol"]
 
     def test_a_node_walks_its_chain_once(self, tmp_path, monkeypatch):
         # The link is recorded, so the next tick takes the NEXT link rather

@@ -945,7 +945,7 @@ class TestResolveFallbackChain:
         # goes to codex" - the sentence, executable.
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None: False)
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
         st = _chain_settings(_OPERATOR_RULE)
 
         assert sd.link_id(sd.resolve_fallback_chain("L", settings=st)[0]) == (
@@ -960,7 +960,7 @@ class TestResolveFallbackChain:
         # five-hour cap are different meters, and either can be the one down.
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None: False)
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
         st = _chain_settings(_OPERATOR_RULE)
         for size in ("S", "L", "M"):
             assert len(sd.resolve_fallback_chain(size, settings=st)) >= 2, size
@@ -968,7 +968,7 @@ class TestResolveFallbackChain:
     def test_an_absent_size_reads_default(self, monkeypatch) -> None:
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None: False)
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
         st = _chain_settings(_OPERATOR_RULE)
         assert sd.link_id(sd.resolve_fallback_chain("M", settings=st)[0]) == (
             "claude/sonnet"
@@ -987,7 +987,7 @@ class TestResolveFallbackChain:
 
         monkeypatch.setattr(
             sd, "link_is_exhausted",
-            lambda link, now=None: sd.link_id(link) == "codex/gpt-5.6-sol",
+            lambda link, now=None, repo_root=None: sd.link_id(link) == "codex/gpt-5.6-sol",
         )
         chain = sd.resolve_fallback_chain("L", settings=_chain_settings(_OPERATOR_RULE))
         assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
@@ -997,7 +997,7 @@ class TestResolveFallbackChain:
         # holding, and holding is what an empty chain makes the caller do.
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None: True)
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: True)
         assert sd.resolve_fallback_chain(
             "L", settings=_chain_settings(_OPERATOR_RULE)
         ) == []
@@ -1005,7 +1005,7 @@ class TestResolveFallbackChain:
     def test_an_already_spent_link_is_not_offered_again(self, monkeypatch) -> None:
         from fno.agents import spawn_defaults as sd
 
-        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None: False)
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
         chain = sd.resolve_fallback_chain(
             "L", exclude=["codex/gpt-5.6-sol"],
             settings=_chain_settings(_OPERATOR_RULE),
@@ -1108,3 +1108,90 @@ class TestLinkToSpawnFlags:
             {"harness": "codex", "model": "m", "effort": "low"},
         ]})["L"]
         assert sd.link_id(a) == sd.link_id(b)
+
+
+class TestLinkIdentityIncludesTheAccountAxis:
+    def test_two_accounts_on_one_model_are_two_destinations(self) -> None:
+        # An account names a different bill and a different meter. Folding two
+        # links together spends the first and skips the second as spent.
+        from fno.agents import spawn_defaults as sd
+
+        a, b = sd.validate_fallback({"L": [
+            {"harness": "claude", "model": "sonnet", "account": "primary"},
+            {"harness": "claude", "model": "sonnet", "account": "secondary"},
+        ]})["L"]
+        assert sd.link_id(a) != sd.link_id(b)
+
+    def test_an_unpinned_link_keeps_the_bare_identity(self) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        assert sd.link_id(link) == "codex/m"
+
+    def test_the_second_account_is_still_offered_after_the_first(
+        self, monkeypatch
+    ) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(
+            sd, "link_is_exhausted",
+            lambda link, now=None, repo_root=None: False, raising=True,
+        )
+        table = {"L": [
+            {"harness": "claude", "model": "sonnet", "account": "primary"},
+            {"harness": "claude", "model": "sonnet", "account": "secondary"},
+        ]}
+        chain = sd.resolve_fallback_chain(
+            "L", exclude=["claude/sonnet@primary"],
+            settings=_chain_settings(table),
+        )
+        assert [sd.link_id(x) for x in chain] == ["claude/sonnet@secondary"]
+
+
+class TestForeignProjectRooting:
+    def test_the_chain_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
+        # The recovery roster is global. A foreign worker resolving the
+        # daemon's chain would spawn on a vendor its own project never
+        # authorized.
+        from fno.agents import spawn_defaults as sd
+
+        seen = {}
+
+        def _for_repo(root):
+            seen["root"] = root
+            return _chain_settings(_OPERATOR_RULE)
+
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo", _for_repo, raising=True
+        )
+        monkeypatch.setattr(
+            sd, "link_is_exhausted",
+            lambda link, now=None, repo_root=None: False, raising=True,
+        )
+        sd.resolve_fallback_chain("L", repo_root=str(tmp_path))
+        assert str(seen["root"]) == str(tmp_path)
+
+    def test_headroom_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
+        from fno.agents import spawn_defaults as sd
+
+        seen = {}
+
+        class _V:
+            state = object()
+
+        monkeypatch.setattr(
+            sd, "_harness_records",
+            lambda harness, repo_root=None: [type("R", (), {"id": "acct"})()],
+            raising=True,
+        )
+
+        def _headroom(pid, now=None, repo_root=None):
+            seen["root"] = repo_root
+            return _V()
+
+        monkeypatch.setattr(
+            "fno.adapters.providers.runtime_state.headroom", _headroom, raising=True
+        )
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        sd.link_is_exhausted(link, repo_root=str(tmp_path))
+        assert str(seen["root"]) == str(tmp_path)

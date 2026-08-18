@@ -1106,24 +1106,39 @@ def link_id(link) -> str:
     has already spent. Two links that differ only in effort are the SAME
     destination for that purpose: retrying the same vendor at a different
     reasoning setting does not answer a cap.
+
+    ``account`` DOES participate, because it names a different bill and a
+    different meter. Two links on one harness and model that differ only by
+    account are the operator's second credential, and folding them together
+    would spend the first and then skip the second as already tried.
     """
     harness = (getattr(link, "provider", "") or "").strip() or "?"
     model = (getattr(link, "model", "") or "").strip()
     route = (getattr(link, "route", "") or "").strip()
-    return f"{harness}/{model or route or 'default'}"
+    account = (getattr(link, "account", "") or "").strip()
+    base = f"{harness}/{model or route or 'default'}"
+    return f"{base}@{account}" if account else base
 
 
-def _harness_records(harness: str):
-    """Account records whose harness is ``harness``, or [] when unreadable."""
+def _harness_records(harness: str, repo_root=None):
+    """Account records whose harness is ``harness``, or [] when unreadable.
+
+    Rooted at ``repo_root`` because the recovery roster is global and a
+    candidate can belong to another project. A same-id record in the
+    dispatcher's own project must never answer for a foreign worker.
+    """
     try:
-        from fno.adapters.providers.cli import _load
+        from fno.adapters.providers.loader import load_providers
 
-        return [r for r in _load().records if r.harness == harness]
+        from pathlib import Path as _Path
+
+        cfg = load_providers(repo_root=_Path(repo_root) if repo_root else None)
+        return [r for r in cfg.records if r.harness == harness]
     except Exception:  # noqa: BLE001 - an unreadable config means UNKNOWN, not exhausted
         return []
 
 
-def link_is_exhausted(link, *, now: Optional[float] = None) -> bool:
+def link_is_exhausted(link, *, now: Optional[float] = None, repo_root=None) -> bool:
     """True only when every account this link can land on is KNOWN exhausted.
 
     This is the check task 1.2 made real. Before the harvested reset, a claude
@@ -1140,11 +1155,17 @@ def link_is_exhausted(link, *, now: Optional[float] = None) -> bool:
 
     account = (getattr(link, "account", "") or "").strip()
     harness = (getattr(link, "provider", "") or "").strip()
-    ids = [account] if account else [r.id for r in _harness_records(harness)]
+    ids = (
+        [account] if account
+        else [r.id for r in _harness_records(harness, repo_root)]
+    )
     if not ids:
         return False
     try:
-        verdicts = [headroom(pid, now=now) for pid in ids]
+        from pathlib import Path as _Path
+
+        root = _Path(repo_root) if repo_root else None
+        verdicts = [headroom(pid, now=now, repo_root=root) for pid in ids]
     except Exception:  # noqa: BLE001 - a failed read is UNKNOWN, never exhausted
         return False
     return all(v.state is HeadroomState.EXHAUSTED for v in verdicts)
@@ -1156,6 +1177,7 @@ def resolve_fallback_chain(
     exclude: Sequence[str] = (),
     settings: object = None,
     now: Optional[float] = None,
+    repo_root=None,
 ) -> List[object]:
     """The eligible fallback links for a node of ``size``, in order.
 
@@ -1175,9 +1197,19 @@ def resolve_fallback_chain(
     there spawns a worker at an unintended vendor and bills it.
     """
     if settings is None:
-        from fno.config import load_settings
+        # Rooted at the CANDIDATE's project, not the daemon's cwd. The recovery
+        # roster is global, so a foreign worker resolving the dispatcher's
+        # chain would spawn on a vendor its own project never authorized.
+        if repo_root:
+            from pathlib import Path as _Path
 
-        settings = load_settings()
+            from fno.config import load_settings_for_repo
+
+            settings = load_settings_for_repo(_Path(repo_root))
+        else:
+            from fno.config import load_settings
+
+            settings = load_settings()
     table = validate_fallback(
         getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
     )
@@ -1186,7 +1218,8 @@ def resolve_fallback_chain(
     spent = set(exclude)
     return [
         link for link in chain
-        if link_id(link) not in spent and not link_is_exhausted(link, now=now)
+        if link_id(link) not in spent
+        and not link_is_exhausted(link, now=now, repo_root=repo_root)
     ]
 
 
