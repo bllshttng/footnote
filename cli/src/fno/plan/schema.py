@@ -23,6 +23,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
+from fno.graph._constants import is_wellformed_node_id
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
 # Str-enum built directly from the status axis + terminals. Functional API so
@@ -41,17 +42,26 @@ class ConsolidationEntry(BaseModel):
     id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
+    @field_validator("id")
+    @classmethod
+    def _id_is_a_node_id(cls, v: str) -> str:
+        # Same predicate the graph mints against, imported rather than
+        # re-spelled: a reason pointing at a typo'd id is a decision no later
+        # reader can check, which is the one thing this block exists to give.
+        if not is_wellformed_node_id(v):
+            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)")
+        return v
+
 
 class ConsolidationBlock(BaseModel):
     """The step 2d Consolidation Gate's recorded outcome.
 
-    Shape authority: this model pins the enum, the non-empty reason per id,
-    and the rule that absorb/append must record a decision, so the two
-    surfaces agree on those. Two things stay deliberately one-sided.
-    Presence is the bash gate's call, because grandfathering pre-gate plans
-    is a policy date rather than a shape. Block style is the bash gate's too:
-    a flow-style list is valid YAML this model accepts and that walk cannot
-    parse, so it refuses the shape instead of misreading it.
+    Sole shape authority. `validate-plan.sh` loads the frontmatter with
+    PyYAML and validates the block THROUGH this model rather than walking it
+    in awk, so there is no second implementation to diverge from. The bash
+    gate keeps only what is not shape: whether a block is present at all
+    (grandfathering pre-gate plans is a policy date), and the contradiction
+    between an `append` outcome and a plan file existing to carry it.
     """
 
     outcome: Literal["absorb", "append", "proceed_alone"]

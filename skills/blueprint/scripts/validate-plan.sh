@@ -79,8 +79,11 @@ _plan_rung() {
 # Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
 # nothing. Shared by _plan_rung and _semantic_validate so the "which fno runs?"
 # question has ONE answer here rather than two that can drift apart.
-_fno_source_python() {
-    local repo_root="" script_dir="" source_root="" candidate="" python_bin=""
+# Echo the checkout root that holds `cli/src/fno`, or nothing. Three callers
+# asked this the same way in three places; one of them can now answer it while
+# the others cannot, so it is one function.
+_fno_source_root() {
+    local repo_root="" script_dir="" candidate=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     for candidate in \
@@ -88,10 +91,16 @@ _fno_source_python() {
         "$script_dir/.." \
         "$script_dir/../../.."; do
         if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
-            source_root=$(cd "$candidate" && pwd)
-            break
+            (cd "$candidate" && pwd)
+            return 0
         fi
     done
+    return 0
+}
+
+_fno_source_python() {
+    local source_root="" python_bin=""
+    source_root=$(_fno_source_root)
     [[ -z "$source_root" ]] && return 0
     if [[ -n "${FNO_PYTHON:-}" && -x "${FNO_PYTHON}" ]]; then
         python_bin="$FNO_PYTHON"
@@ -116,15 +125,7 @@ _semantic_validate() {
     else
         # No usable interpreter, but a source tree may still exist; the uv arm
         # below can still run it, and the refusal message names the root.
-        local script_dir candidate repo_root
-        repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
-        script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-        for candidate in "$repo_root" "$script_dir/.." "$script_dir/../../.."; do
-            if [[ -n "$candidate" && -d "$candidate/cli/src/fno" ]]; then
-                source_root=$(cd "$candidate" && pwd)
-                break
-            fi
-        done
+        source_root=$(_fno_source_root)
     fi
     if [[ -n "$source_root" ]]; then
         # A source checkout whose interpreter lacks the CLI deps (a fresh
@@ -670,7 +671,6 @@ fi
 check_consolidation_file() {
     local file="$1"
     local label="$2"
-    local block=""
     # This check reports through its OWN counter, not the global ERRORS: the
     # positive marker below must print on a clean block even when an unrelated
     # earlier check already failed, or the gate goes silent exactly when the
@@ -678,19 +678,10 @@ check_consolidation_file() {
     local c_errors=0
     c_error() { error "$@"; c_errors=$((c_errors + 1)); }
 
-    # Same two-stage extraction as check_kill_criteria_file: top-level
-    # frontmatter first, then the consolidation: block up to the next
-    # top-level key.
-    block=$(awk '
-        /^---/ { c++; if (c==2) exit; next }
-        c==1 { print }
-    ' "$file" | awk '
-        /^consolidation:/ { in_block=1; next }
-        in_block && /^[A-Za-z_][A-Za-z0-9_-]*:/ { in_block=0 }
-        in_block { print }
-    ')
-
-    if [[ -z "$block" ]]; then
+    # Presence only. Shape is the model's job (see below), but whether a block
+    # exists at all is a policy date rather than a shape, so it stays here.
+    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
+            | grep -qE '^consolidation:'; then
         # Grandfather: the gate governs plans written AFTER it shipped. Every
         # pre-existing plan would otherwise halt /do and /target on work
         # already in flight, so they WARN until backfilled. The boundary is
@@ -728,132 +719,187 @@ check_consolidation_file() {
         return 0
     fi
 
-    # Flow-style lists (`absorbed: [{id: ...}]`) are valid YAML this awk walk
-    # cannot parse - error with the fix rather than misreading them. An empty
-    # `[]` is not flow style in this sense and stays legal.
-    if printf '%s\n' "$block" | grep -Eq '^[[:space:]]*(absorbed|appended_to|proceed_alone_against):[[:space:]]*\[[[:space:]]*[^][:space:]]'; then
-        c_error "$label: consolidation id lists must use block style (a '- id:' entry with its own 'reason:'), not a flow-style list"
+    # Shape check: hand the block to the model that already defines it.
+    # This used to be an awk walk over the YAML, and five review rounds each
+    # found a shape it misread - block scalars, flow lists, key order,
+    # hyphenated sibling keys, duplicate keys, integer ids. Several of those
+    # hard-FAILED valid plans. A second implementation of a shape the
+    # `ConsolidationBlock` model already pins can only ever diverge from it,
+    # so there is now one implementation and bash keeps only what is policy.
+    local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        source_root=$(_fno_source_root)
+    fi
+    if [[ -z "$source_root" ]]; then
+        # A tooling gap is not a clean plan. Say the check did not run rather
+        # than printing the OK marker, which would read as "the block is fine".
+        warn "$label: consolidation block NOT CHECKED (no fno source checkout to import the shape model from) - not a pass"
+        return 0
+    fi
+    local consolidation_prog
+    consolidation_prog=$(cat <<'PYEOF'
+import sys
+
+try:
+    import yaml
+    from pydantic import ValidationError
+
+    from fno.plan.schema import ConsolidationBlock
+except Exception as exc:  # missing PyYAML / pydantic / fno on this interpreter
+    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
+    raise SystemExit(0)
+
+ENUM = "(absorb | append | proceed_alone)"
+
+
+def frontmatter(path):
+    lines = open(path, encoding="utf-8").read().splitlines()
+    if not lines or lines[0].rstrip() != "---":
+        return None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.rstrip() == "---":
+            return "\n".join(lines[1:i])
+    return None
+
+
+def dup_keys(node, out):
+    """Duplicate keys anywhere under the consolidation subtree.
+
+    PyYAML takes the LAST of a repeated key silently, so two `outcome:` lines
+    parse to one value and the discarded decision leaves no trace. The node
+    graph still has both, which is why this reads `compose` and not the dict.
+    """
+    if isinstance(node, yaml.MappingNode):
+        seen = set()
+        for key, value in node.value:
+            name = getattr(key, "value", None)
+            if name in seen:
+                out.append(name)
+            seen.add(name)
+            dup_keys(value, out)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            dup_keys(item, out)
+    return out
+
+
+def render(err, block):
+    loc, kind = err["loc"], err["type"]
+    if loc == ("outcome",):
+        if kind == "missing":
+            return "consolidation block present but has no outcome: line (expected %s)" % ENUM
+        raw = block.get("outcome")
+        return "consolidation outcome `%s` is not in the enum %s" % (raw, ENUM)
+    if len(loc) >= 2 and isinstance(loc[1], int):
+        section, index = loc[0], loc[1]
+        entry = None
+        listed = block.get(section)
+        if isinstance(listed, list) and index < len(listed):
+            entry = listed[index]
+        field = loc[2] if len(loc) > 2 else None
+        if field == "id":
+            if kind == "missing":
+                return "consolidation section `%s` has an entry with no id" % section
+            raw = entry.get("id") if isinstance(entry, dict) else entry
+            return (
+                "consolidation entry id `%s` (%s) is not a node id "
+                "(expected <prefix>-<hex>, e.g. x-3bd3)" % (raw, section)
+            )
+        if field == "reason":
+            named = entry.get("id") if isinstance(entry, dict) else entry
+            return (
+                "consolidation entry `%s` (%s) has an empty reason - the recorded "
+                "decision must be checkable by a later reader" % (named, section)
+            )
+        return (
+            "consolidation section `%s` entry %d is not an id/reason mapping"
+            % (section, index + 1)
+        )
+    message = err["msg"].replace("Value error, ", "")
+    for outcome, key in (("absorb", "absorbed"), ("append", "appended_to")):
+        if message == "outcome %s requires at least one %s entry" % (outcome, key):
+            return "consolidation outcome is %s but the %s: list is empty" % (outcome, key)
+    where = ".".join(str(part) for part in loc)
+    return "consolidation block%s: %s" % (" " + where if where else "", message)
+
+
+path = sys.argv[1]
+text = frontmatter(path)
+if text is None:
+    sys.stdout.write("U\tno closed --- frontmatter block\n")
+    raise SystemExit(0)
+try:
+    loaded = yaml.safe_load(text)
+    composed = yaml.compose(text)
+except yaml.YAMLError as exc:
+    # The frontmatter check above already errors on this; do not double-report.
+    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
+    raise SystemExit(0)
+
+block = (loaded or {}).get("consolidation")
+if not isinstance(block, dict):
+    sys.stdout.write(
+        "E\tconsolidation: must be a block of keys with an outcome: line %s, not `%s`\n"
+        % (ENUM, block)
+    )
+    raise SystemExit(0)
+
+for key, value in (composed.value if composed else []):
+    if getattr(key, "value", None) == "consolidation":
+        for name in dup_keys(value, []):
+            sys.stdout.write(
+                "E\tconsolidation block has more than one `%s:` line - a repeated key "
+                "silently discards the earlier value\n" % name
+            )
+
+try:
+    validated = ConsolidationBlock.model_validate(block)
+except ValidationError as exc:
+    for err in exc.errors():
+        sys.stdout.write("E\t" + " ".join(render(err, block).split()) + "\n")
+    raise SystemExit(0)
+sys.stdout.write("O\t%s\n" % validated.outcome)
+PYEOF
+    )
+    # Same ladder _semantic_validate walks: the checkout's own interpreter
+    # first, then uv, which is the only arm a fresh worktree with no cli/.venv
+    # can take.
+    if [[ -n "$python_bin" ]]; then
+        delegate_out=$(PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+            "$python_bin" -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+    fi
+    if [[ -z "$python_bin" || "$delegate_out" == U$'\t'* ]] \
+            && command -v uv >/dev/null 2>&1; then
+        delegate_rc=0
+        delegate_out=$(uv run --project "$source_root/cli" \
+            python -c "$consolidation_prog" "$file" 2>&1) || delegate_rc=$?
+    fi
+    if [[ -z "$delegate_out" && "$delegate_rc" -eq 0 ]]; then
+        warn "$label: consolidation block NOT CHECKED (no interpreter with the fno CLI importable at $source_root) - not a pass"
+        return 0
     fi
 
-    local outcome outcome_rc=0
-    outcome=$(printf '%s\n' "$block" | awk '
-        /^[[:space:]]*outcome:[[:space:]]*/ {
-            line=$0
-            sub(/^[[:space:]]*outcome:[[:space:]]*/, "", line)
-            sub(/[[:space:]]#.*$/, "", line)
-            sub(/[[:space:]]+$/, "", line)
-            gsub(/^["'"'"']|["'"'"']$/, "", line)
-            n++
-            if (n == 1) value = line
-            next
-        }
-        END { if (n > 0) print value; exit(n > 1 ? 42 : 0) }
-    ') || outcome_rc=$?
-    # A YAML reader takes the LAST duplicate key while this walk pinned the
-    # first, so more than one outcome line is an error, not a silent pick.
-    if [[ "$outcome_rc" -eq 42 ]]; then
-        c_error "$label: consolidation block has more than one outcome: line - a block records exactly one outcome"
+    local outcome="" line kind payload
+    if [[ "$delegate_rc" -ne 0 ]]; then
+        warn "$label: consolidation block NOT CHECKED (the shape check failed to run: ${delegate_out##*$'\n'}) - not a pass"
+        return 0
     fi
-    if [[ -z "$outcome" ]]; then
-        c_error "$label: consolidation block present but has no outcome: line (expected absorb | append | proceed_alone)"
-    elif [[ "$outcome" != "absorb" && "$outcome" != "append" && "$outcome" != "proceed_alone" ]]; then
-        c_error "$label: consolidation outcome \`${outcome}\` is not in the enum (absorb | append | proceed_alone)"
-    fi
+    while IFS=$'\t' read -r kind payload; do
+        case "$kind" in
+            E) c_error "$label: $payload" ;;
+            O) outcome="$payload" ;;
+            U) warn "$label: consolidation block NOT CHECKED ($payload) - not a pass"; return 0 ;;
+        esac
+    done <<< "$delegate_out"
 
-    # Walk the id lists: absorbed / appended_to / proceed_alone_against. An
-    # entry starts at its '-' marker, NOT at an 'id:' key, because YAML lets
-    # the keys of one mapping come in any order - keying the walk on 'id:'
-    # read a reason-first entry as no entry at all and blamed the list for
-    # being empty.
-    local entries
-    entries=$(printf '%s\n' "$block" | awk '
-        function clean(v) {
-            sub(/[[:space:]]#.*$/, "", v)
-            sub(/[[:space:]]+$/, "", v)
-            gsub(/^["'"'"']|["'"'"']$/, "", v)
-            return v
-        }
-        function flush() { if (sec != "" && started) printf "%s\037%s\037%s\n", sec, cur, rsn }
-        # FIRST rule on purpose: the body of a block scalar can contain
-        # anything, bullets included, and a later rule would claim those lines.
-        in_scalar {
-            match($0, /^[[:space:]]*/)
-            if ($0 ~ /^[[:space:]]*$/ || RLENGTH > scalar_indent) next
-            in_scalar=0
-        }
-        /^[[:space:]]*(absorbed|appended_to|proceed_alone_against):/ {
-            flush(); started=0; cur=""; rsn=""
-            sec=$0
-            sub(/^[[:space:]]*/, "", sec)
-            sub(/:.*/, "", sec)
-            next
-        }
-        sec != "" && /^[[:space:]]*-[[:space:]]*/ {
-            flush(); started=1; cur=""; rsn=""
-            line=$0
-            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
-            if (line ~ /^id:/) { sub(/^id:[[:space:]]*/, "", line); cur=clean(line) }
-            else if (line ~ /^reason:/) { sub(/^reason:[[:space:]]*/, "", line); rsn=line; sub(/[[:space:]]+$/, "", rsn) }
-            next
-        }
-        sec != "" && started && /^[[:space:]]*id:/ {
-            line=$0; sub(/^[[:space:]]*id:[[:space:]]*/, "", line); cur=clean(line); next
-        }
-        sec != "" && started && /^[[:space:]]*reason:/ {
-            line=$0
-            match($0, /^[[:space:]]*/); key_indent=RLENGTH
-            sub(/^[[:space:]]*reason:[[:space:]]*/, "", line)
-            sub(/[[:space:]]+$/, "", line); gsub(/^["'"'"']|["'"'"']$/, "", line)
-            # `reason: |` / `reason: >` opens a block scalar whose body is every
-            # MORE-indented line that follows, bullets included. Without this the
-            # walk read those bullets as new list entries and shredded a valid
-            # plan into phantom ids.
-            if (line ~ /^[|>]/) { in_scalar=1; scalar_indent=key_indent; rsn="(block scalar)" }
-            else { in_scalar=0; rsn=line }
-            next
-        }
-        # Any other key CLOSES the current section. Without this the walk stayed
-        # inside the last id list forever, so a later list-valued key (reversal:,
-        # notes:) had its items read as entries of that list and reported as
-        # entries with no id.
-        sec != "" && /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*:/ {
-            flush(); sec=""; started=0; cur=""; rsn=""
-            next
-        }
-        END { flush() }
-    ')
-
-    local absorb_count=0 append_count=0
-    while IFS=$'\037' read -r sec entry_id entry_reason; do
-        [[ -n "$sec" ]] || continue
-        if [[ -z "$entry_id" ]]; then
-            c_error "$label: consolidation section \`${sec}\` has an entry with no id"
-            continue
-        fi
-        if [[ -z "$entry_reason" ]]; then
-            c_error "$label: consolidation entry \`${entry_id}\` (${sec}) has an empty reason - the recorded decision must be checkable by a later reader"
-        fi
-        # Same grammar the graph mints (NODE_ID_BODY in graph/_constants.py).
-        # A bare number is legal YAML that parses to an int, which this walk
-        # reads as text and the Pydantic model rejects as a non-string - the
-        # divergence lands downstream as "plan is unreadable or invalid".
-        if [[ ! "$entry_id" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
-            c_error "$label: consolidation entry id \`${entry_id}\` (${sec}) is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)"
-        fi
-        [[ "$sec" == "absorbed" ]] && absorb_count=$((absorb_count + 1))
-        [[ "$sec" == "appended_to" ]] && append_count=$((append_count + 1))
-    done <<< "$entries"
-
-    # An outcome that records no decision is an empty block wearing a label.
-    if [[ "$outcome" == "absorb" && "$absorb_count" -eq 0 ]]; then
-        c_error "$label: consolidation outcome is absorb but the absorbed: list is empty"
-    fi
-    if [[ "$outcome" == "append" && "$append_count" -eq 0 ]]; then
-        c_error "$label: consolidation outcome is append but the appended_to: list is empty"
-    fi
     # An append decision means the content went onto the OTHER node and no
     # second plan was written. This file existing contradicts that, and it is
-    # the one self-contradiction the gate can catch mechanically.
+    # the one self-contradiction the gate can catch mechanically - which makes
+    # it the caller's knowledge, not the block's shape.
     if [[ "$outcome" == "append" ]]; then
         c_error "$label: consolidation outcome is append, but a plan file was written - append records that the content went onto the other node instead, so either delete this plan or record absorb / proceed_alone"
     fi

@@ -57,7 +57,9 @@ def test_legacy_plan_without_block_warns_not_errors(tmp_path):
     assert "backfill one before the next blueprint" in result.stdout
 
 
-def test_flow_style_id_list_errors_with_fix(tmp_path):
+def test_flow_style_id_list_is_read_not_refused(tmp_path):
+    # A flow-style list is valid YAML. The awk walk could not parse it, so the
+    # gate refused the shape rather than misreading it; the model reads it.
     plan = tmp_path / "flow.md"
     plan.write_text(_plan(
         "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
@@ -66,8 +68,37 @@ def test_flow_style_id_list_errors_with_fix(tmp_path):
         "  absorbed: [{id: x-ab12, reason: same lock}]\n"
     ))
     result = _run(plan)
+    assert result.returncode == 0, result.stdout
+    assert "consolidation outcome is absorb" in result.stdout
+
+
+def test_a_repeated_outcome_key_is_not_silently_last_wins(tmp_path):
+    # PyYAML takes the LAST of a repeated key with no diagnostic, so a block
+    # recording two outcomes would parse as one and discard the other.
+    plan = tmp_path / "dup.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  outcome: proceed_alone\n"
+        "  absorbed:\n"
+        "    - id: x-ab12\n"
+        "      reason: same lock\n"
+    ))
+    result = _run(plan)
     assert result.returncode == 1, result.stdout
-    assert "block style" in result.stdout
+    assert "more than one `outcome:` line" in result.stdout
+
+
+def test_a_scalar_consolidation_value_is_refused(tmp_path):
+    plan = tmp_path / "scalar.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-18\n"
+        "consolidation: proceed_alone\n"
+    ))
+    result = _run(plan)
+    assert result.returncode == 1, result.stdout
+    assert "must be a block of keys" in result.stdout
 
 
 def test_inline_comment_on_outcome_line_is_stripped(tmp_path):
