@@ -251,6 +251,7 @@ pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
 pr graphql-exec	T1	pr graphql-exec	1
 pr info	T1	pr info	10
+pr list	T1	pr list	3
 pr logs	T1	pr logs	1
 pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
 pr next-receipt-generation	T1	pr next-receipt-generation	0
