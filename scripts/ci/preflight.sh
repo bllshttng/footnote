@@ -469,9 +469,16 @@ holder_status_line() {
     (( age_s < 0 )) && age_s=0
     if (( age_s < 3600 )); then age="$((age_s / 60))m"; else age="$((age_s / 3600))h"; fi
     pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    cpu="$(holder_tree_cpu "$pid" 2>/dev/null || echo '?')"
+    # No readable pid means no measurable CPU: print ? rather than a 0 that
+    # reads as a measured zero-CPU (wedged) holder. holder_tree_cpu always
+    # succeeds, so there is no failure fallback to carry.
+    if [[ -n "$pid" ]]; then
+        cpu="cpu=$(holder_tree_cpu "$pid" 2>/dev/null)s"
+    else
+        cpu="cpu=?"
+    fi
     holder_is_orphaned "$pid" && orphan=" orphaned=yes"
-    echo "$line elapsed=$age cpu=${cpu}s$orphan"
+    echo "$line elapsed=$age $cpu$orphan"
 }
 
 skip_hint() {
@@ -636,11 +643,10 @@ holder_is_stalled() {
     # An orphan has no launcher left to finish for, so the floor buys nothing
     # and costs the whole fleet twenty minutes. It still has to fail the CPU
     # probe below (LD3): detached and computing is not the same as wedged.
-    if (( age_s < STALL_MIN_AGE )) && ! holder_is_orphaned "$pid"; then
+    if holder_is_orphaned "$pid"; then _STALL_ORPHANED=1; else _STALL_ORPHANED=0; fi
+    if (( age_s < STALL_MIN_AGE && _STALL_ORPHANED == 0 )); then
         return 1
     fi
-    _STALL_ORPHANED=0
-    holder_is_orphaned "$pid" && _STALL_ORPHANED=1
     if [[ "$line" != "${_STALL_HOLDER:-}" ]]; then
         _STALL_HOLDER="$line"; _STALL_T="$now"; _STALL_CPU="$(holder_tree_cpu "$pid")"
         return 1

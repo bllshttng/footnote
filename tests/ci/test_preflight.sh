@@ -572,17 +572,30 @@ grep <<<"$out" -q "stalled holder" && fail "stole from a healthy holder" || ok "
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== orphan steal: a reparented holder is stolen before the stall floor =="
+# Host probe first: a double-fork must reparent to pid 1 for the orphan
+# predicate to be observable. Under a subreaper (systemd --user, some CI
+# wrappers) reparenting lands on the subreaper instead; the code then
+# correctly fails toward waiting, so the steal cannot be asserted here and
+# the orphan lanes skip rather than fail the suite for the host's shape
+# (the Darwin signal-lane skip is the prior idiom for exactly this).
+probe_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+for _i in $(seq 1 40); do
+    [[ "$(ps -o ppid= -p "$probe_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
+    sleep 0.2
+done
+HOST_SEES_ORPHANS=1
+[[ "$(ps -o ppid= -p "$probe_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] || HOST_SEES_ORPHANS=0
+kill "$probe_orphan" 2>/dev/null
+if [[ "$HOST_SEES_ORPHANS" -eq 0 ]]; then
+    echo "  ok: orphan lanes skipped on this host (double-fork did not land on pid 1; the code correctly waits)"
+fi
+if [[ "$HOST_SEES_ORPHANS" -eq 1 ]]; then
 rm -f "$ATT"   # every steal section clears the attestation or reuse skips the lock
-# Double-fork: the intermediate bash exits, the sleeper reparents to pid 1 -
-# the exact shape of the 2026-08-18 incident holder (live, orphaned, 0% CPU).
 orphan_pid="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] && break
     sleep 0.2
 done
-[[ "$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' ')" == "1" ]] \
-    && ok "fixture: the sleeper is a real orphan (ppid=1)" \
-    || fail "fixture: sleeper never reparented (ppid=$(ps -o ppid= -p "$orphan_pid" 2>/dev/null | tr -d ' '))"
 # Stamp 12s old against a 600s floor: only the orphan bypass can reach the
 # CPU probe. The stamp sits within the recycle slop of the young process.
 orphan_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -597,11 +610,15 @@ else
     fail "the orphan survived the steal"; kill "$orphan_pid" 2>/dev/null
 fi
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+fi
 
 echo "== orphan guard: an orphan that is computing keeps its lock =="
 # LD3 pinned: the bypass removes the age floor and never the CPU probe. Floor 0
 # makes condemnation unreachable by arithmetic, so an orphan that spins must be
 # waited on to the timeout like any healthy holder.
+if [[ "$HOST_SEES_ORPHANS" -eq 0 ]]; then
+    echo "  ok: orphan guard skipped on this host (no observable orphan to guard)"
+else
 spin_orphan="$(bash -c 'while :; do :; done >/dev/null 2>&1 & echo $!')"
 for _i in $(seq 1 40); do
     [[ "$(ps -o ppid= -p "$spin_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
@@ -618,6 +635,7 @@ grep <<<"$out" -q "orphaned holder" && fail "stole from a computing orphan (the 
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$spin_stamp" ]] && ok "the computing orphan kept its lock" || fail "holder stamp changed"
 kill "$spin_orphan" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
+fi
 
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
 old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -777,14 +795,18 @@ holder_is_orphaned "$$" && fail "condemned the suite itself (it has a live paren
     || ok "a parented pid is not an orphan"
 holder_is_orphaned "99999999" && fail "condemned a pid nothing can read" \
     || ok "an unreadable pid reads as not-orphan (waited on, never stolen)"
-unit_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
-for _i in $(seq 1 40); do
-    [[ "$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
-    sleep 0.2
-done
-holder_is_orphaned "$unit_orphan" && ok "a reparented pid reads as orphaned" \
-    || fail "failed to see a real orphan (ppid=$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' '))"
-kill "$unit_orphan" 2>/dev/null
+if [[ "${HOST_SEES_ORPHANS:-1}" -eq 1 ]]; then
+    unit_orphan="$(bash -c 'sleep 600 >/dev/null 2>&1 & echo $!')"
+    for _i in $(seq 1 40); do
+        [[ "$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' ')" == "1" ]] && break
+        sleep 0.2
+    done
+    holder_is_orphaned "$unit_orphan" && ok "a reparented pid reads as orphaned" \
+        || fail "failed to see a real orphan (ppid=$(ps -o ppid= -p "$unit_orphan" 2>/dev/null | tr -d ' '))"
+    kill "$unit_orphan" 2>/dev/null
+else
+    echo "  ok: orphan unit assert skipped on this host (no observable orphan)"
+fi
 unset -f holder_is_orphaned
 
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
