@@ -251,7 +251,9 @@ def test_done_node_but_executing_leaves_not_reaps():
         nodes={"x-b56a": {"status": "done"}},
     )
     assert v.verdict == LEAVE
-    assert "executing" in v.basis
+    # The tool-call guard answers first now; both readings say the same
+    # thing, that this session is mid-task.
+    assert "tool call" in v.basis
 
 
 def test_done_node_quiet_on_a_tool_call_still_leaves():
@@ -282,7 +284,7 @@ def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
     rows = [Row("dddd4444-0000", "k1", "stopped", None, "/tmp/k1")]
     [v] = _run(rows, {"dddd4444-0000": _facts("stopped mid turn", age_min=87852)})
     assert v.verdict == STALE
-    assert "past the 1d wake ceiling" in v.basis
+    assert "wake ceiling" in v.basis
     assert v.action == "report"
     outcome, _ = apply_verdict(v, lanes="all")
     assert outcome == "reported"
@@ -1046,13 +1048,24 @@ def test_json_liveness_carries_watchdog_freshness(monkeypatch, tmp_path):
     monkeypatch.setattr(_install, "_launchctl_is_loaded", lambda: False)
     settings = SimpleNamespace(
         pr_watch=SimpleNamespace(enabled=True, interval_seconds=600),
-        recovery=SimpleNamespace(watchdog="report"),
+        recovery=SimpleNamespace(watchdog="report", enabled=True),
+        autonomy=SimpleNamespace(enabled=True),
     )
     monkeypatch.setattr("fno.config.load_settings", lambda: settings)
 
     report = _install.liveness_report_live()
     assert report["watchdog"]["stale"] is True
     assert report["watchdog"]["source"] == "tick"
+
+    # And the reader shares the TICK's condition, all three parts of it. The
+    # master panic switch stops the sweep, so a freshness alarm about that
+    # silence is an alarm about a deliberate decision - it used to fire
+    # forever.
+    settings.autonomy.enabled = False
+    assert "watchdog" not in _install.liveness_report_live()
+    settings.autonomy.enabled = True
+    settings.recovery.enabled = False
+    assert "watchdog" not in _install.liveness_report_live()
 
     # Lane off: no freshness verdict manufactured for a lane nobody armed.
     monkeypatch.setattr(

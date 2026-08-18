@@ -412,6 +412,10 @@ def tick() -> None:
                 log.warning("pr-watch: recovery sweep failed: %s", exc)
 
         set_tick_phase("watchdog")
+        # Imported here, not at module scope: the watchdog package pulls the
+        # harness layer and this module is on the launchd hot path.
+        from fno.agents.watchdog import lane_armed as _wd_lane_armed
+
         # Fleet watchdog, same cadence, same non-fatal wrap: classify
         # every fleet row from transcript truth and act per
         # config.recovery.watchdog. "report" emits one watchdog_verdict event per
@@ -420,11 +424,7 @@ def tick() -> None:
         # `fno agents watchdog --apply-all`.
         # getattr with the modeled default: a settings stub or a partially-loaded
         # config must never crash the tick - "off" is the no-op that fails safe.
-        if (
-            getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
-            and settings.recovery.enabled
-            and settings.autonomy.enabled
-        ):
+        if _wd_lane_armed(settings):
             try:
                 import time as _time
 

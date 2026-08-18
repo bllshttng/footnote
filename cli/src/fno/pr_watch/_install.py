@@ -630,11 +630,11 @@ def status(
     # threshold is two CONFIGURED tick intervals: a cadence slower than the
     # 600s default would read stale while its next tick is merely not due.
     try:
-        from fno.agents.watchdog import sweep_staleness
+        from fno.agents.watchdog import lane_armed, sweep_staleness
         from fno.config import load_settings
 
         settings = load_settings()
-        if getattr(settings.recovery, "watchdog", "off") != "off":
+        if lane_armed(settings):
             interval = settings.pr_watch.interval_seconds
             s = sweep_staleness(stale_after_s=2 * interval)
             age = "?" if s["age_s"] is None else f"{int(s['age_s']) // 60}m"
@@ -869,9 +869,9 @@ def liveness_report_live(
     # while the pr_watch tick stayed healthy must read loud there too, not
     # only in the human-readable status lines.
     try:
-        from fno.agents.watchdog import sweep_staleness
+        from fno.agents.watchdog import lane_armed, sweep_staleness
 
-        if getattr(settings.recovery, "watchdog", "off") != "off":
+        if lane_armed(settings):
             report["watchdog"] = sweep_staleness(
                 stale_after_s=2 * cfg.interval_seconds
             )

@@ -14,14 +14,14 @@ Order is precedence. The top row wins.
 
 | Verdict | Condition | Basis it prints |
 |---------|-----------|-----------------|
-| `ghost` | state is `working`, `busy`, or `blocked` and no transcript resolves for the row's recorded id | `no transcript for <id>` |
-| `reap` | the node is done, or the `node:<id>` claim is held live by a different session | `node <id> done` / `claim held by <other>` |
-| `stale` | a wake-state row whose last transcript event is older than the 1d ceiling | `<state> <n>d old, past the 1d wake ceiling, needs a human` |
+| `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
+| `reap` | the node is done or its claim is held live by another session, the worktree has no other occupant, no 429 window is open, and the tail says the session is finished rather than still in play | `node <id> done, tail reads done, quiet <n>m` |
+| `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | state `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
-| `leave` | everything else, including every healthy injectable row | `reachable, last turn <n>m ago` |
+| `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
 
-`stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
+`stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. The ceiling is twelve hours, not a day. That is the parser's own resolution, because a date-less stamp is unambiguous for only half a day. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
 
 Every wake condition is positive evidence. The last event parses. The age sits under the ceiling. And the shipped classifier (`session_truth.classify_tail`) reads the tail as `stalled`: silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
 

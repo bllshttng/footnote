@@ -251,10 +251,9 @@ def verdicts(
             facts_by_row[row.row_id] = None
 
     def _still_in_the_tree(row: Row) -> bool:
-        facts = facts_by_row.get(row.row_id)
-        if facts is None or facts.last_event_epoch is None:
-            return True
-        return (now_s - facts.last_event_epoch) <= quiet_after_s
+        return not finished_with_the_tree(
+            facts_by_row.get(row.row_id), now_s, quiet_after_s
+        )
 
     occupants = Counter(
         row.cwd for row in rows if row.cwd and _still_in_the_tree(row)
@@ -294,6 +293,50 @@ def verdicts(
 REAP_YES = "yes"
 REAP_NO = "no"
 REAP_UNKNOWN = "unknown"
+
+
+def lane_armed(settings: Any) -> bool:
+    """Will the tick actually sweep? One condition, every reader.
+
+    The tick leg required three things and the two status readers checked
+    one, so flipping the master panic switch left `pr-watch status` printing
+    FLEET WATCHDOG STALE for a cadence that was off on purpose - a permanent
+    alarm about a deliberate silence. A freshness reader that does not share
+    the producer's own condition is measuring a different subsystem.
+    """
+    try:
+        return bool(
+            getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
+            and settings.recovery.enabled
+            and settings.autonomy.enabled
+        )
+    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
+        return False
+
+
+def finished_with_the_tree(
+    facts: Optional[TailFacts], now_s: float, quiet_after_s: float
+) -> bool:
+    """Is this session done with its worktree? One question, one answer.
+
+    The occupancy tally and the reap predicate both need this, and when they
+    each derived it their own way they disagreed. Occupancy asked "did the
+    transcript move recently"; the predicate asked "is the tail engaged". A
+    session parked on ``<watching>`` is silent, so the first said gone while
+    the second said present, and that disagreement handed a sibling a reap on
+    the tree the parked session was sitting in.
+
+    Two callers, one function, so they cannot drift apart again. False is the
+    safe answer and every unreadable input returns it.
+    """
+    if facts is None or facts.last_event_epoch is None:
+        return False
+    age_s = max(0.0, now_s - facts.last_event_epoch)
+    if age_s <= quiet_after_s:
+        return False
+    return classify_tail(
+        facts.last_role, facts.last_text, age_s
+    ) not in _ENGAGED_TAILS
 
 
 def reap_decision(
@@ -409,22 +452,18 @@ def reap_decision(
         )
 
     age_s = max(0.0, now_s - facts.last_event_epoch)
-    if age_s <= quiet_after_s:
-        return REAP_NO, (
-            f"{reap_basis} but executing, last turn "
-            f"{_mins(now_s, facts.last_event_epoch)}m ago"
-        )
     if facts.last_kind == "tool":
         return REAP_NO, (
             f"{reap_basis} but last event is a tool call, never reaped on "
             f"tool activity"
         )
 
-    # Read five: the marker itself. `done` is the promise a session emits
-    # when it finishes; everything else is a session that stopped writing
-    # for some other reason, and "stopped writing" is not "stopped working".
+    # Read five: is this session finished with the tree? The SAME call the
+    # occupancy tally makes, deliberately, because when the two derived it
+    # separately they disagreed about a parked session and the disagreement
+    # deleted a worktree somebody was sitting in.
     truth = classify_tail(facts.last_role, facts.last_text, age_s)
-    if truth in _ENGAGED_TAILS:
+    if not finished_with_the_tree(facts, now_s, quiet_after_s):
         return REAP_NO, (
             f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m, "
             f"but the tail reads {truth}, which is a session still in play"
@@ -503,8 +542,8 @@ def _verdict_one(
         if facts_age_s > WAKE_MAX_AGE_S:
             return Verdict(
                 row.row_id, row.name, row.state, STALE,
-                f"{row.state} {int(facts_age_s // 86400)}d old, past the 1d "
-                f"wake ceiling, needs a human",
+                f"{row.state} {int(facts_age_s // 3600)}h old, past the "
+                f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling, needs a human",
                 "report",
             )
 
