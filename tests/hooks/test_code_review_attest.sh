@@ -18,6 +18,13 @@
 # unrecognized shape must emit NOTHING, so the gate holds rather than clearing
 # on evidence that never arrived.
 #
+# One live specimen is deliberately in the NEGATIVE half: a real fork ended
+# with the marker, a blank line, then a sentence naming the file it skipped.
+# A review that excluded the only file in the diff read nothing, so its text
+# appears below as the byte-exact fixture of a must-stay-silent case. The
+# bare-marker protocol shape is the positive; the marker plus trailing prose
+# is not.
+#
 # The hook is driven with FNO pointed at a stub recorder, so a "did it attest?"
 # assertion reads a file this test owns rather than the real event log.
 
@@ -35,7 +42,9 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 if ! command -v jq >/dev/null 2>&1; then
-  echo "SKIP: jq not available"; exit 0
+  # exit 77 is the tree's skip convention: the smoke runner scores a 77 as a
+  # visible skip, while a 0 here would report every case green unexecuted.
+  echo "SKIP: jq not available"; exit 77
 fi
 
 # --- a real git repo, because emit-attestation.sh head-pins with rev-parse ---
@@ -99,19 +108,43 @@ subagent_stop() {
 #
 # $1 = last assistant message
 # $2 = skillName to write into the marker sidecar ("" = write no sidecar)
+# $3 = "noflag" writes the marker with skillName but WITHOUT forkedSkill
 forked_skill_stop() {
-  local msg="$1" skill="${2-}"
+  local msg="$1" skill="${2-}" noflag="${3-}"
   local dir="$TMP/subagents"
   rm -rf "$dir"; mkdir -p "$dir"
   local tpath="$dir/agent-a2b49adb85a7931f6.jsonl"
   : > "$tpath"
   if [[ -n "$skill" ]]; then
-    jq -nc --arg s "$skill" '{forkedSkill:true, skillName:$s}' \
-      > "$dir/agent-a2b49adb85a7931f6.forked-skill.marker.json"
+    if [[ "$noflag" == "noflag" ]]; then
+      jq -nc --arg s "$skill" '{skillName:$s}' \
+        > "$dir/agent-a2b49adb85a7931f6.forked-skill.marker.json"
+    else
+      jq -nc --arg s "$skill" '{forkedSkill:true, skillName:$s}' \
+        > "$dir/agent-a2b49adb85a7931f6.forked-skill.marker.json"
+    fi
   fi
   jq -nc --arg cwd "$WORK" --arg msg "$msg" --arg tp "$tpath" \
     '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
       agent_id:"a2b49adb85a7931f6", agent_transcript_path:$tp,
+      last_assistant_message:$msg}'
+}
+
+# A plain spawned TASK, not a skill fork: .meta.json exists (it is written for
+# every subagent) and its description carries caller prose, but there is no
+# forkedSkill marker and no harness-recorded name.
+# $1 = spawn description, $2 = last assistant message
+task_spawn_stop() {
+  local desc="$1" msg="$2"
+  local dir="$TMP/subagents"
+  rm -rf "$dir"; mkdir -p "$dir"
+  local tpath="$dir/agent-b7c31e5a90d24f68.jsonl"
+  : > "$tpath"
+  jq -nc --arg d "$desc" '{agentType:"fno:type-design-analyzer", description:$d}' \
+    > "$dir/agent-b7c31e5a90d24f68.meta.json"
+  jq -nc --arg cwd "$WORK" --arg msg "$msg" --arg tp "$tpath" \
+    '{hook_event_name:"SubagentStop", cwd:$cwd, agent_type:"general-purpose",
+      agent_id:"b7c31e5a90d24f68", agent_transcript_path:$tp,
       last_assistant_message:$msg}'
 }
 
@@ -198,6 +231,24 @@ expect_silent "forked-marker-other-skill"
 run_hook "$(forked_skill_stop "(none)" "")"
 expect_silent "forked-no-sidecar"
 
+# The live specimen, byte exact: the marker, a blank line, then the scope
+# sentence naming the file the fork excluded. That review read zero files, so
+# strict equality stays silent on its real text, not a paraphrase of it. The
+# em-dash inside the sentence is the fork's own byte, kept as evidence.
+run_hook "$(forked_skill_stop $'(none)\n\nThe only change is `tests/hooks/test_code_review_attest.sh`, a new test file — excluded from review at this level.' "code-review")"
+expect_silent "forked-real-specimen-marker-then-scope-note"
+
+# skillName alone is not a skill fork. The forkedSkill flag is the part only
+# the harness writes; a marker without it gates nothing.
+run_hook "$(forked_skill_stop "$JSON_CLEAN" "code-review" "noflag")"
+expect_silent "marker-without-forkedskill-flag"
+
+# A spawned TASK is not a review. .meta.json exists for every subagent and
+# its description is caller prose; no marker, no name field, so prose naming
+# the verb must not attest even over an empty fence.
+run_hook "$(task_spawn_stop "code-review the failing tests and report matches" $'Matches for the pattern:\n\n```json\n[]\n```')"
+expect_silent "task-spawn-verb-in-description"
+
 echo "== SubagentStop: shapes that must stay silent =="
 run_hook "$(subagent_stop "/code-review" "$JSON_DIRTY")"
 expect_silent "described-json-dirty"
@@ -217,6 +268,16 @@ expect_silent "described-empty-message"
 # clear a merge gate. Whatever identifies a code-review must be positive.
 run_hook "$(subagent_stop "general-purpose" $'Here is the list.\n\n```json\n[]\n```')"
 expect_silent "unrelated-subagent-empty-array"
+
+# The heading must OPEN the message. Quoting it inside longer output is not
+# the review's shape.
+run_hook "$(subagent_stop "" $'Notes on the skill:\n## Review findings\n```json\n[]\n```')"
+expect_silent "heading-quoted-midtext"
+
+# When fences carry different arrays, the LAST fence is the verdict: a
+# leading quoted [] over a closing non-empty findings block attests nothing.
+run_hook "$(subagent_stop "/code-review" $'Spec excerpt:\n```json\n[]\n```\n\n```json\n[{"file":"a.py","summary":"boom","failure_scenario":"x"}]\n```')"
+expect_silent "later-fence-carries-findings"
 
 run_hook "$(subagent_stop "general-purpose" "(none)")"
 expect_silent "unrelated-subagent-none-word"

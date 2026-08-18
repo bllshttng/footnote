@@ -75,45 +75,62 @@ case "$event" in
     #    subagent's task carried under. Each is tested on its own rather than
     #    first-non-null, because agent_type is always populated and a `//`
     #    chain starting with it would shadow every later field.
+    # The reviewer identity rule lives HERE and only here; every signal reads
+    # it through this variable, so one edit cannot leave two spellings
+    # disagreeing about what counts as a code review.
+    REVIEWER_RE='^/?code-review([[:space:]]|$)'
     described=0
     while IFS= read -r cand; do
-      [[ "$cand" =~ ^/?code-review([[:space:]]|$) ]] && described=1
+      [[ "$cand" =~ $REVIEWER_RE ]] && described=1
     done < <(printf '%s' "$input" \
       | jq -r '[.agent_type?, .agent_name?, .description?, .subagent_description?]
                | map(select(type == "string")) | .[]' 2>/dev/null || true)
 
     # 2. The harness's own record of WHAT THIS FORK RAN, which it writes
     #    beside the subagent transcript whatever the skill's output contract
-    #    says. This is the positive marker the real outcome always produces:
+    #    says. The marker sidecars are the skill-fork record:
     #    `agent-<id>.forked-skill.marker.json` holds
-    #    {"forkedSkill":true,"skillName":"code-review"}, and the sibling
-    #    `.meta.json` holds the "/code-review <level>" description the payload
-    #    itself omits. Nothing the review prints can dodge it, and no
-    #    unrelated subagent can forge it.
+    #    {"forkedSkill":true,"skillName":"code-review"}. The forkedSkill flag
+    #    is the part a plain spawned task cannot carry, so it gates the match.
+    #    Nothing the review prints can dodge it, and no unrelated subagent
+    #    can forge it.
     #
     #    Fail direction is unchanged: a missing or renamed sidecar leaves this
     #    signal at 0 and the gate holds, rather than attesting on a guess.
     forked=0
     agent_transcript="$(printf '%s' "$input" | jq -r '.agent_transcript_path // empty' 2>/dev/null || true)"
-    [[ "$agent_transcript" == "~/"* ]] && agent_transcript="$HOME/${agent_transcript#\~/}"
+    agent_transcript="${agent_transcript/#\~/$HOME}"
     if [[ -n "$agent_transcript" ]]; then
       sidecar_base="${agent_transcript%.jsonl}"
       for sidecar in "$sidecar_base.forked-skill.marker.json" \
-        "$sidecar_base.forked-skill.json" "$sidecar_base.meta.json"; do
+        "$sidecar_base.forked-skill.json"; do
         [[ -f "$sidecar" ]] || continue
-        while IFS= read -r cand; do
-          [[ "$cand" =~ ^/?code-review([[:space:]]|$) ]] && forked=1
-        done < <(jq -r '[.skillName?, .attributionName?, .name?, .description?]
-                        | map(select(type == "string")) | .[]' "$sidecar" 2>/dev/null || true)
+        if jq -e --arg re "$REVIEWER_RE" \
+          '(.forkedSkill == true) and ((.skillName? // "") | test($re))' \
+          "$sidecar" >/dev/null 2>&1; then
+          forked=1
+          break
+        fi
       done
+      # `.meta.json` is written for EVERY subagent, spawned tasks included,
+      # and its description is caller prose: a task told to "code-review the
+      # failing tests" is not a review fork. Only the harness-recorded name
+      # field counts.
+      if [[ "$forked" == "0" && -f "$sidecar_base.meta.json" ]] \
+        && jq -e --arg re "$REVIEWER_RE" '(.name? // "") | test($re)' \
+          "$sidecar_base.meta.json" >/dev/null 2>&1; then
+        forked=1
+      fi
     fi
 
-    # 3. The message's own shape: "## Review findings" is a heading two live
-    #    self-reviews produced (x-e97b). ReportFindings mandates no header, so
-    #    this was never sound on its own; it is kept because it costs nothing
-    #    and still covers a harness that populates neither of the above.
+    # 3. The message's own shape: "## Review findings" OPENING the message, a
+    #    shape two live self-reviews produced (x-e97b). ReportFindings
+    #    mandates no header, so this was never sound on its own; it is kept
+    #    because it costs nothing and still covers a harness that populates
+    #    neither of the above. Opening-anchor, not line-anchor: an unrelated
+    #    subagent quoting the heading mid-text does not satisfy it.
     shaped=0
-    printf '%s' "$message" | grep -q '^## Review findings' && shaped=1
+    [[ "$message" =~ ^[[:space:]]*"## Review findings" ]] && shaped=1
 
     [[ "$described" == "1" || "$forked" == "1" || "$shaped" == "1" ]] || exit 0
 
@@ -126,12 +143,12 @@ case "$event" in
     findings="$(printf '%s' "$message" | python3 -c '
 import json, re, sys
 text = sys.stdin.read()
-m = re.search(r"```json\s*(.*?)```", text, re.DOTALL)
-if not m:
+fences = re.findall(r"```json\s*(.*?)```", text, re.DOTALL)
+if not fences:
     print("absent")
     sys.exit(0)
 try:
-    data = json.loads(m.group(1))
+    data = json.loads(fences[-1])
 except Exception:
     print("absent")
     sys.exit(0)
