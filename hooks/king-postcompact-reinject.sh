@@ -54,14 +54,20 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
 fi
 
 # Session id: PostCompact (Codex) carries no session_id field, so fall back to
-# the transcript basename, then the ambient env chain - the same chain
-# hooks/precompact-canon-doc.sh uses. No session id means no row to check.
+# the transcript basename, then the ambient env markers in HARNESS_SESSION_MARKERS
+# precedence (CODEX_THREAD_ID is codex's durable identity; the registry row's
+# harness_session_id holds the codex thread id, so anything else matches no row).
 if [[ -z "$SID" && -n "$TRANSCRIPT" ]]; then
     SID="$(basename "$TRANSCRIPT")"
     SID="${SID%.jsonl}"
 fi
-[[ -n "$SID" ]] || SID="${CLAUDE_CODE_SESSION_ID:-${CODEX_COMPANION_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+[[ -n "$SID" ]] || SID="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
 [[ -n "$SID" ]] || exit 0
+
+# The brief, checked before the registry read: it is a pure file stat, and the
+# common case (an uncrowned session compacting) must not pay the fno/jq spawns.
+# Missing or empty means no injection, never a partial one.
+[[ -r "$BRIEF" && -s "$BRIEF" ]] || exit 0
 
 # Read the crown from the registry, not from a guess. `fno agents registry-json`
 # is a daemon-free file read; `fno agents list` is Rust-routed and would
@@ -78,16 +84,15 @@ CROWN_LEVEL="$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null
 CROWN_SCOPE="$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)"
 [[ -n "$CROWN_LEVEL" || -n "$CROWN_SCOPE" ]] || exit 0
 
-# The brief. Missing or empty means no injection, never a partial one.
-[[ -r "$BRIEF" && -s "$BRIEF" ]] || exit 0
-
 # Never truncate: a brief that outgrew its budget fails the byte-budget test
-# rather than arriving silently mangled.
+# rather than arriving silently mangled. HTML comment lines are lint metadata
+# (style-exception markers), not rules; they stay in the file and never ride
+# into model context.
 CONTEXT="## You are still the king
 
 Crown: level ${CROWN_LEVEL:-?} over ${CROWN_SCOPE:-?}. Confirm with \`fno whoami\`.
 
-$(cat "$BRIEF")"
+$(sed '/^<!--/d' "$BRIEF")"
 postcompact_emit "$(postcompact_carrier "$SOURCE")" "$CONTEXT"
 
 exit 0

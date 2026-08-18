@@ -52,7 +52,10 @@ if [[ -n "$_tp" ]]; then
   SID="${SID%.jsonl}"
 fi
 if [[ -z "$SID" ]]; then
-  SID="${CLAUDE_CODE_SESSION_ID:-${CODEX_COMPANION_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+  # CODEX_THREAD_ID first (codex's durable identity, per HARNESS_SESSION_MARKERS
+  # and docs/harnesses/codex.md); the registry row's harness_session_id holds
+  # the thread id, so any other codex env id matches no row.
+  SID="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
 fi
 # No session id -> nothing useful to point at. Emit nothing, exit clean.
 [[ -n "$SID" ]] || exit 0
