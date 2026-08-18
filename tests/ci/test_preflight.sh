@@ -152,9 +152,13 @@ GREEN_FULL="$(git -C "$FIX" rev-parse HEAD)"
 # The changed packet resolves its base as merge-base origin/main; without this
 # ref preflight skips the leg, so the fixture would never exercise it.
 git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
-# The fixture is a plain repo, so its git-common-dir is $FIX/.git; the lock and
-# the attestation slots are siblings under it.
-LOCKDIR="$FIX/.git/.preflight.lock.d"
+# The fixture is a plain repo, so its git-common-dir is $FIX/.git. Execution
+# locks and persistent worktrees are keyed by the full candidate SHA; the
+# attestation slots are per-SHA files under a sibling directory.
+LOCK_ROOT="$FIX/.git/.preflight-locks.d"
+POOL_ROOT="$WT_BASE/repo/preflight-pool"
+refresh_lockdir() { LOCKDIR="$LOCK_ROOT/$(git -C "$FIX" rev-parse HEAD).d"; }
+refresh_lockdir
 ATT_DIR="$FIX/.git/.preflight-attestations.d"
 EVENTS="$FIX/.fno/events.jsonl"
 export PREFLIGHT_AUDIT_LOG="$TMP/audit.log"
@@ -196,6 +200,10 @@ echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
 [[ -f "$(cur_att)" ]] && ok "attestation written on full green" || fail "no attestation file after green"
 grep -q "^sha=$GREEN_FULL " "$(cur_att)" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$(cur_att)")"
 grep -q " host=$HOST" "$(cur_att)" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$(cur_att)")"
+grep <<<"$out" "worktree=$POOL_ROOT/$GREEN_FULL" >/dev/null \
+    && ok "the receipt names the full-SHA worktree slot" || fail "receipt did not name the SHA slot: $out"
+git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$GREEN_FULL" >/dev/null \
+    && ok "the candidate has one registered reusable slot" || fail "full-SHA slot is not registered"
 
 echo "== global authority: a failed delivery-root mirror stays GREEN everywhere =="
 mv "$EVENTS" "$EVENTS.saved"
@@ -264,6 +272,100 @@ out="$(run_pf --force 2>&1)"; rc=$?
     && ok "the legacy single-file carrier was removed" || fail "legacy carrier survived"
 [[ -f "$(cur_att)" ]] && ok "the fresh slot survived its own reap" || fail "reap deleted the slot it just wrote"
 rm -f "$FIX/.git/.preflight-attestation"
+
+echo "== per-SHA pool: N distinct candidates overlap with one slot and receipt each =="
+cp "$BIN/uv" "$BIN/uv.before-overlap"
+OVERLAP_DIR="$TMP/overlap"; mkdir -p "$OVERLAP_DIR/active"; : > "$OVERLAP_DIR/samples"
+cat > "$BIN/uv" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in *" --changed "*) echo "smoke: CHANGED SUBSET verdict=green"; exit 0 ;; esac
+active="$PREFLIGHT_OVERLAP_DIR/active/$$"
+mkdir "$active" || exit 1
+trap 'rmdir "$active" 2>/dev/null || true' EXIT
+count=0
+for _i in $(seq 1 100); do
+    count="$(ls -1 "$PREFLIGHT_OVERLAP_DIR/active" 2>/dev/null | wc -l | tr -d ' ')"
+    printf '%s\n' "$count" >> "$PREFLIGHT_OVERLAP_DIR/samples"
+    [[ "$count" -ge 3 ]] && break
+    sleep 0.1
+done
+[[ "$count" -ge 3 ]] || { echo "smoke: overlap barrier reached only $count" >&2; exit 1; }
+sleep 1
+echo "smoke: all green (overlap=$count)"
+EOF
+chmod +x "$BIN/uv"
+CONC_SHAS=""; conc_pids=""
+for i in 1 2 3; do
+    invoke="$TMP/invoke-$i"
+    git -C "$FIX" worktree add --detach "$invoke" "$GREEN_FULL" >/dev/null
+    printf '%s\n' "$i" > "$invoke/candidate-$i"
+    git -C "$invoke" add "candidate-$i"; git -C "$invoke" commit -qm "candidate $i"
+    sha="$(git -C "$invoke" rev-parse HEAD)"; CONC_SHAS="$CONC_SHAS $sha"
+    ( cd "$invoke" && PREFLIGHT_POOL_SIZE=3 PREFLIGHT_OVERLAP_DIR="$OVERLAP_DIR" \
+        bash scripts/ci/preflight.sh --force > "$TMP/overlap-$i.out" 2>&1 ) &
+    conc_pids="$conc_pids $!"
+done
+i=0
+for pid in $conc_pids; do
+    i=$((i + 1)); wait "$pid"; rc=$?
+    [[ $rc -eq 0 ]] && ok "candidate $i exits 0" || fail "candidate $i rc=$rc: $(cat "$TMP/overlap-$i.out")"
+done
+overlap_max="$(sort -nr "$OVERLAP_DIR/samples" | sed -n '1p')"
+[[ "$overlap_max" -eq 3 ]] && ok "positive overlap marker reached N=3" || fail "overlap marker max=$overlap_max"
+for sha in $CONC_SHAS; do
+    git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$sha" >/dev/null \
+        && ok "candidate ${sha:0:8} owns its full-SHA slot" || fail "missing pool slot for $sha"
+    jq -se --arg sha "$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed"' \
+        "$GLOBAL_EVENTS" >/dev/null \
+        && ok "candidate ${sha:0:8} owns a full/passed receipt" || fail "missing passing receipt for $sha"
+done
+for i in 1 2 3; do git -C "$FIX" worktree remove --force "$TMP/invoke-$i" >/dev/null; done
+mv "$BIN/uv.before-overlap" "$BIN/uv"; chmod +x "$BIN/uv"
+
+echo "== pool reap: the oldest inactive slot is removed and an active slot survives =="
+set -- $CONC_SHAS; active_sha="$1"; victim_sha="$2"; survivor_sha="$3"
+mkdir -p "$LOCK_ROOT/$active_sha.d"
+printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$active_sha" > "$LOCK_ROOT/$active_sha.d/holder"
+touch -t 202001010000 "$FIX/.git/.preflight-pool.d/$victim_sha.used"
+touch -t 202101010000 "$FIX/.git/.preflight-pool.d/$active_sha.used"
+touch -t 202201010000 "$FIX/.git/.preflight-pool.d/$survivor_sha.used"
+out="$(PREFLIGHT_POOL_SIZE=3 run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "new SHA runs after reaping one inactive slot" || fail "safe reap run rc=$rc: $out"
+git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$active_sha" >/dev/null \
+    && ok "the active slot survived" || fail "active slot was reaped"
+git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$victim_sha" >/dev/null \
+    && fail "the oldest inactive slot survived" || ok "the oldest inactive slot was reaped"
+grep <<<"$out" "reaped inactive pool slot ${victim_sha:0:12}" >/dev/null \
+    && ok "reap receipt names the inactive SHA" || fail "missing positive reap receipt: $out"
+rm -rf "$LOCK_ROOT/$active_sha.d"
+
+echo "== pool capacity: a waiting new SHA cancels without exceeding the bound =="
+for sha in "$active_sha" "$survivor_sha" "$GREEN_FULL"; do
+    mkdir -p "$LOCK_ROOT/$sha.d"
+    printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$sha" > "$LOCK_ROOT/$sha.d/holder"
+done
+WAIT_INVOKE="$TMP/invoke-wait"
+git -C "$FIX" worktree add --detach "$WAIT_INVOKE" "$GREEN_FULL" >/dev/null
+printf 'wait\n' > "$WAIT_INVOKE/candidate-wait"
+git -C "$WAIT_INVOKE" add candidate-wait; git -C "$WAIT_INVOKE" commit -qm "waiting candidate"
+WAIT_SHA="$(git -C "$WAIT_INVOKE" rev-parse HEAD)"
+( cd "$WAIT_INVOKE" && PREFLIGHT_POOL_SIZE=3 bash scripts/ci/preflight.sh --force --wait-timeout 30 \
+    > "$TMP/pool-wait.out" 2>&1 ) & pool_wait_pid=$!
+for _i in $(seq 1 100); do
+    [[ -f "$LOCK_ROOT/$WAIT_SHA.d/holder" ]] && break
+    sleep 0.1
+done
+mkdir -p "$WAIT_INVOKE/.fno"; touch "$WAIT_INVOKE/.fno/preflight-cancel"
+wait "$pool_wait_pid"; rc=$?
+[[ $rc -eq 130 ]] && ok "capacity waiter exits 130 on the one-shot sentinel" || fail "capacity waiter rc=$rc: $(cat "$TMP/pool-wait.out")"
+grep "$TMP/pool-wait.out" -e "cancelled while waiting for preflight pool capacity" >/dev/null \
+    && ok "capacity cancellation emits its positive marker" || fail "missing capacity-cancel marker"
+git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$WAIT_SHA" >/dev/null \
+    && fail "cancelled candidate created a fourth slot" || ok "cancelled candidate created no slot"
+rm -rf "$LOCK_ROOT/$active_sha.d" "$LOCK_ROOT/$survivor_sha.d" "$LOCK_ROOT/$GREEN_FULL.d"
+git -C "$FIX" worktree remove --force "$WAIT_INVOKE" >/dev/null
+refresh_lockdir
 
 echo "== AC2-FR: --force always discards the attestation and re-runs =="
 out="$(run_pf --force 2>&1)"; rc=$?
@@ -443,13 +545,14 @@ out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed still passes" || fail "expected 0 got $rc"
 grep <<<"$out" -q "changed packet" && fail "retry-failed ran the changed packet" || ok "changed packet skipped"
 rm -f "$(cur_att)"
+refresh_lockdir
 
 echo "== AC2-ERR: dirty invoking tree refused (exit 4), nothing touched =="
 ( cd "$FIX" && echo dirt > dirty.txt )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 4 ]] && ok "exit 4 on dirty" || fail "expected 4 got $rc"
 grep <<<"$out" -q "dirty.txt" && ok "lists the dirty file" || fail "did not list dirty file"
-[[ ! -d "$WT_BASE/repo/preflight" ]] || { [[ -z "$(ls -A "$WT_BASE/repo/preflight" 2>/dev/null)" ]] && ok "no worktree materialized on refusal" || ok "worktree pre-existed (from green run) - refusal touched nothing"; }
+[[ ! -d "$POOL_ROOT/$(git -C "$FIX" rev-parse HEAD)" ]] || ok "worktree pre-existed (from green run) - refusal touched nothing"
 ( cd "$FIX" && rm -f dirty.txt )
 
 echo "== AC2-EDGE: concurrent invocation (--wait-timeout 0) -> exit 3 with holder =="
@@ -463,6 +566,7 @@ rm -rf "$LOCKDIR"
 echo "== FIFO queue: waiters are served in arrival order, not by chance =="
 rm -f "$(cur_att)"
 ( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
+refresh_lockdir
 mkdir -p "$LOCKDIR"
 sleep 600 & fifo_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$fifo_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
@@ -500,6 +604,7 @@ wait "$w2"; r2=$?
 kill "$fifo_holder" 2>/dev/null; wait "$fifo_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 ( cd "$FIX" && git rm -q STUB_FNO_SLOW && git commit -qm "drop slow stub sentinel" )
+refresh_lockdir
 
 echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
@@ -719,6 +824,7 @@ echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock wo
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done
 git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
 ( cd "$FIX" && git reset -q --hard HEAD~3 )
+refresh_lockdir
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 6 ]] && ok "exit 6 on a stale base" || fail "expected 6 got $rc: $out"
 grep <<<"$out" -q "3 commit(s) behind origin/main" && ok "names the behind count" || fail "no behind count: $out"
@@ -797,6 +903,7 @@ echo "smoke: all green (stub, stole the lock)"; exit 0
 EOF
 chmod +x "$BIN/uv"
 ( cd "$FIX" && git commit -q --allow-empty -m "lock-stealing smoke stub" )
+refresh_lockdir
 write_attest "$(git -C "$FIX" rev-parse HEAD)"   # AC2-ERR: a prior attestation for this SHA
 # --force bypasses reuse so the planted attestation does not short-circuit; the
 # run must actually execute to reach the VOID tripwire.
@@ -808,20 +915,20 @@ grep -q "pid=424242" "$LOCKDIR/holder" 2>/dev/null && ok "the stealer's lock sur
 [[ -f "$(cur_att)" ]] && ok "VOID left the prior attestation untouched (AC2-ERR)" || fail "VOID wrote or deleted the attestation"
 rm -rf "$LOCKDIR"; rm -f "$(cur_att)"
 
-# NOTE: keep the worktree-hijack leg LAST. Its stub permanently resets the
-# fixture's preflight worktree, so any test appended after it inherits a
-# hijacked tree and fails for reasons that have nothing to do with it.
+# NOTE: keep the worktree-hijack leg LAST. Its stub permanently resets this
+# SHA's preflight worktree, so any test appended after it inherits a hijacked
+# tree and fails for reasons that have nothing to do with it.
 echo "== tripwire: a hijacked worktree VOIDs the verdict instead of reporting it =="
-# Move the shared worktree off our candidate mid-run, as a second preflight's
-# `reset --hard` would. The stub smoke.sh is the hook: it fires inside the run.
-PF_WT="$WT_BASE/repo/preflight"
+# The uv stub runs with the pool worktree as cwd, so it can move that exact SHA
+# off candidate without relying on the retired singleton path.
 cat > "$BIN/uv" <<EOF
 #!/usr/bin/env bash
-git -C "$PF_WT" reset --hard HEAD~1 >/dev/null 2>&1
+git reset --hard HEAD~1 >/dev/null 2>&1
 echo "smoke: all green (stub, hijacked the worktree)"; exit 0
 EOF
 chmod +x "$BIN/uv"
 ( cd "$FIX" && git commit -q --allow-empty -m "hijacking smoke stub" )
+refresh_lockdir
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 5 ]] && ok "exit 5 (VOID), distinct from RED's 1" || fail "expected 5 got $rc: $out"
 grep <<<"$out" -q "VOID - worktree moved off our candidate" && ok "names the cause" || fail "no VOID line: $out"
