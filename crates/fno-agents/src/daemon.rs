@@ -20,6 +20,7 @@ use crate::protocol::{
 use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
+use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1841,30 +1842,51 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 
 /// Bind the supervisor socket, resolving the lazy-start race and stale sockets.
 ///
-/// - If a live daemon answers a connect to the existing socket, we are the race
-///   loser: return [`DaemonError::AlreadyRunning`] so the caller exits cleanly.
-/// - If the socket file exists but nothing answers (stale, from a crash), remove
-///   and bind.
+/// - Acquires an exclusive `flock` on a sidecar lockfile BEFORE touching the
+///   socket at all. `try_lock()` is a positive marker (held or not), unlike a
+///   connect probe that reads "absent" for a daemon merely too busy to accept
+///   in time -- the failure mode that let every failed probe add a new
+///   supervisor instead of replacing the incumbent (x-ef7f). On contention,
+///   return [`DaemonError::AlreadyRunning`] immediately.
+/// - Once the lock is held, no other process can be mid-bind, so any existing
+///   socket file is unconditionally stale (a crash, or a prior holder that
+///   exited before cleanup) -- remove and bind.
 /// - Enforce dir 0700 / socket 0600 regardless of umask, fstat-verifying after
 ///   (finding #6 Critical).
-pub async fn bind_supervisor_socket(home: &AgentsHome) -> Result<UnixListener, DaemonError> {
+///
+/// Returns the lock `File` alongside the listener: the caller must keep it
+/// alive for the whole process lifetime (dropping it, or process exit,
+/// releases the lock).
+pub async fn bind_supervisor_socket(
+    home: &AgentsHome,
+) -> Result<(UnixListener, std::fs::File), DaemonError> {
     home.ensure_root()?;
     flock_self_test(home)?;
 
-    let sock = home.supervisor_sock();
-    if sock.exists() {
-        // Probe for a live daemon.
-        if UnixStream::connect(&sock).await.is_ok() {
-            return Err(DaemonError::AlreadyRunning(sock));
+    let lock_path = home.supervisor_lock();
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)?;
+    if let Err(e) = lock_file.try_lock() {
+        let io_err: std::io::Error = e.into();
+        if io_err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
         }
-        // Stale: remove and continue to bind.
-        let _ = std::fs::remove_file(&sock);
+        return Err(io_err.into());
     }
+
+    let sock = home.supervisor_sock();
+    // We hold the exclusive lock: no other process can be mid-bind right now,
+    // so any file at `sock` is stale -- remove it unconditionally rather than
+    // probing for a live daemon that, by construction of the lock, cannot
+    // exist.
+    let _ = std::fs::remove_file(&sock);
 
     let listener = match UnixListener::bind(&sock) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // A racing daemon bound between our probe and bind; it won.
+            // Defensive: should be unreachable while we hold the lock.
             return Err(DaemonError::AlreadyRunning(sock));
         }
         Err(e) => return Err(e.into()),
@@ -1889,7 +1911,17 @@ pub async fn bind_supervisor_socket(home: &AgentsHome) -> Result<UnixListener, D
         }
     }
 
-    Ok(listener)
+    Ok((listener, lock_file))
+}
+
+/// True when `sock` still resolves to the inode we originally bound. A
+/// mismatch means something else unlinked and rebound the path out from under
+/// us (an operator `rm`, or a bug elsewhere) -- we no longer own the
+/// reachable path (x-ef7f / x-e98b).
+fn socket_inode_matches(sock: &Path, bound_ino: u64) -> bool {
+    std::fs::metadata(sock)
+        .map(|m| m.ino() == bound_ino)
+        .unwrap_or(false)
 }
 
 /// Prove the filesystem under `home` supports advisory locking before relying
@@ -1935,14 +1967,20 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     load_registry_asserted(&home.registry_json())?;
 
     // State: cold_start.
-    let listener = match bind_supervisor_socket(&home).await {
-        Ok(l) => l,
+    // `_supervisor_lock` is a named (not `let _`) binding: it must stay alive
+    // for the rest of this function so the flock is held for the daemon's
+    // whole lifetime. Only the leading underscore (suppressing the "unused"
+    // lint) matters -- nothing ever reads the `File` again.
+    let (listener, _supervisor_lock) = match bind_supervisor_socket(&home).await {
+        Ok(pair) => pair,
         Err(DaemonError::AlreadyRunning(_)) => {
             // Race loser: nothing to do; the winner serves.
             return Ok(());
         }
         Err(e) => return Err(e),
     };
+    let sock_path = home.supervisor_sock();
+    let bound_ino = std::fs::metadata(&sock_path).ok().map(|m| m.ino());
 
     // State: recovering. Recovery must complete before we accept a request.
     emit_state(&emitter, DaemonState::Recovering);
@@ -2085,6 +2123,24 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 break;
             }
             _ = idle_check.tick() => {
+                // Bound-inode self-check (x-ef7f): if the socket path no
+                // longer resolves to the inode we bound, something else now
+                // owns it (an operator `rm`, or a bug elsewhere) -- retire
+                // rather than keep serving unreachable forever.
+                if let Some(ino) = bound_ino {
+                    if !socket_inode_matches(&sock_path, ino) {
+                        let _ = ctx.emitter.emit(
+                            "daemon_socket_lost",
+                            &json!({"reason": "socket path no longer resolves to our bound inode"}),
+                        );
+                        emit_state(&ctx.emitter, DaemonState::ShuttingDown);
+                        let _ = ctx.emitter.emit(
+                            "daemon_shutting_down",
+                            &json!({"reason": "socket-lost"}),
+                        );
+                        break;
+                    }
+                }
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 reap_zombies();
@@ -2181,7 +2237,17 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     ab_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     ab_handle.abort();
 
-    let _ = std::fs::remove_file(ctx.home.supervisor_sock());
+    // Only reap the socket if it's still ours -- never unlink a live
+    // successor's socket (x-e98b), the same discipline stop_worker_confirmed
+    // already applies to worker sockets ("never unlink a live worker's
+    // socket"). No captured inode (bind-time metadata read failed) falls back
+    // to today's unconditional behavior.
+    let still_ours = bound_ino
+        .map(|ino| socket_inode_matches(&sock_path, ino))
+        .unwrap_or(true);
+    if still_ours {
+        let _ = std::fs::remove_file(&sock_path);
+    }
     emit_state(&ctx.emitter, DaemonState::Exited);
     let _ = ctx.emitter.emit("daemon_exited", &json!({"clean": true}));
     Ok(())
@@ -6488,6 +6554,63 @@ mod tests {
         let home = AgentsHome::at(&p);
         home.ensure_root().unwrap();
         home
+    }
+
+    // x-ef7f: the connect-probe singleton guard let a busy-but-alive
+    // incumbent read as absent, so every losing race added a new supervisor
+    // instead of replacing the incumbent. The flock-based guard must resolve
+    // N concurrent binders to exactly one winner.
+    #[tokio::test]
+    async fn bind_supervisor_socket_concurrent_only_one_survives() {
+        // A real UnixListener::bind needs its path to fit sockaddr_un's short
+        // sun_path buffer (104 bytes on macOS); tmp_home()'s long
+        // tag+pid+nanos name overflows that once `/supervisor.sock` is
+        // appended, so this test (the first here to actually bind a socket)
+        // builds a short path directly under /tmp instead.
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::path::PathBuf::from(format!("/tmp/fa-cb-{}-{n}", std::process::id()));
+        let home = AgentsHome::at(&dir);
+        home.ensure_root().unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let h = home.clone();
+            handles.push(tokio::spawn(
+                async move { bind_supervisor_socket(&h).await },
+            ));
+        }
+        let mut ok_count = 0;
+        let mut already_running = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(_) => ok_count += 1,
+                Err(DaemonError::AlreadyRunning(_)) => already_running += 1,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(ok_count, 1, "exactly one bind must survive the race");
+        assert_eq!(already_running, 7);
+    }
+
+    // x-ef7f / x-e98b: the bound-inode check is what lets a daemon detect
+    // that its socket path was unlinked and rebound out from under it (by an
+    // operator `rm`, or a departing incumbent's blind unlink) instead of
+    // continuing to serve unreachable, and lets the exit-time cleanup refuse
+    // to unlink a live successor's fresh socket.
+    #[test]
+    fn socket_inode_matches_detects_unlink_and_rebind() {
+        let home = tmp_home("inode-retire");
+        let sock = home.supervisor_sock();
+        std::fs::write(&sock, b"").unwrap();
+        let ino = std::fs::metadata(&sock).unwrap().ino();
+        assert!(socket_inode_matches(&sock, ino));
+
+        std::fs::remove_file(&sock).unwrap();
+        std::fs::write(&sock, b"").unwrap(); // a new inode takes the same path
+        assert!(
+            !socket_inode_matches(&sock, ino),
+            "a rebound path must not match the old inode"
+        );
     }
 
     fn read_events(home: &AgentsHome) -> Vec<Value> {
