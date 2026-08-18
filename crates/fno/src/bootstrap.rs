@@ -1190,8 +1190,9 @@ fn parse_probe_fields(text: &str) -> (String, String, String) {
 ///
 /// `answered` covers the MISSING-field tears. A tear INSIDE the Author value
 /// answers all three fields with the author truncated - a prefix of the one
-/// string the rule matches on - and no foreign package carries that prefix,
-/// so it is an instrument failure, not an identity verdict.
+/// string the rule matches on. A foreign author can coincidentally BE that
+/// prefix ("Jason"), so the two are indistinguishable here: such a stranger
+/// pays the retry and is still refused on every pass, never exec'd.
 fn refusal_is_stable(answered: bool, author: &str) -> bool {
     // `answered` already requires a present author, so emptiness needs no
     // separate conjunct here: it would only suggest a third case that the
@@ -1246,8 +1247,12 @@ fn exec_real(real: &Path, args: &[OsString]) -> BootErr {
 // ---------------------------------------------------------------------------
 
 fn sentinel_dir() -> PathBuf {
+    // Empty is unset, the way the sh twin's `${XDG_CACHE_HOME:-...}` reads it:
+    // honoring an empty value would resolve the cache (and this PR's adopt
+    // discriminator) against the CWD instead of the home cache.
     let base = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
         .or_else(|| home_dir().map(|h| h.join(".cache")))
         .unwrap_or_else(|| PathBuf::from(".cache"));
     base.join("fno-bootstrap")
