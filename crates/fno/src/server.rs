@@ -1132,9 +1132,6 @@ pub fn run(socket: PathBuf) -> i32 {
             );
         }
     }
-    if let Err(e) = crate::pty::reserve_fd_for_diagnostics() {
-        eprintln!("fno mux: warn: could not reserve an fd for ceiling diagnostics: {e}");
-    }
     let _guard = SocketGuard(socket.clone());
 
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux

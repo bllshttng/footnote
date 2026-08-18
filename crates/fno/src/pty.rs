@@ -35,10 +35,6 @@ use std::sync::{Arc, Mutex};
 /// every later spawn into a second failure.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
 
-/// One descriptor held open solely so an EMFILE diagnostic can close it,
-/// inspect `/dev/fd`, then replenish it before returning to the server loop.
-static FD_COUNT_RESERVE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-
 thread_local! {
     // Instant of the last openpty timeout, scoped per thread rather than a
     // process-wide static. In production this is a no-op difference: the
@@ -504,22 +500,19 @@ fn fd_limits() -> Result<(libc::rlim_t, libc::rlim_t), std::io::Error> {
     Ok((limits.rlim_cur, limits.rlim_max))
 }
 
-/// Hold one descriptor in reserve for an eventual EMFILE diagnostic.
-pub fn reserve_fd_for_diagnostics() -> Result<(), std::io::Error> {
-    let file = std::fs::File::open("/dev/null")?;
-    let mut reserve = FD_COUNT_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
-    *reserve = Some(file);
-    Ok(())
-}
-
-fn count_open_fds() -> Result<usize, std::io::Error> {
-    let mut reserve = FD_COUNT_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
-    drop(reserve.take());
-    let count = fs::read_dir("/dev/fd").map(|entries| entries.count());
-    if let Ok(file) = std::fs::File::open("/dev/null") {
-        *reserve = Some(file);
-    }
-    count
+/// Count descriptors without opening another descriptor. The diagnostic runs
+/// only after EMFILE, where `/dev/fd` cannot be opened and an accept loop can
+/// consume any descriptor released from a traditional emergency reserve.
+fn count_open_fds(limit: libc::rlim_t) -> usize {
+    let upper = limit.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
+    (0..upper)
+        .filter(|fd| {
+            // SAFETY: F_GETFD only inspects the integer descriptor and does not
+            // read through a pointer or allocate a new descriptor.
+            let rc = unsafe { libc::fcntl(*fd, libc::F_GETFD) };
+            rc != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+        })
+        .count()
 }
 
 /// Raise this process's soft open-file limit to the installable ceiling.
@@ -567,7 +560,7 @@ fn is_typed_emfile(mut error: &(dyn std::error::Error + 'static)) -> bool {
 
 fn fd_ceiling_state() -> Option<(usize, libc::rlim_t)> {
     let (limit, _) = fd_limits().ok()?;
-    let open = count_open_fds().ok()?;
+    let open = count_open_fds(limit);
     Some((open, limit))
 }
 
@@ -958,6 +951,7 @@ fn spawn_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     /// Serializes every test in this module that reaches `open_pty`. The
     /// wedge cooldown itself is thread-local (see `LAST_OPENPTY_TIMEOUT`
@@ -1069,6 +1063,16 @@ mod tests {
     fn fd_limit_target_is_idempotent_at_ceiling() {
         assert_eq!(target_fd_limit(4_096, 4_096, Some(8_192)), None);
         assert_eq!(target_fd_limit(4_096, 8_192, Some(4_096)), None);
+    }
+
+    #[test]
+    fn fd_count_scans_existing_descriptors_without_a_reserve() {
+        let marker = std::fs::File::open("/dev/null").unwrap();
+        let marker_fd = marker.as_raw_fd();
+        let count = count_open_fds(marker_fd as libc::rlim_t + 1);
+        assert!(count > 0);
+        // The scan observes the marker without consuming or replacing it.
+        assert_ne!(unsafe { libc::fcntl(marker_fd, libc::F_GETFD) }, -1);
     }
 
     #[test]
