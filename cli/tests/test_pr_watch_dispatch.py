@@ -2276,7 +2276,7 @@ class TestTickRecordsAndDeadline:
 
 
 # ---------------------------------------------------------------------------
-# Fleet leg ordering + heartbeat (x-a912 wave 1)
+# Fleet leg ordering + heartbeat
 # ---------------------------------------------------------------------------
 
 

@@ -155,7 +155,7 @@ class ProviderRuntimeState:
     provider_health: dict[str, ProviderHealth]
     combo_cursors: dict[str, ComboCursor] = dataclasses.field(default_factory=dict)
     usage: dict[str, UsageSnapshot] = dataclasses.field(default_factory=dict)
-    # x-a912: when each provider's rolling usage window OPENED, as
+    # When each provider's rolling usage window OPENED, as
     # ``{provider_id: {label: {"opened_at": float, "warned": bool}}}``. The one
     # thing footnote can know about a provider with no usage probe: z.ai is
     # UNKNOWN to the quota layer (usage.py registers probes for claude and codex

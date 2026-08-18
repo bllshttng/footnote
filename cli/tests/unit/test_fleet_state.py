@@ -36,9 +36,9 @@ class TestHeartbeat:
 
     def test_a_heartbeat_preserves_the_chain_memory(self, tmp_path: Path) -> None:
         p = _p(tmp_path)
-        fleet_state.record_link("x-a912", "codex/gpt-5.6-sol", path=p)
+        fleet_state.record_link("node-1", "codex/gpt-5.6-sol", path=p)
         fleet_state.write_heartbeat(candidates=1, path=p)
-        assert fleet_state.links_tried("x-a912", path=p) == ["codex/gpt-5.6-sol"]
+        assert fleet_state.links_tried("node-1", path=p) == ["codex/gpt-5.6-sol"]
 
     def test_a_corrupt_file_reads_as_no_memory(self, tmp_path: Path) -> None:
         # Fail-open: a corrupt watermark costs one repeated chain link. A raise
@@ -46,7 +46,7 @@ class TestHeartbeat:
         p = _p(tmp_path)
         p.write_text("{not json", encoding="utf-8")
         assert fleet_state.read_fleet_state(p) == {}
-        assert fleet_state.links_tried("x-a912", path=p) == []
+        assert fleet_state.links_tried("node-1", path=p) == []
 
     def test_a_json_scalar_reads_as_no_memory(self, tmp_path: Path) -> None:
         p = _p(tmp_path)
