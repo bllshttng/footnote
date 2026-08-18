@@ -727,6 +727,22 @@ def test_a_failed_projection_never_reports_a_lost_capture(
     assert [d["decision"] for d in payload["decisions"]] == ["fold first"]
 
 
+def test_a_node_subject_folds_case_in_both_directions(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The doc promises every spelling of a node, "any case". The resolver's id
+    tier is case-sensitive, so only the query side folded before."""
+    did = runner.invoke(
+        decide_app, ["--subject", "X-7D94", "--decision", "shouted"]
+    ).stdout.strip().splitlines()[-1]
+
+    for query in ("x-7d94", "fold-the-inbox", "X-7D94"):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", query, "--json"]).stdout
+        )
+        assert did in [d["decision_id"] for d in payload["decisions"]], query
+
+
 def test_a_non_node_subject_is_case_insensitive_but_still_exact(
     root: Path, tmp_graph: Path, index: Path
 ):
@@ -766,23 +782,22 @@ def test_reindex_exits_nonzero_when_the_index_cannot_be_written(
     monkeypatch.setattr(events_mod, "append_event", boom)
     res = runner.invoke(decide_app, ["reindex"])
     assert res.exit_code == 1, res.output
-    assert "every attempted write failed" in res.output
+    assert "could not be written" in res.output
 
 
 def test_an_unreadable_graph_says_recall_degraded(
-    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path, tmp_graph: Path, index: Path
 ):
     """Without the graph a subject only matches its literal spelling, so a
     ruling recorded under a slug stops answering the id the receipt printed.
     Degrading in silence is indistinguishable from no such decision."""
-    import fno.graph.store as gs
-
     runner.invoke(decide_app, ["--subject", "fold-the-inbox", "--decision", "fold"])
 
-    def unreadable(*a, **kw):
-        raise OSError("graph.json is mid-write")
+    # A REAL half-written graph, not a monkeypatched raise. read_graph swallows
+    # corruption and answers [], so a guard exercised through a patched
+    # exception stays green on a path production never takes.
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
 
-    monkeypatch.setattr(gs, "read_graph", unreadable)
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
     assert "the graph could not be read" in listed.output

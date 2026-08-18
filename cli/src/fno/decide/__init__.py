@@ -275,8 +275,13 @@ def _graph_entries() -> "list[dict]":
     try:
         from fno.graph import store as graph_store
 
+        # read_graph_STRICT, not read_graph. The soft reader swallows
+        # corruption and answers [], which here would silently collapse
+        # cross-spelling recall to a literal match and report "no decisions" on
+        # exit 0. The strict reader raises, so the degrade below is reachable
+        # on the path a half-written graph actually takes.
         return graph_store.entries_with_archive(
-            graph_store.read_graph(graph_store.GRAPH_JSON)
+            graph_store.read_graph_strict(graph_store.GRAPH_JSON)
         )
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
         # Advisory, but NOT silent. Without the graph the reader falls back to
@@ -320,7 +325,9 @@ def _subject_matcher(subject: str):
     A subject that names no node matches itself and nothing more.
     """
     entries = _graph_entries()
-    node_id = _resolved_node(subject, entries)
+    node_id = _resolved_node(subject, entries) or _resolved_node(
+        subject.strip().casefold(), entries
+    )
     if node_id is None:
         # casefold, not ==. A node subject gets case-folding free through the
         # resolver's slug tier, so without this `--subject PR-923` answers
@@ -333,12 +340,19 @@ def _subject_matcher(subject: str):
     # Resolved per DISTINCT recorded subject by the caller's cache, never per
     # row: the graph read is the expensive part and it already happened.
     seen: "dict[str, str | None]" = {}
+    want = subject.strip().casefold()
 
     def matches(recorded: str) -> bool:
-        if recorded == subject:
+        # Casefold on this branch too. The resolver's id tier is
+        # case-sensitive, so without it a ruling recorded as `X-7D94` answers
+        # nothing for `x-7d94` while the unresolved branch folds case happily -
+        # and the doc promises every spelling, "any case", for a node subject.
+        if recorded.strip().casefold() == want:
             return True
         if recorded not in seen:
-            seen[recorded] = _resolved_node(recorded, entries)
+            seen[recorded] = _resolved_node(recorded, entries) or _resolved_node(
+                recorded.strip().casefold(), entries
+            )
         return seen[recorded] == node_id
 
     return matches

@@ -228,14 +228,16 @@ def reindex_cmd() -> None:
     # stdout carries the value: the number of decisions now recoverable.
     typer.echo(counts["total"])
 
-    # Exit 1 when nothing landed and writes failed. The per-row `invalid`
-    # counter cannot tell one unusable legacy row from an unwritable store, and
-    # exiting 0 on the second would tell the operator the documented recovery
-    # ran while every decision stayed unrecoverable.
-    if counts.get("invalid") and not counts.get("added"):
+    # Exit 1 on ANY write failure, not only on a total one. The counter cannot
+    # tell an unusable legacy row from a store that went unwritable partway
+    # through, and a caller gating on the exit code (`fno decide reindex && ...`,
+    # or an agent following the recovery an IndexWriteError named) must not read
+    # success while decisions stay unrecoverable. Fail safe on the ambiguity.
+    if counts.get("invalid"):
         typer.echo(
-            "decide reindex: nothing was added and every attempted write "
-            f"failed. Check that {_index_path()} is writable.",
+            f"decide reindex: {counts['invalid']} row(s) could not be written, "
+            f"so the backfill is incomplete. Check that {_index_path()} is "
+            f"writable, then run it again.",
             err=True,
         )
         raise typer.Exit(1)
