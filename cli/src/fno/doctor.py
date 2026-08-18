@@ -1774,18 +1774,25 @@ def _emit_human(
 
 
 def _codex_context_window_report() -> dict[str, Any]:
-    """What context window a fresh codex thread will actually get.
+    """What context window a codex thread on the configured model actually gets.
 
     Codex resolves the window as ``min(config.model_context_window,
     max_context_window) * effective_context_window_percent / 100``, where both
     right-hand values come from ``$CODEX_HOME/models_cache.json``.  The TUI
     footer echoes the CONFIGURED number, so a config asking for 1M reads as 1M
-    while every turn runs clamped - the gap this reports.
+    while every turn runs smaller - the gap this reports.
 
-    The cached ``max_context_window`` is itself served per originator header,
-    yet the cache file records no originator and every launcher shares it.  So
-    whichever launcher fetched last decides the next thread's tier, and the
-    tier is the only readable trace of who that was.  Read-only, advisory."""
+    Scope is the model config.toml selects.  ``-m`` and a profile both override
+    it per thread, so this describes the default, never "every thread".
+
+    The cached ``max_context_window`` is served per originator header while the
+    cache records no originator and every launcher shares one copy, so the last
+    fetch sets the cap for every thread started since.  That cap is per MODEL,
+    not per file: one fetch here holds gpt-5.6-sol at 272000 beside gpt-5.4 at
+    1000000, so no single file-wide tier label is truthful.  Read-only.
+
+    A silent path returns a ``reason`` rather than ``{}`` so ``--json`` says
+    which of "nothing to report" and "could not tell" happened."""
     import tomllib
 
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
@@ -1793,52 +1800,67 @@ def _codex_context_window_report() -> dict[str, Any]:
         with (codex_home / "config.toml").open("rb") as handle:
             config = tomllib.load(handle)
         cache = json.loads((codex_home / "models_cache.json").read_text())
-    except Exception:  # noqa: BLE001 - doctor stays advisory on any unreadable home
-        return {}
+    except Exception as exc:  # noqa: BLE001 - doctor stays advisory on an unreadable home
+        return {"reason": f"unreadable-codex-home: {str(exc)[-200:]}"}
+
+    # A `profile` key redirects model selection wholesale; reading the
+    # top-level `model` past one describes a model no thread runs.
+    source = "model"
+    profile = config.get("profile")
+    if isinstance(profile, str):
+        source = f"profiles.{profile}.model"
+        config = {**config, **((config.get("profiles") or {}).get(profile) or {})}
 
     configured = config.get("model_context_window")
     slug = config.get("model")
-    if not isinstance(configured, int) or not isinstance(slug, str):
-        return {}
-    entry = next(
-        (m for m in cache.get("models") or [] if m.get("slug") == slug),
-        None,
-    )
+    if not isinstance(configured, int):
+        return {"reason": "no-configured-window"}
+    if not isinstance(slug, str):
+        return {"reason": "no-configured-model"}
+    entry = next((m for m in cache.get("models") or [] if m.get("slug") == slug), None)
     if entry is None:
-        return {}
+        return {"reason": f"model-not-in-cache: {slug}"}
     cap = entry.get("max_context_window")
-    base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    if not isinstance(cap, int) or not isinstance(percent, int):
-        return {}
+    if not isinstance(cap, int) or not isinstance(percent, (int, float)):
+        return {"reason": f"cache-schema-drift: {slug}"}
 
+    effective = int(min(configured, cap) * percent // 100)
     return {
         "model": slug,
+        "model_source": source,
         "configured": configured,
         "max_context_window": cap,
-        "effective": min(configured, cap) * percent // 100,
+        "effective": effective,
         "percent": percent,
-        "tier": "extended" if isinstance(base, int) and cap > base else "base",
-        "capped": configured > cap,
+        # The footer lies whenever the effective window is short of the
+        # configured one, and the percent shrink alone is enough to do it.
+        "overstated": effective < configured,
         "cache_fetched_at": cache.get("fetched_at"),
         "cache_client_version": cache.get("client_version"),
     }
 
 
 def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
-    """Name the real window when the configured one is a promise codex drops."""
+    """Name the real window when the configured one overstates it."""
     report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
-    if not report.get("capped"):
+    if not report.get("overstated"):
         return
-    out(
-        f"fno doctor: codex model_context_window={report['configured']} is capped at "
-        f"{report['max_context_window']} for {report['model']}; the effective window is "
-        f"{report['effective']} ({report['percent']}%). The TUI footer shows the configured "
-        f"value, not this one. models_cache.json holds the {report['tier']} tier "
-        f"(fetched {report['cache_fetched_at']} by codex {report['cache_client_version']}); "
-        "it records no originator, and the cap is served per originator, so whichever "
-        "launcher fetched last set this tier for every thread started since."
+    line = (
+        f"fno doctor: codex {report['model_source']}={report['model']} with "
+        f"model_context_window={report['configured']} runs at an effective "
+        f"{report['effective']} (codex keeps {report['percent']}%). The TUI footer shows "
+        "the configured value, not this one."
     )
+    if report["configured"] > report["max_context_window"]:
+        line += (
+            f" models_cache.json also caps {report['model']} at "
+            f"{report['max_context_window']} (fetched {report['cache_fetched_at']} by codex "
+            f"{report['cache_client_version']}). That cap is served per originator header "
+            "and the cache records none, so whichever launcher fetched last set it for "
+            "every thread started since."
+        )
+    out(line)
 
 
 def _codex_hooks_report() -> dict[str, Any]:
@@ -2297,10 +2319,13 @@ def _harness_surface_report() -> dict[str, Any]:
     except Exception:
         pass
 
-    try:
-        report["codex_context_window"] = _codex_context_window_report()
-    except Exception:
-        pass
+    # Gated like the codex plugin check above: a leftover ~/.codex from an
+    # uninstalled codex must not nag a user who no longer runs it.
+    if shutil.which("codex") is not None:
+        try:
+            report["codex_context_window"] = _codex_context_window_report()
+        except Exception:
+            pass
 
     return report
 
