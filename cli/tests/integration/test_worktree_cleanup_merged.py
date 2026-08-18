@@ -327,6 +327,31 @@ def test_age_sweep_keeps_codex_app_owned_worktree(
     assert wt.exists()
 
 
+def test_age_sweep_keeps_detached_tree_with_unpushed_commits(repo: Path):
+    """The age sweep removes by default and with --force, and a detached tree
+    has no preserved branch to fall back on: force-removing it destroys any
+    commit no remote carries. The same wt_unpushed_count guard the merged
+    sweep uses must hold on this path too."""
+    wt = _add_detached(repo, repo / "wt-age-unpushed")
+    _commit(wt, "age.txt")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (detached HEAD holds unpushed commits)" in r.stdout
+    assert wt.exists(), "age sweep must not force-remove unique commits on a detached HEAD"
+
+
+def test_age_sweep_removes_old_clean_detached_tree(repo: Path):
+    wt = _add_detached(repo, repo / "wt-age-clean")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert not wt.exists(), r.stdout
+    assert "REMOVED" in r.stdout
+
+
 def test_compat_age_sweep_delegates_app_owned_guard(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

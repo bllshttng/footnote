@@ -419,6 +419,13 @@ case "${1:-status}" in
                 fi
 
                 BRANCH=$(cd "$wt" 2>/dev/null && git branch --show-current || echo "unknown")
+                # A detached tree has no branch to preserve, so the --force
+                # below would destroy any commit no remote carries - the exact
+                # loss the merged sweep's wt_unpushed_count guard prevents.
+                if [[ -z "$BRANCH" && "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                    echo "  SKIP: $wt (detached HEAD holds unpushed commits)"
+                    continue
+                fi
                 if [[ -n "$DRY_RUN" ]]; then
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
                 else
