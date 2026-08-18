@@ -18,12 +18,16 @@ Order is precedence. The top row wins.
 | `reap` | the node is done or its claim is held live by another session, the worktree has no other occupant, no 429 window is open, and the tail says the session is finished rather than still in play | `node <id> done, tail reads done, quiet <n>m` |
 | `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
-| `wake` | state `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
+| `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
 
 `stale` is the needs-human bucket. It is checked before the 429 window math on purpose. The reset stamp carries no date, so on a tail older than the ceiling its time-of-day reading is garbage. That reading must not poison reroute. The ceiling is twelve hours, not a day. That is the parser's own resolution, because a date-less stamp is unambiguous for only half a day. A session stopped for two months has a dead node, a stale branch, and a context describing a repository that has moved. Waking it is not recovery. `stale` never auto-acts at any apply level.
 
 Every wake condition is positive evidence. The last event parses. The age sits under the ceiling. And the shipped classifier (`session_truth.classify_tail`) reads the tail as `stalled`: silent while still owing its next move. "No 429 in tail" is an absence and never a wake reason, and a tail with no parseable evidence reads leave, never an action lane.
+
+The state word only decides CANDIDACY, which is why `working` is a candidate. A state word is what a session claims, and this lane exists because that claim lies. On 2026-08-18 a row read live and `working` while its last message was an API error 56 minutes old. Woken by hand, it opened a PR fifteen minutes later. Those are the eight stale-`working` rows at the top of this page. A word a dead session still wears is no reason to skip it. The stalled check is what keeps a genuinely working row from being touched.
+
+One number bounds how fast any of this can fire. `classify_tail` calls a tail stalled only past `STALLED_AFTER_S`, which is two hours. The 56-minute row above is therefore still `working` to the classifier, and this lane leaves it. Candidacy makes such a row reachable. It does not make it reachable at 56 minutes, and moving that needs the threshold, not the state set.
 
 Reset stamps ride the provider error text in Singapore time, UTC+8. `02:48:21 SGT` is `18:48:21Z`. Two sessions launched at 18:45 and 18:46 took a 429 three minutes before their window opened. When a stamp fails to parse, the window is unknown and the row classifies `leave`, never `wake`. Bouncing a session off a closed window was proved twice by hand and costs a real turn each time.
 
