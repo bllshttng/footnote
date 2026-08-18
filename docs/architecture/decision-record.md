@@ -30,11 +30,15 @@ There is no new recording gate, and none is needed. `crates/fno-agents/src/loopc
 | Decision index | Recall. The reader's only source | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
 
-One `fno decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the exception propagates, the command prints `decide: failed to record` and exits 1. A write the operator cannot read back is worse than a refusal.
+One `fno decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
+
+It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno decide reindex` as the recovery.
 
 ## Why the index is separate from the global journal
 
-The event stays project-local because it is durable there. `cli/src/fno/events/gc.py` refuses to compact the global journal but does compact project journals, and it deletes rows classified `retention: ephemeral`. `operator_decision` now carries an explicit `retention: durable` key, so the GC keeps it. It behaved that way before only because it named no retention and the default is durable.
+The event stays project-local because it is durable there. `cli/src/fno/events/gc.py` refuses to compact the global journal but does compact project journals, and it deletes rows classified `retention: ephemeral`. `operator_decision` carries an explicit `retention: durable` key, so the GC keeps it.
+
+That key changes no behavior today, and it is not decoration. The schema default is already `durable`, so the record survived by inheriting it. A record the whole recall promise rests on was one schema edit away from not surviving, and the key is what makes the guarantee readable at the entry rather than inferred from a default three thousand lines away.
 
 Recall needs one machine-wide file, and two candidates were rejected.
 

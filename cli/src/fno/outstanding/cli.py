@@ -130,6 +130,7 @@ def clear(
     ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
+    from fno.decide import IndexWriteError
     from fno.events import append_event, operator_question_closed
     from fno.outstanding.core import events_path, read_open_questions
 
@@ -178,6 +179,20 @@ def clear(
                 ),
                 events_path=events_path(root),
             )
+        except IndexWriteError as exc:
+            # The other producer of operator_decision, and it must give the
+            # same guidance: the durable event landed, so the documented
+            # "just run it again" would record one answer twice under two ids.
+            # A guard on one of two producer paths is decorative.
+            typer.echo(
+                f"outstanding: recorded the answer to {qid} as {exc.decision_id}, "
+                f"but the recall index write failed: {exc}. The question stays "
+                f"open. Run `fno decide reindex` to recover the answer, then "
+                f"close it with no --answer; clearing with --answer again "
+                f"records the same ruling a second time.",
+                err=True,
+            )
+            raise typer.Exit(1)
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
             raise typer.Exit(1)

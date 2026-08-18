@@ -576,6 +576,111 @@ def test_limit_says_so_when_it_truncates(root: Path, tmp_graph: Path, index: Pat
     assert "showing 2 of 3" in human.output
 
 
+def test_a_torn_multibyte_append_stays_readable_and_recoverable(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A crash can split a multi-byte character mid-append. A strict read
+    raises on the WHOLE file, taking every good row with it - and breaking the
+    reindex the damaged-row warning names as the cure."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("ab") as fh:
+        fh.write(b'{"type":"operator_decision","data":{"decision":"caf\xc3\n')
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"])
+    assert listed.exit_code == 0, listed.output
+    assert [d["decision"] for d in json.loads(listed.stdout)["decisions"]] == ["merged"]
+
+    assert reindex(sources=[root / ".fno" / "events.jsonl"])["repaired"] == 1
+    assert index.with_suffix(".jsonl.corrupt").exists(), "the drop is reversible"
+
+
+def test_one_unusable_projection_row_does_not_abort_the_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The event builder slices strings and validates. An eager list build
+    aborts on the first bad row and loses the journal half of the fold too."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
+    index.unlink()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
+        {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert counts["added"] == 2, counts
+    for subject, decision in (("pr-923", "from the journal"), ("x-7d94", "usable")):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+        )
+        assert decision in [d["decision"] for d in payload["decisions"]]
+
+
+def test_an_unreachable_index_is_a_failed_read_not_an_empty_one(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Path.exists() answers False for a dangling symlink, which would turn an
+    unreachable store into "no decisions recorded" on exit 0."""
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.symlink_to(index.parent / "gone.jsonl")
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-923"])
+    assert listed.exit_code == 1, listed.output
+    assert "cannot read the decision index" in listed.output
+
+
+def test_the_second_producer_also_refuses_to_ask_for_a_retry(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`fno outstanding clear --answer` is the other operator_decision writer.
+    A guard on one of two producer paths is decorative."""
+    import fno.events as events_mod
+    from fno.outstanding.cli import outstanding_app
+
+    qid = runner.invoke(
+        outstanding_app, ["ask", "which lane owns the retry?"]
+    ).stdout.strip().splitlines()[-1]
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
+    assert res.exit_code == 1
+    assert "fno decide reindex" in res.output
+    assert "records the same ruling a second time" in res.output
+
+
+def test_equal_timestamps_do_not_invert_newest_first(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Every legacy projection row shares the same no-ts fallback, and a stable
+    sort keeps file order for ties - silently reversing the stated contract."""
+    from fno.decide import reindex
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
+        {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    assert reindex(sources=[])["added"] == 2
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == ["d-bbb002", "d-aaa001"]
+
+
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
     """It behaved this way only because it named no retention and the default
     is durable. The record the recall promise rests on is then one schema edit

@@ -190,12 +190,24 @@ def _read_index(path: Path, *, warn: bool = True) -> "list[dict]":
     to REPAIR them, so a backfill does not tell the operator to run the command
     they are already running.
     """
-    if not path.exists():
-        return []
+    # os.stat, not path.exists(): exists() answers False for a dangling symlink
+    # and for a PermissionError on an ancestor, so it turns an UNREACHABLE index
+    # into "no decisions" - the absence-as-success failure named above.
+    try:
+        path.stat()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except OSError:
+            return []  # nothing there at all: the case before the first write
+        raise  # a symlink whose target is gone is UNREACHABLE, not absent
 
     rows: "list[dict]" = []
     damaged = 0
-    with path.open(encoding="utf-8") as fh:
+    # errors="replace", not strict: a crash can split a multi-byte character
+    # mid-append, and a strict read raises on the whole file. That takes every
+    # good row with it AND breaks reindex, the recovery this warning names.
+    with path.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
             if not line.strip():
                 continue
@@ -326,7 +338,13 @@ def list_decisions(
         row["superseded_by"] = superseded_by.get(str(row.get("decision_id")))
         out.append(row)
 
-    out.sort(key=lambda d: str(d.get("ts") or ""), reverse=True)
+    # decision_id breaks the tie. A stable sort keeps file order for equal
+    # timestamps, which silently inverts "newest first" for the backfill rows
+    # that all share the no-ts fallback.
+    out.sort(
+        key=lambda d: (str(d.get("ts") or ""), str(d.get("decision_id") or "")),
+        reverse=True,
+    )
     if limit and limit > 0:
         out = out[:limit]
     return subject or "(all)", out
@@ -359,7 +377,13 @@ def _projection_events() -> "list[dict]":
             # The row lives ON the node, so the node IS the subject; without
             # this the recovered decision answers no query at all.
             kwargs.setdefault("subject", entry.get("id"))
-            event = operator_decision(**kwargs)
+            try:
+                event = operator_decision(**kwargs)
+            except Exception:  # noqa: BLE001 - one unusable row must not cost the rest
+                # The builder slices strings and validates. A row carrying a
+                # non-string rationale raises here, and an eager list build
+                # would abort the WHOLE backfill - the journal half included.
+                continue
             # A row with no ts is older than anything that records one. The
             # builder would stamp NOW, which floats a legacy ruling to the top
             # of a list whose whole promise is newest-first.
@@ -503,14 +527,15 @@ def _compact_index(path: Path) -> int:
     same notice. Runs BEFORE the fold, so a decision lost with the damaged row
     is re-appended from the journals in the same command.
 
+    Nothing is destroyed. The dropped lines are appended to a
+    ``decisions.jsonl.corrupt`` sidecar first, because a decision whose source
+    journal is gone (a deleted repo, another machine) has no other copy left.
+
     Under the same mkdir mutex ``append_event`` uses, so a concurrent write
     cannot land between the read and the replace.
     """
-    if not path.exists():
-        return 0
-    raw = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    good = [line for line in raw if _is_index_line(line)]
-    if len(good) == len(raw):
+    raw = _read_lines(path)
+    if all(_is_index_line(line) for line in raw):
         return 0
 
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
@@ -522,18 +547,33 @@ def _compact_index(path: Path) -> int:
         raise TimeoutError(f"decisions.jsonl lock timeout: {lock_dir}")
     try:
         # Re-read under the lock: a writer may have appended since the check.
-        raw = [
-            line
-            for line in resolved.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        raw = _read_lines(resolved)
         good = [line for line in raw if _is_index_line(line)]
+        dropped = [line for line in raw if not _is_index_line(line)]
+        if dropped:
+            with resolved.with_suffix(resolved.suffix + ".corrupt").open(
+                "a", encoding="utf-8"
+            ) as fh:
+                fh.write("".join(line + "\n" for line in dropped))
         tmp = resolved.with_suffix(resolved.suffix + ".compact")
         tmp.write_text("".join(line + "\n" for line in good), encoding="utf-8")
         tmp.replace(resolved)
     finally:
         release_dir_mutex(lock_dir, token)
     return len(raw) - len(good)
+
+
+def _read_lines(path: Path) -> "list[str]":
+    """Non-blank lines, tolerant of a torn multi-byte character.
+
+    ``errors="replace"``: a strict read raises on the whole file, which would
+    make the damage unrecoverable by the very command sent to repair it.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    return [line for line in text.splitlines() if line.strip()]
 
 
 def _is_index_line(line: str) -> bool:

@@ -141,7 +141,9 @@ def list_cmd(
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
         label, found = list_decisions(subject, limit=None)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers UnicodeDecodeError, which a torn multi-byte append
+        # raises and which is NOT an OSError.
         typer.echo(f"decide list: cannot read the decision index: {exc}", err=True)
         raise typer.Exit(1)
 
