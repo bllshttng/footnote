@@ -128,7 +128,7 @@ have hooks/git-protection.py '_VETO_PROBE_TIMEOUT = 25' "shared veto timeout def
 _v=$(grep -c 'timeout=_VETO_PROBE_TIMEOUT' "$REPO/hooks/git-protection.py")
 [ "$_v" -eq 2 ] || fail "expected both veto call sites on _VETO_PROBE_TIMEOUT, found $_v"
 _hook_veto=$(grep -oE '_VETO_PROBE_TIMEOUT = [0-9]+' "$REPO/hooks/git-protection.py" | head -n 1)
-_doc_ceiling=$(grep -oE 'against [0-9]+s' "$REPO/docs/architecture/cli-lazy-imports.md" | head -n 1)
+_doc_ceiling=$(grep -oE 'shells `fno` against [0-9]+s' "$REPO/docs/architecture/cli-lazy-imports.md" | head -n 1)
 [ -n "$_hook_veto" ] || fail "git-protection.py lost its shared veto timeout"
 [ -n "$_doc_ceiling" ] || fail "cli-lazy-imports.md lost its per-invocation sizing line"
 _h=${_hook_veto//[^0-9]/}; _c=${_doc_ceiling//[^0-9]/}
