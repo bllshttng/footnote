@@ -151,7 +151,7 @@ fi
    **Record exactly one outcome** in the plan frontmatter as a `consolidation:` block. The schema is [references/quick-template.md](references/quick-template.md). `validate-plan.sh` refuses a plan written after 2026-08-17 without a well-formed one. Plans created before the gate warn until backfilled:
 
    - **absorb** - the other node is a wave of THIS deliverable. Record its id and a reason a later reader can check. After intake (3b), run `fno backlog supersede <this-node> --replaces <other> --reason "<recorded reason>"`. Record the reversal (`fno backlog unsupersede <other>`) in the block.
-   - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
+   - **append** - THIS node's content belongs on the OTHER node. Record the id and reason, write no second plan, and stop. The validator rejects an append outcome inside a written plan, because the file contradicts the decision. The content reaches the other node through its own channel (`fno backlog update <other> --details ...`).
    - **proceed_alone** - record every id considered under `proceed_alone_against:` with the reason each is not the same work. An empty candidate list is a legal `proceed_alone`.
 
    Silence is not an outcome. A plan that ignores its sibling is the failure this gate exists to prevent. Do not build a second consolidator here: `fno backlog groom` already owns the daily levers-only pass and its allowlist already carries `supersede`. This gate is the pre-write half only.
@@ -258,8 +258,12 @@ Load [references/quick-template.md](references/quick-template.md) for the full t
 ---
 status: ready
 kind: quick-plan
+created: <YYYY-MM-DD>      # required; the consolidation gate reads it
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
 # executor: do             # transcribed from a Locked Decision, if any
+consolidation:             # step 2d, exactly one outcome (see 2d above)
+  outcome: proceed_alone
+  proceed_alone_against: []
 kill_criteria:
   - name: iteration_ceiling
     predicate: iteration > 15

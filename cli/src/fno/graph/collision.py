@@ -32,6 +32,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal, TypedDict, cast
 
+# Distinguishes "node carries no plan_path" from "node is not on the graph";
+# both are self, but for different reasons and a bare None conflates them.
+_UNSET_PLAN = object()
+
 Severity = Literal["low", "medium", "high"]
 Action = Literal["coordinate", "absorb", "supersede"]
 ResolvedStatus = Literal["done", "merged"]
@@ -495,8 +499,21 @@ def find_collisions(
     if thresholds is None:
         thresholds = _load_thresholds()
 
+    graph = list(graph)
     if self_id is None:
-        self_id = _claims_default(candidate_plan_path)
+        # The claimed node is SELF only when this file is the plan it already
+        # registered, or when it has registered none yet. A DIFFERENT plan
+        # drafted against the same node genuinely overlaps that node's own
+        # plan, and excluding it would hide the one collision worth seeing.
+        claimed = _claims_default(candidate_plan_path)
+        if claimed:
+            registered = next(
+                (e.get("plan_path") for e in graph if e.get("id") == claimed), _UNSET_PLAN
+            )
+            if registered is _UNSET_PLAN or not registered:
+                self_id = claimed
+            elif _resolve_plan_path(str(registered), _find_repo_root()) == candidate_plan_path:
+                self_id = claimed
 
     out: list[Collision] = []
     candidate_files = parse_files_to_modify(candidate_plan_path)

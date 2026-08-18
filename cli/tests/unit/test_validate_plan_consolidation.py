@@ -199,6 +199,70 @@ def test_a_hyphenated_next_key_ends_the_block(tmp_path):
     assert "consolidation outcome is proceed_alone" in out.stdout
 
 
+def test_a_list_key_after_the_entries_closes_the_section(tmp_path):
+    # The walk set the section on its header and cleared it nowhere, so a
+    # later list-valued key had its items read as entries of that list.
+    plan = tmp_path / "tail-list.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  absorbed:\n"
+        "    - id: x-ab12\n"
+        "      reason: same lock\n"
+        "  reversal:\n"
+        "    - fno backlog unsupersede x-ab12\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+    assert "entry with no id" not in out.stdout
+
+
+def test_entry_id_must_look_like_a_node_id(tmp_path):
+    # A bare number is legal YAML that parses to an int. The awk walk reads it
+    # as text and the model rejects it as a non-string, and that divergence
+    # surfaces downstream as "plan is unreadable or invalid".
+    plan = tmp_path / "int-id.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  absorbed:\n"
+        "    - id: 12345\n"
+        "      reason: numeric id\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 1
+    assert "is not a node id" in out.stdout
+
+
+def test_append_outcome_in_a_written_plan_is_a_contradiction(tmp_path):
+    # append records that the content went onto the other node and no second
+    # plan was written. This file existing says otherwise.
+    plan = tmp_path / "append.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: append\n"
+        "  appended_to:\n"
+        "    - id: x-ab12\n"
+        "      reason: belongs on that node\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 1
+    assert "a plan file was written" in out.stdout
+
+
+def test_decompose_child_scaffold_carries_created(tmp_path):
+    # Without created: every decompose child is grandfathered forever, so the
+    # gate is permanently inert on that path.
+    from fno.graph._decompose import scaffold_separate_plan, validate_groups
+
+    group = validate_groups([{"slug": "1", "title": "G1", "waves": "1-2"}], None)[0]
+    text = scaffold_separate_plan(group, "ab-epic0001", "big.md", created="2026-08-20")
+    assert "created: 2026-08-20" in text
+
+
 def test_blueprint_owns_the_consolidation_frontmatter_key():
     # The validator requires the block, so the ownership model must permit the
     # write that satisfies it, or blueprint raises OwnershipViolation instead.

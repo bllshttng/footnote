@@ -11,6 +11,7 @@ duplicating. See internal/fno/plans/2026-05-24-epic-scoped-execution.md.
 from __future__ import annotations
 
 import re
+from datetime import date as _date
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -274,6 +275,7 @@ def scaffold_separate_plan(
     source_doc: str,
     why_digest: str = "",
     adopted: list[tuple[str, str]] | None = None,
+    created: str | None = None,
 ) -> str:
     """A self-contained quick-plan stub for one group child.
 
@@ -299,6 +301,11 @@ def scaffold_separate_plan(
     """
     # Escape so a title containing a double quote can't emit invalid YAML.
     yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
+    # A scaffold with no `created:` is invisible to the consolidation gate,
+    # which reads that key to tell a new plan from a pre-gate one - so every
+    # child of a decompose would be grandfathered forever. Caller-injectable
+    # for deterministic tests.
+    created_date = created or _date.today().isoformat()
     why_block = why_digest.strip() or _WHY_STUB
     if adopted:
         checklist = "".join(f"- [ ] `{nid}` - {title}\n" for nid, title in adopted)
@@ -316,6 +323,7 @@ def scaffold_separate_plan(
         f'title: "{yaml_title}"\n'
         f'status: idea\n'
         f'kind: quick-plan\n'
+        f'created: {created_date}\n'
         f'parent_epic: {epic_id}\n'
         f'source_doc: {source_doc}\n'
         f'---\n\n'

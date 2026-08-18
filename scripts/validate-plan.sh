@@ -796,6 +796,14 @@ check_consolidation_file() {
             sub(/[[:space:]]+$/, "", line); gsub(/^["'"'"']|["'"'"']$/, "", line)
             rsn=line; next
         }
+        # Any other key CLOSES the current section. Without this the walk stayed
+        # inside the last id list forever, so a later list-valued key (reversal:,
+        # notes:) had its items read as entries of that list and reported as
+        # entries with no id.
+        sec != "" && /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*:/ {
+            flush(); sec=""; started=0; cur=""; rsn=""
+            next
+        }
         END { flush() }
     ')
 
@@ -809,6 +817,13 @@ check_consolidation_file() {
         if [[ -z "$entry_reason" ]]; then
             c_error "$label: consolidation entry \`${entry_id}\` (${sec}) has an empty reason - the recorded decision must be checkable by a later reader"
         fi
+        # Same grammar the graph mints (NODE_ID_BODY in graph/_constants.py).
+        # A bare number is legal YAML that parses to an int, which this walk
+        # reads as text and the Pydantic model rejects as a non-string - the
+        # divergence lands downstream as "plan is unreadable or invalid".
+        if [[ ! "$entry_id" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+            c_error "$label: consolidation entry id \`${entry_id}\` (${sec}) is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)"
+        fi
         [[ "$sec" == "absorbed" ]] && absorb_count=$((absorb_count + 1))
         [[ "$sec" == "appended_to" ]] && append_count=$((append_count + 1))
     done <<< "$entries"
@@ -819,6 +834,12 @@ check_consolidation_file() {
     fi
     if [[ "$outcome" == "append" && "$append_count" -eq 0 ]]; then
         c_error "$label: consolidation outcome is append but the appended_to: list is empty"
+    fi
+    # An append decision means the content went onto the OTHER node and no
+    # second plan was written. This file existing contradicts that, and it is
+    # the one self-contradiction the gate can catch mechanically.
+    if [[ "$outcome" == "append" ]]; then
+        c_error "$label: consolidation outcome is append, but a plan file was written - append records that the content went onto the other node instead, so either delete this plan or record absorb / proceed_alone"
     fi
 
     if [[ $c_errors -eq 0 ]]; then
