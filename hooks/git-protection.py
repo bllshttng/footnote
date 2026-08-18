@@ -703,9 +703,9 @@ def _coverage_refusal(command=""):
         # 15s of verify waits before the CLI's own coverage read starts (see
         # cli-lazy-imports.md's per-invocation ceiling). A 15s timeout kills
         # exactly that probe mid-wait and fails open in the storm state, so
-        # this carries the shared 25s: over the shim's ceiling. With the
-        # lineage veto ahead of it, the pair's worst case is 25s + 25s plus
-        # process startup, about 51s of the 60s hook budget.
+        # this carries the shared 25s: over the shim's ceiling. The worst case
+        # counts the git probes ahead of the vetoes too (1s + 1s + 2s): 54s
+        # plus process startup of the 60s hook budget, margin under 6s.
         timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
     )
