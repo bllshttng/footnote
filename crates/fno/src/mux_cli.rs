@@ -3190,7 +3190,9 @@ fn render_filter_picker(p: &FilterPicker) -> String {
     out.push_str(&format!("filter: {}\r\n", p.filter));
     for (i, row) in p.visible().iter().enumerate() {
         let marker = if i == p.cursor { '>' } else { ' ' };
-        let age = row.age_s.map_or_else(|| "-".to_string(), |a| format!("{a}s"));
+        let age = row
+            .age_s
+            .map_or_else(|| "-".to_string(), |a| format!("{a}s"));
         let (pre, post) = if i == p.cursor {
             ("\x1b[7m", "\x1b[0m")
         } else {
@@ -3328,7 +3330,10 @@ fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
             return EXIT_ERROR;
         }
     };
-    let bind = state.get("bind").and_then(|v| v.as_str()).unwrap_or("127.0.0.1");
+    let bind = state
+        .get("bind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
     let port = match state.get("port").and_then(|v| v.as_u64()) {
         Some(p) => p,
         None => {
@@ -3475,10 +3480,7 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
     // The probe the server matches on: the row's own session id when the
     // match came through the name tier, else the selector itself (which, in
     // the id tiers, IS the id or its prefix).
-    let fno_id = row
-        .session_id
-        .clone()
-        .unwrap_or_else(|| fno_id.clone());
+    let fno_id = row.session_id.clone().unwrap_or_else(|| fno_id.clone());
     // The hosting mux session name.
     let Some(host_session) = row.mux.as_ref().map(|(s, _)| s.clone()) else {
         eprintln!("fno mux where: {} hosts no live pane", row.name);
@@ -4680,7 +4682,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["focus", "t-x919-sentinel"])).unwrap().cmd,
+            parse_pane_args(&os(&["focus", "t-x919-sentinel"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Selector("t-x919-sentinel".into())
             }
@@ -4733,10 +4737,7 @@ mod tests {
             }
         );
         // A filter matching nothing: Enter BELs rather than focusing stale state.
-        let mut q = FilterPicker::new(vec![
-            pane_row("a", "work", 1),
-            pane_row("b", "work", 2),
-        ]);
+        let mut q = FilterPicker::new(vec![pane_row("a", "work", 1), pane_row("b", "work", 2)]);
         for c in "zzz".bytes() {
             q.step(PickKey::Char(c));
         }

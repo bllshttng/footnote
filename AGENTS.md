@@ -184,7 +184,6 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
 - **`fno target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). `-p` is reachable only via explicit `headless`; never default to it.
-- **`fno mux view <selector>`** - focus a pane by node id, slug, or agent name (shared tier resolution with `mux where` and `pane focus`); `--fzf` opens an interactive picker, `--url` prints a pasteable per-pane web link. [mux-selector-resolution](docs/architecture/mux-selector-resolution.md)
 - **`fno agents watchdog`** - fleet sweep from transcript truth: wake / reroute / reap. Dry run by default; `--apply` (wake), `--apply-all` (reroute; reap needs `config.recovery.watchdog_reap`, it deletes worktrees). Cadence behind `config.recovery.watchdog`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)
 - **`fno doctor`** - detects stale deployed `fno` vs merged source only; `--fix` delegates to `fno update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider; never infer the axis from a value. Definitions in [axis-vocabulary](docs/architecture/axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`.
@@ -213,7 +212,8 @@ ln -s /path/to/footnote ~/.claude/plugins/fno  # permanent
 
 Everything the body already links is reachable from the paragraph that explains it. These are the docs nothing above points at:
 
-Backlog: [triage](docs/backlog-triage.md)
-Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md)
-Planning & ship: [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
-Providers: [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md)
+Loop & target: [unified loop](docs/architecture/unified-loop.md) · [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md) · [loc-ratchet](docs/architecture/loc-ratchet.md)
+Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md) · [mux selector resolution](docs/architecture/mux-selector-resolution.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md)
