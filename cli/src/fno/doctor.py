@@ -1805,17 +1805,25 @@ def _codex_context_window_report() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - doctor stays advisory on an unreadable home
         return {"reason": f"unreadable-codex-home: {str(exc)[-200:]}"}
 
-    # A `profile` key redirects model selection wholesale; reading the
-    # top-level `model` past one describes a model no thread runs.
+    # A `profile` key redirects model selection wholesale, so reading the
+    # top-level `model` past one describes a model no thread runs.  A profile
+    # sets an arbitrary subset though: name the profile key only once that
+    # table actually carried `model`, else the provenance itself is a lie.
     source = "model"
     profile = config.get("profile")
     if isinstance(profile, str):
-        source = f"profiles.{profile}.model"
-        config = {**config, **((config.get("profiles") or {}).get(profile) or {})}
+        table = (config.get("profiles") or {}).get(profile) or {}
+        if "model" in table:
+            source = f"profiles.{profile}.model"
+        config = {**config, **table}
 
     configured = config.get("model_context_window")
     slug = config.get("model")
     if not isinstance(configured, int):
+        # Deliberately silent.  `overstated` measures a promise the USER wrote
+        # against what runs; with nothing configured there is no such promise,
+        # and what an unconfigured footer displays is unverified here.  Do not
+        # "fix" this into a percent-shrink nag for every codex install.
         return {"reason": "no-configured-window"}
     if not isinstance(slug, str):
         return {"reason": "no-configured-model"}
@@ -1823,6 +1831,7 @@ def _codex_context_window_report() -> dict[str, Any]:
     if entry is None:
         return {"reason": f"model-not-in-cache: {slug}"}
     cap = entry.get("max_context_window")
+    base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
     if not isinstance(cap, int) or not isinstance(percent, (int, float)):
         return {"reason": f"cache-schema-drift: {slug}"}
@@ -1833,11 +1842,20 @@ def _codex_context_window_report() -> dict[str, Any]:
         "model_source": source,
         "configured": configured,
         "max_context_window": cap,
+        "context_window": base if isinstance(base, int) else cap,
         "effective": effective,
         "percent": percent,
         # The footer lies whenever the effective window is short of the
         # configured one, and the percent shrink alone is enough to do it.
         "overstated": effective < configured,
+        # The cached cap is load-bearing both when it clamps and when a RAISED
+        # cap is the only reason it does not.  gpt-5.4 sits at base 272000 and
+        # cap 1000000: a configured 400000 escapes the clamp solely because the
+        # last fetch won the raised cap, and reverts to 258400 without it.
+        "leans_on_cached_cap": isinstance(base, int) and configured > base,
+        # Every app-server fetch lands the base cap, whatever clientInfo name
+        # it presents, so a live daemon keeps pulling a raised cap back down.
+        "app_server_running": bool(_codex_app_server_report().get("present")),
         "cache_fetched_at": cache.get("fetched_at"),
         "cache_client_version": cache.get("client_version"),
     }
@@ -1846,7 +1864,7 @@ def _codex_context_window_report() -> dict[str, Any]:
 def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
     """Name the real window when the configured one overstates it."""
     report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
-    if not report.get("overstated"):
+    if not (report.get("overstated") or report.get("leans_on_cached_cap")):
         return
     line = (
         f"fno doctor: codex {report['model_source']}={report['model']} with "
@@ -1854,14 +1872,32 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
         f"{report['effective']} (codex keeps {report['percent']}%). The TUI footer shows "
         "the configured value, not this one."
     )
-    if report["configured"] > report["max_context_window"]:
-        line += (
-            f" models_cache.json also caps {report['model']} at "
-            f"{report['max_context_window']} (fetched {report['cache_fetched_at']} by codex "
+    # The cached cap is load-bearing whenever the configured value clears the
+    # model's base, whether the cap clamped it or a raised cap spared it.
+    if report.get("leans_on_cached_cap"):
+        cap, base = report["max_context_window"], report["context_window"]
+        provenance = (
+            f"(fetched {report['cache_fetched_at']} by codex "
             f"{report['cache_client_version']}). That cap is served per fetching client, "
-            "surface and originator both, and the cache records neither, so whichever "
-            "launcher fetched last set it for every thread started since."
+            "surface and originator both, and the cache records neither"
         )
+        if cap > base:
+            line += (
+                f" models_cache.json holds {report['model']} at {cap}, above its {base} "
+                f"base {provenance}. A base-tier fetch drops this to "
+                f"{int(base * report['percent'] // 100)}."
+            )
+        else:
+            line += (
+                f" models_cache.json caps {report['model']} at {cap}, its base "
+                f"{provenance}, so whichever launcher fetched last set it for every "
+                "thread started since."
+            )
+            if report.get("app_server_running"):
+                line += (
+                    " A codex app-server daemon is live here and every app-server "
+                    "fetch lands the base cap, so it will keep pulling this back down."
+                )
     out(line)
 
 

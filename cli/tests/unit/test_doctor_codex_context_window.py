@@ -147,6 +147,71 @@ def test_a_float_percent_is_not_schema_drift(tmp_path, monkeypatch) -> None:
     assert doctor._codex_context_window_report()["effective"] == 258400
 
 
+def test_a_profile_without_a_model_key_keeps_the_top_level_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    """A profile sets an arbitrary subset.  One that does not name a model
+    leaves the top-level `model` in force, so claiming the profile key as the
+    source is itself a false provenance line."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(
+        tmp_path,
+        configured=1000000,
+        config_extra='profile = "fast"\n[profiles.fast]\nmodel_reasoning_effort = "high"',
+    )
+
+    report = doctor._codex_context_window_report()
+
+    assert report["model"] == "gpt-5.6-sol"
+    assert report["model_source"] == "model"
+
+
+def test_a_profile_naming_no_table_keeps_the_top_level_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, config_extra='profile = "nope"')
+
+    assert doctor._codex_context_window_report()["model_source"] == "model"
+
+
+def test_a_raised_cap_that_spares_the_clamp_is_still_flagged(tmp_path, monkeypatch) -> None:
+    """gpt-5.4 sits at base 272000 and cap 1000000.  A configured 400000 escapes
+    the clamp only because the last fetch won the raised cap, and reverts to
+    258400 without it, so the cache caveat has to appear."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=400000, cached_max=1000000)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["effective"] == 380000
+    assert report["leans_on_cached_cap"] is True
+    line = _emit(report)[0]
+    assert "above its 272000 base" in line
+    assert "drops this to 258400" in line
+
+
+def test_the_harness_surface_report_carries_and_gates_the_check(tmp_path, monkeypatch) -> None:
+    """Pin the wiring, not just the pieces: the key name, the codex-on-PATH
+    gate, and the fact the emitter reads the same key doctor writes."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000)
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    assert "codex_context_window" not in doctor._harness_surface_report()
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/local/bin/codex")
+    surface = doctor._harness_surface_report()
+    assert surface["codex_context_window"]["effective"] == 258400
+    assert _emit_from_surface(surface) != []
+
+
+def _emit_from_surface(surface: dict) -> list[str]:
+    lines: list[str] = []
+    doctor._emit_codex_context_window({"harness_surface": surface}, out=lines.append)
+    return lines
+
+
 def _emit(report: dict) -> list[str]:
     lines: list[str] = []
     doctor._emit_codex_context_window(
@@ -173,6 +238,7 @@ def test_emitted_line_names_the_numbers_and_the_cache_provenance(tmp_path, monke
     # differently under one originator string.
     assert "surface and originator both" in line
     assert "records neither" in line
+    assert "its base" in line
     # No file-wide tier claim: one cache holds sol at base and luna above it.
     assert "tier" not in line
 
@@ -180,13 +246,17 @@ def test_emitted_line_names_the_numbers_and_the_cache_provenance(tmp_path, monke
 def test_emitted_line_omits_the_cap_clause_when_only_the_percent_bites(
     tmp_path, monkeypatch
 ) -> None:
+    """A configured value UNDER the model's base never consulted the cached
+    cap, so the per-fetcher caveat does not apply and must not be pasted on."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    _write(tmp_path, configured=400000, cached_max=872000)
+    _write(tmp_path, configured=200000, cached_max=872000)
 
-    lines = _emit(doctor._codex_context_window_report())
+    report = doctor._codex_context_window_report()
+    lines = _emit(report)
 
+    assert report["leans_on_cached_cap"] is False
     assert len(lines) == 1
-    assert "380000" in lines[0]
+    assert "190000" in lines[0]
     assert "originator" not in lines[0]
 
 
@@ -201,3 +271,20 @@ def test_emitter_is_silent_when_the_configured_value_is_honest(tmp_path, monkeyp
 
 def test_emitter_is_silent_on_a_reason_only_report() -> None:
     assert _emit({"reason": "no-configured-window"}) == []
+
+
+def test_a_live_app_server_daemon_is_named_as_the_thing_holding_the_cap_down(
+    tmp_path, monkeypatch
+) -> None:
+    """Every app-server fetch lands the base cap whatever clientInfo name it
+    presents, so a live daemon keeps pulling a raised cap back down.  That is
+    the actionable half, and the operator only sees it if the line says it."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=272000)
+    sock = tmp_path / "app-server-control" / "app-server-control.sock"
+    sock.parent.mkdir(parents=True)
+
+    assert "app-server daemon is live" not in _emit(doctor._codex_context_window_report())[0]
+
+    sock.touch()
+    assert "app-server daemon is live" in _emit(doctor._codex_context_window_report())[0]
