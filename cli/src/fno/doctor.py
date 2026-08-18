@@ -1899,10 +1899,13 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
             "surface and originator both, and the cache records neither"
         )
         if cap > base:
+            # `percent` is None on cache schema drift, so apply the same 100%
+            # assumption `effective` already uses instead of multiplying by it.
+            pct = report.get("percent")
+            base_tier = base if pct is None else int(base * pct // 100)
             line += (
                 f" models_cache.json holds {report['model']} at {cap}, above its {base} "
-                f"base {provenance}. A base-tier fetch drops this to "
-                f"{int(base * report['percent'] // 100)}."
+                f"base {provenance}. A base-tier fetch drops this to {base_tier}."
             )
         else:
             line += (

@@ -288,6 +288,20 @@ def test_a_missing_percent_still_reports_the_clamp(tmp_path, monkeypatch) -> Non
     assert "codex keeps" not in line
 
 
+def test_a_missing_percent_under_a_raised_cap_does_not_crash(tmp_path, monkeypatch) -> None:
+    """The raised-cap branch multiplies by the percent.  A None percent there
+    took down the whole `fno doctor` run, since the emitter is called bare."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=400000, cached_max=1000000, percent=None)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["percent"] is None
+    assert report["leans_on_cached_cap"] is True
+    line = _emit(report)[0]
+    assert "drops this to 272000." in line
+
+
 def test_a_missing_cap_falls_back_to_the_base_window(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     _write(tmp_path, configured=1000000, cached_max=None)
