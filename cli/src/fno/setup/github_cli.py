@@ -28,12 +28,12 @@ def ensure_proxy(
     real_gh: Optional[Path] = None,
     which: Callable[[str], Optional[str]] = shutil.which,
 ) -> InstallResult:
-    root = directory or github_cli_proxy_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    proxy = root / "gh"
     resolved = real_gh or (Path(found) if (found := which("gh")) else None)
     if resolved is None:
         raise FileNotFoundError("real gh executable not found on PATH")
+    root = directory or github_cli_proxy_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    proxy = root / "gh"
     resolved = resolved.resolve()
     if resolved == proxy.resolve():
         raise RuntimeError("resolved gh delegate points back to the Footnote proxy")
