@@ -44,6 +44,8 @@ State your level, altitude, and scope in your own opening line, so the transcrip
 
 **The crown is stamped by a grantor, never self-declared.**
 Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio.
+
+When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. This path grants authority only from a human. It refuses agent-originated calls. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
 Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
@@ -79,7 +81,7 @@ Crown a bg king for a pass, which abdicates before layout matters; crown a pane 
 
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
-**There is no coronate-in-place verb.** A crown is bestowed at spawn and only at spawn, so a session that grew into an epic's author organically cannot be crowned where it sits - spawn a fresh king over that scope instead. That is a deliberate narrowing: one way to mint authority is one place to audit it, and a king born crowned is a king whose pane was chosen for the court it will run.
+**In-place coronation is human-attended.** `fno agents crown <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run the command from a normal terminal with no ambient agent identity. A session cannot use the verb to crown itself or another session. When creating a king, placing a court, granting to a subordinate, or transferring your scope, use spawn-time `--crown`.
 
 **Succession happens at spawn too.** An abdicating king that spawns a successor over its OWN scope hands the crown over rather than being refused as a duplicate: the vacate and the stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. This is the only handoff there is, and it has to happen while you still reign - a session that has already exited spawns nothing.
 

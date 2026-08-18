@@ -3,6 +3,7 @@ agents adopt	T1	agents adopt	6
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents codex-session-for-pid	T1	agents codex-session-for-pid	3
+agents crown	T1	agents crown	17
 agents digest	T1	agents digest	7
 agents discovered-json	T1	agents discovered-json	9
 agents drive-authority	T1	agents drive-authority	9

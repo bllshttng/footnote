@@ -39,6 +39,7 @@ the spellings.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Optional
 
 #: The bottom rung. Kept as a bound rather than a magic number so the stored
@@ -359,6 +360,100 @@ def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
 
     left, right = _canon(a), _canon(b)
     return bool(left) and left == right
+
+
+class CrownPromotionError(RuntimeError):
+    """An attended in-place grant that refused without changing the registry."""
+
+
+def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
+    """Grant a crown to one existing row from an attended human shell.
+
+    This is deliberately not a general crown writer. Agent-to-agent grants and
+    same-scope succession stay on ``spawn --crown``; this function only closes
+    the human workflow where the useful target session already exists.
+    """
+    caller = calling_agent_row()
+    if caller is not None:
+        raise CrownPromotionError(
+            "in-place coronation must run from an attended shell with no ambient "
+            "agent identity. Run `fno agents register` in the target session, "
+            "then run this crown command from another terminal."
+        )
+
+    try:
+        level, scope = resolve_crown(scopes)
+    except CrownScopeError as exc:
+        raise CrownPromotionError(str(exc)) from exc
+
+    from fno.agents.registry import (
+        AgentResolutionError,
+        TERMINAL_STATUSES,
+        resolve_agent,
+        update_registry,
+    )
+
+    try:
+        target_name = resolve_agent(handle).entry.name
+    except AgentResolutionError as exc:
+        raise CrownPromotionError(str(exc)) from exc
+
+    receipt: dict[str, Any] = {}
+
+    def _stamp(rows: list) -> list:
+        target = next((row for row in rows if row.name == target_name), None)
+        if target is None:
+            raise CrownPromotionError(
+                f"no agent matching {handle!r}; the target disappeared before the grant committed"
+            )
+        if target.status in TERMINAL_STATUSES:
+            raise CrownPromotionError(
+                f"refusing to crown {target.name!r}: target status {target.status!r} is terminal"
+            )
+        if any(
+            value is not None
+            for value in (target.crown_level, target.crown_scope, target.crown_grantor)
+        ):
+            raise CrownPromotionError(
+                f"refusing to crown {target.name!r}: it already holds "
+                f"{target.crown_label or 'crown metadata'}"
+            )
+
+        holder = next(
+            (
+                row
+                for row in rows
+                if row.name != target.name
+                and row.status not in TERMINAL_STATUSES
+                and _same_territory(row.crown_scope, scope)
+            ),
+            None,
+        )
+        if holder is not None:
+            raise CrownPromotionError(
+                f"refusing to crown {target.name!r}: scope {scope!r} is already held "
+                f"by live row {holder.name!r}"
+            )
+
+        for index, row in enumerate(rows):
+            if row.name == target.name:
+                rows[index] = replace(
+                    row,
+                    crown_level=level,
+                    crown_scope=scope,
+                    crown_grantor="human",
+                )
+                break
+        receipt.update(
+            crowned=target.name,
+            level=level,
+            scope=scope,
+            grantor="human",
+        )
+        return rows
+
+    update_registry(_stamp)
+    return receipt
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
