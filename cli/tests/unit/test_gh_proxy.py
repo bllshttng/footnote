@@ -46,6 +46,17 @@ def test_install_backs_up_an_unrelated_existing_wrapper(tmp_path):
     assert os.access(proxy, os.X_OK)
 
 
+def test_missing_gh_fails_before_loading_configured_proxy_path(monkeypatch):
+    def path_must_not_load():
+        raise AssertionError("configured paths loaded before gh existence check")
+
+    monkeypatch.setattr(
+        "fno.setup.github_cli.github_cli_proxy_dir", path_must_not_load
+    )
+    with pytest.raises(FileNotFoundError, match="real gh executable not found"):
+        ensure_proxy(which=lambda _: None)
+
+
 def test_worker_environment_prepends_proxy_and_pins_delegate(tmp_path, monkeypatch):
     real = tmp_path / "real-gh"
     real.write_text("real")

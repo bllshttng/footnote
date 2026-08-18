@@ -22,7 +22,10 @@ from typer.testing import CliRunner
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(monkeypatch: pytest.MonkeyPatch) -> CliRunner:
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment", lambda base: dict(base)
+    )
     return CliRunner()
 
 
