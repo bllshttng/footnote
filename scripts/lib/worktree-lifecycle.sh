@@ -78,24 +78,40 @@ _wt_app_owned() {
 # worktree - never count as "rooted here". The pgrep lane still catches bg
 # processes carrying the path in argv.
 _wt_pids() {
-    local wt="$1" pids="" pids_f="" re
+    local wt="$1" pids="" pids_f="" re candidates
     if command -v lsof >/dev/null 2>&1; then
         pids="$(lsof -a -d cwd +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
     fi
     re="$(printf '%s' "$wt" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
     pids_f="$(pgrep -f -- "$re" 2>/dev/null || true)"
-    # Drop our own PID and any live pid running the sweep/archive tooling: a
-    # concurrent sweep carries the worktree path in its argv (a different PGID,
-    # so pgrep -f matches it), and it is our own machinery, never a squatter.
+    # Drop our own PID: a concurrent sweep carries the worktree path in its
+    # argv (a different PGID, so pgrep -f matches it too), and its own
+    # machinery is filtered below, never treated as a squatter.
     # `|| true`: a mid-pipeline `grep -v` with no match exits 1, which pipefail
     # would surface as the function's status even though the pids printed fine.
-    printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u \
-        | while IFS= read -r pid; do
-            case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-                *archive-worktree.sh*|*worktree-lifecycle.sh*) continue ;;
-            esac
-            printf '%s\n' "$pid"
-        done || true
+    candidates="$(printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
+    [[ -z "$candidates" ]] && return 0
+    # One process-table snapshot for the whole candidate set, not one `ps`
+    # subprocess per pid: a concurrent sweep's own argv carries every
+    # worktree path (see the lock comment above), so candidates scale with
+    # the number of overlapping sweeps and a per-pid `ps` turned that into
+    # N sweeps x 49 worktrees x N matches.
+    awk '
+        FNR==NR {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            pid = $1
+            sub("^" pid "[ \t]+", "", line)
+            cmdbypid[pid] = line
+            next
+        }
+        {
+            pid = $1
+            cmd = (pid in cmdbypid) ? cmdbypid[pid] : ""
+            if (cmd ~ /archive-worktree\.sh/ || cmd ~ /worktree-lifecycle\.sh/) next
+            print pid
+        }
+    ' <(ps -Ao pid=,command= 2>/dev/null) <(printf '%s\n' "$candidates")
 }
 
 # Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
@@ -201,6 +217,62 @@ case "${1:-status}" in
         done
 
         MAIN_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+
+        # --- mutual exclusion --------------------------------------------------
+        # A sweep is idempotent read-only-ish work (the --merged path only mutates
+        # on --apply) that gains nothing from overlapping with another sweep - and
+        # a concurrent sweep's own subprocesses carry every worktree path in their
+        # argv, which _wt_pids' pgrep then matches, turning N overlapping sweeps
+        # into an N-squared subprocess storm (measured: load 570, 159 chained
+        # sweep processes, 2026-08-17). One sweep at a time removes that term
+        # outright. Portable mkdir lock (atomic on every POSIX filesystem) so
+        # there's no flock dependency; the status) case is never wrapped in this,
+        # it stays a fast, always-answering read.
+        _GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null)"
+        case "$_GIT_COMMON_DIR" in
+            /*) ;;
+            *) _GIT_COMMON_DIR="$MAIN_DIR/$_GIT_COMMON_DIR" ;;
+        esac
+        _WT_SWEEP_LOCK="$_GIT_COMMON_DIR/fno-wt-sweep.lock"
+        _wt_lock_acquired=""
+        for _wt_lock_attempt in 1 2 3 4 5; do
+            if mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
+                _wt_lock_acquired=1
+                break
+            fi
+            _held_pid="$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true)"
+            if [[ -n "$_held_pid" ]]; then
+                if kill -0 "$_held_pid" 2>/dev/null; then
+                    echo "worktree cleanup: another sweep (pid $_held_pid) is already running; exiting (sweeps are idempotent, no need to overlap)" >&2
+                    exit 0
+                fi
+                # Stamped but dead: genuinely stale, reclaim it. rmdir only
+                # succeeds on an empty dir, so a concurrent reclaimer that
+                # wins the race makes ours fail here - loop and re-check
+                # rather than mkdir blindly over a peer that just won.
+                unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
+                if rmdir "$_WT_SWEEP_LOCK" 2>/dev/null && mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
+                    _wt_lock_acquired=1
+                    break
+                fi
+                continue
+            fi
+            # Dir exists but carries no pid yet: a peer may be mid-acquire
+            # (mkdir succeeded, the pid write hasn't landed). Reclaiming this
+            # unconditionally is the exact race that let two sweeps both
+            # believe they held the lock - wait briefly instead of tearing
+            # down a hold that never went stale.
+            sleep 0.2
+        done
+        if [[ -z "$_wt_lock_acquired" ]]; then
+            echo "worktree cleanup: could not acquire sweep lock after retries; exiting" >&2
+            exit 0
+        fi
+        echo $$ > "$_WT_SWEEP_LOCK/pid"
+        # Only tear down the lock if it still names us - a lock reclaimed
+        # from a dead holder, or freshly acquired, must never be removed out
+        # from under a different process that has since taken it over.
+        trap '[[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
 
         # --- merged mode: reap worktrees whose branch already landed ---------
         if [[ -n "$MERGED" ]]; then
