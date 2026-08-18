@@ -21,6 +21,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+REAL_GIT="$(command -v git)"
 PREFLIGHT_SRC="$REPO_ROOT/scripts/ci/preflight.sh"
 # The fixture's preflight falls back to bare python3, whose only route to the
 # fno package is this path; the smoke runner exports it for its steps, so a
@@ -119,6 +120,17 @@ if [[ $rc -eq 0 && "${PREFLIGHT_TEST_SIGNAL_LOCK:-0}" == "1" \
 fi
 exit "$rc"
 EOF
+cat > "$BIN/git" <<EOF
+#!/usr/bin/env bash
+if [[ -n "\${PREFLIGHT_TEST_REAP_LOG:-}" && " \$* " == *" worktree remove --force "* ]]; then
+    target="\${!#}"
+    sha="\${target##*/}"
+    lock="\${PREFLIGHT_TEST_LOCK_ROOT:-}/\$sha.d/holder"
+    grep -q ' role=pool-reaper$' "\$lock" 2>/dev/null || { echo "pool reap removed \$sha without its own execution-lock reservation" >&2; exit 91; }
+    printf '%s\n' "\$sha" >> "\$PREFLIGHT_TEST_REAP_LOG"
+fi
+exec "$REAL_GIT" "\$@"
+EOF
 # preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
 # behave like the retired smoke.sh stub (red iff POISON is checked out).
 # The changed packet is a distinct invocation (--changed) and must be stubbable
@@ -137,7 +149,7 @@ esac
 if [[ -f POISON ]]; then echo "smoke: POISON step failed"; exit 1; fi
 echo "smoke: all green (stub)"; exit 0
 EOF
-chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/mkdir" "$BIN/uv"
+chmod +x "$BIN/fno" "$BIN/cargo" "$BIN/cargo-audit" "$BIN/rustup" "$BIN/mkdir" "$BIN/git" "$BIN/uv"
 export PATH="$BIN:$PATH"
 
 # --- build the fixture repo -------------------------------------------------
@@ -350,8 +362,11 @@ printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$active_sha" > "$LOCK_ROOT/$ac
 touch -t 202001010000 "$FIX/.git/.preflight-pool.d/$victim_sha.used"
 touch -t 202101010000 "$FIX/.git/.preflight-pool.d/$active_sha.used"
 touch -t 202201010000 "$FIX/.git/.preflight-pool.d/$survivor_sha.used"
-out="$(PREFLIGHT_POOL_SIZE=3 run_pf --force 2>&1)"; rc=$?
+REAP_LOG="$TMP/reap-reservations.log"; : > "$REAP_LOG"
+out="$(PREFLIGHT_POOL_SIZE=3 PREFLIGHT_TEST_REAP_LOG="$REAP_LOG" PREFLIGHT_TEST_LOCK_ROOT="$LOCK_ROOT" run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "new SHA runs after reaping one inactive slot" || fail "safe reap run rc=$rc: $out"
+grep -xF "$victim_sha" "$REAP_LOG" >/dev/null \
+    && ok "the reaper reserved the victim execution lock before removal" || fail "missing victim reservation for $victim_sha"
 git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$active_sha" >/dev/null \
     && ok "the active slot survived" || fail "active slot was reaped"
 git -C "$FIX" worktree list --porcelain | grep -xF "worktree $POOL_ROOT/$victim_sha" >/dev/null \
