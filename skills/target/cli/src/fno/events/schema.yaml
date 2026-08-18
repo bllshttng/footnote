@@ -3175,7 +3175,7 @@ event_types:
           description: "Wall-clock seconds from tick entry to this record."
         phase:
           type: string
-          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, catchup."
+          description: "Last stage marker reached: one of entry, settings, lock, discover, sweep, dispatch, recovery, watchdog, catchup."
         sweep_failures:
           type: integer
           description: "Repo listing failures (present when a sweep ran)."

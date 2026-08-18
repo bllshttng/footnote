@@ -1250,6 +1250,23 @@ def _valid_status(value: Any) -> bool:
     return value is not None
 
 
+def _row_label(row: Any, index: int) -> str:
+    """Name a row in a warning by something that survives filtering.
+
+    A bare position stopped being a usable pointer once these two enumerators
+    walked different lists: `claude_agents_rows` filters interactive rows out,
+    so position 0 here is position 2 there, and a drift warning whose whole
+    job is aiming an investigation at one record aimed it at another. The
+    session id is the row's own identity and moves with it.
+    """
+    if isinstance(row, dict):
+        for key in ("sessionId", "id", "short_id", "name"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"row {value.strip()}"
+    return f"row at non-interactive position {index}"
+
+
 def claude_agents_rows(
     timeout: float = _AGENTS_JSON_TIMEOUT_DEFAULT,
 ) -> tuple[list[dict], list[str]]:
@@ -1345,7 +1362,7 @@ def claude_agents_rows(
     warnings: list[str] = []
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
-            warnings.append(f"claude agents --json row {index} is not an object; skipped")
+            warnings.append(f"claude agents --json {_row_label(row, index)} is not an object; skipped")
             continue
         if row.get("kind") == "interactive":
             continue
@@ -1401,17 +1418,21 @@ def claude_agents_json(
         short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
         if short_id is None:
             warnings.append(
-                f"claude agents --json row {index} has no usable short id "
+                f"claude agents --json {_row_label(row, index)} has no usable short id "
                 f"under any of {list(_SHORT_ID_KEYS)}; skipped"
             )
             continue
         if id_warning:
-            warnings.append(f"claude agents --json row {index} short id {id_warning}")
+            warnings.append(
+                f"claude agents --json {_row_label(row, index)} short id {id_warning}"
+            )
         live_status, status_warning = _alias_value(
             row, _STATUS_KEYS, _valid_status, normalize=_normalize_live_status
         )
         if status_warning:
-            warnings.append(f"claude agents --json row {index} status {status_warning}")
+            warnings.append(
+                f"claude agents --json {_row_label(row, index)} status {status_warning}"
+            )
         # The isinstance guard short-circuits before the frozenset lookup: a
         # non-string status (dict/list under drift) is itself unrecognized, and
         # hashing it here would raise TypeError out of a best-effort probe.
@@ -1419,7 +1440,7 @@ def claude_agents_json(
             not isinstance(live_status, str) or live_status not in KNOWN_LIVE_STATUSES
         ):
             warnings.append(
-                f"claude agents --json row {index} has unrecognized status="
+                f"claude agents --json {_row_label(row, index)} has unrecognized status="
                 f"{live_status!r} (expected one of {sorted(KNOWN_LIVE_STATUSES)}); "
                 "passing through unchanged"
             )

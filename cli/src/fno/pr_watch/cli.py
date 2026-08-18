@@ -210,6 +210,16 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
+#: A roster probe needs at least this much budget to be worth starting. The
+#: probe measured 3.4s on a 43-row fleet, so anything under this buys a
+#: certain timeout rather than a smaller answer.
+_ROSTER_FLOOR_S = 8.0
+
+
+class _WatchdogBudgetSpent(Exception):
+    """The tick has too little left to sweep. Not a failure of the sweep."""
+
+
 #: A wake apply needs this much tick left before it may start: `fno
 #: agents resume` waits up to 180s and the landing confirmation polls
 #: after it. Starting one with less is how the watchdog leg eats the
@@ -426,9 +436,18 @@ def tick() -> None:
                 # later leg, so this lane spends at most half of what is
                 # left rather than its own standalone budget.
                 left = deadline - (time.monotonic() - started)
-                payload, rows = _wd.run_sweep(
-                    now_s=now, roster_timeout=max(1.0, left / 2)
-                )
+                budget = left / 2
+                if budget < _ROSTER_FLOOR_S:
+                    # A budget under the probe's measured cost does not buy a
+                    # smaller answer, it buys a guaranteed timeout: zero rows,
+                    # a refusal that blames the instrument, and a sweep file
+                    # withheld. Skipping says the same thing honestly and
+                    # costs the fleet nothing - the next tick sweeps.
+                    raise _WatchdogBudgetSpent(
+                        f"{budget:.1f}s left, under the {_ROSTER_FLOOR_S:.0f}s "
+                        f"a roster probe costs"
+                    )
+                payload, rows = _wd.run_sweep(now_s=now, roster_timeout=budget)
                 # Read BEFORE any write and defaulted here: the refused branch
                 # writes nothing, and an unbound read after the if/else crashed
                 # every refused tick into the outer except.
@@ -514,6 +533,8 @@ def tick() -> None:
                     f"{k}={v}" for k, v in sorted(payload["counts"].items())
                 )
                 typer.echo(f"watchdog sweep: {counts} acted={acted}")
+            except _WatchdogBudgetSpent as exc:
+                log.info("pr-watch: watchdog leg skipped: %s", exc)
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
                 log.warning("pr-watch: watchdog sweep failed: %s", exc)
 

@@ -2746,7 +2746,6 @@ def cmd_watchdog(
                 "watchdog_verdict",
                 {"row_id": v.row_id, "name": v.name,
                  "verdict": v.verdict, "basis": v.basis},
-                source="cli",
             )
 
     if not apply and not apply_all:
@@ -2797,7 +2796,6 @@ def cmd_watchdog(
                 "watchdog_applied" if outcome == "applied" else "watchdog_refused",
                 {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
                  "outcome": outcome},
-                source="cli",
             )
     if json_out:
         sys.stdout.write(json.dumps({"results": results}) + "\n")

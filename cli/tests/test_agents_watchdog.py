@@ -1439,6 +1439,28 @@ def test_a_terminal_row_occupies_no_worktree():
         nodes={"x-done": {"status": "done"}},
     )
     assert vs[0].verdict == REAP, vs[0].basis
+    # And the TERMINAL row's own verdict, which is the half that bites: it
+    # was never counted, so subtracting it anyway cancelled its live sibling
+    # and handed it a reap on the tree that sibling is working in.
+    assert vs[1].verdict != REAP, vs[1].basis
+
+    # The live sibling being BUSY changes nothing: reap deletes the tree, not
+    # the session, so the quiet row must still refuse.
+    busy = [
+        Row("aaaa1111-0000", "live", "working", "x-done", "/wt/one"),
+        Row("bbbb2222-0000", "finished", "stopped", "x-done", "/wt/one"),
+    ]
+    vs_busy = _run(
+        busy,
+        {
+            "aaaa1111-0000": _facts("still going", age_min=1),
+            "bbbb2222-0000": _facts("done", age_min=120),
+        },
+        nodes={"x-done": {"status": "done"}},
+    )
+    assert vs_busy[1].verdict == STALE, vs_busy[1].basis
+    assert "share /wt/one" in vs_busy[1].basis
+
     # An unknown (non-terminal) state still protects the tree.
     rows[1] = rows[1]._replace(state="quiescing")
     vs = _run(
@@ -1467,3 +1489,21 @@ def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
         agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
                                 only=None, mail_to=None)
     assert "timed out after 30.0s" in err.getvalue()
+
+
+def test_a_watchdog_event_uses_a_source_the_schema_accepts(tmp_path, monkeypatch):
+    """A source outside the envelope enum raised inside _build, and the
+    swallow turned that into the whole manual lane writing NOTHING while
+    every receipt still read normally. The event has to actually land."""
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    watchdog.emit_event(
+        "watchdog_verdict",
+        {"row_id": "aaaa1111-0000", "name": "w1", "verdict": WAKE, "basis": "b"},
+    )
+    written = (tmp_path / "events.jsonl")
+    assert written.exists(), "the event was swallowed, not written"
+    record = json.loads(written.read_text().splitlines()[-1])
+    assert record["type"] == "watchdog_verdict"
+    assert record["source"] == "daemon"

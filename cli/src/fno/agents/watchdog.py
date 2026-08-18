@@ -28,6 +28,7 @@ Two traps a stranger inherits (both measured by hand on 2026-08-15):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import time
@@ -228,6 +229,17 @@ def verdicts(
     # completed rows made every tree that ever hosted a respawn read as
     # shared for good, which silently retired the reap lane instead of
     # narrowing it.
+    def _cotenants(counts: Counter, row: Row) -> int:
+        # Subtract this row ONLY if it was counted. A terminal row was
+        # never in the tally, so an unconditional -1 cancels a LIVE
+        # sibling and hands the quiet terminal row a reap on a tree
+        # somebody is working in - the exact deletion this guard exists
+        # to refuse, reintroduced by the arithmetic that narrowed it.
+        if not row.cwd:
+            return 0
+        mine = 0 if row.state in _TERMINAL_STATES else 1
+        return max(0, counts[row.cwd] - mine)
+
     occupants = Counter(
         row.cwd for row in rows
         if row.cwd and row.state not in _TERMINAL_STATES
@@ -242,7 +254,7 @@ def verdicts(
                 node_state_for=node_state_for,
                 now_s=now_s,
                 quiet_after_s=quiet_after_s,
-                cotenants=max(0, occupants[row.cwd] - 1) if row.cwd else 0,
+                cotenants=_cotenants(occupants, row),
             )
         )
     return out
@@ -830,23 +842,33 @@ def run_sweep(
     return payload, rows
 
 
-def emit_event(kind: str, data: dict, *, source: str = "daemon") -> None:
+def emit_event(kind: str, data: dict) -> None:
     """Best-effort schema-validated event on the global events.jsonl (the same
     path the pr_watch tick writes). A miss is swallowed: telemetry never breaks
     a sweep.
 
-    ``source`` names the cadence. The sweep FILE already distinguishes a tick
-    from a hand-run sweep, and staleness is read off that distinction, so an
-    event stream that calls both "daemon" cannot corroborate it."""
+    The source is ``daemon`` for both cadences because that is what the
+    envelope enum and this type's own ``sources`` list allow. Passing a word
+    outside them raised inside ``_build``, and the swallow below turned that
+    into every manual-lane event silently never being written - a whole lane
+    of telemetry gone with nothing said. Distinguishing tick from hand-run
+    belongs in a schema change, not in a value the schema rejects; the sweep
+    file already carries that distinction and staleness is read off it.
+
+    So the swallow is loud now. It still cannot break a sweep, but a miss
+    that means "this lane writes nothing at all" must not look like silence.
+    """
     try:
         from fno import paths
         from fno.events import _build, append_event
 
         append_event(
-            _build(kind, source, data), paths.state_dir() / "events.jsonl"
+            _build(kind, "daemon", data), paths.state_dir() / "events.jsonl"
         )
-    except Exception:  # noqa: BLE001 - telemetry must never break the sweep
-        pass
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break the sweep
+        logging.getLogger(__name__).warning(
+            "watchdog: event %s not written: %s", kind, exc
+        )
 
 
 def sweep_path() -> Path:
