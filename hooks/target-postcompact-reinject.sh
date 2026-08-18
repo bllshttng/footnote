@@ -26,19 +26,18 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_
 GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 
-# Read the hook event. SessionStart carries a "source" field; "compact" is the
-# value the harness sets after a compaction. PostCompact (Codex) has no such
-# field, so SOURCE is empty there. Guard the read: a bare `cat` on a terminal
-# blocks forever when the script is run by hand for debugging.
-INPUT=""
-[[ -t 0 ]] || INPUT="$(cat 2>/dev/null || true)"
-SOURCE="$(printf '%s' "$INPUT" | python3 -c '
-import json, sys
-try:
-    print(json.load(sys.stdin).get("source") or "")
-except Exception:
-    print("")
-' 2>/dev/null || true)"
+# Event read, carrier choice, and payload emission all come from the shared lib
+# (keyed on the harness, never the event payload - the reasoning is in the lib).
+# An unreadable lib means a broken plugin install; emit nothing rather than guess.
+[[ -r "$CARRIER_LIB" ]] || exit 0
+# shellcheck source=../scripts/lib/postcompact-carrier.sh
+source "$CARRIER_LIB"
+
+# SessionStart carries a "source" field; "compact" is the value the harness
+# sets after a compaction. PostCompact (Codex) has no such field, so SOURCE is
+# empty there.
+EVENT="$(postcompact_read_event)"
+SOURCE="$(printf '%s' "$EVENT" | sed -n 1p)"
 
 # Defensive gate: on SessionStart, reinject only for compaction. The matcher
 # ("compact") already enforces this at registration; this check keeps the script
@@ -48,12 +47,6 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
     exit 0
 fi
 
-# Carrier selection and payload emission come from the shared lib: keyed on the
-# harness, never on the event payload (the reasoning is documented in the lib).
-# An unreadable lib means a broken plugin install; emit nothing rather than guess.
-[[ -r "$CARRIER_LIB" ]] || exit 0
-# shellcheck source=../scripts/lib/postcompact-carrier.sh
-source "$CARRIER_LIB"
 CARRIER="$(postcompact_carrier "$SOURCE")"
 
 # Guard (c) re-surface: if a handoff was armed pre-compaction (by

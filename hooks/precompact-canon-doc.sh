@@ -21,6 +21,9 @@ set -uo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 FNO_DIR=".fno"
+# The session-id fallback chain lives in the shared postcompact lib so a marker
+# change lands once. Unreadable lib: keep the local chain quiet, never fail.
+CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 
 # ---------------------------------------------------------------------------
 # Read the hook event from stdin (non-fatal if absent).
@@ -42,20 +45,24 @@ except Exception:
 }
 
 # ---------------------------------------------------------------------------
-# Resolve the session id. PreCompact carries transcript_path (its basename is
-# the session id); fall back to the ambient env id.
+# Resolve the session id through the shared postcompact lib: transcript
+# basename first (PreCompact carries transcript_path), then the env markers in
+# HARNESS_SESSION_MARKERS precedence. No session id -> nothing useful to point
+# at; emit nothing, exit clean.
 # ---------------------------------------------------------------------------
-SID=""
 _tp="$(_json_field transcript_path)"
-if [[ -n "$_tp" ]]; then
-  SID="$(basename "$_tp")"
-  SID="${SID%.jsonl}"
-fi
-if [[ -z "$SID" ]]; then
-  # CODEX_THREAD_ID first (codex's durable identity, per HARNESS_SESSION_MARKERS
-  # and docs/harnesses/codex.md); the registry row's harness_session_id holds
-  # the thread id, so any other codex env id matches no row.
-  SID="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+if [[ -r "$CARRIER_LIB" ]]; then
+  # shellcheck source=../scripts/lib/postcompact-carrier.sh
+  source "$CARRIER_LIB"
+  SID="$(postcompact_resolve_sid "" "$_tp")"
+else
+  # Unreadable lib: degrade to the transcript basename only (the claude path;
+  # PreCompact always carries it there) rather than duplicating the chain.
+  SID=""
+  if [[ -n "$_tp" ]]; then
+    SID="$(basename "$_tp")"
+    SID="${SID%.jsonl}"
+  fi
 fi
 # No session id -> nothing useful to point at. Emit nothing, exit clean.
 [[ -n "$SID" ]] || exit 0

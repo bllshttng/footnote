@@ -27,20 +27,8 @@ BRIEF="$PLUGIN_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
 # shellcheck source=../scripts/lib/postcompact-carrier.sh
 source "$CARRIER_LIB"
 
-# Read the hook event (guarded: a bare `cat` on a terminal blocks forever).
-INPUT=""
-[[ -t 0 ]] || INPUT="$(cat 2>/dev/null || true)"
-# One python pass for source + session_id + transcript_path.
-EVENT="$(printf '%s' "$INPUT" | python3 -c '
-import json, sys
-try:
-    e = json.load(sys.stdin)
-    print(e.get("source") or "")
-    print(e.get("session_id") or "")
-    print(e.get("transcript_path") or "")
-except Exception:
-    pass
-' 2>/dev/null || true)"
+# Read the hook event through the shared lib (TTY-guarded; one python pass).
+EVENT="$(postcompact_read_event)"
 SOURCE="$(printf '%s' "$EVENT" | sed -n 1p)"
 SID="$(printf '%s' "$EVENT" | sed -n 2p)"
 TRANSCRIPT="$(printf '%s' "$EVENT" | sed -n 3p)"
@@ -53,15 +41,9 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
     exit 0
 fi
 
-# Session id: PostCompact (Codex) carries no session_id field, so fall back to
-# the transcript basename, then the ambient env markers in HARNESS_SESSION_MARKERS
-# precedence (CODEX_THREAD_ID is codex's durable identity; the registry row's
-# harness_session_id holds the codex thread id, so anything else matches no row).
-if [[ -z "$SID" && -n "$TRANSCRIPT" ]]; then
-    SID="$(basename "$TRANSCRIPT")"
-    SID="${SID%.jsonl}"
-fi
-[[ -n "$SID" ]] || SID="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+# Session id through the shared resolver: event field, then transcript
+# basename, then the env markers in HARNESS_SESSION_MARKERS precedence.
+SID="$(postcompact_resolve_sid "$SID" "$TRANSCRIPT")"
 [[ -n "$SID" ]] || exit 0
 
 # The brief, checked before the registry read: it is a pure file stat, and the

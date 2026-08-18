@@ -489,13 +489,21 @@ def test_observer_expected_lists_match_their_group_source_ids() -> None:
                 for hook in entry.get("hooks", []):
                     command = hook.get("command", "")
                     source = re.search(r"--source-id (\S+)", command)
-                    expected = re.search(r"--expected (\S+?)(?= --)", command)
+                    expected = re.search(r"--expected (\S+)", command)
                     if not (source and expected):
                         continue
                     source_ids.append(source.group(1))
                     expected_lists.append(expected.group(1))
                 if not source_ids:
                     continue
+                # Every observer-wrapped command in the group must declare the
+                # list at all: a missing --expected would otherwise pass
+                # vacuously (nothing to compare) while the census drifts.
+                assert len(expected_lists) == len(source_ids), (
+                    f"{path.name} {event} matcher={entry.get('matcher', '')!r}: "
+                    f"{len(source_ids) - len(expected_lists)} observer command(s) "
+                    "carry --source-id without --expected"
+                )
                 registration = set(source_ids)
                 for expected in expected_lists:
                     assert set(expected.split(",")) == registration, (

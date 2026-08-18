@@ -43,3 +43,37 @@ else:
 print(json.dumps(payload))
 " "$1" "$2" 2>/dev/null
 }
+
+# postcompact_read_event - read the hook event from stdin (TTY-guarded: a bare
+# `cat` on a terminal blocks forever when run by hand) and echo three lines:
+# source, session_id, transcript_path ("" each when absent).
+postcompact_read_event() {
+    local input=""
+    [[ -t 0 ]] || input="$(cat 2>/dev/null || true)"
+    printf '%s' "$input" | python3 -c '
+import json, sys
+try:
+    e = json.load(sys.stdin)
+except Exception:
+    e = {}
+for k in ("source", "session_id", "transcript_path"):
+    print(e.get(k) or "")
+' 2>/dev/null
+}
+
+# postcompact_resolve_sid EVENT_SID TRANSCRIPT - echo this session's id.
+# $1: session_id from the event (claude carries it; codex PostCompact does not).
+# $2: transcript_path from the event (its basename is the claude session id).
+# Env fallbacks follow HARNESS_SESSION_MARKERS precedence: CODEX_THREAD_ID is
+# codex's durable identity and the value the registry row's harness_session_id
+# holds, so any other codex env id matches no row. One home for the chain, so
+# the next marker change lands once instead of per hook.
+postcompact_resolve_sid() {
+    local sid="${1:-}" transcript="${2:-}"
+    if [[ -z "$sid" && -n "$transcript" ]]; then
+        sid="$(basename "$transcript")"
+        sid="${sid%.jsonl}"
+    fi
+    [[ -n "$sid" ]] || sid="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+    printf '%s' "$sid"
+}
