@@ -192,4 +192,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.interval_secs` | int | `5` | advanced | Seconds between status-fanout ticks per project (daemon host). |
 | `status_fanout.http_timeout_secs` | int | `5` | advanced | Bounded per-webhook HTTP timeout for a status sink. |
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
+| `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
+| `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |

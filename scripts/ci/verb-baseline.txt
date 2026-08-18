@@ -80,6 +80,9 @@ event emit
 executor
 fno-agents
 help
+king board
+king escalate
+king init
 lint
 loops
 loops resume-all

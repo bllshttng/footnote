@@ -161,7 +161,8 @@ crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
 crates/fno-agents/src/lib.rs:12
 crates/fno-agents/src/loop_dispatch.rs:6
-crates/fno-agents/src/loopcheck.rs:60
+crates/fno-agents/src/loop_king.rs:1
+crates/fno-agents/src/loopcheck.rs:62
 crates/fno-agents/src/manifest.rs:2
 crates/fno-agents/src/needs.rs:1
 crates/fno-agents/src/nudge.rs:1

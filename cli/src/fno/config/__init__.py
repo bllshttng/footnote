@@ -3235,6 +3235,22 @@ class ContextBlock(BaseModel):
     artifacts: dict[str, ArtifactConfig] = Field(default_factory=dict)
 
 
+class KingBlock(BaseModel):
+    """The king loop (nested under 'config.king').
+
+    Both keys default OFF. ``enabled`` arms the loop that holds a king session
+    open while its board names work it can shrink. ``autonomous_merge`` is
+    separate and stricter: merging is outward and hard to reverse, so a
+    mergeable PR is reported to the king and never counted as its work until an
+    operator opts in.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    autonomous_merge: bool = False
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -3293,6 +3309,7 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
+    king: KingBlock = Field(default_factory=KingBlock)
 
     @field_validator("status_sinks", mode="before")
     @classmethod

@@ -443,6 +443,9 @@ FIELD_META: dict[str, Meta] = {
     "status_fanout.interval_secs": Meta("advanced", "Seconds between status-fanout ticks per project (daemon host)."),
     "status_fanout.http_timeout_secs": Meta("advanced", "Bounded per-webhook HTTP timeout for a status sink."),
     "status_fanout.retries": Meta("advanced", "Retry budget per webhook dispatch before drop/short-circuit."),
+    # --- config.king.* (the king loop; both default false) ---
+    "king.enabled": Meta("advanced", "Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false."),
+    "king.autonomous_merge": Meta("advanced", "Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work."),
 }
 
 

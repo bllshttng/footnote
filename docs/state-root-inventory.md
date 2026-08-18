@@ -113,3 +113,16 @@ Leave them. The finding is the cwd fallback, not the directories it produced. `.
 2. Add the accessor to `cli/src/fno/paths.py` so the location follows `config.state_dir`. When a bash caller needs it, export it from `cli/src/fno/setup/emit_shell.py`, then regenerate `scripts/lib/paths.sh`.
 3. Name the deleter. Ephemeral state gets its lifetime in the code that writes it, not in a separate janitor. A janitor drifts from the writer and goes unrun. `scripts/prune-fno-dir.sh` was deleted for exactly that: never once invoked, while every file on its delete list sat in the root.
 4. Add a row above.
+
+## Project-relative session manifests
+
+Not state-root writers, listed here because they are the other family of session-keyed files an operator finds and cannot attribute.
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno target init` | write-once per target session; archived on a terminal |
+| `.fno/king-state.md` | `cli/src/fno/king/state.py` via `fno king init` | write-once per king session; deleted when the crown expires |
+
+Both are write-once after init. Both gate a stop hook.
+
+A king runs in the canonical checkout. A target manifest can sit there too. So the king gets its own file rather than a `driver:` field on the target one. A manifest whose name says target and whose contents say king is how two sessions come to share one discriminator.

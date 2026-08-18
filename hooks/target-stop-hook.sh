@@ -83,13 +83,46 @@ else
 fi
 DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
+
+# Second candidate: a king session. Its manifest is a separate file because a
+# king runs in the canonical checkout where a target manifest may also exist,
+# and the target manifest wins when both are present: a session holding one is
+# a worker, whatever else is on disk beside it. Checked only after the target
+# search comes up empty, so nothing about a worker's path changes.
+KING_STATE_FILE=".fno/king-state.md"
+DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
-    exit 0
+    # Presence is NOT ownership. Kings run in the canonical checkout, which is
+    # where every ordinary session also runs, and nothing deletes this manifest
+    # when a king dies. Gating on the file alone therefore held every later
+    # claude session in the repo open until the board was clean, for people who
+    # never crowned anything, permanently.
+    #
+    # So the manifest must NAME this session. An id that is missing on either
+    # side proves nothing, and the safe reading of "cannot prove it" is to let
+    # the session go: a stale manifest outliving its king must not capture a
+    # stranger. `fno king init` refuses to write an unattributable manifest, so
+    # a real king always has an id to match.
+    KING_HARNESS_ID=""
+    if [[ -f "$KING_STATE_FILE" ]]; then
+        KING_HARNESS_ID=$(grep -E '^harness_session_id:' "$KING_STATE_FILE" 2>/dev/null \
+            | sed -E 's/^harness_session_id:[[:space:]]*//' \
+            | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    fi
+    if [[ -n "$KING_HARNESS_ID" && -n "$HOOK_HARNESS_ID" \
+        && "$KING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
+        STATE_FILE="$KING_STATE_FILE"
+        DRIVER="king"
+    else
+        exit 0
+    fi
 fi
 
-# Active target session confirmed from here down.
-SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
-    | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+# Active session confirmed from here down. A king manifest carries fno_id and
+# no session_id, so read both; SESSION_ID only keys the unavailable-retry
+# counter, and an empty one would collide every king with every other.
+SESSION_ID=$(grep -E '^(session_id|fno_id):' "$STATE_FILE" 2>/dev/null \
+    | head -1 | sed -E 's/^(session_id|fno_id):[[:space:]]*//' | tr -d '[:space:]' || true)
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${GEMINI_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}}"
 EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
@@ -215,6 +248,7 @@ if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
     DECISION_JSON=$("$BIN" loop-check \
+        --driver "$DRIVER" \
         --state "$STATE_FILE" \
         --transcript "$TRANSCRIPT_PATH" \
         --cwd "$PWD" \
@@ -256,7 +290,14 @@ fi
 # Run synchronously (NOT backgrounded): a backgrounded child would be SIGHUP'd
 # when the session process exits, defeating the survive-compaction goal.
 TERMINATION_REASON=$(echo "$DECISION_JSON" | jq -r '.termination_reason // empty')
-if [[ -n "$TERMINATION_REASON" ]]; then
+# A king terminal skips this whole block. `finalize` stamps a plan, graduates a
+# node, and writes a ledger row for ONE deliverable; a king has none of those,
+# and pointing it at a king manifest would have it read fields that are not
+# there. The claim release below is likewise target-shaped: a king manifest
+# carries no target_claim_key, so it would be a no-op even unguarded.
+if [[ -n "$TERMINATION_REASON" && "$DRIVER" == "king" ]]; then
+    echo "target stop-hook: king terminal ($TERMINATION_REASON); the king loop has no plan to stamp" >&2
+elif [[ -n "$TERMINATION_REASON" ]]; then
     # ── 10b. Release the node claim at a FINISHED terminal ─────────────
     # Fires BEFORE finalize on purpose: both stamp a `do` row for the same
     # session, and sessions[] is append-only (first observation wins), so the

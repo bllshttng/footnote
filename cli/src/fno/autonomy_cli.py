@@ -276,6 +276,34 @@ def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
         )
 
 
+def _king_loop_status(project_root: Optional[Path]) -> SpawnerStatus:
+    """The king loop (x-e747), the first row here that is a loop rather than a
+    trigger.
+
+    Every other row in this table is woken by an external event: a PR merge, a
+    launchd tick, a daemon tick, a node's birth. Not one sustains itself. The
+    table was the honest statement of that gap, so a king row landing in it is
+    the honest statement of the fix.
+
+    One thing this row does NOT claim. A king that terminates cleanly on an
+    empty board EXITS. Nothing here restarts it when the board refills; an
+    external watchdog owns that trigger.
+    """
+    try:
+        armed, rank = _gate_with_master(
+            project_root, lambda: _settings_for(project_root).king.enabled
+        )
+        return SpawnerStatus(
+            "king loop", "board non-empty (stop hook / loop run)",
+            "config.king.enabled", armed, rank,
+        )
+    except Exception:  # noqa: BLE001
+        return SpawnerStatus(
+            "king loop", "board non-empty (stop hook / loop run)",
+            "config.king.enabled", False, "default",
+        )
+
+
 def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
     """Resolve every known spawner's armed state through its real resolver."""
     rows = [
@@ -295,6 +323,7 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _groom_status(project_root),
         _restart_status(project_root),
         _evals_status(project_root),
+        _king_loop_status(project_root),
     ]
     return rows
 

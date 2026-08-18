@@ -374,6 +374,21 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         }
         Some("target") => {}
+        Some("king") => {
+            // The cross-session king walk was cut before it shipped. It had no
+            // working path: the resume guard closed its unit undispatched, and
+            // the one dispatch path runs `/target --resume` for every driver.
+            // Under that, nothing crowns, returns or expires a crown at all.
+            // Refusing by NAME beats a silent fallthrough to the target walk,
+            // which would run a target session against a king's manifest.
+            eprintln!(
+                "fno-agents loop run: --driver king is not available. The \
+                 cross-session king walk needs a crown lifecycle (crown, \
+                 respawn, expire) that does not exist yet. The in-session arm \
+                 (`loop-check --driver king`, via the stop hook) is unaffected."
+            );
+            return Ok(2);
+        }
         Some(other) => {
             eprintln!("fno-agents loop run: unknown --driver '{other}'; supported: 'target'");
             return Ok(2);
@@ -404,9 +419,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     };
 
     // ── preflight (all before any dispatch) ───────────────────────────────────
-    // 1. Manifest exists (exit 1 on missing).
-    let mut queue = match TargetQueue::from_manifest(&cwd) {
-        Ok(q) => q,
+    // 1. Manifest exists (exit 1 on missing). Which manifest depends on the
+    // driver: a king reads .fno/king-state.md and never touches the target one.
+    let mut target_queue = match TargetQueue::from_manifest(&cwd) {
+        Ok(q) => Some(q),
         Err(e) => {
             eprintln!("fno-agents loop run: {e}");
             return Ok(1);
@@ -511,14 +527,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // Read session_id/input from the already-constructed queue instead of
     // re-reading the manifest (which avoids the TOCTOU double-read and the
     // .unwrap().unwrap() panic path).
-    let (session_id_display, input_display) = {
-        // Peek without consuming: TargetQueue stores Option<Unit>, so we look
-        // at the inner unit via as_ref without taking it.
-        match queue.unit.as_ref() {
+    // Peek without consuming: TargetQueue stores Option<Unit>, so we look at
+    // the inner unit via as_ref without taking it.
+    let (session_id_display, input_display) =
+        match target_queue.as_ref().and_then(|q| q.unit.as_ref()) {
             Some(u) => (u.id.clone(), u.title.clone()),
             None => ("(none)".to_string(), "(none)".to_string()),
-        }
-    };
+        };
 
     // Print header. resolve_driver_binary now reflects the cli_alias (F2).
     let binary_name = resolve_driver_binary(&dispatcher_name, cli_alias.as_deref());
@@ -547,7 +562,14 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let cancel = move || SIGINT_RECEIVED.load(Ordering::SeqCst) || cancel_file.exists();
 
     // ── run the loop ──────────────────────────────────────────────────────────
-    let outcome = match run_loop(&mut queue, &dispatcher, &budget, &journal, &cancel, None) {
+    // No cap: a target unit is one deliverable and re-dispatches until it
+    // terminates. The king walk that needed a per-unit cap was cut before it
+    // shipped, and `--driver king` refuses by name above, so there is no
+    // second caller to branch for here.
+    let queue: &mut dyn Queue = target_queue
+        .as_mut()
+        .expect("the target queue is always constructed above");
+    let outcome = match run_loop(queue, &dispatcher, &budget, &journal, &cancel, None) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("fno-agents loop run: fatal loop error: {e}");

@@ -182,6 +182,42 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 **Cancel:** the cancel closure checks `SIGINT_RECEIVED` (atomic bool set by a signal handler) OR the existence of `.fno/.target-cancelled`. Either trips `Interrupted`.
 
+## The board-empty walk (king driver)
+
+A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
+
+`fno king board --json` reads six queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
+
+| Queue | Read | King can shrink it |
+|---|---|---|
+| `undispatched` | `fno backlog ready --json` + `fno claim list -J` | yes, by spawning a worker |
+| `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
+| `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
+| `stale_claim` | `fno claim list -J --include-stale` | yes, by `fno claim reap` |
+| `operator_question` | `fno outstanding --json` | no, a human answers it |
+| `unreachable_worker` | `fno agents needs --json` | not yet |
+
+The split in that last column is what makes the loop converge. A queue only a human can clear holds the loop open forever, so it is reported and never counted toward done. The rule survives a broken verb. An unreadable report-only queue is loud (the board exits non-zero) and still uncounted. A human-gated queue never gates `NoWork`, and a failed reader behind it does not weaken that.
+
+**Staffed is an activity reading, never a status word.** The roster's wire vocabulary collapses four real states into three words. A worker consuming tokens, a worker parked at its prompt, and a worker whose model refused all render alike. A board reading that word drops every stalled node out of its queue. It then terminates `NoWork` while claims are held and nothing moves, which is worse than no loop. The discriminator is membership in `_ACTIVE_STATES` plus a fresh activity age. The set is imported rather than copied, so a later vocabulary fix reaches the board without an edit here.
+
+**Progress is a positive marker, never board size.** A king's board refills while it works. Dispatching a worker and merging a PR both create future work, so the actionable count can rise on the very fire that clears a row. Progress is therefore a row IDENTITY present on the previous fire and absent now, recorded as `actionable_ids` on each `king_loop_check`. That is external truth, read back off the board, and it needs no producer. A `king_action` naming an unseen `target_id` also counts, so a real producer works the day one lands, but nothing depends on one existing. Re-emitting the same `target_id` is not progress. That matters because a `stalled_holder` row can survive the only action a king has for it. The action is a wake, and it can fail, because the holder's model is the thing that refused. Three dry fires then terminate the loop `NoProgress` with a reason naming what stayed unshrunk. That is the truthful terminal for a stalled board.
+
+**One arm, and a named hole where the second was.**
+
+- *In-session:* `hooks/target-stop-hook.sh` adds `.fno/king-state.md` as a second candidate after its target search comes up empty and forwards `--driver king`. When both are present the target manifest wins: a session holding one is a worker whatever else sits beside it. A king terminal skips `finalize`, which stamps a plan and graduates a node that a king does not have. `hooks/agy-target-stop-hook.sh` cannot gate a king, because the loop is claude-only in v1. It names the manifest and refuses rather than allowing the stop. A guard on one of two reachable paths is decorative.
+- *Cross-session:* there is none. A `KingQueue` walk arm was built and cut before it shipped. It had no working path. `run_loop`'s resume guard closed its unit without dispatching. The unit's `session_key` and the king's own termination event both used the manifest `fno_id`. It dispatched rarely, and dispatched the wrong thing. `CONTINUE_PROMPT` is hardcoded to `/target --resume` for every driver. `Unit.extra_env` is read by nothing. So the spawned session was a target resume with no idea it was a king. `fno-agents loop run --driver king` now refuses by name rather than falling through to the target walk.
+
+**A `NoProgress` terminal asks the operator, exactly once.** `NoWork` is the clean exit. `NoProgress` is different. It is the king giving up with the board still full. That is this feature's own failure arriving through a different door. Work is pending, nothing moves, and nobody is told. So every `NoProgress` terminal calls `fno king escalate --stalled <rows>`. The verb records one question in the operator queue. `king_decide` reaches NoProgress two ways: an unreadable board, and a board nothing cleared. So the call sits in the shared `terminate` closure rather than at one site. That covers a terminal added later without anyone remembering to wire it, and a guard on one of several terminals is decorative.
+
+The dedupe key is a hash of the sorted stalled row set. It is not the session and not the fire. A later king meeting the same stalled board must not file a second question. A board that CHANGED is a different ask and gets its own question. Rows are queue-qualified, as in `undispatched:<id>`. The same node in two queues is two rows, and clearing one of them is real progress. An unreadable board escalates over an empty set. The question text names that case, so the operator never has to tell "no rows" from "could not see". A failed escalation is named on stderr and folded into the termination message. It never blocks the terminal. The king stops either way, and a terminal that refused to finish because the ask failed is strictly worse.
+
+**What a clean `NoWork` terminal means, and the edge it leaves open.** It means the king EXITS. When the board refills, NOTHING restarts it. This arm is a floor under an awake king and nothing more.
+
+That edge is wider than a missing trigger. Nothing crowns a king either. The `king-for-a-day` skill never calls `fno king init`. When a king dies, nothing deletes the manifest. And a spawn can transfer a crown with no verb to return it. Crown, respawn and expire are one lifecycle and none of the three exists. A respawn arm bolted on before that lifecycle has no king to respawn, which is why the walk arm was cut rather than repaired.
+
+Gated by `config.king.enabled` (default false), visible as the `king loop` row in `fno autonomy status`. It is the first row in that table that is a loop rather than a trigger. Every other one is woken by a PR merge, a launchd tick, a daemon tick, or a node's birth.
+
 ### `done_probes`: the operational-evidence conjunct
 
 `DonePRGreen` normally conjuncts PR-exists + CI-green + review-clean + HEAD-shipped.

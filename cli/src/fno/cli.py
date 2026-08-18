@@ -65,6 +65,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Inspect every path that can start a session without an operator asking.",
         {"hidden": True},
     ),
+    "king": (
+        "fno.king.cli:king_app",
+        "The king's board and its session manifest.",
+        {"hidden": True},
+    ),
     "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
