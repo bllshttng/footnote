@@ -18,9 +18,226 @@
 //! defeats the ~1h idle auto-suspend window -- is the Phase-0 spike's job, not a
 //! code-shape concern. Nothing in this module asserts it.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
+
+const AGENTS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeAgentRow {
+    pub short_id: String,
+    pub state: Option<String>,
+}
+
+impl ClaudeAgentRow {
+    pub fn new(short_id: &str, state: Option<&str>) -> Self {
+        Self {
+            short_id: short_id.to_string(),
+            state: state.map(|value| value.to_ascii_lowercase()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeAgentsSnapshot {
+    Known {
+        rows: Vec<ClaudeAgentRow>,
+        warnings: Vec<String>,
+    },
+    Unknown {
+        rows: Vec<ClaudeAgentRow>,
+        warnings: Vec<String>,
+    },
+}
+
+impl ClaudeAgentsSnapshot {
+    pub fn known(rows: Vec<ClaudeAgentRow>) -> Self {
+        Self::Known {
+            rows,
+            warnings: Vec::new(),
+        }
+    }
+
+    pub fn unknown(reason: &str) -> Self {
+        Self::Unknown {
+            rows: Vec::new(),
+            warnings: vec![reason.to_string()],
+        }
+    }
+
+    pub fn find(&self, short_id: &str) -> Option<&ClaudeAgentRow> {
+        match self {
+            Self::Known { rows, .. } | Self::Unknown { rows, .. } => {
+                rows.iter().find(|row| row.short_id == short_id)
+            }
+        }
+    }
+
+    pub fn is_known(&self) -> bool {
+        matches!(self, Self::Known { .. })
+    }
+
+    pub fn warning_text(&self) -> String {
+        let warnings = match self {
+            Self::Known { warnings, .. } | Self::Unknown { warnings, .. } => warnings,
+        };
+        warnings.join("; ")
+    }
+}
+
+struct ClaudeCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+pub fn read_all_agents() -> ClaudeAgentsSnapshot {
+    read_all_agents_with(run_all_agents_command)
+}
+
+fn read_all_agents_with(
+    run: impl FnOnce() -> Result<ClaudeCommandOutput, String>,
+) -> ClaudeAgentsSnapshot {
+    let output = match run() {
+        Ok(output) => output,
+        Err(reason) => return ClaudeAgentsSnapshot::unknown(&reason),
+    };
+    if !output.success {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return ClaudeAgentsSnapshot::unknown(&format!(
+            "claude agents --json --all exited non-zero: {}",
+            detail.trim()
+        ));
+    }
+    parse_all_agents(&output.stdout)
+}
+
+fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
+    let parsed: serde_json::Value = match serde_json::from_slice(stdout) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return ClaudeAgentsSnapshot::unknown(&format!(
+                "claude agents --json --all parse failure: {error}"
+            ))
+        }
+    };
+    let rows = match parsed {
+        serde_json::Value::Array(rows) => rows,
+        serde_json::Value::Object(mut object) => match object.remove("agents") {
+            Some(serde_json::Value::Array(rows)) => rows,
+            _ => {
+                return ClaudeAgentsSnapshot::unknown(
+                    "claude agents --json --all response missing agents array",
+                )
+            }
+        },
+        _ => {
+            return ClaudeAgentsSnapshot::unknown(
+                "claude agents --json --all response has an unexpected shape",
+            )
+        }
+    };
+
+    let mut parsed_rows = Vec::new();
+    let mut warnings = Vec::new();
+    let mut agent_rows = 0usize;
+    for (index, row) in rows.into_iter().enumerate() {
+        let Some(object) = row.as_object() else {
+            warnings.push(format!(
+                "claude agents row {index} is not an object; skipped"
+            ));
+            continue;
+        };
+        if object.get("kind").and_then(|value| value.as_str()) == Some("interactive") {
+            continue;
+        }
+        agent_rows += 1;
+        let short_id = ["short_id", "id"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(|value| value.as_str()))
+            .filter(|value| !value.is_empty());
+        let Some(short_id) = short_id else {
+            warnings.push(format!(
+                "claude agents row {index} has no usable short id; skipped"
+            ));
+            continue;
+        };
+        let state = ["state", "status"]
+            .into_iter()
+            .find_map(|key| object.get(key).and_then(|value| value.as_str()));
+        parsed_rows.push(ClaudeAgentRow::new(short_id, state));
+    }
+    if !warnings.is_empty() {
+        if agent_rows > 0 && parsed_rows.is_empty() {
+            warnings.push(format!(
+                "0 of {agent_rows} Claude agent rows parsed; agent list is unverified"
+            ));
+        }
+        return ClaudeAgentsSnapshot::Unknown {
+            rows: parsed_rows,
+            warnings,
+        };
+    }
+    ClaudeAgentsSnapshot::Known {
+        rows: parsed_rows,
+        warnings,
+    }
+}
+
+fn run_all_agents_command() -> Result<ClaudeCommandOutput, String> {
+    let mut child = std::process::Command::new("claude")
+        .args(["agents", "--json", "--all"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("claude agents --json --all failed to start: {error}"))?;
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let deadline = std::time::Instant::now() + AGENTS_LIST_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "claude agents --json --all timed out after {}s",
+                    AGENTS_LIST_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("claude agents --json --all wait failed: {error}")),
+        }
+    };
+    let stdout = stdout
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    Ok(ClaudeCommandOutput {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
 
 /// Env override that redirects the whole Claude daemon dir (tests, and operators
 /// who run Claude with a non-default home). When unset, `$HOME/.claude/daemon`.
@@ -463,5 +680,52 @@ mod tests {
         };
         assert!(w.resolve_control_sock().is_none());
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn all_agents_reader_keeps_background_rows_and_skips_interactive() {
+        let stdout = br#"[
+          {"kind":"background","id":"aaaa1111","state":"stopped"},
+          {"kind":"interactive","name":"operator"},
+          {"kind":"background","short_id":"bbbb2222","status":"working"}
+        ]"#;
+        let snapshot = read_all_agents_with(|| {
+            Ok(ClaudeCommandOutput {
+                success: true,
+                stdout: stdout.to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+
+        let ClaudeAgentsSnapshot::Known { rows, warnings } = snapshot else {
+            panic!("valid agent JSON must be known");
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].short_id, "aaaa1111");
+        assert_eq!(rows[0].state.as_deref(), Some("stopped"));
+        assert_eq!(rows[1].short_id, "bbbb2222");
+        assert_eq!(rows[1].state.as_deref(), Some("working"));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn all_agents_timeout_is_unknown_not_successful_empty() {
+        let snapshot = read_all_agents_with(|| Err("timed out after 15s".to_string()));
+        let ClaudeAgentsSnapshot::Unknown { warnings, .. } = snapshot else {
+            panic!("a timeout must not prove an empty agent list");
+        };
+        assert!(warnings.iter().any(|warning| warning.contains("timed out")));
+    }
+
+    #[test]
+    fn all_agents_partial_parse_cannot_prove_a_row_absent() {
+        let snapshot = parse_all_agents(
+            br#"[
+              {"kind":"background","id":"aaaa1111","state":"stopped"},
+              {"kind":"background","state":"stopped"}
+            ]"#,
+        );
+        assert!(matches!(snapshot, ClaudeAgentsSnapshot::Unknown { .. }));
+        assert!(snapshot.find("aaaa1111").is_some());
     }
 }

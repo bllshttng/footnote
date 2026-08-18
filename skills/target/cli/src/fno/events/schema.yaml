@@ -1552,6 +1552,24 @@ event_types:
           type: string
         short_id:
           type: string
+        registry_removed:
+          type: boolean
+        harness:
+          type: string
+        harness_row_id:
+          type: [string, "null"]
+        harness_removed:
+          type: [boolean, "null"]
+        harness_reason:
+          type: [string, "null"]
+        pane_session:
+          type: [string, "null"]
+        pane_id:
+          type: [integer, "null"]
+        pane_removed:
+          type: [boolean, "null"]
+        pane_reason:
+          type: [string, "null"]
 
   - name: agent_inconsistent
     description: "Agent state is inconsistent (missing state.json, unexpected status, etc.)."

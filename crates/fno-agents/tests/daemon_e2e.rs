@@ -10,6 +10,7 @@ use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::Request;
 use fno_agents::state;
 use serde_json::json;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -344,6 +345,144 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
         });
     })
     .unwrap();
+}
+
+fn write_executable(path: &Path, body: &str) {
+    std::fs::write(path, body).unwrap();
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+#[tokio::test]
+async fn rm_reaps_registry_claude_and_mux_surfaces_in_one_call() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_pane_row(&home, "three-surface-worker");
+    state::update_registry(&home.registry_json(), |registry| {
+        let row = registry.find_mut("three-surface-worker").unwrap();
+        row.status = fno_agents::AgentStatus::Exited;
+        row.exited_at = None;
+    })
+    .unwrap();
+
+    let shim_dir = home.root().join("shims");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let claude_state = home.root().join("claude-row");
+    let mux_state = home.root().join("mux-pane");
+    std::fs::write(&claude_state, "e6f78b98\n").unwrap();
+    std::fs::write(&mux_state, "main:10\n").unwrap();
+    write_executable(
+        &shim_dir.join("claude"),
+        r#"#!/bin/sh
+if [ "$1" = "agents" ]; then
+  if [ -f "$CLAUDE_STATE" ]; then
+    printf '[{"kind":"background","id":"e6f78b98","state":"stopped"}]\n'
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+if [ "$1" = "rm" ] && [ "$2" = "e6f78b98" ]; then
+  /bin/rm -f "$CLAUDE_STATE"
+  exit 0
+fi
+exit 2
+"#,
+    );
+    write_executable(
+        &shim_dir.join("fno"),
+        r#"#!/bin/sh
+if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "kill" ] && \
+   [ "$4" = "--session" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
+  /bin/rm -f "$MUX_STATE"
+  exit 0
+fi
+if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "ls" ]; then
+  if [ -f "$MUX_STATE" ]; then
+    printf '[{"session":"main","pane_id":10}]\n'
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let claude_state_env = claude_state.to_string_lossy().into_owned();
+    let mux_state_env = mux_state.to_string_lossy().into_owned();
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("PATH", &path),
+            ("CLAUDE_STATE", &claude_state_env),
+            ("MUX_STATE", &mux_state_env),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+        ],
+    );
+
+    assert_eq!(
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    let pre_claude = Command::new(shim_dir.join("claude"))
+        .args(["agents", "--json", "--all"])
+        .env("CLAUDE_STATE", &claude_state_env)
+        .output()
+        .unwrap();
+    let pre_mux = Command::new(shim_dir.join("fno"))
+        .args(["mux", "pane", "ls"])
+        .env("MUX_STATE", &mux_state_env)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&pre_claude.stdout).contains("e6f78b98"));
+    assert!(String::from_utf8_lossy(&pre_mux.stdout).contains("pane_id"));
+
+    let out = Command::new(CLIENT_BIN)
+        .args(["rm", "three-surface-worker"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("rm client runs");
+    assert!(
+        out.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("fno + claude + mux"),
+        "receipt: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let post_registry = state::load_registry(&home.registry_json()).unwrap();
+    let post_claude = Command::new(shim_dir.join("claude"))
+        .args(["agents", "--json", "--all"])
+        .env("CLAUDE_STATE", &claude_state_env)
+        .output()
+        .unwrap();
+    let post_mux = Command::new(shim_dir.join("fno"))
+        .args(["mux", "pane", "ls"])
+        .env("MUX_STATE", &mux_state_env)
+        .output()
+        .unwrap();
+    assert_eq!(post_registry.entries.len(), 0, "registry row survived");
+    assert_eq!(String::from_utf8_lossy(&post_claude.stdout).trim(), "[]");
+    assert_eq!(String::from_utf8_lossy(&post_mux.stdout).trim(), "[]");
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
 }
 
 // ---------------------------------------------------------------------------

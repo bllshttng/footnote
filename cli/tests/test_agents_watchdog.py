@@ -872,6 +872,15 @@ def test_a_manual_sweep_never_certifies_the_cadence(monkeypatch, tmp_path):
     assert watchdog.sweep_staleness(now_s=NOW_1840)["stale"] is False
 
 
+def test_sweep_file_persists_terminal_harness_residue(monkeypatch, tmp_path):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+    watchdog.write_sweep_file(
+        "tick", {LEAVE: 3}, NOW_1840, terminal_harness_rows=3
+    )
+    assert json.loads(path.read_text())["terminal_harness_rows"] == 3
+
+
 def test_stopped_row_survives_claude_agents_json(monkeypatch):
     from fno.agents.harnesses import claude as claude_mod
 
@@ -903,7 +912,12 @@ def test_stopped_row_survives_claude_agents_json(monkeypatch):
 
 
 def test_sweep_payload_shape():
-    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp")]
+    rows = [
+        Row("aaaa1111-0000", "w1", "working", None, "/tmp"),
+        Row("bbbb2222-0000", "w2", "stopped", None, "/tmp"),
+        Row("cccc3333-0000", "w3", "done", None, "/tmp"),
+        Row("dddd4444-0000", "w4", "exited", None, "/tmp"),
+    ]
     payload, out_rows = watchdog.run_sweep(
         now_s=NOW_1840,
         rows_provider=lambda: (rows, []),
@@ -913,9 +927,34 @@ def test_sweep_payload_shape():
     )
     assert payload["generated_at"] == "2026-08-16T18:40:00Z"
     assert payload["verdicts"][0]["verdict"] == LEAVE
-    assert payload["counts"] == {LEAVE: 1}
+    assert payload["terminal_harness_rows"] == 3
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
+
+
+def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
+    from fno.agents import cli as agents_cli
+
+    row = Row("aaaa1111-0000", "w1", "stopped", None, "/tmp")
+    verdict = Verdict(
+        "aaaa1111-0000", "w1", "stopped", LEAVE, "terminal", "none"
+    )
+    payload = {
+        "generated_at": "x",
+        "verdicts": [verdict._asdict()],
+        "counts": {LEAVE: 1},
+        "warnings": [],
+        "terminal_harness_rows": 3,
+    }
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, [row]))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
+
+    agents_cli.cmd_watchdog(
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+    )
+
+    assert "terminal harness rows: 3" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +976,7 @@ def _payload_two_rows():
 def test_digest_is_house_style_and_names_the_basis():
     text = watchdog.digest_text(_payload_two_rows())
     assert "- wake k1: blocked 30m" in text
+    assert "terminal harness rows: 0" in text
     # The mail lane is style-gated at send time; a semicolon or the modal
     # 'could' makes the whole send exit non-zero without delivering, and a
     # bare verdict line under the header reads as an illegal mid-paragraph
@@ -995,6 +1035,31 @@ def test_mail_digest_project_recipient(monkeypatch, tmp_path):
     ok, _ = watchdog.mail_digest(_payload_two_rows(), "project:fno", runner=runner)
     assert ok
     assert "--to-project" in seen["argv"] and "fno" in seen["argv"]
+
+
+def test_terminal_harness_residue_mails_even_when_every_verdict_is_leave(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    path.write_text(json.dumps({"signature": ""}))
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+    sent = []
+
+    def runner(argv, **kw):
+        sent.append(argv)
+        return _Proc(0, stdout="msg-3 delivered (hosted)\n")
+
+    payload = {
+        "verdicts": [
+            {"row_id": "aaaa1111", "name": "w1", "state": "stopped",
+             "verdict": LEAVE, "basis": "terminal", "action": "none"}
+        ],
+        "counts": {LEAVE: 1},
+        "terminal_harness_rows": 1,
+    }
+    ok, receipt = watchdog.mail_digest(payload, "king", runner=runner)
+    assert ok and "delivered" in receipt
+    assert sent and "terminal harness rows: 1" in sent[0][-1]
 
 
 def test_staleness_reads_loud_and_never_clean(monkeypatch, tmp_path):

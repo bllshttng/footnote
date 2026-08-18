@@ -1039,6 +1039,7 @@ def run_sweep(
         ),
         "verdicts": [v._asdict() for v in vs],
         "counts": counts,
+        "terminal_harness_rows": sum(r.state in _TERMINAL_STATES for r in rows),
         "warnings": warnings,
     }
     return payload, rows
@@ -1086,6 +1087,7 @@ def write_sweep_file(
     signature: str = "",
     *,
     events_signature: str = "",
+    terminal_harness_rows: int = 0,
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
@@ -1109,6 +1111,7 @@ def write_sweep_file(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
             "counts": counts,
+            "terminal_harness_rows": terminal_harness_rows,
             "signature": signature,
             "events_signature": events_signature,
         }
@@ -1220,6 +1223,9 @@ def verdict_signature(payload: dict) -> str:
         for v in payload["verdicts"]
         if v["verdict"] != LEAVE
     )
+    terminal_rows = int(payload.get("terminal_harness_rows") or 0)
+    if terminal_rows:
+        parts.append(f"terminal-harness-rows:{terminal_rows}")
     return ";".join(parts)
 
 
@@ -1247,7 +1253,11 @@ def digest_text(payload: dict, limit: int = 8) -> str:
     block, which is the legal shape for a table of rows."""
     total = len(payload["verdicts"])
     counts = " ".join(f"{k}={v}" for k, v in sorted(payload["counts"].items()))
-    lines = [f"fleet watchdog swept {total} rows. {counts}", ""]
+    terminal_rows = int(payload.get("terminal_harness_rows") or 0)
+    lines = [
+        f"fleet watchdog swept {total} rows. {counts} terminal harness rows: {terminal_rows}",
+        "",
+    ]
     non_leave = [x for x in payload["verdicts"] if x["verdict"] != LEAVE]
     for v in non_leave[:limit]:
         lines.append(f"- {v['verdict']} {v['name']}: {v['basis']}")
@@ -1271,7 +1281,7 @@ def mail_digest(
         # rows found, and the digest must not claim either.
         return False, payload["refused"]
     non_leave = [v for v in payload["verdicts"] if v["verdict"] != LEAVE]
-    if not non_leave:
+    if not non_leave and int(payload.get("terminal_harness_rows") or 0) == 0:
         return True, "all rows leave, nothing to say"
     if verdict_signature(payload) == _last_signature():
         return True, "unchanged since the last sweep, not mailed"
@@ -1680,4 +1690,3 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
             f"{(removed.stderr or '').strip()[:200]}",
         )
     return "applied", f"stopped and removed ({v.basis})"
-

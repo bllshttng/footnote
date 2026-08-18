@@ -480,6 +480,7 @@ def tick() -> None:
                     _wd.write_sweep_file(
                         "tick", payload["counts"], now, signature,
                         events_signature=_wd.verdict_signature(payload),
+                        terminal_harness_rows=payload.get("terminal_harness_rows", 0),
                     )
                 fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
                 acted = 0
