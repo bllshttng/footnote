@@ -134,7 +134,7 @@ def coverage_publish(
 @pr_app.command(
     "info",
     help=(
-        "Read PR state, head SHA, refs, and mergeability through one REST request. "
+        "Read PR state, URL, head SHA, refs, and mergeability through one REST request. "
         "Prints JSON; exit 4 when the REST instrument cannot answer."
     ),
 )

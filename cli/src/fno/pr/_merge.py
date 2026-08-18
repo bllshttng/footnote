@@ -40,9 +40,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator, List, Literal, Optional, Sequence
 
-from fno.pr import _internal_gh
 from fno.pr._proc import ToolMissing, run
-from fno.pr.gh_proxy import Action, classify
 
 _PR_RE = re.compile(r"^[1-9][0-9]*$")
 
@@ -101,8 +99,6 @@ def _emit(
 
 
 def _gh(args: Sequence[str], cwd: str):
-    if classify(args) is Action.BROKER:
-        return _internal_gh.execute("discretionary", args, cwd=cwd, runner=run)
     return run(["gh", *args], cwd=cwd)
 
 

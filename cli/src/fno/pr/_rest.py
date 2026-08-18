@@ -123,9 +123,13 @@ def fetch_pr_info_rest(
     merged_at = pr_data.get("merged_at")
     if merged_at is not None and not isinstance(merged_at, str):
         return None, "gh api pulls/<n> carried malformed merged_at"
+    url = pr_data.get("html_url")
+    if url is not None and (not isinstance(url, str) or not url):
+        return None, "gh api pulls/<n> carried malformed HTML URL"
     return (
         {
             "pr": int(pr),
+            "url": url,
             "state": _map_pr_state(pr_data),
             "head_sha": sha,
             "head_ref": head_ref,

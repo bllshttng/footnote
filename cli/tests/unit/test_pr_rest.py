@@ -15,6 +15,7 @@ from fno.pr import _rest, _status
 from fno.pr._proc import Result
 
 _PULLS = {
+    "html_url": "https://github.com/Owner/Repo/pull/42",
     "state": "open",
     "merged": False,
     "head": {"sha": "abc123def", "ref": "feature/test"},
@@ -74,6 +75,7 @@ def test_settledness_reader_issues_no_graphql_call():
 def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
     calls: list[list[str]] = []
     pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
         "state": "open",
         "merged": False,
         "mergeable": True,
@@ -86,6 +88,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
     assert reason == ""
     assert info == {
         "pr": 42,
+        "url": "https://github.com/Owner/Repo/pull/42",
         "state": "OPEN",
         "head_sha": "abc123def",
         "head_ref": "feature/rest-info",
@@ -98,6 +101,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
 
 def test_pr_info_preserves_unknown_mergeability():
     pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
         "state": "open",
         "merged": False,
         "mergeable": None,
@@ -119,6 +123,18 @@ def test_pr_info_rejects_malformed_head_shape():
     )
     assert info is None
     assert "malformed head/base" in reason
+
+
+def test_pr_info_allows_missing_html_url_without_losing_metadata():
+    pulls = dict(_PULLS)
+    pulls.pop("html_url")
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["url"] is None
+    assert info["head_sha"] == "abc123def"
 
 
 def test_rest_reader_rejects_malformed_check_runs():
@@ -245,6 +261,7 @@ def test_rest_primary_limit_reason_names_core_bucket():
 def test_rest_merged_state_maps():
     r = _runner(
         pulls={
+            "html_url": "https://github.com/Owner/Repo/pull/42",
             "state": "closed",
             "merged": True,
             "merged_at": "2026-08-18T00:00:00Z",

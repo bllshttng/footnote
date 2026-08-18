@@ -7,8 +7,9 @@ cd "$repo_root"
 matches=$(python3 scripts/ci/graphql-caller-inventory.py)
 
 classified=$(printf '%s\n' "$matches" | awk 'NF {n++} END {print n+0}')
+unclassified=$(printf '%s\n' "$matches" | awk -F'|' '$1 == "unclassified" {n++} END {print n+0}')
 digest=$(printf '%s\n' "$matches" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}')
-expected_digest="68015553457f6e7ac6a57b779648c306c5472151df0102a9a9f10125230c1be9"
+expected_digest="1a0bb0d88a4de9d0aef0e8a7f6e625e1930bc33e8705db10198d4efb99190580"
 
 if [[ "${1:-}" == "--print-digest" ]]; then
   printf 'classified_graphql_callers=%s digest=%s\n' "$classified" "$digest"
@@ -19,13 +20,24 @@ if [[ "$classified" -eq 0 ]]; then
   echo "direct-graphql-pr-read: classification instrument matched zero callers" >&2
   exit 1
 fi
-if ! printf '%s\n' "$matches" | grep -q '^argv-pr|cli/src/fno/pr/_merge.py|'; then
+if [[ "$unclassified" -ne 0 ]]; then
+  printf '%s\n' "$matches" | awk -F'|' '$1 == "unclassified"' >&2
+  echo "direct-graphql-pr-read: executable callers lack a routing disposition" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$matches" | grep -q '^fno-process-proxy|argv-pr|cli/src/fno/pr/_merge.py|'; then
   echo "direct-graphql-pr-read: argv inventory missed _merge.py" >&2
+  exit 1
+fi
+if ! grep -q 'protected = worker_environment(os.environ)' cli/src/fno/cli.py \
+    || ! grep -q 'Command::new("fno-gh-coverage")' crates/fno-agents/src/finalize.rs \
+    || ! grep -q 'let mut gh_bin = "fno-gh-loopcheck"' crates/fno-agents/src/loopcheck.rs; then
+  echo "direct-graphql-pr-read: a named enforcement boundary is missing" >&2
   exit 1
 fi
 if [[ "$digest" != "$expected_digest" ]]; then
   echo "direct-graphql-pr-read: caller inventory changed; classify the new or removed path" >&2
-  echo "classified_graphql_callers=$classified unclassified=1 digest=$digest" >&2
+  echo "classified_graphql_callers=$classified unclassified=$unclassified digest=$digest" >&2
   exit 1
 fi
 
