@@ -14,7 +14,9 @@
 # dirty tree still refuses (AC1-EDGE), a foreign host and a corrupt/empty file
 # degrade to a full run (AC3-EDGE/AC2-EDGE), a subset pass mints nothing
 # (AC1-ERR), a RED deletes a matching one (AC3-ERR), and a VOID leaves a prior
-# one untouched (AC2-ERR).
+# one untouched (AC2-ERR). The carrier is one slot per candidate SHA: a green on
+# another SHA never erases this one's, and aged slots plus the legacy
+# single-file carrier are reaped at write time.
 
 set -uo pipefail
 
@@ -151,14 +153,17 @@ GREEN_FULL="$(git -C "$FIX" rev-parse HEAD)"
 # ref preflight skips the leg, so the fixture would never exercise it.
 git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
 # The fixture is a plain repo, so its git-common-dir is $FIX/.git; the lock and
-# the attestation are siblings under it.
+# the attestation slots are siblings under it.
 LOCKDIR="$FIX/.git/.preflight.lock.d"
-ATT="$FIX/.git/.preflight-attestation"
+ATT_DIR="$FIX/.git/.preflight-attestations.d"
 EVENTS="$FIX/.fno/events.jsonl"
 export PREFLIGHT_AUDIT_LOG="$TMP/audit.log"
 HOST="$(hostname 2>/dev/null || echo unknown)"
+# One slot per candidate SHA; the fixture HEAD moves across sections, so resolve
+# the current slot at use time, never once up front.
+cur_att() { printf '%s/%s\n' "$ATT_DIR" "$(git -C "$FIX" rev-parse HEAD)"; }
 # Plant an attestation line for a given full SHA (defaulting to this host).
-write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT"; }
+write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pid=4242\n' "$1" "$(date +%s)" "${2:-$HOST}" > "$ATT_DIR/$1"; }
 
 run_pf() { ( cd "$FIX" && bash scripts/ci/preflight.sh "$@" ); }
 
@@ -188,9 +193,9 @@ jq -se --arg sha "$GREEN_FULL" \
     || fail "missing canonical pending-to-final transition"
 
 echo "== attestation: a FULL GREEN records one (sha + host pinned) =="
-[[ -f "$ATT" ]] && ok "attestation written on full green" || fail "no attestation file after green"
-grep -q "^sha=$GREEN_FULL " "$ATT" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$ATT")"
-grep -q " host=$HOST" "$ATT" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$ATT")"
+[[ -f "$(cur_att)" ]] && ok "attestation written on full green" || fail "no attestation file after green"
+grep -q "^sha=$GREEN_FULL " "$(cur_att)" && ok "attestation pins the full candidate SHA" || fail "attestation sha wrong: $(cat "$(cur_att)")"
+grep -q " host=$HOST" "$(cur_att)" && ok "attestation pins this host" || fail "attestation host wrong: $(cat "$(cur_att)")"
 
 echo "== global authority: a failed delivery-root mirror stays GREEN everywhere =="
 mv "$EVENTS" "$EVENTS.saved"
@@ -222,6 +227,43 @@ out="$(run_pf 2>&1)"; rc=$?
 grep <<<"$out" -q "reused attestation" && ok "satisfied by the cache, not the lock" || fail "did not reuse under a held lock"
 grep -q "pid=$$" "$LOCKDIR/holder" && ok "the held lock was left untouched" || fail "reuse clobbered the live lock"
 rm -rf "$LOCKDIR"
+
+echo "== per-SHA carriers: a green on another SHA never erases this SHA's slot =="
+# The regression this file guards: under a single shared carrier, worktree B's
+# record_attestation overwrote worktree A's green, so the fleet-wide hit rate
+# degraded to 1/N across concurrently active SHAs.
+( cd "$FIX" && git commit -q --allow-empty -m "second candidate SHA" )
+SHA_B="$(git -C "$FIX" rev-parse HEAD)"
+git -C "$FIX" update-ref refs/remotes/origin/main "$SHA_B"
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "the second SHA runs green" || fail "second SHA red rc=$rc: $out"
+[[ -f "$ATT_DIR/$GREEN_FULL" && -f "$ATT_DIR/$SHA_B" ]] \
+    && ok "both SHA slots coexist" || fail "slots missing after two greens on different SHAs"
+# Back on the first SHA: its green must still be reusable (the shared carrier
+# erased it; the per-SHA slot keeps it).
+git -C "$FIX" reset -q --hard "$GREEN_FULL"
+git -C "$FIX" update-ref refs/remotes/origin/main "$GREEN_FULL"
+out="$(run_pf 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "the first SHA reuses after another SHA's green" || fail "expected 0 got $rc: $out"
+grep <<<"$out" -q "reused attestation" && ok "reuse receipt on the first SHA" || fail "the first SHA missed its own slot: $out"
+
+echo "== cache bound: write-time reap removes aged slots and the legacy carrier =="
+# Reap is by mtime at record time: content is irrelevant to the reaper, so the
+# planted slot carries a dummy sha and an ancient timestamp.
+mkdir -p "$ATT_DIR"
+printf 'sha=dead mode=FULL verdict=green at=0 iso=old host=%s pid=1\n' "$HOST" \
+    > "$ATT_DIR/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+touch -t 202001010000 "$ATT_DIR/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+printf 'sha=legacy mode=FULL verdict=green at=0 iso=old host=%s pid=1\n' "$HOST" \
+    > "$FIX/.git/.preflight-attestation"
+out="$(run_pf --force 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "green run after planting aged residue" || fail "expected 0 got $rc: $out"
+[[ ! -e "$ATT_DIR/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]] \
+    && ok "the aged slot was reaped at write time" || fail "aged slot survived the reap"
+[[ ! -e "$FIX/.git/.preflight-attestation" ]] \
+    && ok "the legacy single-file carrier was removed" || fail "legacy carrier survived"
+[[ -f "$(cur_att)" ]] && ok "the fresh slot survived its own reap" || fail "reap deleted the slot it just wrote"
+rm -f "$FIX/.git/.preflight-attestation"
 
 echo "== AC2-FR: --force always discards the attestation and re-runs =="
 out="$(run_pf --force 2>&1)"; rc=$?
@@ -255,28 +297,28 @@ grep <<<"$out" -q "foreign host" && ok "receipt states the attestation was rejec
 grep <<<"$out" -q "reused attestation" && fail "reused a foreign attestation" || ok "did not reuse the foreign attestation"
 
 echo "== AC2-EDGE: a corrupt / empty attestation degrades to a full run =="
-printf 'sha=not-even-a-sha garbage\n' > "$ATT"
+printf 'sha=not-even-a-sha garbage\n' > "$(cur_att)"
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "unparseable attestation -> full run -> GREEN" || fail "expected 0 got $rc"
 grep <<<"$out" -q "reused attestation" && fail "trusted an unparseable attestation" || ok "unparseable attestation not trusted"
-: > "$ATT"   # empty file
+: > "$(cur_att)"   # empty file
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "empty attestation -> full run -> GREEN" || fail "expected 0 got $rc"
 grep <<<"$out" -q "reused attestation" && fail "trusted an empty attestation" || ok "empty attestation not trusted"
 
 echo "== AC2-EDGEb: a non-FULL / non-green attestation degrades to a full run =="
-printf 'sha=%s mode=FULL verdict=red at=%s iso=now host=%s pid=4242\n' "$GREEN_FULL" "$(date +%s)" "$HOST" > "$ATT"
+printf 'sha=%s mode=FULL verdict=red at=%s iso=now host=%s pid=4242\n' "$GREEN_FULL" "$(date +%s)" "$HOST" > "$(cur_att)"
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "non-green attestation -> full run -> GREEN" || fail "expected 0 got $rc"
 grep <<<"$out" -q "reused attestation" && fail "trusted a non-green attestation" || ok "non-green attestation not trusted"
 
 echo "== AC1-ERR: a --retry-failed (subset) pass mints no FULL attestation; reuse then full-runs =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 LEGREC="$FIX/.fno/preflight-last-failed-legs.txt"
 printf 'rustfmt:fno\n' > "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
-[[ ! -f "$ATT" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
+[[ ! -f "$(cur_att)" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
 jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.result == "passed"' \
     "$EVENTS" >/dev/null \
@@ -290,7 +332,7 @@ out="$(run_pf 2>&1)"; rc=$?
 grep <<<"$out" -q "reused attestation" && fail "reused a subset-only green" || ok "no FULL attestation to reuse -> full run"
 
 echo "== leg record: a cargo-only RED records its leg scope alone =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 out="$(PREFLIGHT_TEST_FAIL_FNO_TEST=1 run_pf --force 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "cargo-only red exits non-zero" || fail "expected red got $rc: $out"
 [[ -f "$LEGREC" ]] && ok "RED wrote the leg record" || fail "no leg record after RED"
@@ -298,7 +340,7 @@ out="$(PREFLIGHT_TEST_FAIL_FNO_TEST=1 run_pf --force 2>&1)"; rc=$?
     || fail "record wrong: $(cat "$LEGREC")"
 
 echo "== --retry-failed honors the leg record: smoke skipped, only the red leg re-runs =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "leg-scoped retry passes" || fail "expected 0 got $rc: $out"
 grep <<<"$out" -q "smoke suite (skipped - not in the retry leg record)" \
@@ -307,7 +349,7 @@ grep <<<"$out" -q "cargo test --all-targets (fno-agents) (skipped - not in the r
     && ok "untouched cargo leg skipped" || fail "fno-agents leg ran: $out"
 grep <<<"$out" -q "=== cargo test --all-targets (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
-[[ ! -f "$ATT" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
+[[ ! -f "$(cur_att)" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
 jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.steps_executed < .data.steps_expected' \
     "$EVENTS" >/dev/null \
@@ -316,10 +358,10 @@ jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
 [[ ! -s "$LEGREC" ]] && ok "green retry truncated the record" || fail "record not truncated: $(cat "$LEGREC")"
 
 echo "== fallback: a missing leg record runs every leg and earns FULL =="
-rm -f "$ATT" "$LEGREC"
+rm -f "$(cur_att)" "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "fallback retry passes" || fail "expected 0 got $rc: $out"
-[[ -f "$ATT" ]] && ok "fallback retry minted the FULL attestation it earned" || fail "no attestation after full-coverage retry"
+[[ -f "$(cur_att)" ]] && ok "fallback retry minted the FULL attestation it earned" || fail "no attestation after full-coverage retry"
 jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.steps_executed == .data.steps_expected' \
     "$EVENTS" >/dev/null \
@@ -328,7 +370,7 @@ jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
 
 echo "== corrupt record: unrecognized names run every leg =="
 printf 'not-a-leg\n' > "$LEGREC"
-rm -f "$ATT"
+rm -f "$(cur_att)"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "corrupt record falls back to every leg" || fail "expected 0 got $rc: $out"
 grep <<<"$out" -q "=== smoke suite" && ok "smoke ran under a corrupt record" || fail "smoke skipped on a corrupt record"
@@ -340,9 +382,9 @@ write_attest "$(git -C "$FIX" rev-parse HEAD)"   # plant a stale green for the R
 out="$(run_pf --force 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "RED run exits non-zero" || fail "expected red got $rc"
 grep <<<"$out" -q "RED - fix" && ok "reports RED" || fail "no RED line: $out"
-[[ ! -f "$ATT" ]] && ok "RED deleted the matching attestation" || fail "RED left a stale green attestation"
+[[ ! -f "$(cur_att)" ]] && ok "RED deleted the matching attestation" || fail "RED left a stale green attestation"
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison AC3-ERR" )
-rm -f "$ATT"
+rm -f "$(cur_att)"
 
 echo "== AC2-HP-red: a POISON commit is caught locally, exit non-zero, no push =="
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "poisoned" )
@@ -354,29 +396,29 @@ grep <<<"$out" -q "fail.*smoke suite" && ok "smoke suite marked fail" || fail "s
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison" )
 
 echo "== changed packet: a red packet stops the run BEFORE the full gate =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 ( cd "$FIX" && touch CHANGED_POISON && git add -A && git commit -qm "changed-packet red" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "exit 1 on a red changed packet" || fail "expected 1 got $rc: $out"
 grep <<<"$out" -q "RED (changed packet)" && ok "names the changed packet as the cause" || fail "no changed-packet RED line: $out"
 grep <<<"$out" -q "all green (stub)" && fail "full smoke ran after a red changed packet" || ok "full gate not started (earliest signal)"
 grep <<<"$out" -q "the full gate has NOT run" && ok "says the full gate did not run" || fail "no full-gate caveat"
-[[ ! -f "$ATT" ]] && ok "a red changed packet mints no attestation" || fail "changed packet wrote an attestation"
+[[ ! -f "$(cur_att)" ]] && ok "a red changed packet mints no attestation" || fail "changed packet wrote an attestation"
 ( cd "$FIX" && git rm -q CHANGED_POISON && git commit -qm "unpoison changed" )
 
 echo "== AC7: a green changed packet cannot rescue a red full gate =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 ( cd "$FIX" && touch POISON && git add -A && git commit -qm "full red, changed green" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok "exit non-zero when an unselected full step fails" || fail "expected non-zero got $rc"
 grep <<<"$out" -q "pass.*changed packet (CHANGED SUBSET)" && ok "changed packet passed" || fail "changed leg not green: $out"
 grep <<<"$out" -q "fail.*smoke suite" && ok "full smoke marked fail" || fail "full smoke not failed"
-[[ ! -f "$ATT" ]] && ok "no FULL attestation minted (AC7)" || fail "minted a full attestation on a red run"
+[[ ! -f "$(cur_att)" ]] && ok "no FULL attestation minted (AC7)" || fail "minted a full attestation on a red run"
 ( cd "$FIX" && git rm -q POISON && git commit -qm "unpoison full" )
 
 echo "== AC4/AC5: unselected and unevaluated packets fall through to the full gate =="
 for sentinel in CHANGED_NONE CHANGED_UNEVAL; do
-    rm -f "$ATT"
+    rm -f "$(cur_att)"
     ( cd "$FIX" && touch "$sentinel" && git add -A && git commit -qm "$sentinel" )
     out="$(run_pf 2>&1)"; rc=$?
     [[ $rc -eq 0 ]] && ok "$sentinel: full gate ran and passed" || fail "$sentinel: expected 0 got $rc: $out"
@@ -387,7 +429,7 @@ done
 grep <<<"$out" -q "UNEVALUATED" && ok "unevaluated state is stated, not swallowed" || fail "no UNEVALUATED note"
 
 echo "== a missing prerequisite keeps preflight's documented exit 2 =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 ( cd "$FIX" && touch CHANGED_PREREQ && git add -A && git commit -qm "changed prereq missing" )
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 2 ]] && ok "exit 2 (not 1) when the packet cannot run" || fail "expected 2 got $rc: $out"
@@ -396,11 +438,11 @@ grep <<<"$out" -q "RED (changed packet)" && fail "reported a test failure for a 
 ( cd "$FIX" && git rm -q CHANGED_PREREQ && git commit -qm "drop prereq sentinel" )
 
 echo "== --retry-failed skips the changed packet (a different subset mode) =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed still passes" || fail "expected 0 got $rc"
 grep <<<"$out" -q "changed packet" && fail "retry-failed ran the changed packet" || ok "changed packet skipped"
-rm -f "$ATT"
+rm -f "$(cur_att)"
 
 echo "== AC2-ERR: dirty invoking tree refused (exit 4), nothing touched =="
 ( cd "$FIX" && echo dirt > dirty.txt )
@@ -419,7 +461,7 @@ grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hi
 rm -rf "$LOCKDIR"
 
 echo "== FIFO queue: waiters are served in arrival order, not by chance =="
-rm -f "$ATT"
+rm -f "$(cur_att)"
 ( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
 mkdir -p "$LOCKDIR"
 sleep 600 & fifo_holder=$!
@@ -486,7 +528,7 @@ wait "$mono_w"; rc=$?
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
-rm -f "$ATT"   # the prior section minted an attestation for this SHA; reuse would skip the lock
+rm -f "$(cur_att)"   # the prior section minted an attestation for this SHA; reuse would skip the lock
 # The stamp must sit within the recycle slop of the holder process's real age
 # (a genuinely stalled holder wrote its own stamp): 12s old, STALL_MIN_AGE=10.
 recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
@@ -513,7 +555,7 @@ echo "== stall guard: a live, non-stale holder is never stolen =="
 # slop, the stamp then claimed an age the young process could not have, and
 # the (correct) recycled-pid steal fired - failing the code for the fixture's
 # own lie. Progress-vs-stall semantics are pinned by the unit section below.
-rm -f "$ATT"   # the stall-steal run just minted one for this same SHA
+rm -f "$(cur_att)"   # the stall-steal run just minted one for this same SHA
 mkdir -p "$LOCKDIR"
 guard_recent="$(date -u -v-12S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '12 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$$" "$guard_recent" > "$LOCKDIR/holder"
@@ -526,7 +568,7 @@ rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
 old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
-rm -f "$ATT"
+rm -f "$(cur_att)"
 mkdir -p "$LOCKDIR"
 sleep 600 & recycled_holder=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$recycled_holder" "$old" > "$LOCKDIR/holder"
@@ -540,7 +582,7 @@ kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
 echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
-rm -f "$ATT"   # else attestation reuse skips the lock and the phantom is never walked
+rm -f "$(cur_att)"   # else attestation reuse skips the lock and the phantom is never walked
 mkdir -p "$LOCKDIR.queue.d/000001"
 sleep 600 & phantom_pid=$!
 printf 'pid=%s started=%s host=x sha=deadbee\n' "$phantom_pid" "$old" > "$LOCKDIR.queue.d/000001/holder"
@@ -556,7 +598,7 @@ echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears 
 # sleep+wait, and a builtin read), so a SIGINT-asserting test fails on this
 # platform while passing on CI's Linux bash 5. The polled sentinel is the
 # cancellation contract that holds everywhere; the traps remain best-effort.
-rm -f "$ATT"   # else reuse exits 0 before the waiter ever queues
+rm -f "$(cur_att)"   # else reuse exits 0 before the waiter ever queues
 rm -rf "$FIX/.fno"   # fresh clone: no state dir exists until the queued run ensures it
 mkdir -p "$LOCKDIR"
 sleep 600 & cancel_holder=$!
@@ -601,7 +643,7 @@ echo "== cancel (signal lane): INT still works where bash runs traps =="
 # so the signal branch is asserted only on platforms where it can fire (CI's
 # Linux bash 5); the sentinel test above carries the contract everywhere.
 if [[ "$(uname)" != "Darwin" ]]; then
-    rm -f "$ATT"
+    rm -f "$(cur_att)"
     mkdir -p "$LOCKDIR"
     sleep 600 & sig_holder=$!
     printf 'pid=%s started=%s host=x sha=deadbee\n' "$sig_holder" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCKDIR/holder"
@@ -729,7 +771,7 @@ echo "== steal-race: concurrent steal of one dead holder -> exactly one winner =
 steal_winners=0
 for _round in 1 2 3 4 5; do
     rm -rf "$LOCKDIR"
-    rm -f "$ATT"   # else the prior green attestation satisfies the gate and no one contends
+    rm -f "$(cur_att)"   # else the prior green attestation satisfies the gate and no one contends
     mkdir -p "$LOCKDIR"; printf 'pid=%s started=OLD host=x sha=deadbee\n' 999999 > "$LOCKDIR/holder"
     run_pf --wait-timeout 0 >/dev/null 2>&1 & p1=$!
     run_pf --wait-timeout 0 >/dev/null 2>&1 & p2=$!
@@ -763,8 +805,8 @@ out="$(run_pf --force 2>&1)"; rc=$?
 grep <<<"$out" -q "VOID - another preflight took our lock" && ok "names the lock, not the worktree" || fail "wrong VOID cause: $out"
 grep -q "pid=424242" "$LOCKDIR/holder" 2>/dev/null && ok "the stealer's lock survived our exit" \
     || fail "cleanup deleted a lock owned by the stealer"
-[[ -f "$ATT" ]] && ok "VOID left the prior attestation untouched (AC2-ERR)" || fail "VOID wrote or deleted the attestation"
-rm -rf "$LOCKDIR"; rm -f "$ATT"
+[[ -f "$(cur_att)" ]] && ok "VOID left the prior attestation untouched (AC2-ERR)" || fail "VOID wrote or deleted the attestation"
+rm -rf "$LOCKDIR"; rm -f "$(cur_att)"
 
 # NOTE: keep the worktree-hijack leg LAST. Its stub permanently resets the
 # fixture's preflight worktree, so any test appended after it inherits a
