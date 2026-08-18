@@ -87,6 +87,9 @@ def validate_receipt(
         missing.append(f"floor={FLOOR}")
     if not isinstance(minimum, int) or minimum <= FLOOR:
         missing.append(f"min_remaining>{FLOOR}")
+    post_coverage = receipt.get("post_coverage_remaining")
+    if not isinstance(post_coverage, int) or post_coverage <= FLOOR:
+        missing.append(f"post_coverage_remaining>{FLOOR}")
     workers = receipt.get("min_live_workers")
     if not isinstance(workers, int) or workers < min_workers:
         missing.append(f"min_live_workers>={min_workers}")
@@ -198,7 +201,8 @@ def run_soak(args: argparse.Namespace) -> int:
     atomic_json(Path(args.receipt), receipt)
     print(
         f"settled=true samples={receipt['samples']} min_remaining={receipt['min_remaining']} "
-        f"coverage=covered reviewed_count={receipt['reviewed_count']} head_sha={head}"
+        f"post_coverage_remaining={receipt['post_coverage_remaining']} coverage=covered "
+        f"reviewed_count={receipt['reviewed_count']} head_sha={head}"
     )
     return 0
 
@@ -230,7 +234,8 @@ def main() -> int:
                 raise RuntimeError("positive markers failed: " + ", ".join(missing))
             print(
                 f"settled=true samples={receipt['samples']} min_remaining={receipt['min_remaining']} "
-                f"coverage=covered reviewed_count={receipt['reviewed_count']} "
+                f"post_coverage_remaining={receipt['post_coverage_remaining']} coverage=covered "
+                f"reviewed_count={receipt['reviewed_count']} "
                 f"head_sha={receipt['head_sha']} receipt={path}"
             )
             return 0
