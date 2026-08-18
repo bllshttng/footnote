@@ -208,6 +208,11 @@ mod tests {
         // file reaches it: it must floor each dropped var to "" (claude reads
         // an empty settings value as unset) under the agents tree, and the
         // write must be repeatable (content-addressed, same path twice).
+        // The crate-wide env lock: FNO_AGENTS_HOME is process-global and the
+        // unit tests share one process.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "fno-scrub-settings-{}-{}",
             std::process::id(),

@@ -42,10 +42,13 @@ if [[ -f "$GUARD_LIB" ]]; then
   [[ -n "$_p" ]] && PROVIDER="$_p"
 fi
 
-# base_url host (empty when unset): strip scheme, path, and port.
+# base_url host (empty when unset): strip scheme, path, and port. Case-folded
+# like Python's base_url_is_anthropic and the Rust mirror, so a mixed-case
+# host (https://API.Anthropic.com) matches the anthropic.com rule the same way.
 BASE_HOST=""
 if [[ -n "$BASE" ]]; then
-  BASE_HOST="${BASE#*://}"; BASE_HOST="${BASE_HOST%%/*}"; BASE_HOST="${BASE_HOST%%:*}"
+  BASE_HOST="$(printf '%s' "$BASE" | tr '[:upper:]' '[:lower:]')"
+  BASE_HOST="${BASE_HOST#*://}"; BASE_HOST="${BASE_HOST%%/*}"; BASE_HOST="${BASE_HOST%%:*}"
 fi
 
 # Record the resolved intended identity for Layer 2 + post-hoc audit (best effort).
