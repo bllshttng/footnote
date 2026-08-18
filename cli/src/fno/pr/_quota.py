@@ -53,7 +53,7 @@ def resolve_real_gh() -> Optional[str]:
 
 
 def _coverage_read(args: Sequence[str]) -> bool:
-    """Only the two review-coverage queries may spend the reserved points."""
+    """Only review-coverage computation and publication reads spend the reserve."""
     if len(args) < 4 or list(args[:2]) != ["pr", "view"]:
         return False
     try:
@@ -63,7 +63,11 @@ def _coverage_read(args: Sequence[str]) -> bool:
             (arg.partition("=")[2] for arg in args if arg.startswith("--json=")), ""
         )
     fields = frozenset(part for part in fields_arg.split(",") if part)
-    return fields in {frozenset({"reviews", "comments"}), frozenset({"commits"})}
+    return fields in {
+        frozenset({"reviews", "comments"}),
+        frozenset({"commits"}),
+        frozenset({"labels"}),
+    }
 
 
 def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:

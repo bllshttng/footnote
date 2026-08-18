@@ -1810,11 +1810,11 @@ pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
     parse_pr_ref(&serde_json::to_vec(&payload).ok()?)
 }
 
-/// Pure parse of `gh pr view --json number,url` stdout. Split from the shell-out
-/// so the malformed/missing-field cases are unit-testable without gh.
+/// Pure parse of REST `fno pr info` output, with the legacy GraphQL field kept
+/// for callers carrying cached payloads.
 fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
     let v: Value = serde_json::from_slice(stdout).ok()?;
-    let number = v.get("number")?.as_u64()?;
+    let number = v.get("pr").or_else(|| v.get("number"))?.as_u64()?;
     let url = v.get("url")?.as_str()?.trim().to_string();
     if url.is_empty() {
         None
@@ -2851,6 +2851,11 @@ mod tests {
         // Valid: number + url.
         assert_eq!(
             parse_pr_ref(br#"{"number": 358, "url": "https://x/pull/358"}"#),
+            Some((358, "https://x/pull/358".to_string()))
+        );
+        // REST `fno pr info` names the same field `pr`.
+        assert_eq!(
+            parse_pr_ref(br#"{"pr": 358, "url": "https://x/pull/358"}"#),
             Some((358, "https://x/pull/358".to_string()))
         );
         // Malformed JSON -> None (treated as "no PR", not a crash). AC1-ERR.

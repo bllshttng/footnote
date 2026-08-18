@@ -152,6 +152,16 @@ def test_rest_reader_rejects_malformed_check_runs():
     assert "malformed check_runs" in reason
 
 
+def test_rest_reader_fails_closed_when_legacy_status_read_fails_with_green_check_runs():
+    r = _runner(
+        check_runs=[_cr("ci", "completed", "success")],
+        fail=lambda cmd: "legacy status unavailable" if cmd[-1].endswith("/status") else None,
+    )
+    payload, reason = _rest.fetch_pr_rest("42", runner=r)
+    assert payload is None
+    assert reason == "legacy status unavailable"
+
+
 def test_rest_reader_rejects_malformed_statuses():
     def runner(cmd, cwd=None):
         if cmd[:2] == ["git", "remote"]:
