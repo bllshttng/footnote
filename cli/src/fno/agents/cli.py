@@ -2791,24 +2791,26 @@ def cmd_watchdog(
             outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
         results.append({"row_id": v.row_id, "verdict": v.verdict,
                         "outcome": outcome, "detail": detail})
-        if outcome == "reported":
-            # A verdict outside the lane (every leave row on a bare --apply)
-            # is not news; printing one line per healthy row drowns the few
-            # that acted. "partial" is NOT this: the fleet already changed.
+        if outcome == wd.SKIPPED:
+            # The ONE silent outcome: a verdict outside the lane (every leave
+            # row on a bare --apply). Printing one line per healthy row
+            # drowns the few that acted. Everything else surfaces, so a new
+            # outcome cannot go silent by not being listed here.
             continue
         line = f"{outcome:9} {v.name:34} {detail}"
-        if outcome in ("refused", "partial", "frozen"):
+        if outcome != "applied":
             print(line, file=sys.stderr)
         elif not json_out:
             # Human lines on stdout ahead of the JSON object make the whole
             # document unparseable; the dry-run path already guards this.
             typer.echo(line)
-        if outcome in ("applied", "refused", "partial", "frozen"):
-            wd.emit_event(
-                "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
-                 "outcome": outcome},
-            )
+        # Every non-skipped outcome emits: the `outcome` field carries which
+        # one it was, so no list here decides what is worth recording.
+        wd.emit_event(
+            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+            {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
+             "outcome": outcome},
+        )
     if json_out:
         sys.stdout.write(json.dumps({"results": results}) + "\n")
         sys.stdout.flush()

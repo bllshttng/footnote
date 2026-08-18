@@ -73,7 +73,7 @@ def test_no_transcript_working_row_is_ghost_and_apply_all_still_refuses():
     assert v.basis == "no transcript for bbbb2222-0000"
     assert v.action == "report"
     outcome, detail = apply_verdict(v, lanes="all")
-    assert outcome == "reported"
+    assert outcome == watchdog.SKIPPED
     assert "outside" in detail
 
 
@@ -287,7 +287,7 @@ def test_wake_age_ceiling_buckets_old_rows_as_stale_not_wake():
     assert "wake ceiling" in v.basis
     assert v.action == "report"
     outcome, _ = apply_verdict(v, lanes="all")
-    assert outcome == "reported"
+    assert outcome == watchdog.SKIPPED
 
 
 def test_deliverable_reaps_regardless_of_age():
@@ -485,7 +485,7 @@ def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
 def test_wake_lane_only_wakes_even_with_lanes_all_available():
     reroute = Verdict("cccc3333-0000", "r1", "blocked", REROUTE, "429", "redispatch")
     outcome, _ = apply_verdict(reroute, lanes="wake", cwd="/tmp/r1")
-    assert outcome == "reported"
+    assert outcome == watchdog.SKIPPED
 
 
 def test_wake_confirmation_requires_the_exact_message(monkeypatch):
@@ -770,7 +770,9 @@ def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
     assert len(calls) == 1, calls
     assert outcomes[0][0] == "applied"
     for outcome, detail in outcomes[1:]:
-        assert outcome == "reported"
+        # "held", not the silent lane-skip word: an action was withheld and
+        # the operator has to see that rows 2 and 3 did nothing.
+        assert outcome == "held"
         assert "already rotated this sweep" in detail
     # With no budget passed the caller keeps the old per-row behavior.
     calls.clear()
@@ -1749,3 +1751,41 @@ def test_reroute_refuses_a_shared_manifest_it_would_respawn_from(monkeypatch):
     )
     assert outcome == "refused"
     assert "not a linked worktree" in detail
+
+
+def test_only_the_lane_skip_is_silent(monkeypatch, tmp_path):
+    """Callers used to list which outcomes were worth printing, and three
+    receipts were swallowed by that list in turn. The default is surface now,
+    so an outcome cannot go silent by not being listed."""
+    import contextlib
+    import io as _io
+
+    from fno.agents import cli as agents_cli
+
+    verdicts = [
+        Verdict("aaaa1111-0000", "held-row", "blocked", REROUTE, "429", "redispatch"),
+        Verdict("bbbb2222-0000", "frozen-row", "working", REAP, "node done", "stop+rm"),
+    ]
+    rows = [Row(v.row_id, v.name, v.state, None, "/tmp/w") for v in verdicts]
+    payload = {"generated_at": "x", "verdicts": [v._asdict() for v in verdicts],
+               "counts": {REROUTE: 1, REAP: 1}, "warnings": []}
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, rows))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    monkeypatch.setattr(
+        watchdog, "apply_verdict",
+        lambda v, **kw: ("held", "reroute held: already rotated this sweep")
+        if v.verdict == REROUTE else ("frozen", "reap classified but not executed"),
+    )
+
+    err = _io.StringIO()
+    with contextlib.redirect_stderr(err):
+        agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=True,
+                                only=None, mail_to=None)
+    text = err.getvalue()
+    assert "held" in text and "already rotated" in text, text
+    assert "frozen" in text, text

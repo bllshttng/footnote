@@ -67,9 +67,12 @@ LEAVE = "leave"
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
 #: transcript is not a ghost - stopped is already the operator's answer.
-#: ``busy`` rides here because claude emits it as a ``working`` spelling (see
-#: ``_LIVE_STATUS_INPUT`` in harnesses/claude.py); missing it would read a
-#: ghost as a healthy leave.
+#: ``_row_state`` folds claude's ``busy`` onto ``working`` and its ``needs
+#: input`` onto ``blocked`` before the classifier runs, so on rows built by
+#: ``fleet_rows`` the fold is what keeps a ``busy`` ghost from reading as a
+#: healthy leave - not the ``busy`` entry here, which cannot match. It stays
+#: because ``verdicts`` is a pure function anyone can hand a raw row, and a
+#: caller that skips the fold must not silently lose the ghost lane.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: ``stopped`` belongs here and reviewers keep asking why, since the ghost
 #: lane calls stopped "the operator's answer". Membership is candidacy, not a
@@ -884,9 +887,12 @@ _CANONICAL_STATE = {"Working": "working", "Needs input": "blocked",
 #: is one whose silence has not yet reached the stalled threshold.
 _ENGAGED_TAILS = frozenset({"watching", "your-move", "working"})
 
-#: A row in a terminal state occupies no worktree. Non-terminal is the test,
-#: not an allowlist of live-looking words: an unknown state must read as
-#: possibly-live, and so protect a shared tree, rather than as gone.
+#: States that mean the roster considers a session over. Occupancy does NOT
+#: use this: it asks the transcript through ``finished_with_the_tree``,
+#: because the roster called a working session done on 2026-08-15 and keying
+#: the tally on that field let a live row count as zero. The use left is
+#: deciding whether an unmapped spelling deserves a drift warning, where a
+#: terminal word is expected and anything else is news.
 _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"})
 
 
@@ -1419,6 +1425,11 @@ def _confirm_once(
 #: remedy is a respawn under a new id, which is the operator's call.
 LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE, REAP})}
 
+#: The one silent outcome: the verdict was outside the lane the caller asked
+#: for, so nothing was attempted and there is nothing to report. Every other
+#: outcome is news. See :func:`apply_verdict` for why surface is the default.
+SKIPPED = "skipped"
+
 
 class RotationBudget:
     """One global provider rotation per sweep.
@@ -1445,10 +1456,17 @@ def apply_verdict(
     reap_enabled: Optional[bool] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
-    ``(outcome, detail)`` with outcome in applied | partial | frozen |
-    refused | reported. ``partial`` means the action HALF landed (a stop with no rm, a
-    provider rotation with no replacement): the fleet changed, so a caller
-    must surface it. ``reported`` is the lane skip and carries no action.
+    ``(outcome, detail)``. Exactly ONE outcome is silent: ``SKIPPED``, which
+    says the verdict was outside the lane the caller asked for, so nothing
+    was attempted. Every other word is news and callers surface all of them.
+
+    That inversion is deliberate. Callers used to enumerate which outcomes
+    were worth printing, and three receipts were swallowed by that list in
+    turn: a stop that landed without its rm, a reap withheld by the config
+    freeze, and a reroute held because the provider had already rotated.
+    Each was added to the list only after a review found it missing.
+    Defaulting to surface means the next outcome added here cannot go silent
+    by omission.
     Mechanisms delegate: resume (which verifies the state move and holds its
     own single-writer claim), recovery._redispatch for reroute, stop + rm for
     reap - rm is never forced, ``claude rm``'s own refusal on a dirty worktree
@@ -1457,7 +1475,7 @@ def apply_verdict(
     a registry-less row from another project must resolve in its own project,
     not in whatever project launched the sweep."""
     if v.verdict not in LANES.get(lanes, frozenset()):
-        return "reported", f"{v.verdict} outside {lanes} lane"
+        return SKIPPED, f"{v.verdict} outside {lanes} lane"
     if v.verdict == REAP:
         # The freeze sits HERE, at the one funnel every lane and every
         # caller passes through, rather than in the CLI that happens to
@@ -1483,7 +1501,7 @@ def apply_verdict(
             return _apply_reap(v, cwd=cwd, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
         return "refused", f"{v.verdict} action failed: {exc}"
-    return "reported", f"{v.verdict} has no auto-action"
+    return SKIPPED, f"{v.verdict} has no auto-action"
 
 
 def _reap_execution_enabled() -> bool:
@@ -1542,7 +1560,7 @@ def _apply_reroute(
 
     if rotation is not None and rotation.rotated:
         return (
-            "reported",
+            "held",
             f"reroute held: the active provider already rotated this sweep "
             f"({v.basis}). Re-run after the swap settles",
         )
