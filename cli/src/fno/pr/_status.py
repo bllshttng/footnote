@@ -332,7 +332,6 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     verdict, code, counts = verdict_for(rollup)
     green = verdict == "green"
 
-    merged = (pr_json.get("state") or "").upper() == "MERGED"
     # A terminal PR (round 3) has no would-merge left: the coverage conjunct
     # guards what WOULD merge, and the probes that feed it are live reads a
     # closed PR can still burn - `gh pr view --json reviews` and a 120s
