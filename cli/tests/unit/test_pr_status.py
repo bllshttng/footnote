@@ -671,6 +671,43 @@ def test_ac1_fr_non_optional_review_excluded():
     assert state["optional_reviews_unresolved"] == 0
 
 
+def _fake_runner_with_quota(*, remaining, reviews=None, threads=None):
+    """Like _fake_runner, but also answers `gh api rate_limit` and counts
+    every `gh api graphql` invocation (the reviewThreads call the floor
+    must prevent)."""
+    calls = {"graphql": 0}
+
+    def runner(cmd, *, cwd=None, timeout=None, **_):
+        if "rate_limit" in cmd:
+            return Result(0, _json.dumps(
+                {"resources": {"graphql": {"remaining": remaining}}}
+            ), "")
+        if "graphql" in cmd:
+            calls["graphql"] += 1
+            return Result(0, _json.dumps(threads or _threads_payload([])), "")
+        return Result(0, _json.dumps({"url": _URL, "reviews": reviews or []}), "")
+
+    return runner, calls
+
+
+def test_below_floor_returns_unknown_and_spends_no_query():
+    runner, calls = _fake_runner_with_quota(remaining=50)
+    state = _reviews.read_optional_review_state("42", runner=runner)
+    assert state == dict(_reviews._UNKNOWN)
+    assert calls["graphql"] == 0, "the floor must trip before the query fires"
+
+
+def test_above_floor_reads_threads_normally():
+    runner, calls = _fake_runner_with_quota(
+        remaining=5000,
+        reviews=[{"author": {"login": "gemini-code-assist[bot]"}, "state": "COMMENTED"}],
+        threads=_threads_payload([_thread("gemini-code-assist[bot]", False)]),
+    )
+    state = _reviews.read_optional_review_state("42", runner=runner)
+    assert state["optional_reviews_unresolved"] == 1
+    assert calls["graphql"] == 1
+
+
 def test_body_only_commented_review_lists_with_zero_inline():
     """Boundary: a body-only COMMENTED review (no thread) still lists via reviews."""
     state = _reviews.read_optional_review_state(
