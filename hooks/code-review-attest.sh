@@ -86,7 +86,7 @@ case "$event" in
     #    says. This is the positive marker the real outcome always produces:
     #    `agent-<id>.forked-skill.marker.json` holds
     #    {"forkedSkill":true,"skillName":"code-review"}, and the sibling
-    #    `.meta.json` holds the "/code-review low" description the payload
+    #    `.meta.json` holds the "/code-review <level>" description the payload
     #    itself omits. Nothing the review prints can dodge it, and no
     #    unrelated subagent can forge it.
     #

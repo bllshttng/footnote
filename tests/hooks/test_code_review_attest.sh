@@ -161,7 +161,7 @@ expect_attest "described-with-level-json-clean"
 
 # PR 923: the low-level protocol's empty-findings marker is the literal
 # "(none)". No fence at all, so the fence parser could never read it.
-run_hook "$(subagent_stop "/code-review low" "(none)")"
+run_hook "$(subagent_stop "/code-review <level>" "(none)")"
 expect_attest "described-none-marker"
 
 run_hook "$(subagent_stop "/code-review" $'Reviewed.\n\n(none)\n')"
@@ -176,7 +176,7 @@ expect_attest "forked-marker-none"
 run_hook "$(forked_skill_stop "$JSON_CLEAN" "code-review")"
 expect_attest "forked-marker-json-clean"
 
-run_hook "$(forked_meta_stop "(none)" "/code-review low")"
+run_hook "$(forked_meta_stop "(none)" "/code-review <level>")"
 expect_attest "forked-meta-none"
 
 run_hook "$(forked_skill_stop "$JSON_DIRTY" "code-review")"
