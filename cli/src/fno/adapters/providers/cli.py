@@ -403,7 +403,7 @@ def window_providers(
         when = (
             "unknown"
             if closes_in is None
-            else f"closes {_fmt_resets_in(float(row['closes_at']), now)}"
+            else f"closes {_fmt_resets_in(float(cast(float, row['closes_at'])), now)}"
         )
         typer.echo(
             f"{pid}  [{row['harness']}]  headroom={row['headroom']:<9} {when}"

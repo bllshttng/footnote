@@ -1088,7 +1088,7 @@ class TestEveryLockWriterHarvestsTheReset:
     def test_failover_writes_the_harvested_reset(
         self, state_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        seen = {}
+        seen: dict[str, object] = {}
         import fno.adapters.providers.failover as fo
 
         def _spy(provider_id, rule, model=None, now=None, resets_at=None):
@@ -1114,7 +1114,7 @@ class TestEveryLockWriterHarvestsTheReset:
         import fno.adapters.providers.runtime_state as rs
         from fno.agents import dispatch
 
-        seen = {}
+        seen: dict[str, object] = {}
         monkeypatch.setattr(
             rs, "update_provider_health",
             lambda provider_id, rule, model=None, now=None, resets_at=None:
@@ -1134,7 +1134,7 @@ class TestEveryLockWriterHarvestsTheReset:
         import fno.adapters.providers.runtime_state as rs
         from fno.adapters.providers.error_taxonomy import classify_error, reset_epoch_from
 
-        seen = {}
+        seen: dict[str, object] = {}
         monkeypatch.setattr(
             rs, "update_provider_health",
             lambda provider_id, rule, model=None, now=None, resets_at=None:

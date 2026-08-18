@@ -88,6 +88,11 @@ def _emit_event(
         return False
 
 
+def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
+    """run_sweep's emit contract drops the write receipt _emit_event returns."""
+    _emit_event(event_type, data)
+
+
 def _notify_parked(message: str) -> None:
     """Send an OS notification for a parked PR.
 
@@ -385,7 +390,7 @@ def tick() -> None:
             try:
                 from fno.agents.sweep import run_sweep as _run_silence_sweep
 
-                _rows, _fleet_silent = _run_silence_sweep(emit=_emit_event)
+                _rows, _fleet_silent = _run_silence_sweep(emit=_emit_for_sweep)
                 if _fleet_silent:
                     typer.echo(f"silence sweep: silent={_fleet_silent}")
             except Exception as exc:  # noqa: BLE001 - a backstop never breaks the tick

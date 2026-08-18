@@ -948,7 +948,9 @@ def update_provider_health(
                     )
                     labels[WINDOW_LABEL] = {
                         "opened_at": opened_at,
-                        "warned": bool(prior.get("warned")) if same else False,
+                        "warned": (
+                            bool(prior.get("warned")) if prior is not None and same else False
+                        ),
                     }
 
             new_state = ProviderRuntimeState(
