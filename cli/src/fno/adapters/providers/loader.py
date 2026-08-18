@@ -256,11 +256,13 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "confirm",
         "dead_row_grace",
         "defaults",
+        "fallback",
         "gemini",
         "happy_routed_panes",
         "max_live",
         "min_free_gb",
         "profiles",
+        "silence_deadline_seconds",
         "spawn_permission_mode",
         "worker_qos",
     }
