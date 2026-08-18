@@ -19,12 +19,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup prerequisites
+        # jq ships on ubuntu-latest; apt runs only as an image-drift fallback.
+        # The unconditional `apt-get update` once stalled 15 minutes on an
+        # unreachable azure.archive.ubuntu.com mirror and took the job down at
+        # its own timeout with zero assertions run (PR 933's red codex-bootstrap
+        # was exactly that), so the common path never touches apt at all.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+          command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+          jq --version
 
       - name: Run Codex setup (no package setup)
         run: |
