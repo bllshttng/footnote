@@ -220,7 +220,7 @@ A node claiming to be ready with no plan, and a blocked node whose blocker merge
 **`done` does not mean merged. Cross-check the wave gate yourself.**
 `done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged.
 This is not cosmetic: it is the wave gate, and a stale `done` means the whole tail behind it is waiting on a merge nobody performed.
-Run `gh pr view <n> --json state,mergeable,statusCheckRollup` on every child whose PR number you are treating as landed, and reconcile before you plan a single edge.
+Run `fno pr info <n>` for state/head/mergeability and `fno pr status <n>` for CI on every child whose PR number you are treating as landed, and reconcile before you plan a single edge.
 
 **Check that the merge machinery is alive.**
 A dead pr-watch is silent and looks exactly like "no PRs finished recently."

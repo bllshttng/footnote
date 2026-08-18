@@ -403,6 +403,9 @@ def headless_create(
             spawn_env, _ = compose_worker_credentials(
                 account_env, route_env, spawn_env
             )
+    from fno.setup.github_cli import worker_environment
+
+    spawn_env = worker_environment(spawn_env or os.environ)
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -412,8 +415,7 @@ def headless_create(
         "text": True,
         "timeout": timeout,
     }
-    if spawn_env is not None:
-        run_kwargs["env"] = spawn_env
+    run_kwargs["env"] = spawn_env
     # Emit the spawn receipt BEFORE the synchronous blocking claude -p. A
     # one-shot holds this process until claude -p returns (potentially long),
     # so without an up-front line a watcher sees nothing and may assume the
@@ -558,6 +560,10 @@ def bg_create(
         from fno.agents.account_env import compose_worker_credentials
 
         spawn_env, _ = compose_worker_credentials(account_env, route, spawn_env)
+
+    from fno.setup.github_cli import worker_environment
+
+    spawn_env = worker_environment(spawn_env)
 
     start = time.monotonic()
     try:

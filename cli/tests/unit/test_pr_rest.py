@@ -105,6 +105,30 @@ def test_pr_info_preserves_unknown_mergeability():
     assert info["mergeable"] == "UNKNOWN"
 
 
+def test_current_pr_number_uses_rest_not_gh_pr_view():
+    calls: list[list[str]] = []
+
+    def runner(cmd, cwd=None):
+        calls.append(list(cmd))
+        if cmd[:3] == ["git", "branch", "--show-current"]:
+            return Result(0, "feature/rest-info\n", "")
+        if cmd[:2] == ["gh", "api"]:
+            return Result(0, '[{"number":930}]', "")
+        return Result(1, "", "unexpected")
+
+    number, reason = _rest.resolve_current_pr_number_rest(
+        repo="Owner/Repo", runner=runner
+    )
+    assert (number, reason) == (930, "")
+    assert calls == [
+        ["git", "branch", "--show-current"],
+        [
+            "gh", "api",
+            "repos/Owner/Repo/pulls?state=all&head=Owner:feature/rest-info&per_page=2",
+        ],
+    ]
+
+
 def test_rest_green_maps_to_rollup_green():
     r = _runner(
         check_runs=[
