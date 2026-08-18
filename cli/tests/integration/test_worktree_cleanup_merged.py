@@ -352,6 +352,21 @@ def test_age_sweep_removes_old_clean_detached_tree(repo: Path):
     assert "REMOVED" in r.stdout
 
 
+def test_age_sweep_keeps_detached_tree_with_uncommitted_work(repo: Path):
+    """Same loss class as unpushed commits, one step earlier: a detached tree
+    has no branch holding uncommitted content either, and the sweep removes by
+    default with --force. The in-flight eval tree rides this guard via its
+    untracked marker file (cli/src/fno/evals/runner.py)."""
+    wt = _add_detached(repo, repo / "wt-age-dirty")
+    (wt / "scratch.txt").write_text("not on any ref\n")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (detached HEAD holds uncommitted work" in r.stdout
+    assert wt.exists(), "age sweep must not force-remove uncommitted work on a detached HEAD"
+
+
 def test_compat_age_sweep_delegates_app_owned_guard(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -529,6 +544,26 @@ def test_archive_detached_refused_when_refs_unverifiable(repo: Path):
     assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
     assert "not verifiable" in r.stderr, f"stderr={r.stderr}"
     assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_dead_secondary_remote_degrades_instead_of_aborting(repo: Path):
+    """fetch --all fails if ANY remote is dead, and one stale account remote
+    must not brick the reclaim verb. Origin stays the merged-check baseline
+    (branched judging continues); the detached tree is kept because its refs
+    cannot be verified against the dead remote - with a receipt that says so,
+    not a phantom unpushed count."""
+    merged = _add_merged(repo, "reapme")
+    det = _add_detached(repo, repo / "wt-scratch-fork")
+    _git(repo, "remote", "add", "fork", str(repo / "dead-fork.git"))
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not merged.exists(), diag
+    assert "remote refs unverifiable" in r.stdout, diag
+    assert det.exists(), "refs unverifiable against a dead remote must keep detached trees" + diag
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────
