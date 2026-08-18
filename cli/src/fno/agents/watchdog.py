@@ -1039,6 +1039,7 @@ def run_sweep(
         ),
         "verdicts": [v._asdict() for v in vs],
         "counts": counts,
+        "terminal_harness_rows": sum(r.state in _TERMINAL_STATES for r in rows),
         "warnings": warnings,
     }
     return payload, rows
@@ -1680,4 +1681,3 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
             f"{(removed.stderr or '').strip()[:200]}",
         )
     return "applied", f"stopped and removed ({v.basis})"
-

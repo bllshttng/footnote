@@ -903,7 +903,12 @@ def test_stopped_row_survives_claude_agents_json(monkeypatch):
 
 
 def test_sweep_payload_shape():
-    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp")]
+    rows = [
+        Row("aaaa1111-0000", "w1", "working", None, "/tmp"),
+        Row("bbbb2222-0000", "w2", "stopped", None, "/tmp"),
+        Row("cccc3333-0000", "w3", "done", None, "/tmp"),
+        Row("dddd4444-0000", "w4", "exited", None, "/tmp"),
+    ]
     payload, out_rows = watchdog.run_sweep(
         now_s=NOW_1840,
         rows_provider=lambda: (rows, []),
@@ -913,9 +918,34 @@ def test_sweep_payload_shape():
     )
     assert payload["generated_at"] == "2026-08-16T18:40:00Z"
     assert payload["verdicts"][0]["verdict"] == LEAVE
-    assert payload["counts"] == {LEAVE: 1}
+    assert payload["terminal_harness_rows"] == 3
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
+
+
+def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
+    from fno.agents import cli as agents_cli
+
+    row = Row("aaaa1111-0000", "w1", "stopped", None, "/tmp")
+    verdict = Verdict(
+        "aaaa1111-0000", "w1", "stopped", LEAVE, "terminal", "none"
+    )
+    payload = {
+        "generated_at": "x",
+        "verdicts": [verdict._asdict()],
+        "counts": {LEAVE: 1},
+        "warnings": [],
+        "terminal_harness_rows": 3,
+    }
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, [row]))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
+
+    agents_cli.cmd_watchdog(
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+    )
+
+    assert "terminal harness rows: 3" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
