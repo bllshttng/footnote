@@ -5139,7 +5139,8 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut settings_path: Option<PathBuf> = None;
     let mut ledger_path: Option<PathBuf> = None;
     let mut now_override: Option<String> = None;
-    let mut gh_bin = std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "gh".to_string());
+    let mut gh_bin = std::env::var("FNO_LOOPCHECK_GH_BIN")
+        .unwrap_or_else(|_| "fno-gh-coverage".to_string());
     let mut git_bin = std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
     let mut author_harness_override: Option<String> = None;
     let mut hook_input_stdin = false;

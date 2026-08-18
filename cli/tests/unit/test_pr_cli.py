@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.pr import _merge
+from fno.pr._proc import Result
 
 runner = CliRunner()
 
@@ -45,6 +46,26 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
         "base_ref": "main",
         "mergeable": "MERGEABLE",
     }
+
+
+def test_graphql_exec_forwards_the_explicit_coverage_purpose(monkeypatch):
+    from fno.pr import _quota
+
+    captured = {}
+
+    def execute(purpose, args):
+        captured["purpose"] = purpose
+        captured["args"] = args
+        return Result(0, '{"coverage":"covered"}\n', "")
+
+    monkeypatch.setattr(_quota, "execute_graphql", execute)
+    result = runner.invoke(
+        app,
+        ["pr", "graphql-exec", "--purpose", "coverage", "--", "pr", "view", "930"],
+    )
+    assert result.exit_code == 0
+    assert captured == {"purpose": "coverage", "args": ["pr", "view", "930"]}
+    assert json.loads(result.stdout) == {"coverage": "covered"}
 
 
 def test_pr_help_renders():
