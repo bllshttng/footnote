@@ -362,10 +362,29 @@ def test_an_oversized_integer_reports_a_reason_rather_than_raising(
         f'"max_context_window": {huge}, "effective_context_window_percent": {huge}}}]}}'
     )
 
-    report = doctor._codex_context_window_report()
+    # No raise is the point.  The range bound then turns it into a reason.
+    assert "reason" in doctor._codex_context_window_report()
 
-    assert report["percent"] is None
-    assert report["effective"] == 1000000
+
+def test_an_impossible_window_is_rejected_by_the_same_gate(tmp_path, monkeypatch) -> None:
+    """The range bound belongs INSIDE the gate, not beside one field.  A cap
+    of -5 or 0 printed 'an effective -5' as fact, and an 80-digit cap landed
+    verbatim in both the human line and the JSON payload."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    for bad in (-5, 0, 10**80):
+        _write(tmp_path, configured=1000000, cached_max=bad)
+        report = doctor._codex_context_window_report()
+        assert report == {
+            "reason": "cache-schema-drift: no max_context_window for gpt-5.6-sol"
+        }, bad
+
+
+def test_a_real_served_window_clears_the_ceiling(tmp_path, monkeypatch) -> None:
+    """The bound must never reject a number codex actually serves."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    for served in (128000, 272000, 872000, 1000000, 1050000):
+        _write(tmp_path, configured=2000000, cached_max=served)
+        assert doctor._codex_context_window_report()["max_context_window"] == served
 
 
 def test_a_cap_below_the_base_still_names_the_cache(tmp_path, monkeypatch) -> None:

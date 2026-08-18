@@ -1857,24 +1857,34 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     cap = entry.get("max_context_window")
     base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    def _number(value: object, *, keep_float: bool = False) -> Optional[float]:
-        """The ONE gate every cached number goes through.
+    def _number(
+        value: object, *, lo: float, hi: float, keep_float: bool = False
+    ) -> Optional[float]:
+        """The ONE gate every cached number goes through, RANGE INCLUDED.
 
         Per-field guards were the recurring defect here: bool, then non-finite,
         then out-of-range each got closed on one field and left open on its
-        neighbour, and every miss raised into a caller that swallows it.  The
-        int branch returns before any float coercion, because `math.isfinite`
-        coerces and an oversized JSON integer raises `OverflowError` there."""
+        neighbour, and every miss either raised into a caller that swallows it
+        or printed an impossible window as fact.  The bounds are arguments, so
+        adding a field cannot forget them.  The int branch returns before any
+        float coercion, because `math.isfinite` coerces and an oversized JSON
+        integer raises `OverflowError` there."""
         if isinstance(value, bool):
             return None
         if isinstance(value, int):
-            return value
-        if isinstance(value, float) and math.isfinite(value):
-            return value if keep_float else int(value)
-        return None
+            number: float = value
+        elif isinstance(value, float) and math.isfinite(value):
+            number = value if keep_float else int(value)
+        else:
+            return None
+        return number if lo <= number <= hi else None
 
-    cap = _number(cap)
-    base = _number(base)
+    # No real window is zero, negative, or astronomical: the largest codex
+    # documents is about 1.05M, so a gigatoken ceiling rejects a corrupt cache
+    # without ever rejecting a served one.
+    WINDOW_CEILING = 1_000_000_000
+    cap = _number(cap, lo=1, hi=WINDOW_CEILING)
+    base = _number(base, lo=1, hi=WINDOW_CEILING)
     # No cap means no computable window.  Substituting the base produced a
     # number the cache never carried, and the line then had to disclaim the
     # very cap it quoted.  Say the cache cannot answer instead.
@@ -1886,11 +1896,8 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     # A missing percent must not silence a clamp that needs no percent to
     # compute.  Carry it as None and let the line omit the claim, rather than
     # defaulting to a number upstream did not send.  A float is legitimate
-    # here (95.0 is served), so keep the type and add the one bound the shared
-    # gate cannot know: a -50 prints an impossible window as fact.
-    percent = _number(percent, keep_float=True)
-    if percent is not None and not 0 <= percent <= 100:
-        percent = None
+    # here, since 95.0 is served.
+    percent = _number(percent, lo=0, hi=100, keep_float=True)
 
     effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
     return {
