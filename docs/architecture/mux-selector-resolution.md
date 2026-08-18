@@ -42,6 +42,6 @@ Selector focus ignores `FNO_SESSION`. That variable names the session you sit in
 
 ## The web-bridge state file
 
-`fno mux serve --web` prints its URL and token once at bind. It also writes `~/.fno/mux/web-<session>.json` at bind: `{"bind", "port", "token"}`, mode 0600. The bridge removes the file on exit, including Ctrl-C via graceful shutdown.
+`fno mux serve --web` prints its URL and token once at bind. It also writes `~/.fno/mux/web-<session>.json` at bind: `{"bind", "port", "token", "pid"}`, mode 0600. The bridge removes the file on exit, including Ctrl-C via graceful shutdown. Removal is pid-guarded: a newer bridge for the same session owns the file, and an older bridge's exit must not delete it.
 
-`mux view <selector> --url` reads that file and probes the TCP port before trusting it. A file left by a killed bridge reads as "no bridge". The command prints `http://<host>:<port>/?t=<token>&pane=<pane>`. The served page reads `pane` from its query string and pins the first paint to that pane. It clears the want once honoured, so the operator can still switch panes by hand.
+`mux view <selector> --url` reads that file and probes the TCP port before trusting it. The probe resolves any bind spelling, `localhost` and `::1` included. A file left by a killed bridge reads as "no bridge". The command prints `http://<host>:<port>/?t=<token>&pane=<pane>` with a bracketed IPv6 host. The served page reads `pane` from its query string and pins the first paint to that pane. Other panes' frames keep waiting while the wanted pane is outstanding. It clears the want once honoured, so the operator can still switch panes by hand.

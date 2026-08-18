@@ -116,7 +116,15 @@ impl WebStateFile {
             // socket_path() names the file <session>.sock; the stem is the name.
             .unwrap_or(proto::DEFAULT_SESSION);
         let path = socket.parent()?.join(format!("web-{session}.json"));
-        let body = serde_json::json!({ "bind": bind, "port": port, "token": token });
+        // `pid` makes the file's ownership checkable: two bridges may share a
+        // session on different ports, the later bind owns the file, and an
+        // exiting OLDER bridge must not delete the newer one's state (codex P2).
+        let body = serde_json::json!({
+            "bind": bind,
+            "port": port,
+            "token": token,
+            "pid": std::process::id(),
+        });
         let wrote = {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
@@ -140,7 +148,17 @@ impl WebStateFile {
 
 impl Drop for WebStateFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        // Remove only the file that still names THIS process. A newer bridge
+        // for the same session overwrote it at its own bind; deleting that
+        // one would make a live bridge read as absent.
+        let still_ours = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+            == Some(std::process::id() as u64);
+        if still_ours {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 }
 

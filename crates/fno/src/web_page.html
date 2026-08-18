@@ -205,10 +205,11 @@
       }
       if (upstreamUp) setBar("live", "live");
       if (current == null) {
-        // A pasted pane link pins the first paint; once honoured (or the
-        // wanted pane died before a frame arrived) fall back to first-landed.
+        // A pasted pane link pins the first paint. Keep waiting for THAT
+        // pane's frame - a different pane landing first must not steal the
+        // paint (codex P1). Only with no want does the first frame win.
         if (wanted != null && frames.has(wanted)) { current = wanted; wanted = null; dirtyPicker = true; }
-        else { current = pane_id; dirtyPicker = true; }
+        else if (wanted == null) { current = pane_id; dirtyPicker = true; }
       }
       if (dirtyPicker) renderPicker();
       if (pane_id === current) draw();
@@ -222,9 +223,12 @@
       // the picker (a plain non-agent pane's death is invisible without a proto
       // signal, so it ages out via the LRU cap instead).
       for (const a of agents) {
-        if (a.exited && a.pane_id != null && frames.has(a.pane_id)) {
+        if (a.exited && a.pane_id != null) {
           frames.delete(a.pane_id);
           if (a.pane_id === current) current = null;
+          // A wanted pane that died before painting: stop waiting for it so
+          // the page falls back to the first frame to land.
+          if (a.pane_id === wanted) wanted = null;
         }
       }
       renderPicker();
