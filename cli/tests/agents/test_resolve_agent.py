@@ -155,6 +155,10 @@ def _codex(name: str, uuid: str, short: str | None = None) -> AgentEntry:
 # canonical handles overlap while the full ids stay distinct.
 _WINDOW_A = "01a0152f-45fd-78f0-b109-78f8dffdeeca"
 _WINDOW_B = "01a0152f-9a2b-74c3-8b0f-11aa22bb33cc"
+# register_existing_session's provider slot holds the harness name; the
+# constant names the value's own axis so the binding never reads as a
+# vendor holding.
+CODEX_HARNESS = "codex"
 
 
 def test_update_registry_allows_same_window_codex_pair_null_short(
@@ -236,10 +240,10 @@ def test_register_existing_session_allows_same_window_generated_handles(
     reg = tmp_path / "registry.json"
 
     first = register_existing_session(
-        provider="codex", session_id=_WINDOW_A, cwd="/w", registry_path=reg
+        provider=CODEX_HARNESS, session_id=_WINDOW_A, cwd="/w", registry_path=reg
     )
     second = register_existing_session(
-        provider="codex", session_id=_WINDOW_B, cwd="/w", registry_path=reg
+        provider=CODEX_HARNESS, session_id=_WINDOW_B, cwd="/w", registry_path=reg
     )
 
     assert first.name == "01a0152f"
