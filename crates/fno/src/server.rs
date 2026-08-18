@@ -1096,17 +1096,6 @@ impl Drop for ConnAlive {
 /// needs no extra flag on the internal `--server` surface. It feeds the
 /// `Info` answer and every pane's `FNO_SESSION`.
 pub fn run(socket: PathBuf) -> i32 {
-    match crate::pty::raise_fd_limit() {
-        Ok(Some((before, after))) => {
-            eprintln!("fno mux: open-file limit raised from {before} to {after}");
-        }
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!(
-                "fno mux: warn: could not raise the open-file limit: {e}; panes will cap early"
-            );
-        }
-    }
     if let Some(parent) = socket.parent() {
         // The socket accepts keystrokes into your shell: never group/world.
         // Born-0700 (atomic) rather than create-then-tighten (gemini
@@ -1132,6 +1121,20 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
+    match crate::pty::raise_fd_limit() {
+        Ok(Some((before, after))) => {
+            eprintln!("fno mux: open-file limit raised from {before} to {after}");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "fno mux: warn: could not raise the open-file limit: {e}; panes will cap early"
+            );
+        }
+    }
+    if let Err(e) = crate::pty::reserve_fd_for_diagnostics() {
+        eprintln!("fno mux: warn: could not reserve an fd for ceiling diagnostics: {e}");
+    }
     let _guard = SocketGuard(socket.clone());
 
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux

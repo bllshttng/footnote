@@ -6,6 +6,7 @@
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -50,6 +51,11 @@ fn spawn_server(sock: &Path, shell: &str) -> Server {
 }
 
 fn spawn_server_with_env(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Server {
+    let mut cmd = server_command(sock, shell, env);
+    Server(cmd.spawn().unwrap())
+}
+
+fn server_command(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("FNO_") {
@@ -85,7 +91,34 @@ fn spawn_server_with_env(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Serv
     for (key, value) in env {
         cmd.env(key, value);
     }
-    Server(cmd.spawn().unwrap())
+    cmd
+}
+
+fn cap_child_nofile(cmd: &mut Command, limit: libc::rlim_t, lower_hard: bool) {
+    // SAFETY: the hook only changes the child between fork and exec, using
+    // async-signal-safe getrlimit/setrlimit calls and a copied scalar limit.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut current = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, current.as_mut_ptr()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let current = current.assume_init();
+            let hard = if lower_hard {
+                limit.min(current.rlim_max)
+            } else {
+                current.rlim_max
+            };
+            let next = libc::rlimit {
+                rlim_cur: limit.min(hard),
+                rlim_max: hard,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &next) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Connect + Attach, returning the ready-to-use stream. Retries the connect
@@ -180,6 +213,59 @@ fn wait_for_raw_frame(
 
 fn send(stream: &mut UnixStream, msg: &ClientMsg) {
     write_msg_sync(stream, msg).unwrap();
+}
+
+#[test]
+fn server_spine_child_spawn_emfile_keeps_typed_ceiling_diagnostic() {
+    let scratch = Scratch::new("child-emfile");
+    let mut command = server_command(&scratch.sock(), "/bin/sh", &[]);
+    cap_child_nofile(&mut command, 64, true);
+    let _server = Server(command.spawn().unwrap());
+    let _probe = connect_with_retry(&scratch.sock());
+
+    let mut failure = None;
+    for _ in 0..40 {
+        let output = Command::new(env!("CARGO_BIN_EXE_fno"))
+            .args([
+                "mux",
+                "pane",
+                "run",
+                "--session",
+                "s",
+                "--",
+                "/bin/sleep",
+                "30",
+            ])
+            .env("FNO_MUX_DIR", &scratch.0)
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            failure = Some(String::from_utf8_lossy(&output.stderr).into_owned());
+            break;
+        }
+    }
+
+    let failure = failure.expect("a 64-fd server must reach its ceiling within 40 panes");
+    assert!(failure.contains("failed to spawn pty child"), "{failure}");
+    assert!(failure.contains("open-file ceiling"), "{failure}");
+    assert!(failure.contains("of 64 fds in use"), "{failure}");
+    assert!(failure.contains("setrlimit"), "{failure}");
+}
+
+#[test]
+fn server_spine_losing_contender_emits_no_raise_receipt() {
+    let scratch = Scratch::new("loser-receipt");
+    let _winner = spawn_server(&scratch.sock(), "/bin/sh");
+    let _probe = connect_with_retry(&scratch.sock());
+
+    let mut loser = server_command(&scratch.sock(), "/bin/sh", &[]);
+    cap_child_nofile(&mut loser, 256, false);
+    loser.stderr(Stdio::piped());
+    let output = loser.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("a server is already running"), "{stderr}");
+    assert!(!stderr.contains("open-file limit raised"), "{stderr}");
 }
 
 #[test]

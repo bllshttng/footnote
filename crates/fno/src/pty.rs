@@ -35,6 +35,10 @@ use std::sync::{Arc, Mutex};
 /// every later spawn into a second failure.
 static FORK_LOCK: Mutex<()> = Mutex::new(());
 
+/// One descriptor held open solely so an EMFILE diagnostic can close it,
+/// inspect `/dev/fd`, then replenish it before returning to the server loop.
+static FD_COUNT_RESERVE: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
 thread_local! {
     // Instant of the last openpty timeout, scoped per thread rather than a
     // process-wide static. In production this is a no-op difference: the
@@ -145,6 +149,17 @@ pub enum PtyError {
         detail: String,
     },
     #[error(
+        "failed to spawn pty child: this mux server is at its open-file ceiling \
+         ({open} of {limit} fds in use). Raise it with setrlimit(RLIMIT_NOFILE) at \
+         server start, or restart the server to reclaim descriptors (this kills live panes). \
+         `fno agents spawn --substrate bg` needs no pane. Underlying: {detail}"
+    )]
+    SpawnFdLimit {
+        open: usize,
+        limit: libc::rlim_t,
+        detail: String,
+    },
+    #[error(
         "openpty did not return within {0:?}; the host pty layer may be wedged (check: ls /dev). \
              This pane was refused, the mux server is still serving"
     )]
@@ -246,6 +261,13 @@ impl PtyShell {
                     break;
                 }
                 // rc drops here on failure -> its temp dir is removed.
+                Err(e) if is_typed_emfile(e.as_ref()) => {
+                    drop(fork);
+                    return Err(classify_spawn_fd_ceiling(format!(
+                        "{}: {e}",
+                        cand.to_string_lossy()
+                    )));
+                }
                 Err(e) => errors.push(format!("{}: {e}", cand.to_string_lossy())),
             }
         }
@@ -283,9 +305,14 @@ impl PtyShell {
         }
         let child = {
             let _fork = fork_guard();
-            pair.slave
-                .spawn_command(cmd)
-                .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?
+            pair.slave.spawn_command(cmd).map_err(|e| {
+                let detail = format!("{program}: {e}");
+                if is_typed_emfile(e.as_ref()) {
+                    classify_spawn_fd_ceiling(detail)
+                } else {
+                    PtyError::Spawn(detail)
+                }
+            })?
         };
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
@@ -477,6 +504,24 @@ fn fd_limits() -> Result<(libc::rlim_t, libc::rlim_t), std::io::Error> {
     Ok((limits.rlim_cur, limits.rlim_max))
 }
 
+/// Hold one descriptor in reserve for an eventual EMFILE diagnostic.
+pub fn reserve_fd_for_diagnostics() -> Result<(), std::io::Error> {
+    let file = std::fs::File::open("/dev/null")?;
+    let mut reserve = FD_COUNT_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
+    *reserve = Some(file);
+    Ok(())
+}
+
+fn count_open_fds() -> Result<usize, std::io::Error> {
+    let mut reserve = FD_COUNT_RESERVE.lock().unwrap_or_else(|e| e.into_inner());
+    drop(reserve.take());
+    let count = fs::read_dir("/dev/fd").map(|entries| entries.count());
+    if let Ok(file) = std::fs::File::open("/dev/null") {
+        *reserve = Some(file);
+    }
+    count
+}
+
 /// Raise this process's soft open-file limit to the installable ceiling.
 /// Returns the values read before and after the change, never the requested
 /// value in place of the kernel's answer.
@@ -505,11 +550,30 @@ fn is_fd_ceiling(message: &str) -> bool {
     message.contains("Too many open files") || message.contains("code: 24,")
 }
 
+fn is_typed_emfile(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.raw_os_error() == Some(libc::EMFILE))
+        {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
+fn fd_ceiling_state() -> Option<(usize, libc::rlim_t)> {
+    let (limit, _) = fd_limits().ok()?;
+    let open = count_open_fds().ok()?;
+    Some((open, limit))
+}
+
 fn classify_open_pty_error(detail: String) -> PtyError {
     if is_fd_ceiling(&detail) {
-        if let (Ok(open), Ok((limit, _))) =
-            (fs::read_dir("/dev/fd").map(|it| it.count()), fd_limits())
-        {
+        if let Some((open, limit)) = fd_ceiling_state() {
             return PtyError::OpenPtyFdLimit {
                 open,
                 limit,
@@ -518,6 +582,18 @@ fn classify_open_pty_error(detail: String) -> PtyError {
         }
     }
     PtyError::OpenPty(detail)
+}
+
+fn classify_spawn_fd_ceiling(detail: String) -> PtyError {
+    if let Some((open, limit)) = fd_ceiling_state() {
+        PtyError::SpawnFdLimit {
+            open,
+            limit,
+            detail,
+        }
+    } else {
+        PtyError::Spawn(detail)
+    }
 }
 
 /// Open a fresh PTY pair at `rows`x`cols` (clamped to >=1).
