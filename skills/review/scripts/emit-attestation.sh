@@ -99,7 +99,31 @@ base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
 base="${base#*/}"
 base="${base:-main}"
 upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-if [[ "$upstream" == */* && "${upstream#*/}" != "$base" ]]; then
+# The upstream is the PR branch only when this checkout carries NO WORK OF ITS
+# OWN. That is what separates the two shapes, and the base name never was: an
+# author worktree tracking any branch other than origin/HEAD (origin/HEAD at
+# main, the worktree created off origin/develop) passes the name test and
+# recorded branch=develop - the round-3 `main`-literal bug relocated, since it
+# still loses the branch arm for the real PR AND puts the event in scope for
+# any PR whose headRefName is literally develop. A reviewer worktree sits AT
+# the PR branch tip it tracks, so `@{upstream}..HEAD` is empty; an author
+# worktree has commits ahead of whatever it tracks, which is precisely the
+# diff under review. Count the commits, do not guess from names.
+#
+# The name test stays as the second conjunct, and it is not redundant: a
+# just-created author worktree has zero commits yet, and without it that
+# worktree would record its BASE as the branch. Both must hold.
+#
+# Deliberately NOT `gh pr view --json baseRefName`. It costs a network call on
+# the emit path, which turns a review receipt into something that fails when
+# GitHub is slow, and it does not even close this bug: with a PR based on main
+# and a worktree tracking origin/develop, baseRefName is main, develop != main,
+# and the wrong name is recorded exactly as before.
+ahead=1
+if [[ -n "$upstream" ]]; then
+  ahead="$(git rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 1)"
+fi
+if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; then
   branch="${upstream#*/}"
 fi
 

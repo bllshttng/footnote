@@ -151,6 +151,39 @@ got="$(stored '.branch')"
   && pass "develop-based repo still records a reviewer upstream PR branch" \
   || fail "develop-based reviewer worktree: want feature/x-e601 (upstream), got '$got'"
 
+# 8. The shape cases 6 and 7 do NOT cover: an author worktree tracking a
+#    branch that is NOT origin/HEAD. origin/HEAD names main, the worktree was
+#    created off origin/develop, and the author has committed. The base-name
+#    test alone passes here (develop != main) and recorded branch=develop -
+#    the round-3 bug relocated, losing the branch arm for the real PR and
+#    leaking scope into any PR whose headRefName is literally develop. The
+#    commits-ahead count is what separates an author worktree from a reviewer
+#    one, so the LOCAL name must win.
+git -C "$REPO" checkout -q feature/x-e601
+git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$REPO" branch --set-upstream-to=origin/develop feature/x-e601 >/dev/null 2>&1
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "author work"
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "an author worktree tracking a non-default branch keeps its local name" \
+  || fail "non-default-tracking author worktree: want feature/x-e601 (local), got '$got'"
+
+# 9. The same repo, reviewer shape, with the PR branch now AHEAD of where the
+#    reviewer worktree was cut. The reviewer still carries no commits of its
+#    own, so the upstream must still win - the commits-ahead conjunct must not
+#    swallow the lane it was added beside.
+git -C "$REPO" update-ref refs/remotes/origin/feature/x-e601 "$(git -C "$REPO" rev-parse HEAD)"
+git -C "$REPO" checkout -q -b wt/r-3 origin/feature/x-e601
+git -C "$REPO" branch --set-upstream-to=origin/feature/x-e601 wt/r-3 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "a reviewer worktree with no commits of its own still records the PR branch" \
+  || fail "reviewer worktree: want feature/x-e601 (upstream), got '$got'"
+
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
