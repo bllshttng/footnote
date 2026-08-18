@@ -97,7 +97,7 @@ def _receipt(status: str, reason: str) -> str:
 
 def publish_review(
     *,
-    pr_number: int,
+    pr_number: Optional[int] = None,
     head_sha: str,
     verdict: str,
     reviewer: str,
@@ -105,6 +105,9 @@ def publish_review(
     dry_run: bool = False,
 ) -> PublishResult:
     """Post ``verdict`` on PR ``pr_number`` as ``review.bot_identity``.
+
+    ``pr_number=None`` (the emit-chokepoint shape) resolves the open PR for
+    the current branch first; no open PR is a ``skipped`` naming that.
 
     Never raises: every failure path lands in the result so the best-effort
     emit chokepoint can print one receipt line and move on.
@@ -136,7 +139,7 @@ def publish_review(
 
 def _publish_review(
     *,
-    pr_number: int,
+    pr_number: Optional[int],
     head_sha: str,
     verdict: str,
     reviewer: str,
@@ -180,7 +183,23 @@ def _publish_review(
             receipt=_receipt("skipped", f"${token_env} unset or empty"),
         )
 
-    # 2. Identity collision. This is the whole defect the node exists to fix:
+    # 2. The PR to post on: explicit (the verb) or the open PR for the current
+    #    branch (the emit chokepoint holds no PR number). Resolution sits AFTER
+    #    the config check so an unconfigured install makes no network calls.
+    if pr_number is None:
+        raw = _gh_scalar(["pr", "view", "--json", "number", "--jq", ".number"], cwd)
+        try:
+            pr_number = int(raw) if raw else None
+        except ValueError:
+            pr_number = None
+        if pr_number is None:
+            return PublishResult(
+                status="skipped",
+                reason="no open PR for HEAD",
+                receipt=_receipt("skipped", "no open PR for HEAD"),
+            )
+
+    # 3. Identity collision. This is the whole defect the node exists to fix:
     #    posting as the PR author would have GitHub accept the call and record
     #    COMMENTED - manufacturing the exact empty-reviewDecision lie. Compare
     #    bot-suffix-stripped logins (GitHub appends ``[bot]`` to app logins).
@@ -204,7 +223,7 @@ def _publish_review(
             receipt=_receipt("refused", detail),
         )
 
-    # 3. Head pin. The attestation is evidence about ONE commit; approving a PR
+    # 4. Head pin. The attestation is evidence about ONE commit; approving a PR
     #    whose head has moved past it approves commits nobody reviewed. A stale
     #    approval is worse than no approval.
     pr_head = _gh_scalar(
@@ -225,7 +244,7 @@ def _publish_review(
             receipt=_receipt("refused", detail),
         )
 
-    # 4. Verdict map. Anything the attestation schema does not enumerate is a
+    # 5. Verdict map. Anything the attestation schema does not enumerate is a
     #    verdict no GitHub event exists for; posting it as a comment would be
     #    the empty-reviewDecision shape again.
     event = _VERDICT_EVENTS.get(verdict)
@@ -246,7 +265,7 @@ def _publish_review(
             receipt=_receipt("skipped", detail),
         )
 
-    # 5. The POST, authenticated as the bot in the subprocess env ONLY: the
+    # 6. The POST, authenticated as the bot in the subprocess env ONLY: the
     #    caller's own gh auth must survive this call unchanged, and the token
     #    must not leak into any other subprocess this process later spawns.
     slug = _gh_scalar(
@@ -288,7 +307,7 @@ def _publish_review(
             receipt=_receipt("failed", detail),
         )
 
-    # 6. Read back what GitHub actually recorded. Load-bearing, not decoration:
+    # 7. Read back what GitHub actually recorded. Load-bearing, not decoration:
     #    the readback is the only honest answer to "did it land as APPROVED?".
     review_decision = _gh_scalar(
         ["pr", "view", str(pr_number), "--json", "reviewDecision", "--jq", ".reviewDecision"],

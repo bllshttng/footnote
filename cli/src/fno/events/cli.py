@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -462,6 +463,34 @@ def emit(
                 f"warning: {type_} not mirrored to the global log: {exc}",
                 err=True,
             )
+
+    # BOT-REVIEW MIRROR (x-93ea): a review_attestation also posts to GitHub as
+    # the reviewer lane's own identity (config.review.bot_identity), so a clean
+    # pass can land APPROVE instead of the COMMENTED an author account is
+    # structurally limited to. This emit is the ONE call every verdict already
+    # funnels through - the skill script, a direct CLI emit, and a spawned
+    # worker all land here - so the producer has exactly one reachable path
+    # rather than sitting on one of N paths while the others silently skip it.
+    #
+    # Best-effort, same posture as the global-log mirror above: the durable
+    # append has already succeeded and a network failure must never fail the
+    # emit. Unconfigured lane -> publish_review returns skipped without any
+    # network call, so a stock install sees one stderr receipt line and nothing
+    # else changes.
+    if type_ in GLOBAL_MIRROR_TYPES:
+        try:
+            from fno.pr._publish_review import publish_review
+
+            _data = event.get("data", {})
+            result = publish_review(
+                head_sha=str(_data.get("head_sha") or ""),
+                verdict=str(_data.get("verdict") or ""),
+                reviewer=str(_data.get("reviewer") or ""),
+                cwd=str(repo_root) if repo_root else os.getcwd(),
+            )
+            typer.echo(result.receipt, err=True)
+        except Exception as exc:  # noqa: BLE001 - never fail the emit
+            typer.echo(f"bot-review: skipped (mirror error: {exc})", err=True)
 
     # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record
