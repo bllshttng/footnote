@@ -225,36 +225,55 @@ def verdicts(
     a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
     returns the graph entry (``{"status", ...}``) or None."""
-    # Only a NON-TERMINAL row occupies its worktree. Counting stopped and
-    # completed rows made every tree that ever hosted a respawn read as
-    # shared for good, which silently retired the reap lane instead of
-    # narrowing it.
-    def _cotenants(counts: Counter, row: Row) -> int:
-        # Subtract this row ONLY if it was counted. A terminal row was
-        # never in the tally, so an unconditional -1 cancels a LIVE
-        # sibling and hands the quiet terminal row a reap on a tree
-        # somebody is working in - the exact deletion this guard exists
-        # to refuse, reintroduced by the arithmetic that narrowed it.
-        if not row.cwd:
-            return 0
-        mine = 0 if row.state in _TERMINAL_STATES else 1
-        return max(0, counts[row.cwd] - mine)
+    # Occupancy is read from the TRANSCRIPT, never from the roster state.
+    # This module exists because both stores lie about liveness, and the
+    # measured 2026-08-15 inversion had claude report `done` for a session
+    # that was working. Keying occupancy on that field let a live row count
+    # as zero, which handed its quiet sibling a reap on the tree the live
+    # one was mid-task in - the same reading-about-one-thing-as-a-verdict-
+    # about-another that the reap predicate below exists to end.
+    #
+    # So the tally asks the same question the predicate asks: is there a
+    # POSITIVE marker that this row is finished with the tree? A transcript
+    # that is fresh says occupied. A transcript that is missing, unreadable
+    # or unparseable says UNKNOWN, and unknown counts as occupied, because
+    # the cost of guessing wrong is somebody's uncommitted work.
+    facts_by_row: dict[str, Optional[TailFacts]] = {}
+    for row in rows:
+        try:
+            facts_by_row[row.row_id] = transcript_for(row.row_id)
+        except Exception:  # noqa: BLE001 - a failed read is never a verdict
+            facts_by_row[row.row_id] = None
+
+    def _still_in_the_tree(row: Row) -> bool:
+        facts = facts_by_row.get(row.row_id)
+        if facts is None or facts.last_event_epoch is None:
+            return True
+        return (now_s - facts.last_event_epoch) <= quiet_after_s
 
     occupants = Counter(
-        row.cwd for row in rows
-        if row.cwd and row.state not in _TERMINAL_STATES
+        row.cwd for row in rows if row.cwd and _still_in_the_tree(row)
     )
+
+    def _cotenants(row: Row) -> int:
+        # Subtract this row only if it was counted, or the subtraction
+        # cancels a sibling that WAS counted and the guard inverts.
+        if not row.cwd:
+            return 0
+        mine = 1 if _still_in_the_tree(row) else 0
+        return max(0, occupants[row.cwd] - mine)
+
     out: list[Verdict] = []
     for row in rows:
         out.append(
             _verdict_one(
                 row,
-                transcript_for=transcript_for,
+                facts=facts_by_row.get(row.row_id),
                 claim_for=claim_for,
                 node_state_for=node_state_for,
                 now_s=now_s,
                 quiet_after_s=quiet_after_s,
-                cotenants=_cotenants(occupants, row),
+                cotenants=_cotenants(row),
             )
         )
     return out
@@ -389,14 +408,13 @@ def _age_clause(now_s: float, epoch: Optional[float]) -> str:
 def _verdict_one(
     row: Row,
     *,
-    transcript_for: Callable[[str], Optional[TailFacts]],
+    facts: Optional[TailFacts],
     claim_for: Callable[[str], dict],
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
     cotenants: int = 0,
 ) -> Verdict:
-    facts = transcript_for(row.row_id)
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
     # transcript - a wake that failed to attach, fell back to spawning, minted
@@ -711,7 +729,11 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     unmapped_states: set[str] = set()
     skipped_no_sid = 0
     for r in raw:
-        sid = str(r.get("sessionId") or "")
+        # Both spellings: claude renamed `short_id`/`status` once already,
+        # which is why the sibling parser resolves every field through
+        # aliases. A rename here zeroes the roster and fires the refusal on
+        # every tick, with a warning that blames the instrument.
+        sid = str(r.get("sessionId") or r.get("session_id") or "")
         if not sid:
             # A row carrying only claude's 8-hex short id can never resolve a
             # transcript, a claim, or a ledger row - carrying it forward reads
@@ -1273,8 +1295,8 @@ def apply_verdict(
     reap_enabled: Optional[bool] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
-    ``(outcome, detail)`` with outcome in applied | partial | refused |
-    reported. ``partial`` means the action HALF landed (a stop with no rm, a
+    ``(outcome, detail)`` with outcome in applied | partial | frozen |
+    refused | reported. ``partial`` means the action HALF landed (a stop with no rm, a
     provider rotation with no replacement): the fleet changed, so a caller
     must surface it. ``reported`` is the lane skip and carries no action.
     Mechanisms delegate: resume (which verifies the state move and holds its
@@ -1294,7 +1316,7 @@ def apply_verdict(
         allowed = _reap_execution_enabled() if reap_enabled is None else reap_enabled
         if not allowed:
             return (
-                "reported",
+                "frozen",
                 "reap classified but not executed: config.recovery."
                 "watchdog_reap is false. Reap deletes the worktree and a "
                 "wrong one is unrecoverable, so it ships off. Turn it on to "
@@ -1428,6 +1450,20 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
     refusal = worktree_refusal(cwd)
     if refusal:
         return "refused", f"reap refused: {refusal}"
+    if not _is_linked_worktree(cwd):
+        # `claude rm` is documented as removing "session record + worktree",
+        # and the ledger join means cwd is routinely a repo ROOT: a
+        # worktree.policy = "never" project, or a bg session started in the
+        # canonical checkout. Whether that arm scopes its delete is an
+        # external binary's undocumented behaviour, and the blast radius of
+        # being wrong is the main checkout. This lane deletes only a tree it
+        # can prove is disposable.
+        return (
+            "refused",
+            f"reap refused: {cwd or 'no cwd'} is not a linked worktree, so "
+            f"rm would act on a canonical checkout. Stop and remove this row "
+            f"by hand",
+        )
     stopped = runner(
         [*_fno(), "agents", "stop", v.row_id],
         capture_output=True, text=True, timeout=60, check=False,

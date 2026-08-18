@@ -2731,6 +2731,9 @@ def cmd_watchdog(
         payload if only is None
         else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
     )
+    # Read the previous stamp BEFORE overwriting it, exactly as the tick
+    # does: the change gate compares against the PREVIOUS sweep.
+    prev_events_sig = wd._last_events_signature()
     wd.write_sweep_file(
         "manual", payload["counts"], now, signature,
         events_signature=wd.verdict_signature(events_payload),
@@ -2739,9 +2742,13 @@ def cmd_watchdog(
     # Classification events ride every mode: a verdict emitted only under a
     # dry run left apply modes with no event record at all, while the tick
     # emits per non-leave row regardless of mode. The two lanes must not
-    # diverge on what the record shows.
+    # diverge on what the record shows - and that cuts both ways. Emitting
+    # ungated here duplicated every row the tick had already published, and
+    # the stamp above then told the next tick they were all published, so a
+    # filtered hand-run made the tick re-emit most of the fleet.
+    fresh_ids = wd.fresh_non_leave(events_payload, prev_events_sig)
     for v, _row in pairs:
-        if v.verdict != wd.LEAVE:
+        if v.verdict != wd.LEAVE and v.row_id in fresh_ids:
             wd.emit_event(
                 "watchdog_verdict",
                 {"row_id": v.row_id, "name": v.name,
@@ -2785,13 +2792,13 @@ def cmd_watchdog(
             # that acted. "partial" is NOT this: the fleet already changed.
             continue
         line = f"{outcome:9} {v.name:34} {detail}"
-        if outcome in ("refused", "partial"):
+        if outcome in ("refused", "partial", "frozen"):
             print(line, file=sys.stderr)
         elif not json_out:
             # Human lines on stdout ahead of the JSON object make the whole
             # document unparseable; the dry-run path already guards this.
             typer.echo(line)
-        if outcome in ("applied", "refused", "partial"):
+        if outcome in ("applied", "refused", "partial", "frozen"):
             wd.emit_event(
                 "watchdog_applied" if outcome == "applied" else "watchdog_refused",
                 {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,

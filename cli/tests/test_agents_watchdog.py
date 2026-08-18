@@ -601,7 +601,7 @@ def test_reap_refuses_on_unpushed_commits_with_count_named(tmp_path):
     assert outcome == "refused" and "1 unpushed commit(s)" in detail
 
 
-def test_reap_applies_on_clean_worktree(tmp_path):
+def test_reap_applies_on_clean_worktree(tmp_path, monkeypatch):
     repo = tmp_path / "clean"
     repo.mkdir()
     def git(*args):
@@ -625,6 +625,9 @@ def test_reap_applies_on_clean_worktree(tmp_path):
         cwds.append(kw.get("cwd"))
         return _Proc(0)
     v = Verdict("eeee1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
+    # The delete-target guard has its own test below; this one exercises
+    # the mechanism past it.
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     outcome, _ = apply_verdict(
         v, lanes="all", cwd=str(repo), runner=runner, reap_enabled=True
     )
@@ -1302,6 +1305,7 @@ def test_a_failed_rm_after_a_successful_stop_reports_rather_than_refuses(
     receipt lies about a session which is now dead, and a reader who retries
     it sends a stop to a stopped session."""
     monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
     seen = []
 
     def runner(argv, **kwargs):
@@ -1325,6 +1329,7 @@ def test_store_only_row_reap_names_the_scope_mismatch_not_just_an_exit_code(
     resolution returns exit 2 permanently. A bare exit code reads as
     transient and invites a retry loop."""
     monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: True)
 
     def stop_not_found(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 2, "", "")
@@ -1432,49 +1437,49 @@ def test_reap_never_fires_on_an_unreadable_transcript():
     assert "not evidence" in v.basis
 
 
-def test_a_terminal_row_occupies_no_worktree():
-    """Counting stopped rows as occupants retired the reap lane instead of
-    narrowing it: any tree that ever hosted a respawn read as shared for good."""
+def test_occupancy_is_read_from_the_transcript_not_the_roster():
+    """The roster is the store this module exists because it lies.
+
+    The measured 2026-08-15 inversion had claude report a WORKING session as
+    done. Keying occupancy on that field let a live row count as zero, so its
+    quiet sibling reaped the tree the live one was mid-task in. Occupancy now
+    asks the transcript, and anything it cannot read counts as occupied.
+    """
+    # A live sibling by TRANSCRIPT, while its roster state says stopped.
     rows = [
-        Row("aaaa1111-0000", "live", "working", "x-done", "/wt/one"),
-        Row("bbbb2222-0000", "ghost-of-respawn", "stopped", "x-done", "/wt/one"),
+        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one"),
+        Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one"),
     ]
     vs = _run(
         rows,
-        {r.row_id: _facts("done", age_min=30) for r in rows},
+        {
+            "aaaa1111-0000": _facts("done", age_min=120),
+            "bbbb2222-0000": _facts("still working", age_min=0),
+        },
         nodes={"x-done": {"status": "done"}},
     )
-    assert vs[0].verdict == REAP, vs[0].basis
-    # And the TERMINAL row's own verdict, which is the half that bites: it
-    # was never counted, so subtracting it anyway cancelled its live sibling
-    # and handed it a reap on the tree that sibling is working in.
-    assert vs[1].verdict != REAP, vs[1].basis
+    assert vs[0].verdict == STALE, vs[0].basis
+    assert "share /wt/one" in vs[0].basis
 
-    # The live sibling being BUSY changes nothing: reap deletes the tree, not
-    # the session, so the quiet row must still refuse.
-    busy = [
-        Row("aaaa1111-0000", "live", "working", "x-done", "/wt/one"),
-        Row("bbbb2222-0000", "finished", "stopped", "x-done", "/wt/one"),
-    ]
-    vs_busy = _run(
-        busy,
+    # An UNREADABLE sibling transcript also holds the tree: absence is not
+    # evidence that the sibling left.
+    vs = _run(
+        rows,
+        {"aaaa1111-0000": _facts("done", age_min=120)},
+        nodes={"x-done": {"status": "done"}},
+    )
+    assert vs[0].verdict == STALE, vs[0].basis
+
+    # Two genuinely quiet rows have nobody to protect, so the lane still works.
+    vs = _run(
+        rows,
         {
-            "aaaa1111-0000": _facts("still going", age_min=1),
+            "aaaa1111-0000": _facts("done", age_min=120),
             "bbbb2222-0000": _facts("done", age_min=120),
         },
         nodes={"x-done": {"status": "done"}},
     )
-    assert vs_busy[1].verdict == STALE, vs_busy[1].basis
-    assert "share /wt/one" in vs_busy[1].basis
-
-    # An unknown (non-terminal) state still protects the tree.
-    rows[1] = rows[1]._replace(state="quiescing")
-    vs = _run(
-        rows,
-        {r.row_id: _facts("done", age_min=30) for r in rows},
-        nodes={"x-done": {"status": "done"}},
-    )
-    assert vs[0].verdict == STALE
+    assert vs[0].verdict == REAP, vs[0].basis
 
 
 def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
@@ -1603,7 +1608,7 @@ def test_reap_ships_frozen_and_the_freeze_is_at_the_funnel(monkeypatch):
     outcome, detail = apply_verdict(
         v, lanes="all", cwd="/wt/solo", runner=never, reap_enabled=False
     )
-    assert outcome == "reported"
+    assert outcome == "frozen"
     assert "watchdog_reap" in detail
 
     # Armed, it reaches the mechanism (and stops there on the clean-tree gate).
@@ -1623,3 +1628,21 @@ def test_unreadable_config_is_never_permission_to_delete(monkeypatch):
 
     monkeypatch.setattr(config_mod, "load_settings", boom)
     assert watchdog._reap_execution_enabled() is False
+
+
+def test_reap_refuses_a_cwd_it_cannot_prove_is_a_worktree(monkeypatch):
+    """`claude rm` removes "session record + worktree", and the ledger join
+    means cwd is routinely a repo ROOT: a worktree.policy = "never" project,
+    or a bg session in the canonical checkout. Whether that arm scopes its
+    delete is an external binary's undocumented behaviour, and being wrong
+    costs the main checkout."""
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: None)
+    monkeypatch.setattr(watchdog, "_is_linked_worktree", lambda cwd: False)
+
+    def never(*a, **k):
+        raise AssertionError("rm must not run against a canonical checkout")
+
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x-done done", "stop+rm")
+    outcome, detail = watchdog._apply_reap(v, cwd="/repos/main", runner=never)
+    assert outcome == "refused"
+    assert "not a linked worktree" in detail
