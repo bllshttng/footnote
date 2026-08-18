@@ -56,6 +56,37 @@ class FakeGH:
         self.calls.append(cmd)
         if cmd[:3] == ["git", "rev-parse", "--show-toplevel"]:
             return Result(0, self.toplevel + "\n", "")
+        if cmd[:4] == ["git", "remote", "get-url", "origin"]:
+            return Result(0, f"https://github.com/{self.repo}.git\n", "")
+        if cmd[:3] == ["gh", "api", f"repos/{self.repo}/pulls/42"]:
+            return Result(
+                0,
+                json.dumps(
+                    {
+                        "state": "open",
+                        "merged": False,
+                        "head": {"sha": self.checks["headRefOid"], "ref": "feature/x"},
+                        "base": {"ref": "main"},
+                        "mergeable": True,
+                        "merged_at": None,
+                        "html_url": f"https://github.com/{self.repo}/pull/42",
+                    }
+                ),
+                "",
+            )
+        if cmd[:2] == ["gh", "api"] and "/check-runs?" in cmd[2]:
+            check_runs = [
+                {
+                    "name": row.get("name"),
+                    "status": str(row.get("status") or "").lower(),
+                    "conclusion": str(row.get("conclusion") or "").lower(),
+                    "started_at": "2026-01-01T00:00:00Z",
+                }
+                for row in self.checks.get("statusCheckRollup", [])
+            ]
+            return Result(0, json.dumps({"total_count": len(check_runs), "check_runs": check_runs}), "")
+        if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/status"):
+            return Result(0, json.dumps({"statuses": []}), "")
         if (
             cmd[:3] == ["gh", "pr", "view"]
             and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" in cmd

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from fno.pr import _quota
 from fno.pr._proc import Result
@@ -175,3 +176,13 @@ def test_preserved_wrapper_cannot_resolve_back_to_quota_proxy(tmp_path, monkeypa
     )
     assert result.returncode == 0
     assert '"login":"ok"' in result.stdout
+
+
+def test_delegate_environment_strips_fallback_proxy_from_env(monkeypatch, tmp_path):
+    fallback = tmp_path / "fallback"
+    real = tmp_path / "real"
+    monkeypatch.setenv("FNO_GH_PROXY_DIR", str(fallback))
+    monkeypatch.setenv("PATH", f"{fallback}:{real}:/usr/bin")
+    env = _quota.delegate_environment()
+    assert env["PATH"].split(os.pathsep) == [str(real), "/usr/bin"]
+    assert "FNO_GH_PROXY_DIR" not in env
