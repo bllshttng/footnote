@@ -7,12 +7,44 @@ retired - the bash is gone).
 """
 from __future__ import annotations
 
+import json
+
 from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.pr import _merge
 
 runner = CliRunner()
+
+
+def test_pr_info_prints_rest_metadata(monkeypatch):
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "fetch_pr_info_rest",
+        lambda pr, cwd=None, repo=None: (
+            {
+                "pr": 930,
+                "state": "OPEN",
+                "head_sha": "abc123",
+                "head_ref": "feature/x",
+                "base_ref": "main",
+                "mergeable": "MERGEABLE",
+            },
+            "",
+        ),
+    )
+    result = runner.invoke(app, ["pr", "info", "930", "--repo", "Owner/Repo"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "pr": 930,
+        "state": "OPEN",
+        "head_sha": "abc123",
+        "head_ref": "feature/x",
+        "base_ref": "main",
+        "mergeable": "MERGEABLE",
+    }
 
 
 def test_pr_help_renders():

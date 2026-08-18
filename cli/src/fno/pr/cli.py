@@ -128,6 +128,26 @@ def coverage_publish(
 
 
 @pr_app.command(
+    "info",
+    help=(
+        "Read PR state, head SHA, refs, and mergeability through one REST request. "
+        "Prints JSON; exit 4 when the REST instrument cannot answer."
+    ),
+)
+def info(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+) -> None:
+    from fno.pr import _rest
+
+    payload, reason = _rest.fetch_pr_info_rest(str(pr_number), cwd=os.getcwd(), repo=repo)
+    if payload is None:
+        typer.echo(json.dumps({"pr": pr_number, "error": reason}, separators=(",", ":")))
+        raise typer.Exit(code=4)
+    typer.echo(json.dumps(payload, separators=(",", ":")))
+
+
+@pr_app.command(
     "logs",
     help=(
         "Why did CI fail: spool the failing job's log to .fno/last-ci.log and "
