@@ -8,27 +8,41 @@
 # the model - so no payload shape can deliver context through it. SessionStart
 # injects via hookSpecificOutput.additionalContext, which is why this script is
 # registered under SessionStart(matcher="compact") in hooks.json, not PostCompact.
-# On Codex the same script still runs as a PostCompact hook: the event has no
-# "source" field, so SOURCE below is empty and the systemMessage carrier is used.
+# On Codex the same script still runs as a PostCompact hook, and the systemMessage
+# carrier is used there. The carrier is chosen from the harness (FNO_PLATFORM /
+# CLAUDE_PLUGIN_ROOT), not from the event payload, so a lost or empty stdin cannot
+# silently downgrade Claude to a carrier the model never sees. That carrier choice
+# and the payload emission live in scripts/lib/postcompact-carrier.sh, shared with
+# hooks/king-postcompact-reinject.sh.
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
 FNO_DIR=".fno"
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
+# The fallback is BASH_SOURCE-relative, never `git rev-parse`: this hook runs
+# with cwd set to the SESSION's repo, which is not the plugin, so a git toplevel
+# would resolve GUARD_LIB into an unrelated checkout and source whatever it finds.
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
+    PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
+else
+    PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$SOURCE_ROOT}}"
+fi
 GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
+CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 
-# Read the hook event. SessionStart carries a "source" field; "compact" is the
-# value the harness sets after a compaction. PostCompact (Codex) has no such
-# field, so SOURCE is empty there.
-INPUT="$(cat 2>/dev/null || true)"
-SOURCE="$(printf '%s' "$INPUT" | python3 -c '
-import json, sys
-try:
-    print(json.load(sys.stdin).get("source") or "")
-except Exception:
-    print("")
-' 2>/dev/null || true)"
+# Event read, carrier choice, and payload emission all come from the shared lib
+# (keyed on the harness, never the event payload - the reasoning is in the lib).
+# An unreadable lib means a broken plugin install; emit nothing rather than guess.
+[[ -r "$CARRIER_LIB" ]] || exit 0
+# shellcheck source=../scripts/lib/postcompact-carrier.sh
+source "$CARRIER_LIB"
+
+# SessionStart carries a "source" field; "compact" is the value the harness
+# sets after a compaction. PostCompact (Codex) has no such field, so SOURCE is
+# empty there.
+EVENT="$(postcompact_read_event)"
+SOURCE="$(printf '%s' "$EVENT" | sed -n 1p)"
 
 # Defensive gate: on SessionStart, reinject only for compaction. The matcher
 # ("compact") already enforces this at registration; this check keeps the script
@@ -38,18 +52,7 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
     exit 0
 fi
 
-emit_context() {
-    local context="$1"
-    python3 -c "
-import json, sys
-source, context = sys.argv[1:3]
-if source == 'compact':
-    payload = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
-else:
-    payload = {'systemMessage': context}
-print(json.dumps(payload))
-" "$SOURCE" "$context" 2>/dev/null
-}
+CARRIER="$(postcompact_carrier "$SOURCE")"
 
 # Guard (c) re-surface: if a handoff was armed pre-compaction (by
 # arm-handoff-precompact.sh), nudge the agent to run it at the next wave
@@ -71,7 +74,7 @@ if [[ -f "$GUARD_LIB" ]]; then
     # state from a prior session would otherwise inject a dead goal into an
     # unrelated compaction event.
     if ! target_is_active "$STATE_FILE"; then
-        [[ -n "$HANDOFF_NUDGE" ]] && emit_context "$HANDOFF_NUDGE"
+        [[ -n "$HANDOFF_NUDGE" ]] && postcompact_emit "$CARRIER" "$HANDOFF_NUDGE"
         exit 0
     fi
 else
@@ -112,6 +115,6 @@ for live phase + completion state (git HEAD, PR/CI, review)."
 
 ${HANDOFF_NUDGE}"
 
-emit_context "$CONTEXT"
+postcompact_emit "$CARRIER" "$CONTEXT"
 
 exit 0

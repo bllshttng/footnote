@@ -31,7 +31,8 @@ DOC="$TMP/canon.md"
 # Feed the hook a JSON event on stdin ($1) with the given env on the command line.
 run_hook() {
   local input="$1"; shift
-  printf '%s' "$input" | env "$@" CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK"
+  printf '%s' "$input" | env "$@" CODEX_THREAD_ID="foreign-codex-thread" \
+    CLAUDE_CODE_SESSION_ID="$SID" bash "$HOOK"
 }
 
 echo "== precompact-canon-doc.sh =="
@@ -60,17 +61,33 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2. No session id anywhere -> exit 0, no stdout (nothing to point at).
-# Unset every session-id env var the hook's fallback chain reads, or a leaked
-# codex-companion id resolves a SID and the hook writes a real doc.
+# A leaked Codex marker must not identify a Claude hook. Unset the Claude marker
+# while leaving a foreign Codex marker present to prove harness-local selection.
 # ---------------------------------------------------------------------------
 NO_SID_OUT="$(printf '{"trigger":"auto"}' \
-  | env -u CLAUDE_CODE_SESSION_ID -u CODEX_COMPANION_SESSION_ID -u CODEX_SESSION_ID \
+  | env -u CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID="foreign-codex-thread" \
     bash "$HOOK" 2>/dev/null)"
 NO_SID_RC=$?
 if [[ "$NO_SID_RC" == "0" && -z "$NO_SID_OUT" ]]; then
   pass "no session id -> exit 0, no stdout"
 else
   fail "no-sid case: rc=$NO_SID_RC stdout_len=${#NO_SID_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# 2b. Codex must use its own plugin root and thread id even when a parent
+# Claude marker and plugin root leak into the environment.
+# ---------------------------------------------------------------------------
+CODEX_DOC="$TMP/codex-canon.md"
+printf '{"trigger":"manual","custom_instructions":"%s"}' "$CODEX_DOC" \
+  | env FNO_PLATFORM=codex PLUGIN_ROOT="$REPO_ROOT" \
+    CLAUDE_PLUGIN_ROOT="$TMP/foreign-claude-plugin" \
+    CLAUDE_CODE_SESSION_ID="foreign-claude-session" CODEX_THREAD_ID="$SID" \
+    bash "$HOOK" >/dev/null 2>&1
+if [[ -f "$CODEX_DOC" ]] && grep -q "Session id (authoritative): \`$SID\`" "$CODEX_DOC"; then
+  pass "codex ignores leaked Claude root and session markers"
+else
+  fail "codex root or session selection followed leaked Claude state"
 fi
 
 # ---------------------------------------------------------------------------

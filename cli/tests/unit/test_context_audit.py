@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -520,17 +521,19 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
     expected_lifecycle = {"claude": "session_start", "codex": "post_compact"}
     for harness in ("claude", "codex"):
         manifest = by_harness[harness]["compiled"]["source_manifest"]
-        source = next(
-            item
-            for item in manifest
-            if item["source_id"] == "target-postcompact-reinject"
-        )
-        assert source["status"] == "registered"
-        assert source["lifecycle"] == expected_lifecycle[harness]
-        assert source["measurement"] == "carrier_template_bytes"
-        assert source["bytes"] == 0
-        assert source["content_hash"] is None
-        assert source["carrier_bytes"] > 0
+        for source_id in (
+            "target-postcompact-reinject",
+            "king-postcompact-reinject",
+        ):
+            source = next(
+                item for item in manifest if item["source_id"] == source_id
+            )
+            assert source["status"] == "registered"
+            assert source["lifecycle"] == expected_lifecycle[harness]
+            assert source["measurement"] == "carrier_template_bytes"
+            assert source["bytes"] == 0
+            assert source["content_hash"] is None
+            assert source["carrier_bytes"] > 0
     gemini = next(
         item
         for item in by_harness["gemini"]["compiled"]["source_manifest"]
@@ -538,6 +541,19 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
     )
     assert gemini["status"] == "omitted"
     assert gemini["error"] == "no_post_compact_registration"
+    # Gemini registers no post-compact hook, so EVERY reinject is omitted there
+    # - one row each, never one row standing in for the rest. The expected set
+    # is derived from the hooks dir (as the audit does), so a third reinject
+    # hook cannot be silently missing from the assertion.
+    gemini_omitted = [
+        item
+        for item in by_harness["gemini"]["compiled"]["source_manifest"]
+        if item["error"] == "no_post_compact_registration"
+    ]
+    expected_reinjects = sorted(
+        path.name[: -len(".sh")] for path in (ROOT / "hooks").glob("*-postcompact-reinject.sh")
+    )
+    assert [item["source_id"] for item in gemini_omitted] == expected_reinjects
 
 
 def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() -> None:
@@ -844,10 +860,18 @@ def test_postcompact_hook_wrapper_preserves_output_and_emits_snapshot(
     assert event["data"]["measurement_complete"] is True
 
 
-@pytest.mark.parametrize("platform", ["claude", "codex"])
+@pytest.mark.parametrize(
+    ("platform", "hook_input"),
+    [
+        pytest.param("claude", '{"source":"compact"}', id="claude-compact"),
+        pytest.param("claude", "", id="claude-empty-input"),
+        pytest.param("codex", "{}", id="codex"),
+    ],
+)
 def test_postcompact_producer_uses_each_harness_wire_schema(
     tmp_path: Path,
     platform: str,
+    hook_input: str,
 ) -> None:
     plugin = tmp_path / "plugin"
     guard = plugin / "scripts" / "lib" / "target-guard.sh"
@@ -859,6 +883,12 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         "}\n",
         encoding="utf-8",
     )
+    # The hook sources its carrier from the plugin's lib dir; a fake plugin that
+    # ships the guard but not the carrier would silence the hook (by design).
+    shutil.copy(
+        ROOT / "scripts" / "lib" / "postcompact-carrier.sh",
+        plugin / "scripts" / "lib" / "postcompact-carrier.sh",
+    )
     state = tmp_path / ".fno" / "target-state.md"
     state.parent.mkdir()
     state.write_text(
@@ -868,18 +898,22 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         "graph_node_id: x-2e3c\n",
         encoding="utf-8",
     )
-    # Claude reinjects via SessionStart(source=compact); Codex via PostCompact
-    # (no source field on the event). Feed each the event shape its carrier rides
-    # so the hook picks the right wire schema.
-    hook_input = json.dumps({"source": "compact"}) if platform == "claude" else "{}"
+    # Claude reinjects via SessionStart(source=compact); Codex via PostCompact.
+    # Empty input on Claude must retain the Claude carrier because selection is
+    # harness-keyed rather than inferred from the event payload.
+    hook_env = {
+        **os.environ,
+        "FNO_PLATFORM": platform,
+    }
+    if platform == "codex":
+        hook_env["PLUGIN_ROOT"] = str(plugin)
+        hook_env["CLAUDE_PLUGIN_ROOT"] = str(tmp_path / "foreign-claude-plugin")
+    else:
+        hook_env["CLAUDE_PLUGIN_ROOT"] = str(plugin)
     result = subprocess.run(
         [str(ROOT / "hooks" / "target-postcompact-reinject.sh")],
         cwd=tmp_path,
-        env={
-            **os.environ,
-            "CLAUDE_PLUGIN_ROOT": str(plugin),
-            "FNO_PLATFORM": platform,
-        },
+        env=hook_env,
         input=hook_input,
         text=True,
         capture_output=True,

@@ -304,7 +304,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject --entry post_compact -- ${CLAUDE_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${CLAUDE_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id king-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${CLAUDE_PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"
           }
         ]
       }
