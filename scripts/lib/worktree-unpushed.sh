@@ -25,19 +25,25 @@
 
 # Set to 1 once a fetch --all --prune has succeeded in this process; exported so a
 # sweep's archive-worktree children inherit the freshness instead of
-# re-fetching per reaped tree.
+# re-fetching per reaped tree. A FAILED fetch caches too: an unreachable
+# network answers every later call the same way, so a sweep pays one connect
+# timeout per process, not one per detached tree.
 _WT_REMOTE_REFS_FRESH="${_WT_REMOTE_REFS_FRESH:-0}"
+_WT_REMOTE_REFS_STALE="${_WT_REMOTE_REFS_STALE:-0}"
 
 # Refresh every remote's tracking refs, pruning ones whose upstream branch is
 # gone on the server. Once per process (and per inheriting child process):
 # the sweep judges many trees against one refresh.
 wt_refresh_remote_refs() {
     [[ "$_WT_REMOTE_REFS_FRESH" == 1 ]] && return 0
+    [[ "$_WT_REMOTE_REFS_STALE" == 1 ]] && return 1
     if git -C "${1:-.}" fetch --all --prune >/dev/null 2>&1; then
         _WT_REMOTE_REFS_FRESH=1
         export _WT_REMOTE_REFS_FRESH
         return 0
     fi
+    _WT_REMOTE_REFS_STALE=1
+    export _WT_REMOTE_REFS_STALE
     return 1
 }
 

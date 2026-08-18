@@ -34,12 +34,14 @@ else
 fi
 
 # The detached-HEAD reachability answer, shared with archive-worktree.sh. A
-# partial deploy that dropped the lib keeps everything (count 1), never reaps.
+# partial deploy that dropped the lib keeps everything (count 1), never reaps;
+# its refresh stub keeps today's fetch-what-the-merged-check-needs behavior.
 if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh" ]]; then
     # shellcheck source=/dev/null
     source "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh"
 else
     wt_unpushed_count() { printf '1\n'; }
+    wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
 fi
 
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
@@ -76,6 +78,16 @@ _wt_app_owned() {
         "$root/"*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Permanent by design: scripts/ci/preflight.sh pins a scratch worktree named
+# `preflight` (hard-reset to the candidate SHA per run, caches deliberately
+# preserved); hermeticity comes from the reset, not from disposal. One
+# predicate for BOTH removal paths so a second permanent tree is a one-line
+# change here, not two loop edits 125 lines apart. See
+# docs/state-root-inventory.md for the recorded entry.
+_wt_permanent() {
+    [[ "$(basename "$1")" == "preflight" ]]
 }
 
 # PIDs actually rooted in the worktree (cwd under it) OR whose cmdline
@@ -228,18 +240,11 @@ case "${1:-status}" in
             # vouch for a commit no remote carries (wt_unpushed_count) or a
             # phantom merged baseline. A failure aborts loudly rather than
             # reaping against stale refs (silently keeping everything looks
-            # identical to a clean state, so the failure must be loud). The
-            # fallback keeps a partial deploy that dropped the lib on today's
-            # fetch-what-the-merged-check-needs behavior.
-            if declare -F wt_refresh_remote_refs >/dev/null 2>&1; then
-                wt_refresh_remote_refs "$MAIN_DIR" || {
-                    echo "worktree cleanup --merged: refresh of remote refs (fetch --all --prune) failed; aborting (refs would be stale)" >&2
-                    exit 1
-                }
-            elif ! git fetch origin main >/dev/null 2>&1; then
-                echo "worktree cleanup --merged: git fetch origin main failed; aborting (refs would be stale)" >&2
+            # identical to a clean state, so the failure must be loud).
+            wt_refresh_remote_refs "$MAIN_DIR" || {
+                echo "worktree cleanup --merged: refresh of remote refs failed; aborting (refs would be stale)" >&2
                 exit 1
-            fi
+            }
             if ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
                 echo "worktree cleanup --merged: origin/main does not resolve after fetch; aborting" >&2
                 exit 1
@@ -269,13 +274,8 @@ case "${1:-status}" in
                     printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)); continue
                 fi
 
-                # 0a. permanent by design. scripts/ci/preflight.sh pins a
-                #     scratch worktree named `preflight` (hard-reset to the
-                #     candidate SHA per run, caches deliberately preserved);
-                #     hermeticity comes from the reset, not from disposal.
-                #     Sweeping it would churn those caches every run. See
-                #     docs/state-root-inventory.md for the recorded entry.
-                if [[ "$(basename "$wt")" == "preflight" ]]; then
+                # 0a. permanent by design (_wt_permanent).
+                if _wt_permanent "$wt"; then
                     printf '%-18s %-34s %s\n' "kept (permanent)" "$branch" "$wt"; N_PERM=$((N_PERM + 1)); continue
                 fi
 
@@ -396,11 +396,12 @@ case "${1:-status}" in
                 continue
             fi
 
-            # Permanent by design on BOTH removal paths: the preflight tree
-            # resets to a fresh candidate per run (so its commit age reads
-            # zero while active) and goes 7+ days stale the moment preflight
-            # stops running, which is exactly when this age sweep fires.
-            if [[ "$(basename "$wt")" == "preflight" ]]; then
+            # Permanent by design on BOTH removal paths (_wt_permanent): the
+            # preflight tree resets to a fresh candidate per run (so its
+            # commit age reads zero while active) and goes 7+ days stale the
+            # moment preflight stops running, which is exactly when this age
+            # sweep fires.
+            if _wt_permanent "$wt"; then
                 echo "  SKIP: $wt (permanent preflight worktree)"
                 continue
             fi
@@ -422,9 +423,19 @@ case "${1:-status}" in
                 # A detached tree has no branch to preserve, so the --force
                 # below would destroy any commit no remote carries - the exact
                 # loss the merged sweep's wt_unpushed_count guard prevents.
-                if [[ -z "$BRANCH" && "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
-                    echo "  SKIP: $wt (detached HEAD holds unpushed commits)"
-                    continue
+                # The refresh must run in THIS shell: the count below runs in
+                # a $( ) subshell that cannot carry the freshness flag back,
+                # so refreshing only inside it re-fetches per detached tree.
+                if [[ -z "$BRANCH" ]]; then
+                    wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true
+                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                            echo "  SKIP: $wt (detached HEAD holds unpushed commits)"
+                        else
+                            echo "  SKIP: $wt (remote refs unverifiable; detached HEAD may hold unpushed commits)"
+                        fi
+                        continue
+                    fi
                 fi
                 if [[ -n "$DRY_RUN" ]]; then
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"

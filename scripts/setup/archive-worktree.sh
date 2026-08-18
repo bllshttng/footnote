@@ -201,7 +201,7 @@ if [[ "$FORCE" -eq 0 ]]; then
     UNPUSHED="$(wt_unpushed_count "$TARGET")"
     if [[ "$UNPUSHED" -gt 0 ]]; then
       echo "archive-worktree: $UNPUSHED commit(s) on detached HEAD not on any remote at $TARGET" >&2
-      git -C "$TARGET" log --oneline HEAD --not --remotes >&2
+      git -C "$TARGET" log --oneline -n 10 HEAD --not --remotes >&2
       echo "    --force to override, or push first." >&2
       exit 2
     fi

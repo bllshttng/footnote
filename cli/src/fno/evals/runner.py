@@ -127,9 +127,11 @@ def _make_disposable_worktree(repo_root: Path, ref: str, tag: str) -> Path:
     )
     # Untracked marker: an in-flight eval tree is a clean detached checkout,
     # which a concurrent `worktree cleanup --merged --apply` reads as a reap
-    # candidate between spawn legs. Dirt keeps it; _remove_worktree's --force
-    # and sweep_orphans never look at dirt, so the marker costs nothing on the
-    # owned removal paths.
+    # candidate between spawn legs; the dirt blocks it via wt_reapable. The
+    # age sweep (`cleanup --older-than`) does not consult dirt, so a fixture
+    # ref older than its threshold is still exposed to it. _remove_worktree's
+    # --force and sweep_orphans never look at dirt, so the marker costs
+    # nothing on the owned removal paths.
     (path / ".fno-evals-tree").write_text("in-flight eval worktree\n")
     return path
 
