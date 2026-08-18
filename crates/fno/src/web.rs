@@ -100,6 +100,50 @@ struct AppState {
     token: Arc<str>,
 }
 
+/// The bridge's live-state marker (x-b80d): `web-<session>.json` beside the
+/// session socket, holding the bind/port/token the bind-time print showed
+/// once. Written 0600 (the token is the only URL guard); removed by `Drop`
+/// on every exit path. A SIGKILLed bridge leaves it behind - the reader
+/// (`mux_cli::print_pane_url`) probes the TCP port, so a corpse file reads
+/// as "no bridge", never as a dead URL.
+struct WebStateFile(PathBuf);
+
+impl WebStateFile {
+    fn write(socket: &Path, bind: &str, port: u16, token: &str) -> Option<Self> {
+        let session = socket
+            .file_stem()
+            .and_then(|s| s.to_str())
+            // socket_path() names the file <session>.sock; the stem is the name.
+            .unwrap_or(proto::DEFAULT_SESSION);
+        let path = socket.parent()?.join(format!("web-{session}.json"));
+        let body = serde_json::json!({ "bind": bind, "port": port, "token": token });
+        let wrote = {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut f: std::fs::File| f.write_all(body.to_string().as_bytes()))
+        };
+        match wrote {
+            Ok(()) => Some(WebStateFile(path)),
+            Err(e) => {
+                eprintln!("fno mux serve --web: cannot record bridge state: {e}");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for WebStateFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Entry point for the `mux serve --web` role. Owns its own runtime like the
 /// server role; returns the process exit code.
 pub fn serve(args: WebArgs) -> i32 {
@@ -178,6 +222,12 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
             "  bound to all interfaces - reach it over tailscale/LAN; the URL token is the only guard."
         );
     }
+    // (x-b80d) Record the live bridge so `mux view <selector> --url` can
+    // recover the URL after this one print. A write failure only costs the
+    // --url door (it reports "no web bridge"), never the bridge itself; a
+    // file left behind by a killed bridge is inert because the reader probes
+    // the port before trusting it. Removed on every exit path via Drop.
+    let _state_guard = WebStateFile::write(&socket, &args.bind, args.port, &token);
 
     let state = AppState { tx, snap, token };
     let app = Router::new()
@@ -185,7 +235,15 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            // Ctrl-C is the NORMAL way a bridge ends. Without this hook the
+            // process dies straight to the signal, no Drop runs, and the
+            // state file outlives its bridge (x-b80d).
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+    {
         eprintln!("fno mux serve --web: server error: {e}");
         return 1;
     }

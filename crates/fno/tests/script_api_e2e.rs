@@ -538,8 +538,10 @@ fn mux_where_cli_rejects_harness_only_ambiguous_prefix() {
         .args(["mux", "where", "019fb024", "--json"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(16));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous prefix"));
+    // (x-b80d) An ambiguous family is its own code (21), distinct from a
+    // no-match typo (16), so a script can tell the two apart.
+    assert_eq!(out.status.code(), Some(21));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous"));
 }
 
 #[test]
