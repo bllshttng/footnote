@@ -84,7 +84,7 @@ One file per session, per day, or per throttle window.
 
 ## Permanent repo-local directories
 
-The rule above governs the state root, but its shape repeats inside a checkout: a directory nobody deletes is a directory nobody owns. A worktree that a script resets on every run is permanent by design, and the disk-reclaim sweep must keep it explicitly or churn its warm caches every pass. Recorded here so a sweep author checks this table before reaching for a blanket rule, and so a reader who finds the directory knows it is intentional.
+The rule above governs the state root, but its shape repeats inside a checkout: a directory nobody deletes is a directory nobody owns. A worktree that a script resets on every run is permanent by design. The sweep must keep it explicitly or churn its warm caches every pass. Recorded here so a sweep author checks this table before reaching for a blanket rule. A reader who finds the directory knows it is intentional.
 
 | Entry | Writer | Lifetime |
 |---|---|---|
