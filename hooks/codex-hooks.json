@@ -143,7 +143,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
+          },
+          {
+            "type": "command",
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id king-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"
           }
         ]
       }
