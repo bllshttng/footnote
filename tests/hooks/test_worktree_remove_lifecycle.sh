@@ -166,6 +166,78 @@ grep -qx jLIVE  "$LOG" 2>/dev/null && fail "live job skipped" "jLIVE reaped" || 
 grep -qx jCANON "$LOG" 2>/dev/null && fail "canonical job skipped (AC4-EDGE)" "jCANON reaped" || pass "canonical job skipped (AC4-EDGE)"
 rm -rf "$JH"
 
+echo "== 5. sweep lock + O(1) ps per worktree (x-a1a5) =="
+
+# 5a. A live-held lock makes a second sweep exit immediately (no scan).
+S=$(new_sandbox)
+LOCKDIR="${TMPDIR:-/tmp}/fno-wt-sweep-$(basename "$S").lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"; echo $$ > "$LOCKDIR/pid"   # this test process is alive
+out=$(cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "already running" && ! echo "$out" | grep -q "^STATUS"; then
+    pass "second sweep exits immediately, no scan (exit 0)"
+else
+    fail "concurrent sweep exclusion" "rc=$rc out=$out"
+fi
+rm -rf "$LOCKDIR"
+rm -rf "$S"
+
+# 5b. A lock left by a dead holder is reclaimed, not treated as live.
+# --merged mode requires a fetchable origin/main; clone (not push, which a
+# machine-local pre-push hook here refuses for a branch named "main") a
+# bare remote from the sandbox itself so the fetch step succeeds.
+S=$(new_sandbox)
+git -C "$S" branch -M main >/dev/null 2>&1
+BARE=$(mktemp -d -t wt-bare.XXXXXX); rmdir "$BARE"
+git clone -q --bare "$S" "$BARE" >/dev/null 2>&1
+git -C "$S" remote add origin "$BARE" >/dev/null 2>&1
+LOCKDIR="${TMPDIR:-/tmp}/fno-wt-sweep-$(basename "$S").lock"
+rm -rf "$LOCKDIR"; mkdir -p "$LOCKDIR"
+( exec true ) & DEAD=$!; wait "$DEAD" 2>/dev/null   # pid now dead
+echo "$DEAD" > "$LOCKDIR/pid"
+out=$(cd "$S" && bash "$LIFECYCLE" cleanup --merged --dry-run 2>&1); rc=$?
+if [[ $rc -eq 0 ]] && echo "$out" | grep -q "^STATUS"; then
+    pass "stale lock reclaimed, sweep proceeds"
+else
+    fail "stale lock reclaim" "rc=$rc out=$out"
+fi
+rm -rf "$LOCKDIR" "$S" "$BARE"
+
+# 5c. _wt_pids spawns exactly one `ps` snapshot per worktree, not one per
+# matched pid. Under a loaded machine lsof's own cwd walk can miss a
+# process opened moments ago, so this uses pgrep-only detection (the
+# worktree path baked into a real invoked script's argv, not a `bash -c`
+# string - bash's exec optimization drops a -c string's trailing arg from
+# the resulting process's argv, which would make it invisible to pgrep -f).
+eval "$(sed -n '/^_wt_pids()/,/^}/p' "$LIFECYCLE")"
+# 120s: comfortably past the observed cost of a single lsof +D scan on a
+# loaded machine (measured 36s against an EMPTY worktree dir here) - the
+# exact cost this fix exists to bound. A short-lived holder can expire
+# mid-lsof-scan and read as "never matched".
+HOLDER=$(mktemp -t wt-holder.XXXXXX); printf '#!/usr/bin/env bash\nsleep 120\n' > "$HOLDER"; chmod +x "$HOLDER"
+STUBDIR=$(mktemp -d -t ps-stub.XXXXXX)
+COUNTFILE="$STUBDIR/count.log"; : > "$COUNTFILE"
+cat > "$STUBDIR/ps" <<EOF
+#!/usr/bin/env bash
+echo \$\$ >> "$COUNTFILE"
+exec /bin/ps "\$@"
+EOF
+chmod +x "$STUBDIR/ps"
+WT=$(mktemp -d -t wt-manymatch.XXXXXX)
+MPIDS=()
+for i in 1 2 3 4 5; do
+    ( exec bash "$HOLDER" "$WT" ) &
+    MPIDS+=($!)
+done
+disown "${MPIDS[@]}" 2>/dev/null || true
+sleep 1.5
+FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
+N_FOUND=$(printf '%s\n' "$FOUND" | grep -c .)
+N_PS=$(wc -l < "$COUNTFILE" | tr -d ' ')
+if [[ "$N_FOUND" -eq 5 ]]; then pass "all 5 argv-matched pids detected"; else fail "detect matches" "found $N_FOUND of 5: [$FOUND]"; fi
+if [[ "$N_PS" -eq 1 ]]; then pass "exactly 1 ps call for 5 matches (was 1-per-match)"; else fail "O(1) ps calls" "ps invoked $N_PS times, want 1"; fi
+for p in "${MPIDS[@]}"; do kill "$p" 2>/dev/null; done
+rm -rf "$WT" "$STUBDIR" "$HOLDER"
+
 echo ""
 echo "worktree lifecycle: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
