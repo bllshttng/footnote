@@ -792,13 +792,15 @@ def _discover_cell_sources(
             )
             ordinal += 1
             if entry_state == "post_compact":
-                for _postcompact_hook in (
-                    "target-postcompact-reinject.sh",
-                    "king-postcompact-reinject.sh",
+                # Derived from the hooks dir, not hardcoded: a third reinject
+                # hook must appear here as an omission without anyone editing
+                # this tuple (the manifest-driven census works that way too).
+                for _postcompact_hook in sorted(
+                    (plugin_root / "hooks").glob("*-postcompact-reinject.sh")
                 ):
                     sources.append(
                         _measure_hook(
-                            plugin_root / "hooks" / _postcompact_hook,
+                            _postcompact_hook,
                             repo_root=plugin_root,
                             harness=harness,
                             entry_state=entry_state,

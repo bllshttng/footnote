@@ -539,17 +539,19 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
     )
     assert gemini["status"] == "omitted"
     assert gemini["error"] == "no_post_compact_registration"
-    # Gemini registers no post-compact hook, so BOTH reinjects are omitted there
-    # - one row each, never one row standing in for two hooks.
+    # Gemini registers no post-compact hook, so EVERY reinject is omitted there
+    # - one row each, never one row standing in for the rest. The expected set
+    # is derived from the hooks dir (as the audit does), so a third reinject
+    # hook cannot be silently missing from the assertion.
     gemini_omitted = [
         item
         for item in by_harness["gemini"]["compiled"]["source_manifest"]
         if item["error"] == "no_post_compact_registration"
     ]
-    assert [item["source_id"] for item in gemini_omitted] == [
-        "target-postcompact-reinject",
-        "king-postcompact-reinject",
-    ]
+    expected_reinjects = sorted(
+        path.name[: -len(".sh")] for path in (ROOT / "hooks").glob("*-postcompact-reinject.sh")
+    )
+    assert [item["source_id"] for item in gemini_omitted] == expected_reinjects
 
 
 def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() -> None:

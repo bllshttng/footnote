@@ -467,3 +467,39 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
             f"python3 ${{{root_var}}}/hooks/git-protection.py",
             f"python3 ${{{root_var}}}/{guard}",
         ], f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
+
+
+def test_observer_expected_lists_match_their_group_source_ids() -> None:
+    """Per event group, set(--expected) must equal the group's --source-id set.
+
+    The observer blocks until one record exists per expected id, so a hook
+    registered without joining the sibling --expected lists leaves the group
+    waiting on an id it will never see, and a stale list reports a complete
+    census while a hook's delivered bytes go uncounted. The lists are
+    hand-maintained in four command lines across two manifests; this pins
+    them to the registration set so they cannot drift silently.
+    """
+    for path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        for event, entries in json.loads(path.read_text(encoding="utf-8"))[
+            "hooks"
+        ].items():
+            for entry in entries:
+                source_ids: list[str] = []
+                expected_lists: list[str] = []
+                for hook in entry.get("hooks", []):
+                    command = hook.get("command", "")
+                    source = re.search(r"--source-id (\S+)", command)
+                    expected = re.search(r"--expected (\S+?)(?= --)", command)
+                    if not (source and expected):
+                        continue
+                    source_ids.append(source.group(1))
+                    expected_lists.append(expected.group(1))
+                if not source_ids:
+                    continue
+                registration = set(source_ids)
+                for expected in expected_lists:
+                    assert set(expected.split(",")) == registration, (
+                        f"{path.name} {event} matcher={entry.get('matcher', '')!r}: "
+                        f"--expected {expected!r} != registered source ids "
+                        f"{sorted(registration)}"
+                    )
