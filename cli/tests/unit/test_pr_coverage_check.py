@@ -52,6 +52,9 @@ def live_head(monkeypatch):
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: _reviews.review_coverage_for_gate(pr, repo, head),
     )
+    # No 3am valve: these tests pin the REFUSAL sentences, and the override
+    # would answer COVERED before any of them is built.
+    monkeypatch.setattr(_reviews, "_override_label_actor", lambda pr, repo, r: (False, None))
 
 
 def _merge_refusal(capsys, tmp_path, fake):
@@ -214,3 +217,83 @@ def test_merge_blocks_when_the_head_fetch_fails(
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "blocked"
     assert obj["reason"] == "coverage probe failed, merge refused: pr head fetch failed"
+
+
+# ---- the 3am release valve on the verb the docs name ----
+#
+# `docs/best-practices.md` and `docs/troubleshooting.md` both route merges
+# through `fno pr merge` and name the `coverage-override` label as the only
+# way past an uncovered head. A valve read anywhere but the shared predicate
+# is a valve on one of N reachable paths: the gate refuses first and the
+# publisher's override branch is never reached, leaving the raw `gh` path the
+# same docs forbid as the only way through.
+
+
+def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The label answers COVERED where the same row would otherwise refuse."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED
+    assert refusal == ""
+    # The waiver drops the review, never the TOCTOU pin: `--match-head-commit`
+    # must still refuse a push that races the merge.
+    assert covered_head == HEAD
+    assert note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX)
+    assert "jane" in note
+
+
+def test_the_override_reaches_the_merge_verb_and_says_so(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """`fno pr merge` proceeds under the label, and the receipt names the waiver.
+
+    Exit 2 here would mean the documented valve does not open on the verb the
+    docs tell the operator to use. A silent exit 0 would mean a waived merge
+    is indistinguishable from a reviewed one in the log.
+    """
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: ({"coverage": "uncovered", "reviewed_count": 0}, ""),
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
+    )
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    rc = _merge.run_merge(["42"], cwd=str(tmp_path))
+    err = capsys.readouterr().err
+    assert rc != 2, "the documented valve did not open on `fno pr merge`"
+    assert "coverage waived: coverage-override label applied by jane" in err
+
+
+def test_an_unreadable_label_never_opens_the_valve(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Fail closed: a label read that dies is not an override.
+
+    The recovery from a wrong refusal is one command. The recovery from a
+    merge nobody reviewed is a revert.
+    """
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+
+    def boom(*_a, **_k):
+        raise OSError("gh died")
+
+    monkeypatch.setattr(_reviews, "_override_label_actor", boom)
+    rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
+    capsys.readouterr()
+    assert rc == 3

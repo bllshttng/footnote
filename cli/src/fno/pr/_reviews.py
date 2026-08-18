@@ -13,6 +13,7 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -503,6 +504,227 @@ def read_review_coverage(
     if note:
         shaped["recompute"] = note
     return shaped
+
+
+# The commit-status context the repo ruleset requires. One name for
+# the publisher, the refresher workflow, and the audit; a context string typed
+# twice is a context that splits in two the first time one copy is edited.
+COVERAGE_STATUS_CONTEXT = "fno/review-coverage"
+
+# The label that makes an uncovered PR mergeable on purpose: the 3am release
+# valve. Named here so the publisher, the refresher, and the docs agree on it.
+COVERAGE_OVERRIDE_LABEL = "coverage-override"
+
+# GitHub's commit-status description limit. Truncation keeps the head of the
+# reason: the actionable half ("coverage was computed at X but HEAD is Y")
+# leads, the tail is detail.
+_GH_DESCRIPTION_LIMIT = 140
+
+# Wait between status-POST attempts. Matches the refresher workflow and the
+# stacked-base guard, which sleep the same 5s between their three attempts.
+# A module const so a test can shrink it rather than pay the wait.
+_POST_RETRY_SLEEP_SECS = 5.0
+
+
+def _truncate_description(text: str, limit: int = _GH_DESCRIPTION_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _override_label_actor(
+    pr_number: int, repo: Optional[str], runner: Runner
+) -> "tuple[bool, Optional[str]]":
+    """Whether the PR carries the override label, and who applied it.
+
+    The label read is ``gh pr view``; the actor comes from the issue events
+    feed (a labeled event carries ``actor.login``), read only when the label is
+    present. Any failure degrades to ``(False, None)`` - an unreadable label
+    state must not mint a success status.
+
+    The events read is PAGINATED. The feed is oldest-first at 30 per page, so
+    an unpaginated read sees the oldest 30 events and never the label applied
+    minutes ago: every busy PR would waive its review under "unknown actor",
+    which is the one fact this receipt exists to carry. ``--paginate`` with
+    ``--jq`` emits one line per page that matched, so the LAST line is the
+    latest labeling.
+    """
+    res = runner(
+        ["gh", "pr", "view", str(pr_number), "--json", "labels"], cwd=repo, timeout=30
+    )
+    if not res.ok:
+        return False, None
+    try:
+        labels = [
+            str(entry.get("name") or "")
+            for entry in json.loads(res.stdout).get("labels", [])
+        ]
+    except (ValueError, TypeError):
+        return False, None
+    if COVERAGE_OVERRIDE_LABEL not in labels:
+        return False, None
+    actor: Optional[str] = None
+    try:
+        ev = runner(
+            [
+                "gh", "api", "--paginate",
+                f"repos/:owner/:repo/issues/{pr_number}/events",
+                "--jq",
+                "[.[] | select(.event==\"labeled\" and .label.name==\""
+                + COVERAGE_OVERRIDE_LABEL
+                + "\")][-1].actor.login // empty",
+            ],
+            cwd=repo,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001 - the actor is cosmetic; the label stands
+        # A slow events feed must not abort the publish: the label was already
+        # confirmed, so post the override with an unnamed actor rather than
+        # leaving an override-labelled PR with no status at all.
+        return True, None
+    if ev.ok and (ev.stdout or "").strip():
+        actor = ev.stdout.strip().splitlines()[-1]
+    return True, actor
+
+
+def _best_effort_reviewed_count(pr_number: int, repo: Optional[str]) -> int:
+    """The reviewed count off the raw row; 0 when unreadable.
+
+    Description text only: the verdict above already gated on the count, so a
+    failed re-read degrades the sentence, never the status state.
+    """
+    try:
+        from fno.pr._merge import _safe_int
+
+        row = latest_review_coverage(pr_number, repo)
+    except Exception:  # noqa: BLE001 - cosmetic, never gates
+        return 0
+    return _safe_int((row or {}).get("reviewed_count"), 0)
+
+
+def publish_coverage_status(
+    pr_number: int,
+    head: Optional[str] = None,
+    cwd: Optional[str] = None,
+    *,
+    repo: Optional[str] = None,
+    gate_verdict: Optional[tuple] = None,
+) -> "tuple[bool, str]":
+    """POST the coverage verdict as a commit status on the PR head.
+
+    Reads with ``recompute=False``: a publisher must never spawn the 120s
+    ``fno-agents`` subprocess. The caller has already caused the row to exist
+    (the stop hook, the standalone verb, or ``fno pr merge``'s own gate read).
+
+    The verdict is the SAME predicate the merge gate enforces
+    (``_coverage_gate.coverage_verdict``, imported, never restated): a status
+    check that disagrees with the gate it certifies is worse than none.
+    A caller that already holds the gate's answer (``fno pr merge``) passes it
+    as ``gate_verdict`` so the receipt stamps the decision that actually let
+    the merge through, never a fresh read that may have flipped since.
+    Success names the reviewed count and the sha it was computed at; failure
+    carries the exact refusal text the local merge gate renders, so the person
+    staring at the GitHub refusal reads the sentence a worker already
+    recognises.
+
+    Returns ``(posted, note)``; never raises. A failed POST is reported, not
+    swallowed, but does not fail the caller - the gate lives on the GitHub
+    side, where a missing status reads as "not passing" (fail-closed).
+    """
+    try:
+        from fno.pr import _coverage_gate
+        from fno.pr._merge import _pr_head_oid
+
+        # One resolved directory for every gh/git spawn below. Never "" - an
+        # empty cwd passed to subprocess is a crash, not "current directory".
+        gh_dir = repo or cwd or str(Path.cwd())
+        head = head or _pr_head_oid(pr_number, gh_dir)
+        if not head:
+            return False, "no PR head to publish a status on"
+
+        runner: Runner = run
+        if gate_verdict is None:
+            verdict, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+                pr_number, gh_dir, recompute=False
+            )
+        else:
+            verdict, refusal, covered_head, note = gate_verdict
+        if verdict == _coverage_gate.COVERED and note.startswith(
+            _coverage_gate.OVERRIDE_NOTE_PREFIX
+        ):
+            # Override first (AC5): a labelled PR publishes success naming the
+            # label and its actor, legible in the PR timeline and the audit.
+            # The gate read the label - the publisher does not read it a second
+            # time, so the status it stamps and the verdict the merge enforces
+            # cannot disagree about the valve.
+            head = covered_head or head
+            state = "success"
+            description = note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :]
+        elif verdict == _coverage_gate.COVERED and covered_head:
+            # POST on the head the row pins, not one the caller guessed
+            # at: the verdict describes that sha and no other.
+            head = covered_head
+            count = _best_effort_reviewed_count(pr_number, gh_dir)
+            state = "success"
+            description = (
+                f"covered: {count} reviewed at {head[:8]}"
+                if count
+                else f"covered at {head[:8]}"
+            )
+        elif verdict == _coverage_gate.COVERED and note == _coverage_gate.NO_LANE_NOTE:
+            # No review lane configured: the merge gate does not apply.
+            # Say so on the status instead of reading as a pass on
+            # nothing. Keyed on the gate's OWN note, never on "covered_head is
+            # empty": a covered row that carried no head_sha lands there too,
+            # and telling the reader that a reviewed merge is ungated is the
+            # receipt lying in the reassuring direction.
+            state = "success"
+            description = "no review lane configured; merge ungated"
+        elif verdict == _coverage_gate.COVERED:
+            # Covered, but the row pinned no head. The verdict still stands;
+            # it just cannot name the sha it was computed at.
+            count = _best_effort_reviewed_count(pr_number, gh_dir)
+            state = "success"
+            description = (
+                f"covered: {count} reviewed (row pinned no head sha)"
+                if count
+                else "covered (row pinned no head sha)"
+            )
+        else:
+            state = "failure"
+            line = (
+                _coverage_gate.refusal_line(refusal, note)
+                if verdict == _coverage_gate.REFUSED
+                else (note or "coverage verdict unavailable")
+            )
+            description = _truncate_description(line)
+
+        # Three attempts, the same transient-5xx policy the refresher workflow
+        # and the stacked-base guard apply to the same POST: once the ruleset
+        # makes the context required, one blip here must not cost the merge
+        # that follows it. The BACKOFF is the policy, not the count - three
+        # POSTs fired back to back inside one millisecond all land in the same
+        # outage, so a retry with no wait is a retry in name only. A permanent
+        # 4xx costs two waits, which is the price of surviving the transient.
+        args = [
+            "gh", "api", "--method", "POST",
+            f"repos/:owner/:repo/statuses/{head}",
+            "-f", f"state={state}",
+            "-f", f"context={COVERAGE_STATUS_CONTEXT}",
+            "-f", f"description={description}",
+        ]
+        res = runner(args, cwd=gh_dir, timeout=30)
+        for _retry in range(2):
+            if res.ok:
+                return True, ""
+            time.sleep(_POST_RETRY_SLEEP_SECS)
+            res = runner(args, cwd=gh_dir, timeout=30)
+        if res.ok:
+            return True, ""
+        why = (res.stderr or res.stdout or f"gh exited {res.returncode}").strip()
+        return False, why[:200]
+    except Exception as exc:  # noqa: BLE001 - a publisher must never raise
+        return False, f"publish failed: {exc}"
 
 
 def _is_optional(login: str, names: list[str]) -> bool:

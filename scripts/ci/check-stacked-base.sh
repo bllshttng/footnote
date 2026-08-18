@@ -41,13 +41,24 @@ esac
 # and the merge button read it. A failed POST is therefore a failed check, not
 # a warning: the job would otherwise go green having published nothing for
 # branch protection to read - the same "verified nothing, reported fine" shape
-# the unevaluated-probe case above already fails closed on.
-if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
-  -f state="$state" \
-  -f context="$CONTEXT" \
-  -f description="${desc:0:139}" \
-  -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-  >/dev/null; then
+# the unevaluated-probe case above already fails closed on. The one exception
+# is the transient 5xx: GitHub's own status page tells the caller to resubmit,
+# so the POST retries three times before it is allowed to count as failed.
+posted=0
+for attempt in 1 2 3; do
+  if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+    -f state="$state" \
+    -f context="$CONTEXT" \
+    -f description="${desc:0:139}" \
+    -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+    >/dev/null; then
+    posted=1
+    break
+  fi
+  echo "status post attempt $attempt failed; retrying after a backoff" >&2
+  sleep 5
+done
+if [ "$posted" != 1 ]; then
   echo "FAIL: could not post the $CONTEXT status for $SHA (verdict was $state)" >&2
   exit 1
 fi

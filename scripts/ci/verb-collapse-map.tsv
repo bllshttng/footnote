@@ -244,6 +244,7 @@ posture apply	KEEP	posture apply	1	single-leaf group
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
 pr coverage-check	T1	pr coverage-check	1
+pr coverage-publish	T1	pr coverage-publish	0
 pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
