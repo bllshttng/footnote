@@ -472,6 +472,50 @@ class TestClassifySessionError:
         assert recovery.classify_session_error(123) is None  # non-str
 
 
+class TestClassifyWorkerRefusal:
+    """AC1: a LIVE worker's refusal is readable from the transcript turn."""
+
+    def test_transcript_refusal_is_found_and_sourced(self):
+        # AC1-HP: the capped worker never died, so output_result is absent and
+        # only its last turn carries the refusal.
+        got = recovery.classify_worker_refusal(
+            None, "Claude usage limit reached. Resets 2026-08-18 07:19:38"
+        )
+        assert got is not None
+        err, source = got
+        assert err.triggers_swap is True
+        assert source == "transcript"
+
+    def test_output_result_wins_over_transcript(self):
+        # A dead session behaves exactly as today: the death text is
+        # authoritative and the source says so.
+        got = recovery.classify_worker_refusal(
+            "API Error: rate limit exceeded", "usage limit reached"
+        )
+        assert got is not None
+        assert got[1] == "output_result"
+
+    def test_ordinary_work_text_is_not_a_refusal(self):
+        # AC1-NEG: no marker in either source means the existing classify and
+        # nudge path is untouched.
+        assert recovery.classify_worker_refusal(
+            None, "Ran the tests, 41 passed. Committing now."
+        ) is None
+
+    def test_non_swap_class_output_falls_through_to_transcript(self):
+        # A connection drop is not swap-class, so it must not shadow a real
+        # refusal sitting in the transcript.
+        got = recovery.classify_worker_refusal(
+            "API Error: Connection closed mid-response", "usage limit reached"
+        )
+        assert got is not None
+        assert got[1] == "transcript"
+
+    def test_no_evidence_at_all_returns_none(self):
+        assert recovery.classify_worker_refusal(None, None) is None
+        assert recovery.classify_worker_refusal("", "") is None
+
+
 class _FailoverHarness(_Harness):
     """A sweep harness with a controllable last-error and a fake failover_fn."""
 

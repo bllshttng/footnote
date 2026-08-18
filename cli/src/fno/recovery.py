@@ -477,6 +477,33 @@ def classify_session_error(output_result: Optional[str]):
     return normalize(http_status=None, exit_code=None, body=output_result)
 
 
+def classify_worker_refusal(
+    output_result: Optional[str],
+    last_message: Optional[str],
+):
+    """The provider refusal a candidate is carrying, as ``(err, source)``, or None.
+
+    Two sources, one taxonomy. ``output_result`` is a DEAD session's last result
+    and stays authoritative, so every path that works today keeps its answer.
+    ``last_message`` is the LIVE worker's last turn, already read by the sweep's
+    ``truth_fn``: a capped worker does not die, it answers once with a refusal
+    and then holds a full session of context, so the transcript is the only place
+    its refusal ever appears. Both go through ``classify_session_error`` -> the
+    shipped ``normalize`` rules, so there is no second marker list to drift.
+
+    ``source`` is ``"output_result"`` or ``"transcript"`` and is carried into the
+    event, because "the session died saying this" and "the session is alive
+    saying this" call for different recovery arms.
+    """
+    err = classify_session_error(output_result)
+    if err is not None and err.triggers_swap:
+        return err, "output_result"
+    err = classify_session_error(last_message)
+    if err is not None and err.triggers_swap:
+        return err, "transcript"
+    return None
+
+
 def _node_id_from_worktree(cwd: str) -> Optional[str]:
     """Read ``graph_node_id`` from the dead session's worktree target-state.md.
 
