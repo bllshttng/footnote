@@ -23,7 +23,6 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
-from fno.graph._constants import is_wellformed_node_id
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
 # Str-enum built directly from the status axis + terminals. Functional API so
@@ -48,6 +47,11 @@ class ConsolidationEntry(BaseModel):
         # Same predicate the graph mints against, imported rather than
         # re-spelled: a reason pointing at a typo'd id is a decision no later
         # reader can check, which is the one thing this block exists to give.
+        # Imported HERE, not at module scope: `fno.graph` costs 126ms of this
+        # module's 219ms import, and every plan read would pay it for a key
+        # most plans carry once.
+        from fno.graph._constants import is_wellformed_node_id
+
         if not is_wellformed_node_id(v):
             raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)")
         return v

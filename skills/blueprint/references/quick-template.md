@@ -9,9 +9,10 @@ Single flat markdown file for bugs, focused features, and single-session work. O
 status: ready
 kind: quick-plan
 created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
-#                                 # tell a new plan from a pre-gate one, so a
-#                                 # plan with no created: is grandfathered
-#                                 # forever and never actually gated.
+#                                 # tell a new plan from a pre-gate one. Omit it
+#                                 # and the gate falls back to a YYYY-MM-DD in
+#                                 # the filename, then REFUSES the plan if
+#                                 # neither carries a date.
 # claims: ab-XXXXXXXX             # Only when the input was an ab-id. When set,
 #                                 # `fno backlog intake` updates that idea-state
 #                                 # node in place instead of creating a duplicate.

@@ -76,12 +76,8 @@ _plan_rung() {
     printf '%s' "$_out"
 }
 
-# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
-# nothing. Shared by _plan_rung and _semantic_validate so the "which fno runs?"
-# question has ONE answer here rather than two that can drift apart.
 # Echo the checkout root that holds `cli/src/fno`, or nothing. Three callers
-# asked this the same way in three places; one of them can now answer it while
-# the others cannot, so it is one function.
+# asked this the same way in three places, so it is one function.
 _fno_source_root() {
     local repo_root="" script_dir="" candidate=""
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -98,6 +94,28 @@ _fno_source_root() {
     return 0
 }
 
+# Echo the YYYY-MM-DD a plan's own NAME carries, or nothing. /blueprint names
+# every plan it writes `YYYY-MM-DD-slug.md`, and a folder plan takes the date
+# from its directory, so this is real evidence of when a plan was written -
+# which is what the consolidation gate needs when frontmatter carries none.
+_plan_name_date() {
+    local file="$1" name=""
+    name=$(basename "$file")
+    if [[ "$name" == "00-INDEX.md" ]]; then
+        name=$(basename "$(dirname "$file")")
+    fi
+    # Bounded on purpose: a bare 8-digit prefix is not a date, and reading
+    # `12345678-notes.md` as 1234-56-78 would sort after any real gate date and
+    # refuse a plan for having a number in its name.
+    if [[ "$name" =~ ^(20[0-9]{2})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[-._] ]] \
+        || [[ "$name" =~ ^(20[0-9]{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[-._] ]]; then
+        printf '%s-%s-%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+    fi
+}
+
+# Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
+# nothing. Shared by _plan_rung, _semantic_validate, and the consolidation gate
+# so the "which fno runs?" question has ONE answer here.
 _fno_source_python() {
     local source_root="" python_bin=""
     source_root=$(_fno_source_root)
@@ -680,8 +698,12 @@ check_consolidation_file() {
 
     # Presence only. Shape is the model's job (see below), but whether a block
     # exists at all is a policy date rather than a shape, so it stays here.
+    # `grep -q` exits at the first match and SIGPIPEs the upstream awk, which
+    # `pipefail` then reports as a failed pipeline - and this one is NEGATED,
+    # so the plan would be told it has no block when it has one. Same trap the
+    # parent_epic check below documents. Read all the input instead.
     if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
-            | grep -qE '^consolidation:'; then
+            | grep -E '^consolidation:' >/dev/null; then
         # Grandfather: the gate governs plans written AFTER it shipped. Every
         # pre-existing plan would otherwise halt /do and /target on work
         # already in flight, so they WARN until backfilled. The boundary is
@@ -707,8 +729,25 @@ check_consolidation_file() {
         if [[ "$created" =~ ^[0-9]{8}$ ]]; then
             created="${created:0:4}-${created:4:2}-${created:6:2}"
         fi
+        # No frontmatter at all is a different defect with a different owner,
+        # and the gate cannot speak about a file that carries no plan header.
+        # Say that plainly rather than passing: silence here would read as a
+        # clean block. No live plan is in this shape (0 of 1056 gate targets).
+        if ! awk '/^---/ { c++ } END { exit(c >= 2 ? 0 : 1) }' "$file"; then
+            warn "$label: consolidation gate did not run - this file has no --- frontmatter block, and frontmatter is mandatory on every plan. Add one carrying created: and the consolidation block"
+            return 0
+        fi
+        # A plan the gate cannot DATE would be grandfathered forever, so the
+        # gate would fire on a date being present and new and read absence as
+        # pre-gate. That is a silent, permanent opt-out for any plan that just
+        # omits the key. Fall back to the plan's own name, and refuse loudly
+        # when neither carries a date.
+        local created_raw="$created"
         if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            warn "$label: consolidation gate UNEVALUATED - no block, and created ${created:-<missing>} is not a readable date, so this plan cannot be told from a pre-gate one. Not a pass: add a YYYY-MM-DD created and the block"
+            created=$(_plan_name_date "$file")
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            c_error "$label: no consolidation: block, and no readable date to tell this plan from a pre-gate one (created: ${created_raw:-<missing>}, and the filename carries no YYYY-MM-DD). Add both - a plan the gate cannot date is grandfathered forever"
         elif [[ "$created" > "$gate_date" ]]; then
             c_error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone), and silence is not an outcome"
         else
@@ -757,12 +796,21 @@ ENUM = "(absorb | append | proceed_alone)"
 
 
 def frontmatter(path):
+    """The text between the first two `---` lines.
+
+    Deliberately the same rule as the `/^---/` awk every other check in this
+    script uses. A stricter reader here would report NOT CHECKED on a plan the
+    presence check had already accepted, which is the divergence this rewrite
+    exists to remove.
+    """
     lines = open(path, encoding="utf-8").read().splitlines()
-    if not lines or lines[0].rstrip() != "---":
-        return None
-    for i, line in enumerate(lines[1:], start=1):
-        if line.rstrip() == "---":
-            return "\n".join(lines[1:i])
+    opened = None
+    for i, line in enumerate(lines):
+        if line.startswith("---"):
+            if opened is None:
+                opened = i
+            else:
+                return "\n".join(lines[opened + 1:i])
     return None
 
 

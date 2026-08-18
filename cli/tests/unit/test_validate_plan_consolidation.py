@@ -152,15 +152,52 @@ def test_quoted_and_compact_created_dates_are_read_not_guessed(tmp_path):
     assert "created 2026-08-06" in out.stdout
 
 
-def test_unreadable_created_grandfathers_and_says_so(tmp_path):
-    # An unparsable date must not be compared lexicographically against the
-    # gate. Warn (never block in-flight work) and name the real reason.
+def test_a_plan_the_gate_cannot_date_is_refused_not_grandfathered(tmp_path):
+    # The gate fires on a date being present AND after it, so a plan carrying
+    # no readable date at all would be grandfathered forever - a silent,
+    # permanent opt-out for anyone who just omits the key.
     plan = tmp_path / "junk-date.md"
     plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: last tuesday\n"))
     out = _run(plan)
+    assert out.returncode == 1, out.stdout
+    assert "no readable date" in out.stdout
+
+    missing = tmp_path / "no-created.md"
+    missing.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\n"))
+    out = _run(missing)
+    assert out.returncode == 1, out.stdout
+    assert "no readable date" in out.stdout
+
+
+def test_a_file_with_no_frontmatter_says_the_gate_did_not_run(tmp_path):
+    # A file with no plan header is a different defect with a different owner.
+    # The gate cannot date it, so it names that rather than passing silently -
+    # a clean-looking gate on an unreadable file is the failure this whole
+    # check exists to avoid.
+    plan = tmp_path / "headerless.md"
+    plan.write_text("# T\n\nno frontmatter at all\n")
+    out = _run(plan)
+    assert "consolidation gate did not run" in out.stdout
+    assert "no --- frontmatter block" in out.stdout
+    assert "consolidation outcome is" not in out.stdout
+
+
+def test_a_dated_filename_dates_a_plan_whose_frontmatter_does_not(tmp_path):
+    # Eight live plans carry the date in the name and nothing in frontmatter.
+    # The name is real evidence, so it grandfathers them rather than blocking
+    # work on plans written months before the gate existed.
+    plan = tmp_path / "2026-05-15-old-plan.md"
+    plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\n"))
+    out = _run(plan)
     assert out.returncode == 0, out.stdout
-    assert "UNEVALUATED" in out.stdout
-    assert "is not a readable date" in out.stdout
+    assert "not after the 2026-08-17 gate" in out.stdout
+
+    # And the same name shape does NOT excuse a plan written after the gate.
+    fresh = tmp_path / "20260820-new-plan.md"
+    fresh.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\n"))
+    out = _run(fresh)
+    assert out.returncode == 1, out.stdout
+    assert "no consolidation: block in frontmatter" in out.stdout
 
 
 def test_entry_keys_may_come_in_any_order(tmp_path):
