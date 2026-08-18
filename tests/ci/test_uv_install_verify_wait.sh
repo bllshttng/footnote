@@ -29,7 +29,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # installer, so this extracts the one function under test by name; the predicate
 # it re-checks is stubbed below.
 helper="$(mktemp)"
-trap 'rm -f "$helper"' EXIT
+identity_helper="$(mktemp)"
+fake_python="$(mktemp)"
+trap 'rm -f "$helper" "$identity_helper" "$fake_python" "${tries_file:-}"' EXIT
 sed -n '/^uv_install_verifies_within() {/,/^}/p' "$SCRIPT" > "$helper"
 [[ -s "$helper" ]] || fail "could not extract uv_install_verifies_within from $SCRIPT"
 
@@ -65,7 +67,26 @@ elapsed=$((SECONDS - start))
 
 rm -f "$tries_file"
 
-# 3. The SAME bounded re-check, on every provisioning path, with the same 3s.
+# 3. A wrong package name with the exact owner author is a complete foreign
+#    answer, not a torn author prefix. The adopt guard reads this stable bit to
+#    decide between refusing the stranger and force-installing over it.
+sed -n '/^FNO_VERIFIED_VERSION=/,/^}/p' "$REPO/scripts/install/fno.sh" > "$identity_helper"
+[[ -s "$identity_helper" ]] || fail "could not extract verify_ours from scripts/install/fno.sh"
+cat > "$fake_python" <<'SH'
+#!/bin/sh
+printf '%s\n' 'name=notfno' 'author=Jason Noah Choi' 'version=0.3.1'
+SH
+chmod +x "$fake_python"
+(
+  # shellcheck disable=SC1090
+  source "$identity_helper"
+  FNO_VENV_PY="$fake_python"
+  verify_ours && fail "a foreign package name must not verify"
+  [[ "$FNO_VERIFY_REASON" == "name=notfno" ]] || fail "expected the foreign-name reason, got $FNO_VERIFY_REASON"
+  [[ -n "$FNO_VERIFY_STABLE" ]] || fail "an exact owner author is complete, not a torn prefix"
+) || exit 1
+
+# 4. The SAME bounded re-check, on every provisioning path, with the same 3s.
 #    A guard on one of N paths is decorative, and this one has been proven so
 #    twice: `scripts/install/fno.sh` and update.py's install verify both shipped
 #    single-shot while the other paths waited, and each refused a good install
@@ -92,15 +113,54 @@ have scripts/install/fno.sh '-gt 15 ] && return 1' "15-retry ceiling"
 have scripts/install/fno.sh 'sleep 0.2' "0.2s poll"
 have scripts/install/fno.sh 'uv_install_verifies_within ||' "waited verify call"
 lacks scripts/install/fno.sh 'uv_install_verifies ||' "call the _within wrapper"
+have scripts/install/fno.sh 'print("name=" + (md.get("Name") or ""))' "key=value identity probe"
+lacks scripts/install/fno.sh 'print(md["Name"])' "None-on-absent-header probe"
+have scripts/install/fno.sh 'verify_ours && return 0' "waited identity verify"
+lacks scripts/install/fno.sh '] && verify_ours; then' "single-shot adopt verify"
+lacks scripts/install/fno.sh 'verify_ours || die' "single-shot post-install verify"
+have scripts/install/fno.sh '[ -x "$FNO_REAL" ] && return 0' "waited executable gate"
+lacks scripts/install/fno.sh '] && [ -x "$FNO_REAL" ] && verify_ours_within' "single-shot adopt executable gate"
+lacks scripts/install/fno.sh 'if [ ! -x "$FNO_REAL" ]; then' "single-shot post-install executable gate"
+have scripts/install/fno.sh 'fno-bootstrap" ] || [ -d "${FNO_REAL%/*}" ]' "two-dir adopt discriminator"
+have scripts/install/fno.sh 'refusing to install over a foreign fno' "stable-stranger adopt refusal"
+lacks scripts/install/fno.sh 'refusing to install over it' "over-broad adopt refusal"
+have scripts/install/fno.sh '(version unreadable)' "receipt never prints a blank version"
 
-have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1' "15-retry ceiling"
+have cli/src/fno/update.py '"$__vn" -gt 15 ] && return 1; sleep 0.2' "15-retry ceiling and 0.2s poll"
 have cli/src/fno/update.py 'if __fno_verify_within; then break' "waited install verify"
 have cli/src/fno/update.py '_fno_n -lt 15' "15-retry ceiling in _await_binary"
-have cli/src/fno/update.py 'sleep 0.2' "0.2s poll"
+# Anchored to _await_binary's own increment: a bare `sleep 0.2` here would be
+# satisfied by whichever of the two polls did NOT drift, so neither would be pinned.
+have cli/src/fno/update.py '_fno_n=$((_fno_n+1)); sleep 0.2' "0.2s poll in _await_binary"
 
 have crates/fno/src/bootstrap.rs 'VERIFY_ATTEMPTS: u32 = 15' "15-retry ceiling"
 have crates/fno/src/bootstrap.rs 'VERIFY_POLL: Duration = Duration::from_millis(200)' "0.2s poll"
 have crates/fno/src/bootstrap.rs 'install_verified_within(uv, VERIFY_ATTEMPTS, VERIFY_POLL)' "waited verify call"
+
+# The git-protection merge veto's timeout is sized off the doc's
+# per-invocation ceiling ("Size any harness budget that shells `fno` against
+# 21s"). When the wait budgets move, that number must be re-derived, and this
+# pin fails until the hook follows it. Without it the four 15-pins still catch
+# a budget change while this fifth consumer silently under-covers. The pin
+# reads the shared constant's definition - one literal, no sibling can shadow
+# it - and both call sites are counted so a bare timeout= literal cannot
+# quietly return.
+have hooks/git-protection.py '_VETO_PROBE_TIMEOUT = 25' "shared veto timeout definition"
+_v=$(grep -c 'timeout=_VETO_PROBE_TIMEOUT' "$REPO/hooks/git-protection.py")
+[ "$_v" -eq 2 ] || fail "expected both veto call sites on _VETO_PROBE_TIMEOUT, found $_v"
+_hook_veto=$(grep -oE '_VETO_PROBE_TIMEOUT = [0-9]+' "$REPO/hooks/git-protection.py" | head -n 1)
+_doc_ceiling=$(grep -oE 'shells `fno` against [0-9]+s' "$REPO/docs/architecture/cli-lazy-imports.md" | head -n 1)
+[ -n "$_hook_veto" ] || fail "git-protection.py lost its shared veto timeout"
+[ -n "$_doc_ceiling" ] || fail "cli-lazy-imports.md lost its per-invocation sizing line"
+_h=${_hook_veto//[^0-9]/}; _c=${_doc_ceiling//[^0-9]/}
+[ "$_h" -ge "$_c" ] || fail "the veto timeout (${_h}s) sits under the doc's ${_c}s ceiling"
+
+# The owner identity the two probes check against. Four unpinned literals
+# across two languages were one byline change from refusing the project's own
+# wheel on the curl path with no test firing. The full definitions are pinned,
+# value included: a name-only pin stays green through the drift that matters.
+have crates/fno/src/bootstrap.rs 'const OWNER_AUTHOR: &str = "Jason Noah Choi"' "owner identity constant"
+have scripts/install/fno.sh '_owner="Jason Noah Choi"' "owner identity in the sh twin"
 
 echo "PASS: postinstall verify waits for a late artifact, still fails bounded on a broken one, and all four provisioning paths share the 3s budget"
 exit 0

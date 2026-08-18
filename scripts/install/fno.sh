@@ -267,6 +267,11 @@ FNO_VERIFIED_VERSION=
 FNO_VERIFY_REASON=
 verify_ours() {
 	FNO_VERIFY_REASON=
+	FNO_VERIFY_STABLE=
+	# The owner identity, one literal beside both users (the accept case and
+	# the torn-prefix rule). The drift test pins it to OWNER_AUTHOR in
+	# crates/fno/src/bootstrap.rs, the one tie a curl-piped script can carry.
+	_owner="Jason Noah Choi"
 	if [ ! -x "$FNO_VENV_PY" ]; then
 		FNO_VERIFY_REASON="its tool venv python is missing"
 		return 1
@@ -275,18 +280,44 @@ verify_ours() {
 	# email makes the build backend emit only `Author-email: Jason Noah Choi <...>`
 	# and drop the bare Author field. The owner's name travels in both, so the
 	# substring check still holds.
+	#
+	# Key=value lines and `.get(...) or ""` on every field, never `md["Name"]`:
+	# an absent header answers None, which print renders as the literal "None" -
+	# a value the match below reads as a foreign package name. An empty line says
+	# "the field was not there" without dressing it up as an answer. The
+	# key=value shape also keeps a stray startup print (a .pth, sitecustomize)
+	# from shifting the fields the way positional parsing did; the last
+	# occurrence of a key wins, because startup prints run first.
 	_probe='import importlib.metadata as m
 md = m.metadata("fno")
-print(md["Name"])
-print(md.get("Author") or md.get("Author-email") or "")
-print(md["Version"])'
+print("name=" + (md.get("Name") or ""))
+print("author=" + (md.get("Author") or md.get("Author-email") or ""))
+print("version=" + (md.get("Version") or ""))'
 	if ! _out=$("$FNO_VENV_PY" -c "$_probe" 2>/dev/null); then
 		FNO_VERIFY_REASON="no readable package metadata"
 		return 1
 	fi
-	_name=$(printf '%s\n' "$_out" | sed -n '1p')
-	_author=$(printf '%s\n' "$_out" | sed -n '2p')
-	_version=$(printf '%s\n' "$_out" | sed -n '3p')
+	_name=$(printf '%s\n' "$_out" | sed -n 's/^name=//p' | tail -n 1)
+	_author=$(printf '%s\n' "$_out" | sed -n 's/^author=//p' | tail -n 1)
+	_version=$(printf '%s\n' "$_out" | sed -n 's/^version=//p' | tail -n 1)
+	# Mirrors refusal_is_stable in crates/fno/src/bootstrap.rs: an answer is
+	# final only when every field is present AND the author is not a torn
+	# PREFIX of the owner string. Anything else is an instrument failure the
+	# retry in verify_ours_within re-asks, rather than refusing once on a
+	# torn read. Computed before both refusal arms, so a complete stranger is
+	# refused on the first pass whichever field it fails on.
+	FNO_VERIFY_STABLE=1
+	for _f in "$_name" "$_author" "$_version"; do
+		[ -n "$_f" ] && [ "$_f" != None ] || FNO_VERIFY_STABLE=
+	done
+	# A torn author lands as a PREFIX of the owner string: an instrument
+	# failure even when every field answered, so it clears the stable mark. An
+	# exact owner is complete: only a proper shorter prefix is torn.
+	if [ "$_author" != "$_owner" ]; then
+		case "$_owner" in
+			"$_author"*) FNO_VERIFY_STABLE= ;;
+		esac
+	fi
 	# name must be `fno` (case-insensitive)...
 	case "$_name" in
 		fno|FNO|Fno) : ;;
@@ -294,17 +325,55 @@ print(md["Version"])'
 	esac
 	# ...AND authored by this project's owner.
 	case "$_author" in
-		*"Jason Noah Choi"*) : ;;
+		*"$_owner"*) : ;;
 		*) FNO_VERIFY_REASON="author=$_author"; return 1 ;;
 	esac
 	FNO_VERIFIED_VERSION="$_version"
 	return 0
 }
 
+# `verify_ours`, re-asked until it passes, the shared 3s budget runs out, or
+# the answer is a complete foreign identity (FNO_VERIFY_STABLE). The same three
+# exits `verify_ours_within` in crates/fno/src/bootstrap.rs has, because the two
+# identity probes are one guard in two reachable paths: this script's adopt arm
+# refusing a torn read fell through to `uv tool install --force` - the storm
+# trigger - while the Rust copy re-asked. One python spawn per pass rather than
+# a stat, same 15 * 0.2s budget the four provisioning waits share.
+verify_ours_within() {
+	_n=0
+	while :; do
+		verify_ours && return 0
+		[ -n "$FNO_VERIFY_STABLE" ] && return 1
+		_n=$((_n + 1))
+		[ "$_n" -gt 15 ] && return 1
+		sleep 0.2
+	done
+}
+
+# `[ -x "$FNO_REAL" ]`, re-checked until it passes or the shared 3s budget
+# runs out: the sh twin of `executable_within` in crates/fno/src/bootstrap.rs.
+# The commit that taught both Rust -x gates to wait left these two call sites
+# single-shot, and one look during a concurrent --force (the script is absent
+# ~490ms) skips the adopt arm or kills a healthy post-install, and control
+# falls into another --force - the storm, reached one look earlier than the
+# torn-verify case.
+fno_real_within() {
+	_n=0
+	while :; do
+		[ -x "$FNO_REAL" ] && return 0
+		_n=$((_n + 1))
+		[ "$_n" -gt 15 ] && return 1
+		sleep 0.2
+	done
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno-py`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
 report_success() {
+	# A blank version must not print as one: the version is the one fact this
+	# line exists to carry (the twin of verified_receipt in bootstrap.rs).
+	[ -n "$FNO_VERIFIED_VERSION" ] || FNO_VERIFIED_VERSION="(version unreadable)"
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
 	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
 	# on PATH would otherwise suppress the fix, yet `fno` would run that other
@@ -368,10 +437,36 @@ main() {
 	# (AC4-HP, AC4-EDGE). An explicit FNO_VERSION / FNO_INSTALL_WHEEL is a request
 	# to (re)install that exact source, so it skips the no-op and provisions.
 	if [ -z "${FNO_INSTALL_WHEEL:-}" ] && [ "${FNO_VERSION+x}" != x ]; then
-		if resolve_real && [ -x "$FNO_REAL" ] && verify_ours; then
-			say "fno is already installed and verified - nothing to do."
-			report_success
-			return 0
+		if resolve_real; then
+			# Two-dir discriminator, same as run() in bootstrap.rs: the
+			# bootstrap cache dir survives the --force that removes the venv
+			# whole, and the venv bin dir marks a box carrying an install.
+			# Both absent means no install ever existed, where a 3s wait is
+			# a first-run tax.
+			_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}"
+			_skip_adopt=
+			if [ -d "$_cache_dir/fno-bootstrap" ] || [ -d "${FNO_REAL%/*}" ]; then
+				fno_real_within || _skip_adopt=1
+			else
+				[ -x "$FNO_REAL" ] || _skip_adopt=1
+			fi
+			if [ -z "$_skip_adopt" ]; then
+				if verify_ours_within; then
+					say "fno is already installed and verified - nothing to do."
+					report_success
+					return 0
+				fi
+				# Only a VERIFIABLE stranger is refused (the Rust adopt arm's
+				# invariant: a complete foreign answer is never
+				# --force-installed over). An instrument failure - torn
+				# metadata, a missing venv python - falls through on purpose:
+				# the force install below is this script's repair path for a
+				# broken-but-ours install, and refusing here would leave a
+				# half-removed install with no automated repair.
+				if [ -n "$FNO_VERIFY_STABLE" ]; then
+					die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to install over a foreign fno."
+				fi
+			fi
 		fi
 	fi
 
@@ -395,7 +490,7 @@ main() {
   looked for: (no path built - \`uv tool dir\` failed or printed nothing)
 Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
-	if [ ! -x "$FNO_REAL" ]; then
+	if ! fno_real_within; then
 		if [ -e "$FNO_REAL" ]; then
 			_why="something is there but it is not an executable file"
 		else
@@ -409,7 +504,7 @@ Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
 	# A foreign by-name PyPI `fno`, or unreadable metadata, must abort here -
 	# never report success for a package that is not ours (AC5-ERR).
-	verify_ours || die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to report success for a foreign fno."
+	verify_ours_within || die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to report success for a foreign fno."
 	report_success
 }
 
