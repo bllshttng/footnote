@@ -250,13 +250,16 @@ That is what makes a rebase carry and a one-line code fix die.
 | `github_app` | the review object's `.commit.oid` | none, already in the `gh pr view --json reviews` payload |
 | `local_attestation` | the attestation's own `data.head_sha` | none, already emitted |
 
-Four separate places ask "has this reviewer reviewed this code", and all four go through the predicate.
-They are the coverage count, the `config.review.reviewers` attestation scan, the required-bot presence check that drives `missing_bots`, and `finalize`'s optional-app auto-merge arming check.
+Four separate places ask "has this reviewer reviewed this code".
+
+All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
+
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
 
 A `stale` verdict is **recorded, not dropped**.
 `CoverageVerdict::Stale` says a reviewer responded against an older commit.
+
 That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
 
 ### Scope: which PR an attestation is about
