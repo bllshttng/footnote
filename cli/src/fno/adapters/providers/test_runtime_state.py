@@ -921,3 +921,143 @@ class TestHarvestedResetBecomesTheLock:
         h = read_state().provider_health["P"]
         assert h.rate_limited_until == pytest.approx(now + 9 * 3600)
         assert "m1" in h.model_locks
+
+
+class TestWindowProjection:
+    """AC3: a probe-less record gets a projection, and never a fake reading."""
+
+    def _span(self, monkeypatch, seconds):
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: seconds, raising=True
+        )
+
+    def test_ac3_hp_a_recorded_open_projects_a_close(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 300 * 60)  # z.ai is a five-hour window
+        now = time.time()
+        opened = now - 2 * 3600
+        assert rs.stamp_window_open("zai", opened) is True
+
+        proj = rs.project_window("zai", now=now)
+        assert proj.opened_at == pytest.approx(opened)
+        assert proj.closes_at == pytest.approx(opened + 300 * 60)
+        assert proj.closes_in_s == pytest.approx(3 * 3600, abs=2)
+
+    def test_ac3_edge_nothing_recorded_reads_unknown_not_zero(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        self._span(monkeypatch, 300 * 60)
+        proj = rs.project_window("never-seen")
+        assert proj.closes_in_s is None
+        assert proj.opened_at is None
+        # And the projection surface must not have taught headroom anything.
+        assert headroom("never-seen").state is HeadroomState.UNKNOWN
+
+    def test_a_rolled_window_stops_projecting(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A negative countdown rendered as a positive number is exactly the
+        # confident-wrong reading this surface exists to avoid.
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 7200)
+        proj = rs.project_window("zai", now=now)
+        assert proj.opened_at is not None
+        assert proj.closes_in_s is None
+
+    def test_no_configured_length_means_no_projection(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, None)
+        rs.stamp_window_open("zai", time.time() - 60)
+        assert rs.project_window("zai").closes_in_s is None
+
+    def test_a_second_stamp_inside_the_window_is_a_no_op(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        assert rs.stamp_window_open("zai", now - 600) is True
+        assert rs.stamp_window_open("zai", now) is False
+        assert rs.project_window("zai", now=now).opened_at == pytest.approx(now - 600)
+
+    def test_the_warn_flag_fires_once_and_rearms_on_a_new_window(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 600)
+        assert rs.mark_window_warned("zai") is True
+        assert rs.mark_window_warned("zai") is False
+        # A fresh window (the old one has closed) re-arms it.
+        rs.stamp_window_open("zai", now + 7200)
+        assert rs.mark_window_warned("zai") is True
+
+    def test_a_harvested_reset_stamps_the_window_it_closed(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The only exact window boundary footnote ever sees for a probe-less
+        # record: the window that just refused closes at resets_at, so it opened
+        # one window-length before it.
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 300 * 60)
+        now = time.time()
+        reset = now + 2 * 3600
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=reset,
+        )
+        proj = rs.project_window("zai", now=now)
+        assert proj.closes_at == pytest.approx(reset)
+        assert proj.closes_in_s == pytest.approx(2 * 3600, abs=2)
+
+    def test_the_block_survives_an_unrelated_write(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Four write paths rebuild the whole payload from disk; any one that
+        # forgot to carry windows_opened would silently delete it.
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 600)
+
+        update_provider_health("other", ErrorRule(status=429, backoff=True), now=now)
+        rs.write_usage_snapshot(UsageSnapshot(
+            provider_id="other",
+            windows=(UsageWindow(label="5h", used_pct=10.0, resets_at=now + 900),),
+            probed_at=now,
+            source="test",
+        ))
+        reset_provider_health("other")
+
+        assert rs.project_window("zai", now=now).closes_in_s is not None
+
+    def test_a_malformed_block_degrades_to_no_projection(
+        self, state_path: Path
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"windows_opened": {"zai": {"window": "nope"}}}),
+            encoding="utf-8",
+        )
+        assert rs.project_window("zai").opened_at is None

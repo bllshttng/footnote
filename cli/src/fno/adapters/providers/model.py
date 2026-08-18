@@ -117,6 +117,13 @@ class ProviderRecord(BaseModel):
     # An offset-bearing stamp and an epoch never need this.
     reset_timezone: str | None = None
 
+    # Length of this account's rolling usage window, in minutes (z.ai is 300).
+    # Only used to PROJECT when the window closes from a recorded open, for a
+    # record no usage probe can read. It is deliberately not a utilization
+    # reading: a projection never becomes a UsageWindow, because headroom()
+    # would then render a confident percentage no probe measured.
+    window_minutes: int | None = Field(default=None, gt=0)
+
     # Optional metadata
     account_id: str | None = None
     tags: list[str] = Field(default_factory=list)

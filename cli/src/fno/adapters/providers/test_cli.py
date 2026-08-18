@@ -2126,3 +2126,54 @@ class TestUsageRefreshContract:
         assert result.exit_code == 0, result.output
         payload = _json.loads(result.output.strip())
         assert payload["readyrule"] == {"state": "unknown", "reason": "not-probed"}
+
+
+class TestWindowVerb:
+    """AC3 at the CLI boundary: a projection, and an honest unknown."""
+
+    def test_ac3_edge_a_probeless_record_prints_unknown_and_keeps_the_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # done_probe 2 greps for "closes_in_s". The key must be present even
+        # when the answer is unknown, or a shapeless response passes the gate.
+        import json as _json
+
+        _usage_env(tmp_path, monkeypatch)
+        result = _invoke(["window", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload
+        for row in payload.values():
+            assert "closes_in_s" in row
+            assert row["closes_in_s"] is None
+            assert row["headroom"] == "unknown"
+
+    def test_ac3_hp_a_recorded_open_prints_seconds_to_close(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+        import time as _time
+
+        import fno.adapters.providers.runtime_state as rs
+
+        _usage_env(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 300 * 60, raising=True
+        )
+        rs.stamp_window_open("readyrule", _time.time() - 2 * 3600)
+
+        result = _invoke(["window", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        row = _json.loads(result.output.strip())["readyrule"]
+        assert row["closes_in_s"] == pytest.approx(3 * 3600, abs=5)
+        assert row["closes_at"] is not None
+        # The projection must not have taught headroom a percentage.
+        assert row["headroom"] == "unknown"
+
+    def test_the_human_row_says_unknown_rather_than_a_number(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _usage_env(tmp_path, monkeypatch)
+        result = _invoke(["window"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "unknown" in result.output
