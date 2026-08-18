@@ -595,7 +595,9 @@ def test_reap_refuses_on_unpushed_commits_with_count_named(tmp_path):
     assert refusal is not None and "1 unpushed commit(s)" in refusal
 
     v = Verdict("eeee1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
-    outcome, detail = apply_verdict(v, lanes="all", cwd=str(repo))
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd=str(repo), reap_enabled=True
+    )
     assert outcome == "refused" and "1 unpushed commit(s)" in detail
 
 
@@ -623,7 +625,9 @@ def test_reap_applies_on_clean_worktree(tmp_path):
         cwds.append(kw.get("cwd"))
         return _Proc(0)
     v = Verdict("eeee1111-0000", "w1", "working", REAP, "node x done", "stop+rm")
-    outcome, _ = apply_verdict(v, lanes="all", cwd=str(repo), runner=runner)
+    outcome, _ = apply_verdict(
+        v, lanes="all", cwd=str(repo), runner=runner, reap_enabled=True
+    )
     assert outcome == "applied"
     assert any("stop" in " ".join(a) for a in stopped)
     assert any("rm" in " ".join(a) for a in stopped)
@@ -1422,7 +1426,9 @@ def test_reap_never_fires_on_an_unreadable_transcript():
     """
     rows = [Row("aaaa1111-0000", "w1", "idle", "x-done", "/wt/solo")]
     [v] = _run(rows, {}, nodes={"x-done": {"status": "done"}})
-    assert v.verdict == LEAVE
+    # STALE, not LEAVE: leave says the row was read and is healthy. An
+    # unanswered read is a different fact and it belongs to a human.
+    assert v.verdict == STALE
     assert "not evidence" in v.basis
 
 
@@ -1507,3 +1513,113 @@ def test_a_watchdog_event_uses_a_source_the_schema_accepts(tmp_path, monkeypatch
     record = json.loads(written.read_text().splitlines()[-1])
     assert record["type"] == "watchdog_verdict"
     assert record["source"] == "daemon"
+
+
+# ---------------------------------------------------------------------------
+# The reap predicate: one gate, and every failed read is UNKNOWN
+# ---------------------------------------------------------------------------
+
+def _decide(row, *, facts=None, nodes=None, claims=None, cotenants=0,
+            node_state_for=None, claim_for=None, now_s=NOW_1840):
+    return watchdog.reap_decision(
+        row,
+        facts=facts,
+        node_state_for=node_state_for or (lambda n: (nodes or {}).get(n)),
+        claim_for=claim_for or (lambda n: (claims or {}).get(n, {})),
+        now_s=now_s,
+        quiet_after_s=watchdog.REAP_QUIET_AFTER_S,
+        cotenants=cotenants,
+    )
+
+
+def test_every_failed_read_is_unknown_and_unknown_never_reaps():
+    """The structural rule, stated once as a test.
+
+    Eight findings over three rounds were one defect: a reading about one
+    thing used as a verdict about another, usually an ABSENCE read as a
+    positive answer. Fixing them site by site converged on nothing. This
+    pins the shape instead: whatever fails, the answer is UNKNOWN, and the
+    only way to YES is through three positive markers.
+    """
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    quiet = _facts("finished", age_min=120)
+
+    def boom(_n):
+        raise OSError("store unreadable")
+
+    # A raising node store is not "not done".
+    answer, basis = _decide(row, facts=quiet, node_state_for=boom)
+    assert answer == watchdog.REAP_UNKNOWN and "unreadable" in basis
+
+    # A raising claim store is not "unclaimed".
+    answer, basis = _decide(row, facts=quiet, nodes={"x-done": {"status": "x"}},
+                            claim_for=boom)
+    assert answer == watchdog.REAP_UNKNOWN and "unreadable" in basis
+
+    # A missing transcript is not "finished".
+    answer, _ = _decide(row, facts=None, nodes={"x-done": {"status": "done"}})
+    assert answer == watchdog.REAP_UNKNOWN
+
+    # An unparseable last event is not "quiet".
+    blind = TailFacts([(None, "x")], None, "x", "assistant", "x", "text")
+    answer, _ = _decide(row, facts=blind, nodes={"x-done": {"status": "done"}})
+    assert answer == watchdog.REAP_UNKNOWN
+
+    # A shared worktree is not "mine to delete".
+    answer, _ = _decide(row, facts=quiet, nodes={"x-done": {"status": "done"}},
+                        cotenants=1)
+    assert answer == watchdog.REAP_UNKNOWN
+
+    # All three markers present, and only then.
+    answer, basis = _decide(row, facts=quiet, nodes={"x-done": {"status": "done"}})
+    assert answer == watchdog.REAP_YES
+    assert "quiet" in basis
+
+
+def test_the_predicate_is_the_only_route_to_a_reap_verdict():
+    """A guard on one of N paths is decorative. This asserts there is one
+    path: no reap verdict exists that the predicate did not authorize."""
+    import inspect
+
+    source = inspect.getsource(watchdog._verdict_one)
+    # The single REAP construction in the classifier is the one guarded by
+    # the predicate's YES. Any second one is a bypass.
+    assert source.count("REAP,") == 1, (
+        "a second REAP verdict site bypasses reap_decision"
+    )
+    assert "reap_decision(" in source
+
+
+def test_reap_ships_frozen_and_the_freeze_is_at_the_funnel(monkeypatch):
+    """Wake and reroute are recoverable; a reap deletes a worktree and a
+    wrong one is not undoable. So reap classifies but does not execute until
+    an operator arms it, and the freeze lives at the one funnel rather than
+    in whichever CLI flag happens to expose the lane today."""
+    v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x-done done", "stop+rm")
+
+    def never(*a, **k):
+        raise AssertionError("a frozen reap must not run a lifecycle command")
+
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/wt/solo", runner=never, reap_enabled=False
+    )
+    assert outcome == "reported"
+    assert "watchdog_reap" in detail
+
+    # Armed, it reaches the mechanism (and stops there on the clean-tree gate).
+    monkeypatch.setattr(watchdog, "worktree_refusal", lambda cwd: "1 unpushed commit(s)")
+    outcome, detail = apply_verdict(
+        v, lanes="all", cwd="/wt/solo", runner=never, reap_enabled=True
+    )
+    assert outcome == "refused" and "unpushed" in detail
+
+
+def test_unreadable_config_is_never_permission_to_delete(monkeypatch):
+    """The one switch whose wrong answer deletes a worktree fails closed."""
+    import fno.config as config_mod
+
+    def boom():
+        raise OSError("settings.yaml is a directory")
+
+    monkeypatch.setattr(config_mod, "load_settings", boom)
+    assert watchdog._reap_execution_enabled() is False

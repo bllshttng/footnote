@@ -385,6 +385,8 @@ max_nudges = 3
 watchdog = "off"
 # Mail handle the watchdog digest is pushed to when the non-leave verdict set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody.
 watchdog_mail_to = ""
+# Whether `fno agents watchdog --apply-all` may EXECUTE the reap lane (default false). Reap runs stop then rm, which deletes the session's worktree; work that exists only there is gone with it. Wake and reroute are recoverable, so they ship on. Reap verdicts are still computed, reported and mailed when this is off - only the destructive action is withheld.
+watchdog_reap = false
 
 [health_monitor]
 # Enable backlog health monitoring.

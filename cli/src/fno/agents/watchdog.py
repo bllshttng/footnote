@@ -260,6 +260,121 @@ def verdicts(
     return out
 
 
+# ---------------------------------------------------------------------------
+# The reap predicate (the one gate to the only destructive verdict)
+# ---------------------------------------------------------------------------
+
+#: Reap's three answers. UNKNOWN is the whole point of the tri-state: every
+#: read that FAILED, and every reading this lane cannot interpret, lands here
+#: instead of being folded into NO or, worse, into YES.
+REAP_YES = "yes"
+REAP_NO = "no"
+REAP_UNKNOWN = "unknown"
+
+
+def reap_decision(
+    row: Row,
+    *,
+    facts: Optional[TailFacts],
+    node_state_for: Callable[[str], Optional[dict]],
+    claim_for: Callable[[str], dict],
+    now_s: float,
+    quiet_after_s: float,
+    cotenants: int,
+) -> tuple[str, str]:
+    """The ONLY path to a reap verdict. Returns ``(answer, basis)``.
+
+    Eight review findings across three rounds were one defect wearing eight
+    costumes: a reading about one thing treated as a verdict about another,
+    and three of them turned an ABSENCE into a positive verdict. Fixing them
+    where they were found converged on nothing, because the shape was the
+    bug. So every question reap asks comes through here, and the rule is
+    uniform: a reap needs a POSITIVE marker, and anything else - a read that
+    raised, a read that returned nothing, a reading this code does not
+    recognise - is UNKNOWN. UNKNOWN never reaps.
+
+    That is what makes it converge. A new state spelling, a transcript that
+    moved, a schema that raised, a store that is briefly unreadable: none of
+    them can produce the marker, so none of them can reach the delete. The
+    failure mode of a bug here is a row a human has to look at, which is the
+    direction this lane is allowed to fail in.
+
+    The three positive signals a reap needs, all of them present:
+    the DELIVERABLE is settled (the node is done, or another live session
+    holds its claim), the worktree is this row's ALONE, and the transcript
+    says the session is QUIET - a parsed last event, past the idle
+    threshold, that is not a tool call.
+    """
+    if not row.node:
+        return REAP_NO, ""
+
+    # Read one: the deliverable. A store that raises is unknown, never "not
+    # done" - that is the absence-as-verdict move this predicate exists to
+    # refuse.
+    try:
+        entry = node_state_for(row.node)
+    except Exception as exc:  # noqa: BLE001 - a failed read is never a verdict
+        return REAP_UNKNOWN, f"node {row.node} state unreadable ({exc!r})"
+
+    reap_basis = ""
+    if entry is not None and entry.get("status") == "done":
+        reap_basis = f"node {row.node} done"
+    else:
+        try:
+            claim = claim_for(row.node)
+        except Exception as exc:  # noqa: BLE001 - same rule as the node read
+            return REAP_UNKNOWN, f"claim on {row.node} unreadable ({exc!r})"
+        holder_sid = _holder_session(claim.get("holder"))
+        if (
+            claim.get("state") == "live"
+            and holder_sid
+            and holder_sid != row.row_id
+            and not _GENERATED_HOLDER_RE.match(holder_sid)
+        ):
+            reap_basis = f"claim held by {holder_sid}"
+
+    if not reap_basis:
+        # The deliverable is not settled. This one IS a read that answered.
+        return REAP_NO, ""
+
+    # Read two: occupancy. `rm` deletes the WORKTREE, and a linked worktree
+    # proves its .git is a file, never that one session owns it. Two rows
+    # were measured working one tree on one node.
+    if cotenants:
+        return REAP_UNKNOWN, (
+            f"{reap_basis} but {cotenants} other session(s) share {row.cwd}, "
+            f"never reaped on a shared worktree"
+        )
+
+    # Read three: the transcript. None has two causes - never written, and
+    # could not be read - and this lane cannot tell them apart, so it treats
+    # neither as evidence.
+    if facts is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis} but no transcript to read, and an unreadable "
+            f"transcript is not evidence of a finished session"
+        )
+    if facts.last_event_epoch is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis} but no parseable last event, so quiet is unproven"
+        )
+
+    age_s = max(0.0, now_s - facts.last_event_epoch)
+    if age_s <= quiet_after_s:
+        return REAP_NO, (
+            f"{reap_basis} but executing, last turn "
+            f"{_mins(now_s, facts.last_event_epoch)}m ago"
+        )
+    if facts.last_kind == "tool":
+        return REAP_NO, (
+            f"{reap_basis} but last event is a tool call, never reaped on "
+            f"tool activity"
+        )
+    return REAP_YES, (
+        f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m"
+    )
+
+
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:
     if epoch is None:
         return None
@@ -291,72 +406,28 @@ def _verdict_one(
         return Verdict(row.row_id, row.name, row.state, GHOST,
                        f"no transcript for {row.row_id}", "report")
 
-    # reap: the DELIVERABLE is settled (node done / claim held live by another
-    # session), never the session's own state - a `done` row is resumable and
-    # a reap keyed on it killed live sessions on 2026-08-15. The deliverable
-    # is necessary and NOT sufficient (king ruling 2026-08-17, c696fddd): a
-    # done node proves the old task ended and proves nothing about re-tasking,
-    # so the row must also be QUIET - past the idle threshold, with a last
-    # event that is not a tool call. Three signals: the basis says the
-    # process is real, the last event says what it is doing now, the node
-    # says its old task finished.
     if row.node:
-        reap_basis = None
-        entry = node_state_for(row.node)
-        if entry is not None and entry.get("status") == "done":
-            reap_basis = f"node {row.node} done"
-        else:
-            claim = claim_for(row.node)
-            holder_sid = _holder_session(claim.get("holder"))
-            if (
-                claim.get("state") == "live"
-                and holder_sid
-                and holder_sid != row.row_id
-                and not _GENERATED_HOLDER_RE.match(holder_sid)
-            ):
-                reap_basis = f"claim held by {holder_sid}"
-        if reap_basis is not None and cotenants:
-            # Reap ends in `fno agents rm`, which deletes the WORKTREE, and a
-            # linked worktree proves its .git is a file, never that ONE
-            # session owns it. Measured on the live fleet: two rows working
-            # in one worktree on one node, so the quiet one earning a reap
-            # destroys the checkout the busy one is mid-task in. Occupancy is
-            # not a thing this lane may resolve, so the row goes to the
-            # needs-human bucket instead of the destructive one.
-            return Verdict(row.row_id, row.name, row.state, STALE,
-                           f"{reap_basis} but {cotenants} other session(s) "
-                           f"share {row.cwd}, never reaped on a shared "
-                           f"worktree", "report")
-        if reap_basis is not None:
-            if facts is None:
-                # An absence has two explanations and this one cannot tell
-                # them apart: tail_facts returns None for a session that
-                # never wrote a transcript AND for one whose transcript it
-                # could not read (a resolver miss, an OSError, a path that
-                # moved). Reaping on it deletes a clean worktree whenever the
-                # read fails, so the destructive lane requires a positive
-                # marker like every other lane here.
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               f"{reap_basis} but no transcript to read, and "
-                               f"an unreadable transcript is not evidence of "
-                               f"a finished session", "none")
-            if facts.last_event_epoch is None:
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               f"{reap_basis} but no parseable evidence, "
-                               f"not reaped", "none")
-            age_s = max(0.0, now_s - facts.last_event_epoch)
-            if age_s <= quiet_after_s:
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               f"{reap_basis} but executing, last turn "
-                               f"{_mins(now_s, facts.last_event_epoch)}m ago",
-                               "none")
-            if facts.last_kind == "tool":
-                return Verdict(row.row_id, row.name, row.state, LEAVE,
-                               f"{reap_basis} but last event is a tool call, "
-                               f"never reaped on tool activity", "none")
+        answer, reap_basis = reap_decision(
+            row,
+            facts=facts,
+            node_state_for=node_state_for,
+            claim_for=claim_for,
+            now_s=now_s,
+            quiet_after_s=quiet_after_s,
+            cotenants=cotenants,
+        )
+        if answer is REAP_YES:
             return Verdict(row.row_id, row.name, row.state, REAP,
-                           f"{reap_basis}, quiet "
-                           f"{_mins(now_s, facts.last_event_epoch)}m", "stop+rm")
+                           reap_basis, "stop+rm")
+        if answer is REAP_UNKNOWN:
+            # Not "leave": leave says the row was read and is healthy. This
+            # says the read did not answer, which is a different fact and a
+            # human's to resolve.
+            return Verdict(row.row_id, row.name, row.state, STALE,
+                           reap_basis, "report")
+        if reap_basis:
+            return Verdict(row.row_id, row.name, row.state, LEAVE,
+                           reap_basis, "none")
 
     # stale: the hard age ceiling, BEFORE the 429 window math - the reset
     # stamp carries no date, so on a tail older than the ceiling its
@@ -1199,6 +1270,7 @@ def apply_verdict(
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
     rotation: Optional[RotationBudget] = None,
+    reap_enabled: Optional[bool] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
     ``(outcome, detail)`` with outcome in applied | partial | refused |
@@ -1214,6 +1286,20 @@ def apply_verdict(
     not in whatever project launched the sweep."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return "reported", f"{v.verdict} outside {lanes} lane"
+    if v.verdict == REAP:
+        # The freeze sits HERE, at the one funnel every lane and every
+        # caller passes through, rather than in the CLI that happens to
+        # expose --apply-all today. A guard on one of several reachable
+        # paths reads as protection and ships with the others open.
+        allowed = _reap_execution_enabled() if reap_enabled is None else reap_enabled
+        if not allowed:
+            return (
+                "reported",
+                "reap classified but not executed: config.recovery."
+                "watchdog_reap is false. Reap deletes the worktree and a "
+                "wrong one is unrecoverable, so it ships off. Turn it on to "
+                "execute, or stop and rm this row by hand",
+            )
     try:
         if v.verdict == WAKE:
             return _apply_wake(v, cwd=cwd, runner=runner)
@@ -1226,6 +1312,22 @@ def apply_verdict(
     except (OSError, subprocess.SubprocessError) as exc:
         return "refused", f"{v.verdict} action failed: {exc}"
     return "reported", f"{v.verdict} has no auto-action"
+
+
+def _reap_execution_enabled() -> bool:
+    """Is the reap lane armed? Fails CLOSED on any config trouble.
+
+    A config that cannot be read is not permission. This is the one switch
+    whose wrong answer deletes a worktree, so an unreadable or malformed
+    settings file withholds the action rather than assuming the default that
+    happens to be convenient.
+    """
+    try:
+        from fno.config import load_settings
+
+        return bool(getattr(load_settings().recovery, "watchdog_reap", False))
+    except Exception:  # noqa: BLE001 - unreadable config is never permission
+        return False
 
 
 def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:

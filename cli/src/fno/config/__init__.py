@@ -2277,6 +2277,15 @@ class RecoveryBlock(BaseModel):
         or ``project:<slug>``). Empty (default) mails nobody. A digest is
         sent only when the non-leave verdict set changed since the previous
         sweep, so a row stuck for a day reads once, not every tick.
+    watchdog_reap:
+        Whether ``--apply-all`` may execute the REAP lane (default ``false``).
+        Wake, reroute and ghost are recoverable; reap runs ``stop`` then
+        ``rm``, which deletes the session's WORKTREE, and work that lives
+        only on that machine is gone with it. Off by default is not a
+        statement about the classifier's accuracy: it is that a wrong reap
+        cannot be undone and a wrong wake can. Classification is unaffected -
+        reap verdicts are still computed, reported and mailed, they just do
+        not execute until an operator turns this on.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2286,6 +2295,7 @@ class RecoveryBlock(BaseModel):
     max_nudges: int = Field(default=3, ge=1)
     watchdog: Literal["off", "report", "wake"] = "off"
     watchdog_mail_to: str = ""
+    watchdog_reap: bool = False
 
 
 class HealthThresholdsBlock(BaseModel):
