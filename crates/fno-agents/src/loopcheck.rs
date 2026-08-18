@@ -5127,6 +5127,15 @@ struct LoopCheckArgs {
     /// (ab-223d2dae). Flag-gated so manual terminal invocations never hang
     /// on a stdin read.
     hook_input_stdin: bool,
+    /// Which driver's `done()` this fire evaluates. `target` asks whether one
+    /// deliverable shipped; `king` asks whether the board is clean. They share
+    /// the engine and nothing else, so `king` routes to its own decision path
+    /// before the target-shaped manifest read rather than branching inside it.
+    driver: String,
+    /// Override for the `fno` binary the king arm shells for its board. Same
+    /// idiom as `gh_bin` / `git_bin`, and for the same reason: a test may not
+    /// depend on what happens to be installed.
+    fno_bin: String,
 }
 
 fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -5143,6 +5152,8 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut git_bin = std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
     let mut author_harness_override: Option<String> = None;
     let mut hook_input_stdin = false;
+    let mut driver = "target".to_string();
+    let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
 
     // Skip the "loop-check" verb itself if present
     let args = if args.first().map(|s| s.as_str()) == Some("loop-check") {
@@ -5180,6 +5191,10 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             git_bin = val;
         } else if let Some(val) = try_flag_value(arg, "--author-harness", args, &mut i) {
             author_harness_override = Some(val);
+        } else if let Some(val) = try_flag_value(arg, "--driver", args, &mut i) {
+            driver = val;
+        } else if let Some(val) = try_flag_value(arg, "--fno-bin", args, &mut i) {
+            fno_bin = val;
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
             // next token as a value, so it is matched directly (ab-223d2dae).
@@ -5192,6 +5207,15 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let state_path = state_path.ok_or_else(|| "--state is required".to_string())?;
     let transcript_path = transcript_path.ok_or_else(|| "--transcript is required".to_string())?;
     let cwd = cwd.ok_or_else(|| "--cwd is required".to_string())?;
+
+    // Fail closed on an unknown driver. Tolerating one would run the target
+    // gate against a manifest it cannot satisfy and burn to NoProgress while
+    // looking like it was working.
+    if driver != "target" && driver != "king" {
+        return Err(format!(
+            "unknown --driver '{driver}'; supported: 'target', 'king'"
+        ));
+    }
 
     Ok(LoopCheckArgs {
         state_path,
@@ -5207,6 +5231,8 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         git_bin,
         author_harness_override,
         hook_input_stdin,
+        driver,
+        fno_bin,
     })
 }
 
@@ -5428,6 +5454,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
+
+    // The king asks a different question of a different manifest, so it routes
+    // BEFORE the target-shaped manifest read below. Branching inside that read
+    // would make every target conjunct reachable from a king fire, which is the
+    // shape that can never terminate cleanly.
+    if parsed.driver == "king" {
+        return king_decide(&parsed);
+    }
 
     let state_path = parsed.state_path.clone();
     let transcript_path = parsed.transcript_path.clone();
@@ -8269,6 +8303,345 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
 
 /// Entry point called from `bin/client.rs` direct dispatch.
 /// Prints JSON to stdout, returns exit code.
+// ── king driver arm ───────────────────────────────────────────────────────────
+//
+// A target driver asks whether its one deliverable shipped: PR, CI, review,
+// probes. A king has no PR, so pointing the target driver at one can never
+// reach a clean terminal state; it burns to NoProgress or Budget while looking
+// like it is working. This arm asks the king's question instead, which is
+// whether the board is clean, and reads that answer from `fno king board`
+// rather than deciding anything itself.
+//
+// It is deliberately self-contained. The target arm below is untouched, which
+// is also what the plan's engine_edit kill criterion exists to enforce.
+
+/// Parsed shape of the king manifest. Only the fields this arm reads.
+#[derive(Debug, Default)]
+pub(crate) struct KingManifest {
+    pub(crate) fno_id: String,
+    pub(crate) scope: String,
+    pub(crate) created_at: Option<String>,
+    pub(crate) max_iterations: u64,
+}
+
+pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
+    let mut out = KingManifest {
+        max_iterations: 40,
+        ..Default::default()
+    };
+    let mut saw_frontmatter = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if saw_frontmatter {
+                break;
+            }
+            saw_frontmatter = true;
+            continue;
+        }
+        let Some((key, raw)) = line.split_once(':') else {
+            continue;
+        };
+        let value = raw.trim().trim_matches('"').to_string();
+        match key.trim() {
+            "fno_id" => out.fno_id = value,
+            "scope" => out.scope = value,
+            "created_at" => out.created_at = Some(value),
+            "budget_max_iterations" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.max_iterations = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    if saw_frontmatter && !out.fno_id.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// What `fno king board --json` answered, or why it could not be read.
+pub(crate) struct KingBoard {
+    pub(crate) actionable: i64,
+    /// The first row of the first actionable non-empty queue, for the block
+    /// reason. A block that only says "work remains" tells the king nothing
+    /// about what to do next.
+    pub(crate) top_row: Option<String>,
+    pub(crate) unreadable: i64,
+}
+
+pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
+    let value: Value = serde_json::from_str(stdout).ok()?;
+    let actionable = value.get("actionable")?.as_i64()?;
+    let unreadable = value
+        .get("unreadable")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let mut top_row = None;
+    if let Some(queues) = value.get("queues").and_then(|q| q.as_array()) {
+        for queue in queues {
+            let name = queue.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            if queue.get("status").and_then(|v| v.as_str()) == Some("unreadable") {
+                let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
+                top_row = Some(format!("{name} is unreadable: {err}"));
+                break;
+            }
+            if queue.get("actionable").and_then(|v| v.as_bool()) != Some(true) {
+                continue;
+            }
+            let rows = queue.get("rows").and_then(|v| v.as_array());
+            if let Some(first) = rows.and_then(|r| r.first()) {
+                let id = first
+                    .get("id")
+                    .or_else(|| first.get("key"))
+                    .or_else(|| first.get("number"))
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| first.to_string());
+                top_row = Some(format!("{name}: {}", id.trim_matches('"')));
+                break;
+            }
+        }
+    }
+    Some(KingBoard {
+        actionable,
+        top_row,
+        unreadable,
+    })
+}
+
+pub(crate) fn read_king_board(fno_bin: &str, cwd: &Path) -> Result<KingBoard, String> {
+    // The board's own exit code is non-zero when any queue is unreadable, and
+    // it still prints a full payload in that case. So the payload is parsed
+    // regardless of exit status; only an absent or unparseable one is a read
+    // failure, and that one blocks, because a king that cannot see its board
+    // must not certify itself finished.
+    let output = Command::new(fno_bin)
+        .args(["king", "board", "--json"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {fno_bin} king board: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_king_board(&stdout).ok_or_else(|| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        format!(
+            "unparseable board output (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim().chars().take(300).collect::<String>()
+        )
+    })
+}
+
+fn king_output(
+    decision: &str,
+    reason: Option<TerminationReason>,
+    message: &str,
+    actionable: i64,
+    fires: u64,
+) -> String {
+    serde_json::json!({
+        "driver": "king",
+        "decision": decision,
+        "termination_reason": reason,
+        // `reason` carries the human-readable why, distinct from the enum
+        // above: a stop hook reader wants the top actionable row, not a tag.
+        "reason": message,
+        "message": message,
+        "actionable": actionable,
+        "fires": fires,
+    })
+    .to_string()
+}
+
+/// Count how many king loop-check fires have landed with no NEW work done.
+///
+/// Progress is a positive marker, never board size: the board refills while the
+/// king works, because dispatching and merging both create future work. So a
+/// fire counts as dry unless a `king_action` names a target id this run has not
+/// acted on before. Re-acting on the same id is not progress, which matters
+/// because `stalled_holder` rows can survive the only action a king has for
+/// them, and a counter that reset on a repeat would never converge.
+pub(crate) fn king_dry_fires(events_path: &Path, session_id: &str) -> u64 {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return 0;
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut dry: u64 = 0;
+    for line in content.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let data = value.get("data");
+        let sid = data
+            .and_then(|d| d.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if sid != session_id {
+            continue;
+        }
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("king_action") => {
+                let target = data
+                    .and_then(|d| d.get("target_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !target.is_empty() && seen.insert(target.to_string()) {
+                    dry = 0;
+                }
+            }
+            Some("king_loop_check") => dry += 1,
+            _ => {}
+        }
+    }
+    dry
+}
+
+/// Consecutive dry fires before the loop gives up on a board that will not
+/// shrink. Named rather than inlined so it is tunable in one place.
+pub(crate) const KING_DRY_FIRE_CEILING: u64 = 3;
+
+fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
+    // A missing manifest is the only safe silent allow, exactly as on the
+    // target path: a session nobody crowned is not a king, and blocking one
+    // would trap every ordinary session in the canonical checkout.
+    let Ok(content) = std::fs::read_to_string(&parsed.state_path) else {
+        return (
+            0,
+            king_output("allow", None, "no king manifest; allowing exit", 0, 0),
+        );
+    };
+    let Some(manifest) = parse_king_manifest(&content) else {
+        eprintln!("loop-check: corrupt king manifest (no frontmatter)");
+        return (
+            0,
+            king_output(
+                "allow",
+                None,
+                "corrupt king manifest; allowing exit",
+                0,
+                0,
+            ),
+        );
+    };
+
+    let project_events = parsed
+        .events_path
+        .clone()
+        .unwrap_or_else(|| parsed.cwd.join(".fno/events.jsonl"));
+    let global_events = parsed
+        .global_events_path
+        .clone()
+        .unwrap_or_else(|| project_events.clone());
+    let session_id = manifest.fno_id.clone();
+    let emit = |event_type: &str, data: serde_json::Value| {
+        emit_to_both(&project_events, &global_events, event_type, data);
+    };
+    let terminate = |reason: TerminationReason, message: &str, actionable: i64, fires: u64| {
+        emit(
+            "termination",
+            serde_json::json!({
+                "session_id": session_id,
+                "driver": "king",
+                "reason": format!("{reason:?}"),
+                "message": message,
+            }),
+        );
+        (
+            0,
+            king_output("allow", Some(reason), message, actionable, fires),
+        )
+    };
+
+    if check_cancel_sentinel(&parsed.cwd, &manifest.created_at) {
+        return terminate(
+            TerminationReason::Interrupted,
+            "cancel sentinel present; exiting",
+            0,
+            0,
+        );
+    }
+
+    let dry = king_dry_fires(&project_events, &session_id);
+
+    let board = match read_king_board(&parsed.fno_bin, &parsed.cwd) {
+        Ok(b) => b,
+        Err(e) => {
+            // Blind is not clean. Block, but let the dry-fire counter below
+            // bound it: a board that never answers reaches the ceiling and
+            // terminates NoProgress rather than holding the king forever.
+            if dry + 1 >= KING_DRY_FIRE_CEILING {
+                return terminate(
+                    TerminationReason::NoProgress,
+                    &format!("king board unreadable {} fires running: {e}", dry + 1),
+                    0,
+                    dry + 1,
+                );
+            }
+            emit(
+                "king_loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "board_error": e,
+                }),
+            );
+            return (
+                2,
+                king_output(
+                    "block",
+                    None,
+                    &format!("king board unreadable: {e}"),
+                    0,
+                    dry + 1,
+                ),
+            );
+        }
+    };
+
+    if board.actionable == 0 {
+        let message = if board.unreadable > 0 {
+            "board clean on every readable queue; exiting NoWork"
+        } else {
+            "board clean; exiting NoWork"
+        };
+        return terminate(TerminationReason::NoWork, message, 0, dry);
+    }
+
+    if dry + 1 >= KING_DRY_FIRE_CEILING {
+        return terminate(
+            TerminationReason::NoProgress,
+            &format!(
+                "{} actionable rows unshrunk after {} fires with no new king_action",
+                board.actionable,
+                dry + 1
+            ),
+            board.actionable,
+            dry + 1,
+        );
+    }
+
+    emit(
+        "king_loop_check",
+        serde_json::json!({
+            "session_id": session_id,
+            "actionable": board.actionable,
+        }),
+    );
+    let top = board
+        .top_row
+        .unwrap_or_else(|| "an actionable queue".to_string());
+    (
+        2,
+        king_output(
+            "block",
+            None,
+            &format!("{} actionable; next: {top}", board.actionable),
+            board.actionable,
+            dry + 1,
+        ),
+    )
+}
+
 pub fn run_loop_check(args: &[String]) -> i32 {
     let (code, json) = decide(args);
     println!("{json}");

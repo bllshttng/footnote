@@ -6595,3 +6595,328 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
         posts[0]
     );
 }
+
+// ── the king driver arm ───────────────────────────────────────────────────────
+//
+// A king has no PR, so none of the target conjuncts above apply. These drive
+// the same verb with `--driver king` over a king manifest and a mocked board.
+
+fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
+    let path = dir.join("king-state.md");
+    fs::write(
+        &path,
+        format!(
+            "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: board drain\n\
+             harness: claude\nbudget_max_iterations: 40\n---\n"
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// A mock `fno` whose `king board --json` prints `payload`.
+fn king_board_bin(dir: &Path, payload: &str, exit: i32) -> PathBuf {
+    make_script(
+        dir,
+        "fno-king-mock",
+        &format!("cat <<'JSON'\n{payload}\nJSON\nexit {exit}"),
+    )
+}
+
+fn king_fire(state: &Path, cwd: &Path, events: &Path, fno_bin: &Path) -> (i32, serde_json::Value) {
+    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
+        "loop-check".to_string(),
+        "--driver".to_string(),
+        "king".to_string(),
+        "--state".to_string(),
+        state.to_str().unwrap().to_string(),
+        "--transcript".to_string(),
+        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
+        "--cwd".to_string(),
+        cwd.to_str().unwrap().to_string(),
+        "--events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--global-events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--fno-bin".to_string(),
+        fno_bin.to_str().unwrap().to_string(),
+    ]);
+    (code, serde_json::from_str(&json).unwrap())
+}
+
+const BOARD_TWO_ACTIONABLE: &str = r#"{
+  "actionable": 2, "unreadable": 0,
+  "queues": [
+    {"name":"undispatched","status":"ok","actionable":true,"count":2,
+     "rows":[{"id":"x-1234"},{"id":"x-5678"}],"error":"","truncated":0,"note":"","source":"s"}
+  ]
+}"#;
+
+const BOARD_CLEAN: &str = r#"{
+  "actionable": 0, "unreadable": 0,
+  "queues": [
+    {"name":"undispatched","status":"ok","actionable":true,"count":0,
+     "rows":[],"error":"","truncated":0,"note":"","source":"s"}
+  ]
+}"#;
+
+#[test]
+fn king_arm_blocks_while_the_board_is_not_empty() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-block");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 2, "a non-empty board must block: {d}");
+    assert_eq!(d["decision"], "block");
+    assert_eq!(d["actionable"], 2);
+    let reason = d["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("undispatched") && reason.contains("x-1234"),
+        "the block reason must name the top actionable row: {reason}"
+    );
+}
+
+#[test]
+fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-clean");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "allow");
+    assert_eq!(d["termination_reason"], "NoWork");
+
+    let journal = fs::read_to_string(&events).unwrap();
+    let row: serde_json::Value = journal
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["type"] == "termination")
+        .expect("a termination event must be appended");
+    assert_eq!(row["data"]["reason"], "NoWork");
+    assert_eq!(
+        row["data"]["session_id"], "k-clean",
+        "the event must carry the king session id so the journal reader matches it"
+    );
+    assert_eq!(row["data"]["driver"], "king");
+}
+
+#[test]
+fn king_arm_allows_silently_when_no_king_manifest_exists() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, d) = king_fire(&cwd.join("absent.md"), cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "allow");
+    assert!(!events.exists(), "a non-king session must write no king events");
+}
+
+#[test]
+fn king_arm_never_reads_the_target_manifest() {
+    // The kill criterion this arm ships under says a diff reaching into the
+    // target arm means the second-driver framing was wrong. This asserts the
+    // runtime half of that: a target manifest sitting in the same checkout
+    // changes nothing about a king fire.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    fs::write(cwd.join(".fno/target-state.md"), "---\nsession_id: t-1\n---\n").unwrap();
+    let state = king_manifest(cwd, "k-iso");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "NoWork");
+}
+
+#[test]
+fn king_arm_honors_the_cancel_sentinel() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let state = king_manifest(cwd, "k-cancel");
+    fs::write(cwd.join(".fno/.target-cancelled"), "").unwrap();
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "Interrupted");
+}
+
+#[test]
+fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-blind");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), "not json at all", 1);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 2, "blind is not clean: {d}");
+    assert!(d["reason"].as_str().unwrap().contains("unreadable"));
+}
+
+/// Append one event row to a king journal.
+fn king_event(events: &Path, event_type: &str, data: serde_json::Value) {
+    use std::io::Write;
+    let row = serde_json::json!({
+        "ts": "2026-08-18T00:00:00Z",
+        "type": event_type,
+        "source": "hook",
+        "data": data,
+    });
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(events)
+        .unwrap();
+    writeln!(f, "{row}").unwrap();
+}
+
+#[test]
+fn king_progress_is_an_action_against_a_target_id_not_seen_before() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-progress");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    // Two dry fires, then a real action: the counter goes back to zero, so the
+    // next fire blocks rather than giving up.
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-progress"}));
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-progress"}));
+    king_event(
+        &events,
+        "king_action",
+        serde_json::json!({"session_id": "k-progress", "kind": "dispatch", "target_id": "x-1234"}),
+    );
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 2, "progress must keep the loop running: {d}");
+    assert_eq!(d["decision"], "block");
+    assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
+}
+
+#[test]
+fn king_noprogress_ends_a_board_that_refuses_to_shrink() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-stuck");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-stuck"}));
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-stuck"}));
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "NoProgress");
+    let reason = d["reason"].as_str().unwrap();
+    assert!(
+        reason.contains('2') && reason.contains("actionable"),
+        "the terminal must name what stayed unshrunk: {reason}"
+    );
+}
+
+#[test]
+fn a_repeated_king_action_is_not_progress() {
+    // The specific way this loop would fail to converge, and it passes every
+    // naive test: `stalled_holder` rows survive the one action a king has for
+    // them, so re-waking the same node forever would reset the counter forever.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-repeat");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let wake = serde_json::json!({"session_id": "k-repeat", "kind": "wake", "target_id": "x-1234"});
+    king_event(&events, "king_action", wake.clone());
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-repeat"}));
+    king_event(&events, "king_action", wake.clone());
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-repeat"}));
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code, 0, "a repeated action must not hold the loop open: {d}");
+    assert_eq!(d["termination_reason"], "NoProgress");
+}
+
+#[test]
+fn another_kings_events_do_not_move_this_kings_counter() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-mine");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    for _ in 0..5 {
+        king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-other"}));
+    }
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 2, "a sibling king's fires are not mine: {d}");
+    assert_eq!(d["fires"], 1);
+}
+
+#[test]
+fn an_empty_board_wins_over_a_dry_fire_streak() {
+    // NoWork is the clean terminal and must not be pre-empted by NoProgress:
+    // a king that drained its board on the third fire finished, it did not stall.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-drained");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-drained"}));
+    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-drained"}));
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "NoWork");
+}
+
+#[test]
+fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
+    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
+        "loop-check".to_string(),
+        "--driver".to_string(),
+        "emperor".to_string(),
+        "--state".to_string(),
+        "/nonexistent".to_string(),
+        "--transcript".to_string(),
+        "/nonexistent".to_string(),
+        "--cwd".to_string(),
+        "/tmp".to_string(),
+    ]);
+    assert_eq!(code, 2);
+    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let err = d["error"].as_str().unwrap();
+    assert!(err.contains("emperor") && err.contains("king"), "got: {err}");
+}
