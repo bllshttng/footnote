@@ -1431,6 +1431,15 @@ class AgentProviderBlock(BaseModel):
     headless_yolo: bool = False
 
 
+# Fallback-chain vocabulary. Restated here rather than imported because config
+# is a leaf module and must not import from agents/harnesses at load time. The
+# harness axis is the BINARY (docs/architecture/axis-vocabulary.md); `opencode`
+# is legally both a harness and a provider, so never infer the axis from the
+# value.
+_FALLBACK_SIZE_KEYS = frozenset({"S", "M", "L", "default"})
+_FALLBACK_HARNESSES = frozenset({"claude", "codex", "agy", "opencode"})
+
+
 class SpawnDefaultsBlock(BaseModel):
     """Default spawn routing (nested under 'config.agents.defaults').
 
@@ -1579,6 +1588,20 @@ class AgentsBlock(BaseModel):
     # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
     # rung above defaults in precedence. Resolved at the spawn seam.
     profiles: dict[str, SpawnDefaultsBlock] = Field(default_factory=dict)
+    # The operator's own simple-versus-complex split, written where a daemon can
+    # read it: an ordered fallback chain per node size, consulted only when a
+    # provider refuses and the account queue cannot answer. Keys are S, M, L and
+    # `default`; each value is an ordered list of partial axis bundles reusing
+    # `SpawnDefaultsBlock`, so no new axis vocabulary enters the codebase.
+    #
+    # Every size wants MORE THAN ONE link. A chain with one link is not a chain:
+    # a claude weekly cap and a z.ai five-hour cap are different meters with
+    # different periods, and either can be the one that is down.
+    fallback: dict[str, list[SpawnDefaultsBlock]] = Field(default_factory=dict)
+    # Seconds of transcript silence after which `fno agents sweep` reports a
+    # worker as silent. A REPORT, never an action - nothing is stopped, spawned
+    # or unclaimed on this signal.
+    silence_deadline_seconds: int = 600
     confirm: str = "auto"
     # When true, the SessionStart register hook auto-joins EVERY hand-started
     # session to the roster (discoverable + mail-addressable). Default false is
@@ -1647,6 +1670,67 @@ class AgentsBlock(BaseModel):
         if not isinstance(v, dict):
             return {}
         return {k: val for k, val in v.items() if isinstance(val, dict)}
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _check_fallback(cls, v: object) -> object:
+        """A malformed fallback chain REFUSES; it does not degrade open.
+
+        The opposite call from `_coerce_profiles` above, and deliberately so.
+        A bad `profiles` table must never brick ordinary spawning, so it
+        degrades to no-profiles. A chain is read on ONE path, the failover
+        path, and degrading open there spawns a worker at an unintended vendor
+        and bills it. Refusing leaves the worker alive and the node claimed,
+        which is a bounded stop; guessing is a charge on someone's card.
+        """
+        if v is None or v == {}:
+            return {}
+        if not isinstance(v, dict):
+            raise ValueError(
+                "config.agents.fallback must be a table keyed by size "
+                f"(S|M|L|default); got {type(v).__name__}"
+            )
+        out: dict = {}
+        for size, chain in v.items():
+            if size not in _FALLBACK_SIZE_KEYS:
+                raise ValueError(
+                    f"config.agents.fallback.{size}: unknown size key; "
+                    f"expected one of {'|'.join(sorted(_FALLBACK_SIZE_KEYS))}"
+                )
+            if not isinstance(chain, list):
+                raise ValueError(
+                    f"config.agents.fallback.{size} must be a list of links; "
+                    f"got {type(chain).__name__}"
+                )
+            out.setdefault(size, [])
+            for i, link in enumerate(chain):
+                if not isinstance(link, dict):
+                    raise ValueError(
+                        f"config.agents.fallback.{size}[{i}] must be a table of "
+                        f"axis fields; got {type(link).__name__}"
+                    )
+                # A chain link is spelled with the CORRECT axis word, `harness`
+                # (the binary). SpawnDefaultsBlock's own field is the legacy
+                # `provider`, which its comment records as meaning harness; the
+                # two are normalized onto that field here rather than renaming a
+                # field every existing config already writes. Both spellings
+                # read, `harness` wins, and the value is checked either way -
+                # without the check `extra="ignore"` would drop a typo'd harness
+                # silently and the link would spawn on the ambient binary.
+                link = dict(link)
+                harness = str(
+                    link.pop("harness", "") or link.get("provider", "") or ""
+                ).strip()
+                if harness and harness not in _FALLBACK_HARNESSES:
+                    raise ValueError(
+                        f"config.agents.fallback.{size}[{i}].harness={harness!r} "
+                        f"is not a known harness "
+                        f"({'|'.join(sorted(_FALLBACK_HARNESSES))})"
+                    )
+                if harness:
+                    link["provider"] = harness
+                out.setdefault(size, []).append(link)
+        return out
 
     @field_validator("confirm")
     @classmethod

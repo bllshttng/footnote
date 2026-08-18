@@ -1011,3 +1011,130 @@ def inject_spawn_defaults(
         # operator's.
         _refuse_off_pane_passthrough(out[1:], err)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The fallback chain: where a refused node goes next
+# ---------------------------------------------------------------------------
+
+#: Sizes that resolve to their own chain. Anything else reads `default`.
+_CHAIN_SIZES = ("S", "M", "L")
+
+
+def link_id(link) -> str:
+    """A stable ``harness/model`` name for one chain link.
+
+    Used as the walk's memory key, so a node never re-dispatches onto a link it
+    has already spent. Two links that differ only in effort are the SAME
+    destination for that purpose: retrying the same vendor at a different
+    reasoning setting does not answer a cap.
+    """
+    harness = (getattr(link, "provider", "") or "").strip() or "?"
+    model = (getattr(link, "model", "") or "").strip()
+    route = (getattr(link, "route", "") or "").strip()
+    return f"{harness}/{model or route or 'default'}"
+
+
+def _harness_records(harness: str):
+    """Account records whose harness is ``harness``, or [] when unreadable."""
+    try:
+        from fno.adapters.providers.cli import _load
+
+        return [r for r in _load().records if r.harness == harness]
+    except Exception:  # noqa: BLE001 - an unreadable config means UNKNOWN, not exhausted
+        return []
+
+
+def link_is_exhausted(link, *, now: Optional[float] = None) -> bool:
+    """True only when every account this link can land on is KNOWN exhausted.
+
+    This is the check task 1.2 made real. Before the harvested reset, a claude
+    record's lock expired seconds after the cap and a z.ai record had no probe
+    at all, so every link looked eligible and the chain routed straight back
+    into the provider that had just refused.
+
+    UNKNOWN stays eligible, matching the invariant `rotation.py` already
+    enforces: unknown is not exhausted. So does an unreadable config, no
+    matching record, and any error on the way - the failure mode of guessing
+    "exhausted" is holding a node that could have run.
+    """
+    from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+    account = (getattr(link, "account", "") or "").strip()
+    harness = (getattr(link, "provider", "") or "").strip()
+    ids = [account] if account else [r.id for r in _harness_records(harness)]
+    if not ids:
+        return False
+    try:
+        verdicts = [headroom(pid, now=now) for pid in ids]
+    except Exception:  # noqa: BLE001 - a failed read is UNKNOWN, never exhausted
+        return False
+    return all(v.state is HeadroomState.EXHAUSTED for v in verdicts)
+
+
+def resolve_fallback_chain(
+    size: Optional[str],
+    *,
+    exclude: Sequence[str] = (),
+    settings: object = None,
+    now: Optional[float] = None,
+) -> List[object]:
+    """The eligible fallback links for a node of ``size``, in order.
+
+    ``size`` is the node's existing ``--size S|M|L``, which is already the
+    operator's own simple-versus-complex split; an absent or unrecognised size
+    reads the ``default`` chain. ``exclude`` carries the links this node has
+    already spent, by :func:`link_id`.
+
+    Returns [] for three different situations that share one correct action -
+    spawn nothing: no chain configured (the pre-existing behavior), every link
+    already tried, and every remaining link's own provider known exhausted.
+    Routing into a known-capped provider is worse than holding, so an
+    all-exhausted chain deliberately does NOT fall back to link zero.
+
+    Raises whatever the config validator raises on a malformed chain. That is
+    the point: a chain is read on the failover path only, and degrading open
+    there spawns a worker at an unintended vendor and bills it.
+    """
+    if settings is None:
+        from fno.config import load_settings
+
+        settings = load_settings()
+    table = getattr(settings.agents, "fallback", None) or {}  # type: ignore[attr-defined]
+    key = size if size in _CHAIN_SIZES else "default"
+    chain = table.get(key) or table.get("default") or []
+    spent = set(exclude)
+    return [
+        link for link in chain
+        if link_id(link) not in spent and not link_is_exhausted(link, now=now)
+    ]
+
+
+def link_to_spawn_flags(link) -> List[str]:
+    """One chain link as spawn flags, in the codebase's existing axis spelling.
+
+    No new axis vocabulary: harness is ``-H``, the vendor/model route is
+    ``--route``, and model, effort, substrate, permission-mode and account keep
+    their own flags. ``--substrate bg`` is claude-only in the Rust client, so a
+    codex link that left substrate unset resolves to a pane rather than being
+    handed a substrate its harness rejects.
+    """
+    harness = (getattr(link, "provider", "") or "").strip()
+    out: List[str] = []
+    if harness:
+        out += ["-H", harness]
+    for flag, field in (
+        ("-m", "model"),
+        ("--effort", "effort"),
+        ("--permission-mode", "permission_mode"),
+        ("--route", "route"),
+        ("--account", "account"),
+    ):
+        val = (getattr(link, field, "") or "").strip()
+        if val:
+            out += [flag, val]
+    substrate = (getattr(link, "substrate", "") or "").strip()
+    if not substrate:
+        substrate = "bg" if harness == "claude" else "pane"
+    out += ["--substrate", substrate]
+    return out

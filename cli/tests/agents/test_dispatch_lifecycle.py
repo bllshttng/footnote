@@ -729,7 +729,7 @@ def test_stop_escalates_to_pid_when_the_cooperative_shellout_times_out(
         _seed_registry(
             dict(
                 name="capped",
-                provider="claude",
+                harness="claude",
                 short_id="b5eed96b",
                 pid=proc.pid,
                 pid_start_time=start_token,
@@ -770,7 +770,7 @@ def test_stop_escalates_to_pid_when_the_shellout_exits_non_zero(
         _seed_registry(
             dict(
                 name="refusing",
-                provider="claude",
+                harness="claude",
                 short_id="b5eed96b",
                 pid=proc.pid,
                 pid_start_time=start_token,
@@ -814,7 +814,7 @@ def test_ac4_edge_an_unprovable_pid_refuses_and_signals_nothing(
         _seed_registry(
             dict(
                 name="unprovable",
-                provider="claude",
+                harness="claude",
                 short_id="b5eed96b",
                 pid=proc.pid,
                 # no pid_start_time
@@ -855,7 +855,7 @@ def test_ac4_neg_a_healthy_stop_sends_no_signal(
         _seed_registry(
             dict(
                 name="healthy",
-                provider="claude",
+                harness="claude",
                 short_id="7c5dcf5d",
                 pid=proc.pid,
                 pid_start_time=start_token,
