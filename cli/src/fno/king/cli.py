@@ -100,7 +100,7 @@ def escalate_cmd(
         "", "--stalled", help="Comma-separated board rows nothing is clearing."
     ),
     reason: str = typer.Option(
-        "NoProgress", "--reason", help="The terminal reason that triggered this."
+        "NoProgress", "--reason", "-R", help="The terminal reason that triggered this."
     ),
 ) -> None:
     """Tell the operator the king stopped with work still pending.
