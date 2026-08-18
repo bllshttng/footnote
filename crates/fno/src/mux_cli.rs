@@ -3352,15 +3352,31 @@ fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
     } else {
         bind
     };
-    let probe = format!("{host}:{port}");
-    if let Ok(addr) = probe.parse::<std::net::SocketAddr>() {
+    // Probe liveness for ANY spelling the operator may have bound. A bare
+    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
+    // the probe and trust a corpse file (codex P2); the tuple form resolves
+    // hostnames and needs no IPv6 brackets.
+    let probe_addr = {
+        use std::net::ToSocketAddrs;
+        (host, port as u16)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut it| it.next())
+    };
+    if let Some(addr) = probe_addr {
         let timeout = std::time::Duration::from_millis(300);
         if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
             eprintln!("{verb}: {hint}");
             return EXIT_ERROR;
         }
     }
-    println!("http://{host}:{port}/?t={token}&pane={pane}");
+    // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
+    let url_host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    println!("http://{url_host}:{port}/?t={token}&pane={pane}");
     EXIT_OK
 }
 
@@ -3477,10 +3493,16 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             return EXIT_NOT_FOUND;
         }
     };
-    // The probe the server matches on: the row's own session id when the
-    // match came through the name tier, else the selector itself (which, in
-    // the id tiers, IS the id or its prefix).
-    let fno_id = row.session_id.clone().unwrap_or_else(|| fno_id.clone());
+    // The probe the server matches on. The server's matcher knows session-id
+    // spellings only, never names (identity_exact/identity_prefix, server.rs),
+    // and a Python-written row carries no session_id - its identity lives in
+    // harness_session_id. Forward the row's EFFECTIVE identity so a name-tier
+    // match still resolves server-side; only a row with neither spelling
+    // falls back to the selector itself (codex P1).
+    let fno_id = row
+        .effective_identity()
+        .map(str::to_string)
+        .unwrap_or_else(|| fno_id.clone());
     // The hosting mux session name.
     let Some(host_session) = row.mux.as_ref().map(|(s, _)| s.clone()) else {
         eprintln!("fno mux where: {} hosts no live pane", row.name);
