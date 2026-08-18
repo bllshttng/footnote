@@ -285,14 +285,20 @@ def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _mint_node_name(
-    node: str, slug_flag: Optional[str], model: Optional[str]
+    node: str,
+    slug_flag: Optional[str],
+    model: Optional[str],
+    existing: Optional[Set[str]] = None,
 ) -> Optional[str]:
     """The ``t-<node>-<slug>-<model>`` mint for a node-driven spawn (x-b80d).
 
     Routes through :func:`fno.agents.naming.agent_name` - the single owner of
-    the 64-char budget - with the model tag as discriminator. Any failure
-    (graph read, budget, contract) returns ``None`` so pass 3 falls back to the
-    adjective-noun mint: a spawn must never die on a naming lookup.
+    the 64-char budget - with the model tag as discriminator. The mint is
+    deterministic, so a name already taken by a live worker gets a ``-2``,
+    ``-3``... suffix (the same collision-avoidance the adjective-noun mint
+    retries for): a re-spawn on one node must not turn into a refusal. Any
+    failure (graph read, budget, contract) returns ``None`` so pass 3 falls
+    back to the adjective-noun mint: a spawn must never die on a naming lookup.
     """
     from fno.agents.naming import AgentNameError, agent_name
 
@@ -303,11 +309,19 @@ def _mint_node_name(
     if slug_flag:
         slug = slug_flag
     try:
-        return agent_name(
+        name = agent_name(
             "t", node_id or node, slug=slug, discriminator=_model_tag(model)
         )
     except AgentNameError:
         return None
+    if existing and name in existing:
+        for n in range(2, 6):
+            if len(name) + len(str(n)) + 1 > 64:
+                return None
+            if f"{name}-{n}" not in existing:
+                return f"{name}-{n}"
+        return None
+    return name
 
 
 def _read_registry_names() -> Set[str]:
@@ -482,8 +496,14 @@ def normalize_spawn_args(
             model = _head_flag_value(head, _MODEL_FLAGS)
             if not model:
                 route = _head_flag_value(head, ("--route",))
-                model = route.split(",", 1)[1].strip() if route and "," in route else None
-            minted = _mint_node_name(node, slug_flag, model)
+                # Canonical route spelling is provider/model (comma is
+                # legacy); take the model half of either.
+                model = (
+                    route.replace(",", "/").rsplit("/", 1)[1].strip()
+                    if route and ("/" in route or "," in route)
+                    else None
+                )
+            minted = _mint_node_name(node, slug_flag, model, names)
         name = minted or _mint_slug(names, rng if rng is not None else random.Random(), err)
         toks = ["--name", name, *toks]
     extra = _positional_indices(toks)

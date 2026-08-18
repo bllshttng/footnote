@@ -408,6 +408,28 @@ def test_node_spawn_model_tag_comes_from_route_when_no_model():
     assert out[2] == "t-x919-arms-glm52"
 
 
+def test_node_spawn_route_slash_spelling_also_feeds_the_tag():
+    # provider/model is the canonical route spelling; the legacy comma is the
+    # alias. Both must yield the model tag.
+    out = _norm(
+        ["spawn", "--node", "x919", "--slug", "arms", "--route", "zai/glm-5.2", "go"]
+    )
+    assert out[2] == "t-x919-arms-glm52"
+
+
+def test_node_spawn_re_spawn_suffixes_the_taken_name():
+    # The mint is deterministic; a name already held by a live worker gets a
+    # numeric suffix instead of a dispatcher refusal (a re-spawn on one node
+    # is the two-worker implement+review shape).
+    argv = ["spawn", "--node", "x919", "--slug", "arms", "--model", "glm-5.2", "go"]
+    first = _norm(argv, existing_names=set())
+    assert first[2] == "t-x919-arms-glm52"
+    second = _norm(argv, existing_names={"t-x919-arms-glm52"})
+    assert second[2] == "t-x919-arms-glm52-2"
+    third = _norm(argv, existing_names={"t-x919-arms-glm52", "t-x919-arms-glm52-2"})
+    assert third[2] == "t-x919-arms-glm52-3"
+
+
 def test_node_spawn_without_model_omits_the_tag():
     out = _norm(["spawn", "--node", "x919", "--slug", "arms", "go"])
     assert out[2] == "t-x919-arms"
