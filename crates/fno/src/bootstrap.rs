@@ -1859,6 +1859,12 @@ mod tests {
         )
         .unwrap();
         fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        // Executable, as uv writes it: the marker verifies with `-x`.
+        fs::set_permissions(
+            tool_dir.join("fno/bin/fno-py"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         let counter = root.join("attempts");
         let script = format!(
             "#!/bin/sh\n\
