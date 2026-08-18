@@ -8,8 +8,8 @@ trap 'rm -rf "$tmp"' EXIT
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 mkdir -p "$tmp/good" "$tmp/bad"
-printf '%s\n' "{\"ended_at\":\"$now\",\"duration_seconds\":3600,\"samples\":60,\"floor\":200,\"min_remaining\":202,\"post_coverage_remaining\":201,\"min_live_workers\":15,\"discretionary_probes\":60,\"coverage\":\"covered\",\"reviewed_count\":1,\"head_sha\":\"abc\",\"coverage_head_sha\":\"abc\",\"settled\":true}" > "$tmp/good/receipt.json"
-printf '%s\n' "{\"ended_at\":\"$now\",\"duration_seconds\":3600,\"samples\":60,\"floor\":0,\"min_remaining\":1,\"post_coverage_remaining\":1,\"min_live_workers\":15,\"discretionary_probes\":0,\"coverage\":\"unknown\",\"reviewed_count\":0,\"head_sha\":\"abc\",\"coverage_head_sha\":\"def\",\"settled\":true}" > "$tmp/bad/receipt.json"
+printf '%s\n' "{\"pr\":930,\"coverage_exit\":0,\"started_at\":\"$now\",\"ended_at\":\"$now\",\"duration_seconds\":3600,\"samples\":60,\"floor\":200,\"min_remaining\":202,\"post_coverage_remaining\":201,\"min_live_workers\":15,\"discretionary_probes\":60,\"coverage\":\"covered\",\"reviewed_count\":1,\"head_sha\":\"abc\",\"coverage_head_sha\":\"abc\",\"settled\":true}" > "$tmp/good/receipt.json"
+printf '%s\n' "{\"pr\":0,\"coverage_exit\":4,\"started_at\":\"not-a-time\",\"ended_at\":\"$now\",\"duration_seconds\":3600,\"samples\":60,\"floor\":0,\"min_remaining\":1,\"post_coverage_remaining\":1,\"min_live_workers\":15,\"discretionary_probes\":0,\"coverage\":\"unknown\",\"reviewed_count\":0,\"head_sha\":\"abc\",\"coverage_head_sha\":\"def\",\"settled\":true}" > "$tmp/bad/receipt.json"
 
 good=$(python3 "$script" --check-latest --receipt-dir "$tmp/good" --min-seconds 3600 --max-age-hours 24)
 grep -q 'settled=true' <<<"$good"
@@ -29,5 +29,8 @@ grep -q 'discretionary_probes>=60' <<<"$bad"
 grep -q 'coverage=covered' <<<"$bad"
 grep -q 'reviewed_count>0' <<<"$bad"
 grep -q 'coverage_head_sha=head_sha' <<<"$bad"
+grep -q 'coverage_exit=0' <<<"$bad"
+grep -q 'pr>0' <<<"$bad"
+grep -q 'timestamps=valid_utc' <<<"$bad"
 
 echo "graphql-quota-soak tests: PASS"
