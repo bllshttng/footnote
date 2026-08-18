@@ -504,6 +504,16 @@ def global_events_json() -> Path:
     return ledger_json().parent / "events.jsonl"
 
 
+def decisions_jsonl() -> Path:
+    """Return the machine-wide decision index beside the global ledger.
+
+    A separate file from :func:`global_events_json` on purpose: that journal
+    rotates, and a rotated-away ruling is a ruling the operator asked for and
+    cannot get back. This one never rotates and holds nothing else.
+    """
+    return ledger_json().parent / "decisions.jsonl"
+
+
 def repo_identity_from_remote_url(url: str) -> Optional[str]:
     """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
 

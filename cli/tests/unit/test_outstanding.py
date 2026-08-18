@@ -271,10 +271,18 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     assert decisions[0]["asked_at"]
 
 
-def test_failed_decision_record_does_not_consume_the_question(
+def test_a_projection_failure_no_longer_holds_the_question_open(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A projection failure must leave the question open for a safe retry."""
+    """The answer is durable and recoverable without the projection.
+
+    This inverts the old contract on purpose. Holding the question open was the
+    only recall path when the graph projection was the sole read source: a
+    projection failure then meant the answer existed and could not be found.
+    The machine-wide index now carries recall, so the projection is the node
+    VIEW alone - and keeping the question open would invite a retry that
+    records one answer a second time under a new id.
+    """
     qid = runner.invoke(
         outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
     ).stdout.strip().splitlines()[-1]
@@ -285,10 +293,16 @@ def test_failed_decision_record_does_not_consume_the_question(
     monkeypatch.setattr("fno.decide._project", fail_projection)
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
 
-    assert cleared.exit_code == 1, cleared.output
+    assert cleared.exit_code == 0, cleared.output
+    assert "graph projection failed" in cleared.output
     from fno.outstanding.core import read_open_questions
 
-    assert [q.id for q in read_open_questions(root)] == [qid]
+    assert [q.id for q in read_open_questions(root)] == []
+
+    from fno.decide.cli import decide_app as decide_cli_app
+
+    listed = runner.invoke(decide_cli_app, ["list", "--json"])
+    assert "fold" in [d["decision"] for d in json.loads(listed.stdout)["decisions"]]
 
 
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):

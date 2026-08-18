@@ -1,9 +1,13 @@
 """Tests for `fno decide` - the durable decision record and its recovery query.
 
-The record has two halves that must both exist: the append-only
-``operator_decision`` event (survives compaction) and the projection onto the
-subject node's graph entry (findable by subject, inherits the archive
-read-through). A record that is only greppable is not recoverable.
+The record has three stores: the append-only ``operator_decision`` event in the
+project journal (durability), the machine-wide ``decisions.jsonl`` index (the
+reader's only source), and the projection onto the subject node's graph entry
+(the node view). A record that is only greppable is not recoverable.
+
+The defect these guard against is a write that succeeded and a read that could
+not find it. So every recall assertion names a POSITIVE marker - the returned
+``decision_id`` - never the absence of an error.
 """
 from __future__ import annotations
 
@@ -31,9 +35,23 @@ def _node(nid: str, **over) -> dict:
 
 
 @pytest.fixture
+def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The machine-wide decision index, pinned into the sandbox.
+
+    Every test takes this: without it a test writes to the developer's real
+    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there.
+    """
+    path = tmp_path / "state" / "decisions.jsonl"
+    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: path)
+    return path
+
+
+@pytest.fixture
 def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": [_node("x-7d94")]}, indent=2) + "\n")
+    g.write_text(
+        json.dumps({"entries": [_node("x-7d94", slug="fold-the-inbox")]}, indent=2) + "\n"
+    )
     import fno.graph._constants as gc
     import fno.graph.store as gs
 
@@ -67,7 +85,7 @@ def _events(root: Path) -> list[dict]:
     ]
 
 
-def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path):
+def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path, index: Path):
     """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
         decide_app,
@@ -102,7 +120,7 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     assert "options: fold first, migrate first" in listed.output
 
 
-def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):
+def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path, index: Path):
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "first"])
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "second"])
 
@@ -115,7 +133,7 @@ def test_list_returns_decisions_newest_first(root: Path, tmp_graph: Path):
     assert [d["decision"] for d in payload["decisions"]] == ["second", "first"]
 
 
-def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
+def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, index: Path):
     """Two decisions on one subject order themselves; the older one
     is marked, not hidden."""
     first = runner.invoke(
@@ -137,7 +155,7 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path):
     assert "superseded by" in listed.output, "the render marks the superseded row"
 
 
-def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path):
+def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, index: Path):
     """A decision recorded pre-archive is still listable post-archive
     through entries_with_archive."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
@@ -151,13 +169,18 @@ def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path):
     assert "fold first" in listed.output
 
 
-def test_list_refuses_a_subject_that_resolves_to_nothing(root: Path, tmp_graph: Path):
+def test_list_of_a_subject_with_nothing_on_record_is_a_successful_read(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Exit 0, not 1. A read that answered "none" ran; only a read that could
+    not run is a failure, and the two must not share an exit code."""
     listed = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
-    assert listed.exit_code == 1
+    assert listed.exit_code == 0, listed.output
+    assert "no decisions recorded for 'x-nope'" in listed.output
 
 
 def test_record_without_a_resolvable_subject_still_writes_the_event(
-    root: Path, tmp_graph: Path
+    root: Path, tmp_graph: Path, index: Path
 ):
     """A subject that names a file or area, not a node, loses the projection
     but keeps the durable event; the verb says so on stderr."""
@@ -178,3 +201,788 @@ def test_decisions_default_applies_on_read_for_legacy_rows(tmp_path: Path):
 
     entries = _apply_graph_defaults([{"id": "x-old", "title": "old", "status": "ready"}])
     assert entries[0]["decisions"] == []
+
+
+# --- recall parity: the reader takes every subject the writer takes ---------
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["x-7d94", "fold-the-inbox", "pr-923", "docs/foo.md", "the mail bus"],
+    ids=["node-id", "slug", "pr", "path", "area"],
+)
+def test_recall_answers_every_subject_shape_the_help_promises(
+    root: Path, tmp_graph: Path, index: Path, subject: str
+):
+    """The defect, named. `--help` says the subject may be a node id/slug, a
+    file, or an area; the writer took all of them and the reader took one, so a
+    ruling about `pr-923` was written, receipted, and lost.
+
+    Asserts the returned decision_id comes back - a positive marker. Restore the
+    graph-only reader and the pr, path and area cases fail.
+    """
+    written = runner.invoke(
+        decide_app, ["--subject", subject, "--decision", f"ruling about {subject}"]
+    )
+    assert written.exit_code == 0, written.output
+    did = written.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+    )
+    assert did in [d["decision_id"] for d in payload["decisions"]]
+
+
+@pytest.mark.parametrize(
+    "recorded_as,queried_as",
+    [
+        ("Fold-The-Inbox", "x-7d94"),
+        ("fold-the-inbox", "x-7d94"),
+        ("x-7d94", "fold-the-inbox"),
+    ],
+    ids=["mixed-case-slug", "slug", "id-queried-by-slug"],
+)
+def test_two_spellings_of_one_node_answer_each_other(
+    root: Path, tmp_graph: Path, index: Path, recorded_as: str, queried_as: str
+):
+    """BOTH sides expand, not just the query.
+
+    The operator records under whatever spelling was in front of them, and the
+    receipt then prints the canonical id as the way back. A reader that expands
+    only the query sends them to a command that returns nothing, which is this
+    PR's own defect wearing a different word.
+
+    Both sides run through the SAME resolver, so whichever spellings it accepts,
+    the writer and the reader accept the same set. The bare-hex tier is left out
+    here on purpose: it depends on the configured node prefix, so it would test
+    the resolver's config rather than this symmetry.
+    """
+    written = runner.invoke(
+        decide_app, ["--subject", recorded_as, "--decision", "one ruling"]
+    )
+    did = written.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", queried_as, "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == [did]
+
+
+def test_recall_is_exact_never_a_prefix_match(root: Path, tmp_graph: Path, index: Path):
+    """A decision about pr-92 must not answer a query for pr-921. Set
+    membership on the recorded string, never a fuzzy match."""
+    runner.invoke(decide_app, ["--subject", "pr-92", "--decision", "the short one"])
+    on_921 = runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"])
+    assert json.loads(on_921.stdout)["decisions"] == []
+
+    on_92 = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-92", "--json"]).stdout
+    )
+    assert [d["decision"] for d in on_92["decisions"]] == ["the short one"]
+
+
+def test_supersession_is_derived_from_index_rows_alone(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The graph projection stamped superseded_by under the lock. For a subject
+    that names no node there is no projection, so the reader must derive it."""
+    first = runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "merge it"]
+    ).stdout.strip().splitlines()[-1]
+    second = runner.invoke(
+        decide_app,
+        ["--subject", "pr-922", "--decision", "hold it", "--supersedes", first],
+    )
+    assert second.exit_code == 0, second.output
+    newer = second.stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-922", "--json"]).stdout
+    )
+    by_id = {d["decision_id"]: d for d in payload["decisions"]}
+    assert by_id[first]["superseded_by"] == newer
+    assert by_id[newer]["superseded_by"] is None
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-922"])
+    assert f"[superseded by {newer}]" in listed.output
+
+
+def test_a_subjectless_decision_is_reachable_only_without_a_subject(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`fno outstanding clear --answer` on a question naming no node records a
+    decision with subject=None. A subject-less list is the only way to it."""
+    from fno.outstanding.cli import outstanding_app
+
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+
+    cleared = runner.invoke(
+        outstanding_app, ["clear", qid, "--answer", "the dispatcher owns it"]
+    )
+    assert cleared.exit_code == 0, cleared.output
+
+    payload = json.loads(runner.invoke(decide_app, ["list", "--json"]).stdout)
+    assert "the dispatcher owns it" in [d["decision"] for d in payload["decisions"]]
+    assert payload["subject"] == "(all)"
+
+
+def test_limit_caps_the_newest_and_zero_means_no_cap(
+    root: Path, tmp_graph: Path, index: Path
+):
+    for n in range(4):
+        runner.invoke(decide_app, ["--subject", "pr-900", "--decision", f"call {n}"])
+
+    capped = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "2", "--json"]
+        ).stdout
+    )
+    assert [d["decision"] for d in capped["decisions"]] == ["call 3", "call 2"]
+
+    uncapped = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "0", "--json"]
+        ).stdout
+    )
+    assert len(uncapped["decisions"]) == 4
+
+
+# --- reindex: the records already on disk become readable -------------------
+
+
+def test_reindex_recovers_journal_records_and_is_idempotent(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The backfill is the whole point: without it the fix helps no record that
+    already exists."""
+    from fno.decide import reindex
+
+    journal = root / ".fno" / "events.jsonl"
+    for subject in ("pr-923", "pr-921", "x-6352-worktree"):
+        runner.invoke(decide_app, ["--subject", subject, "--decision", f"on {subject}"])
+    index.unlink()  # the state before the index existed: journal only
+
+    counts = reindex(sources=[journal])
+    assert counts["added"] == 3, counts
+    for subject in ("pr-923", "pr-921", "x-6352-worktree"):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+        )
+        assert [d["decision"] for d in payload["decisions"]] == [f"on {subject}"]
+
+    again = reindex(sources=[journal])
+    assert again["added"] == 0 and again["already"] == 3, again
+
+
+def test_reindex_reads_one_journal_once_through_a_symlink(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path
+):
+    """A linked checkout points .fno/events.jsonl at the canonical file. The
+    (st_dev, st_ino) dedupe is what keeps a 54 MB journal from being read once
+    per name it is reachable under."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    journal = root / ".fno" / "events.jsonl"
+    link = tmp_path / "linked-events.jsonl"
+    link.symlink_to(journal)
+
+    counts = reindex(sources=[journal, link])
+    assert counts["added"] == 1, counts
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert len(payload["decisions"]) == 1
+
+
+def test_reindex_recovers_a_projection_row_that_stored_no_subject(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The oldest projection on this machine predates the subject field. The
+    row lives ON the node, so the node is the subject; without that fallback
+    the recovered decision answers no query at all."""
+    from fno.decide import reindex
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {
+            "decision_id": "d-legacy1",
+            "decision": "fold every project's inbox first",
+            "decided_by": "operator",
+            "ts": "2026-08-15T00:31:06.178560Z",
+        }
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    assert reindex(sources=[])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == ["d-legacy1"]
+
+
+def test_reindex_folds_every_project_root_the_graph_names(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path
+):
+    """A free-text decision recorded from another repo has no graph projection
+    to recover it. A backfill that folds only the invoking repo leaves exactly
+    the records this verb exists to find."""
+    from fno.decide import _default_journals, reindex
+
+    sibling = tmp_path / "other-repo"
+    (sibling / ".fno").mkdir(parents=True)
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries.append(_node("x-9999", cwd=str(sibling)))
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    from fno.decide import record_decision
+
+    did = record_decision(
+        decision="the sibling repo ruled this", subject="pr-777", events_root=sibling
+    )["decision_id"]
+    index.unlink()
+
+    assert any(sibling in p.parents for p in _default_journals()), _default_journals()
+    assert reindex()["added"] >= 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-777", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == [did]
+
+
+@pytest.mark.parametrize(
+    "torn",
+    ['{"type":"operator_decision","data":{"decision_id":"d-tru', '{"ts":"2026-'],
+    ids=["tear-after-the-type", "tear-before-the-type"],
+)
+def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
+    root: Path, tmp_graph: Path, index: Path, capsys, torn: str
+):
+    """A truncated append must not make an unreadable record and an empty one
+    look the same. The good rows still come back.
+
+    Both tear points, because a crash can end the line before the type string
+    ever appears, and a substring prefilter would drop exactly that one without
+    ever counting it.
+    """
+    from fno.decide import _read_index
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write(torn + "\n")
+
+    capsys.readouterr()
+    rows, _ = _read_index(index)
+    err = capsys.readouterr().err
+    assert [r["decision"] for r in rows] == ["merged"], "one bad row costs no others"
+    assert "1 damaged row(s)" in err
+    assert "fno decide reindex" in err
+
+
+def test_reindex_drops_the_damaged_row_so_the_warning_can_clear(
+    root: Path, tmp_graph: Path, index: Path, capsys
+):
+    """The index never rotates, so a torn line stays forever and reprints the
+    same notice on every read. The recovery the notice names must succeed."""
+    from fno.decide import _read_index, reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert counts["repaired"] == 1, counts
+
+    capsys.readouterr()
+    rows, _ = _read_index(index)
+    assert [r["decision"] for r in rows] == ["merged"]
+    assert "damaged row(s)" not in capsys.readouterr().err
+
+
+def test_reindex_counts_a_journal_row_and_its_own_projection_once(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A first backfill must not report rows as already indexed. The journal
+    row and its projection are one decision seen twice in one run."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
+    index.unlink()
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert (counts["added"], counts["already"]) == (1, 0), counts
+
+    # And on the SECOND run it is one already-indexed decision, not two
+    # sightings of one.
+    again = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert (again["added"], again["already"]) == (0, 1), again
+
+
+def test_a_failed_index_write_names_reindex_and_never_a_retry(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """By the time the index write fails, the durable event has landed. Telling
+    the operator to re-run would record one ruling twice."""
+    import fno.events as events_mod
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    assert res.exit_code == 1
+    assert "fno decide reindex" in res.output
+    assert "Do NOT re-run decide" in res.output
+    assert "recorded d-" in res.output, "the id it already holds"
+
+
+def test_a_legacy_projection_row_with_no_ts_sorts_oldest(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The event builder stamps NOW, which would float a legacy ruling to the
+    top of a list whose whole promise is newest-first."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "recent"])
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"].append(
+        {"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}
+    )
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    assert reindex(sources=[])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["recent", "ancient"]
+
+
+def test_limit_says_so_when_it_truncates(root: Path, tmp_graph: Path, index: Path):
+    """A silent cut on a recall verb is the same lie as a missing record."""
+    for n in range(3):
+        runner.invoke(decide_app, ["--subject", "pr-900", "--decision", f"call {n}"])
+
+    payload = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "pr-900", "--limit", "2", "--json"]
+        ).stdout
+    )
+    assert (payload["total"], payload["truncated"]) == (3, True)
+
+    human = runner.invoke(decide_app, ["list", "--subject", "pr-900", "--limit", "2"])
+    assert "showing 2 of 3" in human.output
+
+
+def test_a_torn_multibyte_append_stays_readable_and_recoverable(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A crash can split a multi-byte character mid-append. A strict read
+    raises on the WHOLE file, taking every good row with it - and breaking the
+    reindex the damaged-row warning names as the cure."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("ab") as fh:
+        fh.write(b'{"type":"operator_decision","data":{"decision":"caf\xc3\n')
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"])
+    assert listed.exit_code == 0, listed.output
+    assert [d["decision"] for d in json.loads(listed.stdout)["decisions"]] == ["merged"]
+
+    assert reindex(sources=[root / ".fno" / "events.jsonl"])["repaired"] == 1
+    assert index.with_suffix(".jsonl.corrupt").exists(), "the drop is reversible"
+
+
+def test_one_unusable_projection_row_does_not_abort_the_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The event builder slices strings and validates. An eager list build
+    aborts on the first bad row and loses the journal half of the fold too."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
+    index.unlink()
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
+        {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    counts = reindex(sources=[root / ".fno" / "events.jsonl"])
+    assert counts["added"] == 2, counts
+    for subject, decision in (("pr-923", "from the journal"), ("x-7d94", "usable")):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+        )
+        assert decision in [d["decision"] for d in payload["decisions"]]
+
+
+def test_an_unreachable_index_is_a_failed_read_not_an_empty_one(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Path.exists() answers False for a dangling symlink, which would turn an
+    unreachable store into "no decisions recorded" on exit 0."""
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.symlink_to(index.parent / "gone.jsonl")
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "pr-923"])
+    assert listed.exit_code == 1, listed.output
+    assert "cannot read the decision index" in listed.output
+
+
+def test_the_second_producer_also_refuses_to_ask_for_a_retry(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`fno outstanding clear --answer` is the other operator_decision writer.
+    A guard on one of two producer paths is decorative."""
+    import fno.events as events_mod
+    from fno.outstanding.cli import outstanding_app
+
+    qid = runner.invoke(
+        outstanding_app, ["ask", "which lane owns the retry?"]
+    ).stdout.strip().splitlines()[-1]
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
+    assert res.exit_code == 1
+    assert "fno decide reindex" in res.output
+    assert "records the same ruling a second time" in res.output
+
+
+def test_equal_timestamps_do_not_invert_newest_first(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Every legacy projection row shares the same no-ts fallback, and a stable
+    sort keeps file order for ties - silently reversing the stated contract."""
+    from fno.decide import reindex
+
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries[0]["decisions"] = [
+        {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
+        {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    assert reindex(sources=[])["added"] == 2
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == ["d-bbb002", "d-aaa001"]
+
+
+def test_a_torn_journal_does_not_make_reindex_impossible(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The fold reads every journal the graph names. One torn multi-byte append
+    in any of them must not take out the recovery command itself."""
+    from fno.decide import reindex
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+    journal = root / ".fno" / "events.jsonl"
+    with journal.open("ab") as fh:
+        fh.write(b'{"type":"other","data":{"x":"caf\xc3\n')
+
+    assert reindex(sources=[journal])["added"] == 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["merged"]
+
+
+def test_a_failed_projection_never_reports_a_lost_capture(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The projection is the third of three writes. Both durable stores already
+    hold the decision, so failing here would invite the duplicate retry."""
+    import fno.graph.store as gs
+
+    def boom(*a, **kw):
+        raise SystemExit(1)  # what locked_mutate_graph does on a corrupt graph
+
+    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
+    assert res.exit_code == 0, res.output
+    assert "graph projection failed" in res.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
+    )
+    assert [d["decision"] for d in payload["decisions"]] == ["fold first"]
+
+
+def test_a_node_subject_folds_case_in_both_directions(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The doc promises every spelling of a node, "any case". The resolver's id
+    tier is case-sensitive, so only the query side folded before."""
+    did = runner.invoke(
+        decide_app, ["--subject", "X-7D94", "--decision", "shouted"]
+    ).stdout.strip().splitlines()[-1]
+
+    for query in ("x-7d94", "fold-the-inbox", "X-7D94"):
+        payload = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", query, "--json"]).stdout
+        )
+        assert did in [d["decision_id"] for d in payload["decisions"]], query
+
+
+def test_a_non_node_subject_is_case_insensitive_but_still_exact(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`pr-<n>` is advertised as a first-class subject with no spelling rule,
+    and a node subject already gets case-folding through the resolver."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+
+    found = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "PR-923", "--json"]).stdout
+    )
+    assert [d["decision"] for d in found["decisions"]] == ["merged"]
+
+    miss = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-92", "--json"]).stdout
+    )
+    assert miss["decisions"] == [], "folding case is not a prefix match"
+
+
+def test_reindex_exits_nonzero_when_the_index_cannot_be_written(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The per-row counter cannot tell one unusable legacy row from a dead
+    store, and exit 0 on the second says the recovery ran while every decision
+    stayed unrecoverable."""
+    import fno.events as events_mod
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    real = events_mod.append_event
+
+    def boom(event, events_path=None, **kw):
+        if events_path is not None and Path(events_path) == index:
+            raise OSError("read-only file system")
+        return real(event, events_path=events_path, **kw)
+
+    monkeypatch.setattr(events_mod, "append_event", boom)
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "could not be written" in res.output
+
+
+def test_an_unreadable_graph_says_recall_degraded(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Without the graph a subject only matches its literal spelling, so a
+    ruling recorded under a slug stops answering the id the receipt printed.
+    Degrading in silence is indistinguishable from no such decision."""
+    runner.invoke(decide_app, ["--subject", "fold-the-inbox", "--decision", "fold"])
+
+    # A REAL half-written graph, not a monkeypatched raise. read_graph swallows
+    # corruption and answers [], so a guard exercised through a patched
+    # exception stays green on a path production never takes.
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "the graph could not be read" in listed.output
+
+
+def test_the_newest_superseder_wins_the_mark(root: Path, tmp_graph: Path, index: Path):
+    """One ruling can be overturned twice, and a backfill interleaves journals
+    with projections, so file order is not recency."""
+    first = runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "merge it"]
+    ).stdout.strip().splitlines()[-1]
+    runner.invoke(
+        decide_app, ["--subject", "pr-922", "--decision", "hold it", "--supersedes", first]
+    )
+    newest = runner.invoke(
+        decide_app,
+        ["--subject", "pr-922", "--decision", "hold it again", "--supersedes", first],
+    ).stdout.strip().splitlines()[-1]
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-922", "--json"]).stdout
+    )
+    by_id = {d["decision_id"]: d for d in payload["decisions"]}
+    assert by_id[first]["superseded_by"] == newest
+
+
+def test_the_json_surface_reports_damaged_rows(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A machine-first surface must not under-report a total that looks
+    complete: that is the lie "truncated" was added to prevent."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert payload["damaged"] == 1
+    assert payload["total"] == 1
+
+
+def test_reindex_refuses_to_report_done_on_an_unreadable_graph(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A query can answer usefully without the graph. A backfill cannot: it
+    would fold zero projection rows and still print "+0 decisions" on exit 0."""
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "decide reindex: failed" in res.output
+
+
+def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`fno decide reindex` is what an IndexWriteError sends people to. One
+    legacy row the schema will never accept must not make it exit 1 forever."""
+    import fno.events as events_mod
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    real = events_mod.validate
+    calls = {"n": 0}
+
+    def picky(event):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("source 'target' left the enum")
+        return real(event)
+
+    monkeypatch.setattr(events_mod, "validate", picky)
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 0, res.output
+    assert "the schema will not accept" in res.output
+
+
+def test_authority_source_is_stated_never_inferred(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Reading --decided-by as a beastmode grant writes wrong provenance into
+    the field a reader months later trusts."""
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert payload["decisions"][0]["authority_source"] == "operator"
+
+    runner.invoke(
+        decide_app,
+        [
+            "--subject", "pr-921",
+            "--decision", "held",
+            "--decided-by", "worker-a",
+            "--authority", "beastmode",
+        ],
+    )
+    granted = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
+    )
+    assert granted["decisions"][0]["authority_source"] == "beastmode"
+
+
+def test_a_torn_archive_also_stops_the_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """entries_with_archive reads the archive softly. A guard on the working
+    graph alone would drop every archived node's decisions from a backfill that
+    still printed "+0" and exited 0."""
+    (tmp_graph.parent / "graph-archive.json").write_text('{"entries": [{"id": "x-ar')
+
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "decide reindex: failed" in res.output
+
+
+def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The write path's pre-check used the soft reader, so a real node read as
+    "names no graph node" with no hint that the graph was unreadable."""
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+
+    res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold"])
+    assert res.exit_code == 0, res.output
+    assert "the graph could not be read" in res.output
+
+
+def test_one_id_is_one_row_even_if_the_index_holds_it_twice(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """reindex is read-then-write with no lock across the fold, so a decide
+    landing mid-backfill can be appended twice under one id."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    duplicate = index.read_text(encoding="utf-8")
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write(duplicate)
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert len(payload["decisions"]) == 1, payload
+
+
+def test_superseding_an_id_nobody_recorded_says_so(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A transposed digit is otherwise a silent no-op, and the overturned
+    ruling keeps reading as current."""
+    res = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "held", "--supersedes", "d-1234657"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "no decision d-1234657 is on record" in res.output
+
+
+def test_an_install_with_no_index_is_told_to_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The upgrade path. Every decision on an existing install lives in the
+    graph projection this reader no longer consults, so a bare "none recorded"
+    would be the absence-reads-as-success shape on this verb's own rollout."""
+    assert not index.exists()
+
+    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "fno decide reindex" in listed.output
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    after = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
+    assert "fno decide reindex" not in after.output, "only while the index is missing"
+
+
+def test_operator_decision_retention_is_durable_by_an_explicit_key():
+    """It behaved this way only because it named no retention and the default
+    is durable. The record the recall promise rests on is then one schema edit
+    from being GC'd out of the project journal."""
+    from fno.events import SCHEMA, retention_for
+
+    assert retention_for("operator_decision") == "durable"
+    entry = next(e for e in SCHEMA["event_types"] if e["name"] == "operator_decision")
+    assert entry.get("retention") == "durable", "explicit, not inherited from the default"

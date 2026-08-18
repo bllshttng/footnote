@@ -2177,7 +2177,8 @@ event_types:
     consumers: [operator, fno-agents needs]
 
   - name: operator_decision
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Folded by `fno decide list` through the graph projection on the subject node, which inherits the archive read-through."
+    retention: durable
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno decide list` reads. See docs/architecture/decision-record.md."
     sources: [target, hook, subagent, test]
     data:
       required: [decision_id, decision]
