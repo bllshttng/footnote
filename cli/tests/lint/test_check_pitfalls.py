@@ -200,3 +200,49 @@ def test_an_absent_registry_still_skips_the_verb_check(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert "read 0 verbs" not in r.stderr
+
+
+# --- pinned claim-bearing qualifiers (x-f3be) -------------------------------
+#
+# A structural check counts headings, fields, dates and backticked tokens. A
+# qualifier is none of those, so a prose diet can delete the word carrying the
+# claim while every count still passes. These tests verify by DELETING the
+# qualifier and asserting the gate fails, never by re-running the counts that
+# already pass on that deletion.
+
+
+def _agents_without(tmp_path: Path, old: str, new: str) -> Path:
+    """The shipped corpus with one qualifier edited out."""
+    text = AGENTS.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"expected exactly one {old!r}"
+    path = tmp_path / "AGENTS.md"
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return path
+
+
+def test_dropping_the_live_qualifier_fails(tmp_path: Path) -> None:
+    """"the lockfile" says presence proves ownership; only the LIVE one does."""
+    path = _agents_without(tmp_path, "live lockfile", "lockfile")
+    r = _run(path)
+    assert r.returncode == 1
+    assert "live lockfile" in r.stderr
+
+
+def test_dropping_the_mail_probe_qualifier_fails(tmp_path: Path) -> None:
+    """Broadened to "mail", it rejects a worker's own autonomous evidence."""
+    path = _agents_without(tmp_path, "a mail probe", "mail")
+    r = _run(path)
+    assert r.returncode == 1
+    assert "mail probe" in r.stderr
+
+
+def test_an_absent_entry_releases_its_pinned_phrase(tmp_path: Path) -> None:
+    """Eviction stays legal: a pin binds only while its own entry is present.
+
+    Without this, the first entry to age out at 60 days wedges the gate on
+    prose the corpus is supposed to have dropped.
+    """
+    path = _fixture(tmp_path, [GOOD])
+    r = _run(path)
+    assert r.returncode == 0, r.stderr
+    assert "live lockfile" not in r.stderr
