@@ -82,6 +82,16 @@ One file per session, per day, or per throttle window.
 
 `latches/` is the shape that had to be fixed. The hook that writes a latch also deletes it, because a latch keyed to a session id has no reader once that session ends. The lifetime lives with the writer, which is the only place it cannot go stale.
 
+## Permanent repo-local directories
+
+The rule above governs the state root, but its shape repeats inside a checkout: a directory nobody deletes is a directory nobody owns. A worktree that a script resets on every run is permanent by design, and the disk-reclaim sweep must keep it explicitly or churn its warm caches every pass. Recorded here so a sweep author checks this table before reaching for a blanket rule, and so a reader who finds the directory knows it is intentional.
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `.claude/worktrees/preflight` (or `<worktrees_base>/<repo>/preflight` when configured) | `scripts/ci/preflight.sh` | permanent; hard-reset to the candidate SHA each run, caches deliberately preserved |
+
+The sweep's matching keep rule is `kept (permanent)` in `scripts/lib/worktree-lifecycle.sh`, keyed on the basename so it follows the worktree base wherever config puts it.
+
 ## Unattributed entries
 
 Files present in one real install with no writer anywhere in the checkout. Recorded rather than deleted: an unexplained file is a finding, not a deletion, and a finding nobody wrote down gets rediscovered.
