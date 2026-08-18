@@ -3611,11 +3611,23 @@ fn clean_pass_review(
         // verdict to the earliest pass of that rank and lets a quota bounce
         // BETWEEN two equal-rank passes outdate the newer one (PR 917 round
         // two: the newest pass postdates the bounce and must be the evidence).
-        if best
-            .as_ref()
-            .map(|(_, b, _)| freshness_rank(fresh) >= freshness_rank(*b))
-            .unwrap_or(true)
-        {
+        // "Later" is decided by `ts_after` on the parsed `createdAt`, never by
+        // iteration order: array order is the payload's promise, not ours, and
+        // a raw string compare mis-orders offset-suffixed against Z-suffixed
+        // stamps. Same predicate `bot_verdict` uses on `submittedAt`, so the
+        // two arms of one verdict cannot order the same evidence differently.
+        let better = match best.as_ref() {
+            None => true,
+            Some((_, b, kept_ts)) => {
+                freshness_rank(fresh) > freshness_rank(*b)
+                    || (freshness_rank(fresh) == freshness_rank(*b)
+                        && ts_after(
+                            ts.as_deref().unwrap_or(""),
+                            kept_ts.as_deref().unwrap_or(""),
+                        ))
+            }
+        };
+        if better {
             best = Some((sha.to_string(), fresh, ts));
         }
     }
@@ -14127,6 +14139,38 @@ mod tests {
             pass("2026-08-17T03:00:00Z", "abc12345"),
         ];
         let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+    }
+
+    #[test]
+    fn equal_rank_tie_breaks_on_the_stamp_not_the_array_order() {
+        // The same three comments as the test above, delivered NEWEST FIRST.
+        // Array order is the payload's promise, not ours: resolving the
+        // equal-rank tie with `>=` over iteration order picked the 01:00 pass
+        // here, the 02:00 bounce then postdated it, and a required bot fell
+        // through Refused -> usage_limited -> all_required_passed false. The
+        // parsed `createdAt` orders it the same way whatever order it arrives
+        // in, which is the rule `bot_verdict` already applies to `submittedAt`.
+        let pass = |at: &str| {
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Review: Didn't find any major issues. Bravo. Reviewed commit: abc12345",
+                "createdAt": at
+            })
+        };
+        let comments = vec![
+            pass("2026-08-17T03:00:00Z"),
+            pass("2026-08-17T01:00:00Z"),
+            usage_comment("2026-08-17T02:00:00Z"),
+        ];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(
+            got.and_then(|(_, _, ts)| ts).as_deref(),
+            Some("2026-08-17T03:00:00Z"),
+            "the newest equal-rank pass must win regardless of array order"
+        );
         let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
         assert_eq!(verdict, CoverageVerdict::Reviewed);
     }
