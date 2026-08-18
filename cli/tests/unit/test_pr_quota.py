@@ -54,6 +54,19 @@ def test_coverage_can_consume_reserved_points(tmp_path):
     ]
 
 
+def test_coverage_publisher_label_read_can_consume_reserved_points(tmp_path):
+    calls: list[list[str]] = []
+    result = _quota.execute_graphql(
+        "coverage",
+        ["pr", "view", "930", "--json", "labels"],
+        runner=_runner(_quota.GRAPHQL_RESERVE, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0
+    assert calls[-1] == ["/real/gh", "pr", "view", "930", "--json", "labels"]
+
+
 def test_unreadable_instrument_fails_closed_only_for_discretionary(tmp_path):
     discretionary_calls: list[list[str]] = []
     refused = _quota.execute_graphql(

@@ -9,7 +9,6 @@ FNO_REPO_ROOT to tmp_path so resolve_repo_root() is isolated
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Generator
 
@@ -526,6 +525,23 @@ def test_state_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert result.name == ".fno"
 
 
+def test_graphql_quota_lock_ignores_project_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One GitHub identity needs one machine lock across all repositories."""
+    machine_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(machine_home))
+    _set_settings(
+        monkeypatch,
+        tmp_path,
+        f"schema_version: 1\nconfig:\n  state_dir: '{tmp_path / 'project-state'}'\n",
+    )
+
+    from fno.paths import graphql_quota_lock
+
+    assert graphql_quota_lock() == machine_home / ".fno" / "locks" / "github-graphql-quota.lock"
+
+
 def test_config_file_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """AC1-HP: config_file() returns ~/.fno/settings.yaml."""
     _set_settings(monkeypatch, tmp_path, "schema_version: 1\n")
@@ -639,7 +655,6 @@ def test_double_brace_escape_in_state_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC1-EDGE: {{personal}} in state_dir becomes {personal} in resolved path."""
-    target = tmp_path / "home" / "{personal}" / "fno"
     raw_dir = str(tmp_path / "home" / "{{personal}}" / "fno")
     _set_settings(
         monkeypatch,

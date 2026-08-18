@@ -433,8 +433,8 @@ def state_dir() -> Path:
 
 
 def graphql_quota_lock() -> Path:
-    """Machine-wide lock held from GraphQL quota probe through command."""
-    return state_dir() / "locks" / "github-graphql-quota.lock"
+    """Config-independent machine lock held from quota probe through command."""
+    return locks_dir() / "github-graphql-quota.lock"
 
 
 def github_cli_proxy_dir() -> Path:

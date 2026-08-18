@@ -235,15 +235,11 @@ def fetch_pr_rest(
             }
         )
 
-    # Legacy StatusContexts ride the combined-status endpoint. Failure here is
-    # tolerated the same way an empty rollup section was on GraphQL: no
-    # contexts reported rather than a loud error for a check-set the repo does
-    # not use. CheckRuns above stay authoritative for CI settledness. The one
-    # exception: zero CheckRuns AND a failed statuses read is NOT "no checks"
-    # - a legacy-status-only repo would read verdict `unknown` while its real
-    # verdict went unread, so that combination stays loud.
+    # Legacy StatusContexts ride the combined-status endpoint. This read is a
+    # separate check class, so failure is always loud: green CheckRuns do not
+    # prove an unread required legacy context is green.
     statuses = runner(["gh", "api", f"repos/{slug}/commits/{sha}/status"], cwd=cwd)
-    if not statuses.ok and not check_runs:
+    if not statuses.ok:
         return None, _rest_reason(statuses)
     if statuses.ok:
         try:
