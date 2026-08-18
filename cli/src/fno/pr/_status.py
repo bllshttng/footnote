@@ -332,9 +332,12 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # the report prints the no-pending answers ([] / 0) rather than `unknown`,
     # because nothing was failed, it was deliberately not asked.
     if (pr_json.get("state") or "").upper() in ("MERGED", "CLOSED"):
-        reviews = {"optional_reviews": [], "optional_reviews_unresolved": 0}
-        unresolved = 0
-        coverage = dict(_UNKNOWN_COVERAGE)
+        # Any-typed to match the probe arms below, whose reads return the
+        # same untyped dicts; a first binding of `0` would narrow the
+        # variable to int and fail the reassignments' type check.
+        reviews: Any = {"optional_reviews": [], "optional_reviews_unresolved": 0}
+        unresolved: Any = 0
+        coverage: Any = dict(_UNKNOWN_COVERAGE)
         review_lane = False
         code_review_required = False
     else:
