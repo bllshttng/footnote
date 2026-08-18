@@ -267,6 +267,7 @@ FNO_VERIFIED_VERSION=
 FNO_VERIFY_REASON=
 verify_ours() {
 	FNO_VERIFY_REASON=
+	FNO_VERIFY_STABLE=
 	if [ ! -x "$FNO_VENV_PY" ]; then
 		FNO_VERIFY_REASON="its tool venv python is missing"
 		return 1
@@ -275,18 +276,39 @@ verify_ours() {
 	# email makes the build backend emit only `Author-email: Jason Noah Choi <...>`
 	# and drop the bare Author field. The owner's name travels in both, so the
 	# substring check still holds.
+	#
+	# Key=value lines and `.get(...) or ""` on every field, never `md["Name"]`:
+	# an absent header answers None, which print renders as the literal "None" -
+	# a value the match below reads as a foreign package name. An empty line says
+	# "the field was not there" without dressing it up as an answer. The
+	# key=value shape also keeps a stray startup print (a .pth, sitecustomize)
+	# from shifting the fields the way positional parsing did; the last
+	# occurrence of a key wins, because startup prints run first.
 	_probe='import importlib.metadata as m
 md = m.metadata("fno")
-print(md["Name"])
-print(md.get("Author") or md.get("Author-email") or "")
-print(md["Version"])'
+print("name=" + (md.get("Name") or ""))
+print("author=" + (md.get("Author") or md.get("Author-email") or ""))
+print("version=" + (md.get("Version") or ""))'
 	if ! _out=$("$FNO_VENV_PY" -c "$_probe" 2>/dev/null); then
 		FNO_VERIFY_REASON="no readable package metadata"
 		return 1
 	fi
-	_name=$(printf '%s\n' "$_out" | sed -n '1p')
-	_author=$(printf '%s\n' "$_out" | sed -n '2p')
-	_version=$(printf '%s\n' "$_out" | sed -n '3p')
+	_name=$(printf '%s\n' "$_out" | sed -n 's/^name=//p' | tail -n 1)
+	_author=$(printf '%s\n' "$_out" | sed -n 's/^author=//p' | tail -n 1)
+	_version=$(printf '%s\n' "$_out" | sed -n 's/^version=//p' | tail -n 1)
+	# Mirrors refusal_is_stable in crates/fno/src/bootstrap.rs: an answer is
+	# final only when every field is present AND the author is not a torn
+	# PREFIX of the owner string. Anything else is an instrument failure the
+	# retry in verify_ours_within re-asks, rather than refusing once on a
+	# torn read. Computed before both refusal arms, so a complete stranger is
+	# refused on the first pass whichever field it fails on.
+	FNO_VERIFY_STABLE=1
+	for _f in "$_name" "$_author" "$_version"; do
+		[ -n "$_f" ] && [ "$_f" != None ] || FNO_VERIFY_STABLE=
+	done
+	case "Jason Noah Choi" in
+		"$_author"|"$_author"*) FNO_VERIFY_STABLE= ;;
+	esac
 	# name must be `fno` (case-insensitive)...
 	case "$_name" in
 		fno|FNO|Fno) : ;;
@@ -299,6 +321,24 @@ print(md["Version"])'
 	esac
 	FNO_VERIFIED_VERSION="$_version"
 	return 0
+}
+
+# `verify_ours`, re-asked until it passes, the shared 3s budget runs out, or
+# the answer is a complete foreign identity (FNO_VERIFY_STABLE). The same three
+# exits `verify_ours_within` in crates/fno/src/bootstrap.rs has, because the two
+# identity probes are one guard in two reachable paths: this script's adopt arm
+# refusing a torn read fell through to `uv tool install --force` - the storm
+# trigger - while the Rust copy re-asked. One python spawn per pass rather than
+# a stat, same 15 * 0.2s budget the four provisioning waits share.
+verify_ours_within() {
+	_n=0
+	while :; do
+		verify_ours && return 0
+		[ -n "$FNO_VERIFY_STABLE" ] && return 1
+		_n=$((_n + 1))
+		[ "$_n" -gt 15 ] && return 1
+		sleep 0.2
+	done
 }
 
 # --- success report --------------------------------------------------------
@@ -368,7 +408,7 @@ main() {
 	# (AC4-HP, AC4-EDGE). An explicit FNO_VERSION / FNO_INSTALL_WHEEL is a request
 	# to (re)install that exact source, so it skips the no-op and provisions.
 	if [ -z "${FNO_INSTALL_WHEEL:-}" ] && [ "${FNO_VERSION+x}" != x ]; then
-		if resolve_real && [ -x "$FNO_REAL" ] && verify_ours; then
+		if resolve_real && [ -x "$FNO_REAL" ] && verify_ours_within; then
 			say "fno is already installed and verified - nothing to do."
 			report_success
 			return 0
@@ -409,7 +449,7 @@ Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
 	# A foreign by-name PyPI `fno`, or unreadable metadata, must abort here -
 	# never report success for a package that is not ours (AC5-ERR).
-	verify_ours || die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to report success for a foreign fno."
+	verify_ours_within || die "the installed fno is not this project's package ($FNO_VERIFY_REASON); refusing to report success for a foreign fno."
 	report_success
 }
 
