@@ -394,9 +394,8 @@ def headless_create(
     # parent byte-identical" path and its test.
     from fno.agents.model_routing import (
         incoherent_model_env,
-        incoherent_model_env_notice,
         overlay_restores_model_env,
-        scrub_incoherent_model_env,
+        scrub_incoherent_model_env_and_notify,
     )
     from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
@@ -413,14 +412,9 @@ def headless_create(
         spawn_env = dict(os.environ)
         scrub_ambient_identity(spawn_env)
         # Strip before the overlay below so a real route still wins.
-        dropped = scrub_incoherent_model_env(spawn_env)
-        if dropped:
-            print(
-                incoherent_model_env_notice(
-                    dropped, routed=overlay_restores_model_env(account_env, route_env)
-                ),
-                file=sys.stderr,
-            )
+        scrub_incoherent_model_env_and_notify(
+            spawn_env, routed=overlay_restores_model_env(account_env, route_env)
+        )
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials
 
@@ -528,8 +522,13 @@ def bg_create(
     # when both are present the route wins the settings file (route-wins
     # atomicity - endpoint+auth+model as one unit), and the account overlay
     # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
-    from fno.agents.model_routing import route_settings_path_for
+    from fno.agents.model_routing import incoherent_model_env, route_settings_path_for
 
+    # Computed once and reused below for the spawn_env scrub: os.environ's
+    # model vars are unchanged between here and there (scrub_ambient_identity
+    # never touches them), so re-deriving the same five-key predicate a
+    # second time would just repeat this answer.
+    _incoherent = incoherent_model_env()
     settings_path = route_settings_path_for(route_env, account_env)
     # Without a route/account there is no settings file, so an env-only scrub
     # of the poisoned model vars below is decorative for `claude --bg`: the
@@ -537,17 +536,12 @@ def bg_create(
     # env (x-6de8), never this process's spawn_env. Float a settings file
     # flooring just the offending vars so the fix reaches the actual worker
     # in the plain unrouted case too - the shape x-4709 exists to fix.
-    if settings_path is None:
-        from fno.agents.model_routing import (
-            incoherent_model_env,
-            materialize_model_scrub_settings,
-        )
+    if settings_path is None and _incoherent:
+        from fno.agents.model_routing import materialize_model_scrub_settings
 
-        _incoherent = incoherent_model_env()
-        if _incoherent:
-            settings_path = materialize_model_scrub_settings(
-                [_k for _k, _v in _incoherent]
-            )
+        settings_path = materialize_model_scrub_settings(
+            [_k for _k, _v in _incoherent]
+        )
     argv = _build_argv(
         name=name,
         message=message,
@@ -585,19 +579,15 @@ def bg_create(
     # compose the account/route overlay after, so a real route still re-supplies
     # its own model vars and wins.
     from fno.agents.model_routing import (
-        incoherent_model_env_notice,
         overlay_restores_model_env,
-        scrub_incoherent_model_env,
+        scrub_incoherent_model_env_and_notify,
     )
 
-    dropped = scrub_incoherent_model_env(spawn_env)
-    if dropped:
-        print(
-            incoherent_model_env_notice(
-                dropped, routed=overlay_restores_model_env(account_env, route_env)
-            ),
-            file=sys.stderr,
-        )
+    scrub_incoherent_model_env_and_notify(
+        spawn_env,
+        routed=overlay_restores_model_env(account_env, route_env),
+        known=[_k for _k, _v in _incoherent],
+    )
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not

@@ -306,19 +306,13 @@ def _default_wake_fn(
     # unconditionally, BEFORE the route overlay, so a real route still
     # re-supplies its own model vars and wins.
     from fno.agents.model_routing import (
-        incoherent_model_env_notice,
         overlay_restores_model_env,
-        scrub_incoherent_model_env,
+        scrub_incoherent_model_env_and_notify,
     )
 
-    dropped = scrub_incoherent_model_env(env)
-    if dropped:
-        print(
-            incoherent_model_env_notice(
-                dropped, routed=overlay_restores_model_env(route_env)
-            ),
-            file=sys.stderr,
-        )
+    scrub_incoherent_model_env_and_notify(
+        env, routed=overlay_restores_model_env(route_env)
+    )
     # Scrub only when there is something to restore, matching
     # bg_create/headless_create (harnesses/claude.py): a route-less row (the
     # common default-account case) keeps its ambient auth untouched rather

@@ -741,14 +741,9 @@ def _scrub_incoherent_model_env_at_seam(args: Sequence[str]) -> None:
     harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
     if harness != "claude":
         return
-    from fno.agents.model_routing import (
-        incoherent_model_env_notice,
-        scrub_incoherent_model_env,
-    )
+    from fno.agents.model_routing import scrub_incoherent_model_env_and_notify
 
-    dropped = scrub_incoherent_model_env()
-    if dropped:
-        print(incoherent_model_env_notice(dropped), file=sys.stderr)
+    scrub_incoherent_model_env_and_notify()
 
 
 def env_scrub_spawn_warning(
