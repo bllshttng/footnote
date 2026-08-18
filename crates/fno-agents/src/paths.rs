@@ -8,6 +8,8 @@
 //! <home>/
 //!   registry.json            registry (schema v4)
 //!   events.jsonl             operator-facing audit log
+//!   route-settings/          --settings floors the spawn arms write (0600,
+//!                            content-addressed; read by claude, not by us)
 //!   supervisor.sock          daemon's client-facing socket (mode 0600)
 //!   <short_id>/
 //!     state.json             per-agent state (schema v1)

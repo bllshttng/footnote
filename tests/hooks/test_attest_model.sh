@@ -97,6 +97,14 @@ OUT="$(run_hook_env "us.anthropic.claude-sonnet-4-20250514-v1:0" "" "" \
   CLAUDE_CODE_USE_VERTEX=1 2>/dev/null)"
 [[ -z "$OUT" ]] && pass "Vertex lane prints nothing" || fail "Vertex warned: $OUT"
 
+# 3f. A mixed-case Anthropic id (or one with padding) is coherent: Python's
+#     is_anthropic_model strips and lowercases before judging, and the hook
+#     must agree rather than drift-warn on a var the spawn seams leave alone.
+OUT="$(run_hook_env "Claude-Haiku-4-5" "" "" 2>/dev/null)"
+[[ -z "$OUT" ]] && pass "mixed-case Anthropic id prints nothing" || fail "mixed-case id warned: $OUT"
+OUT="$(run_hook_env "" "" "" "ANTHROPIC_DEFAULT_HAIKU_MODEL=opus " 2>/dev/null)"
+[[ -z "$OUT" ]] && pass "padded bare alias prints nothing" || fail "padded alias warned: $OUT"
+
 # 4. Properly routed: foreign model + foreign base -> no drift warning.
 OUT="$(run_hook "glm-4.6" "https://open.bigmodel.cn/api/anthropic" "sk-real-apikey" 2>/dev/null)"
 echo "$OUT" | grep -q "ROUTING DRIFT" && fail "false DRIFT on a real routed lane: $OUT" \

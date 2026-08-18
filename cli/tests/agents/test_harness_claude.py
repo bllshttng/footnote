@@ -284,7 +284,12 @@ def test_bg_create_floors_incoherent_model_env_via_settings_file(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.harnesses import claude as claude_mod
 
+    # Pin every model var: the exact-scope assertion below must not see tier
+    # vars leaked in by the ambient (possibly routed or poisoned) test shell.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    for alias in ("OPUS", "SONNET", "HAIKU", "FABLE"):
+        monkeypatch.delenv(f"ANTHROPIC_DEFAULT_{alias}_MODEL", raising=False)
     monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
     captured: dict[str, object] = {}
 

@@ -399,11 +399,8 @@ def headless_create(
     )
     from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
-    # Computed once and reused below: without it the no-overlay path leaves
-    # spawn_env None and the child inherits a poisoned model env verbatim,
-    # and re-deriving the same five-key scan inside the scrub call below
-    # would repeat this answer (spawn_env's model vars are unchanged from
-    # os.environ's at that point - scrub_ambient_identity never touches them).
+    # An incoherent parent env forces an explicit child env too: passing None
+    # would hand the poison to the child verbatim.
     _incoherent = incoherent_model_env()
     # A coherent, overlay-free, marker-free call still passes None and
     # inherits byte-identically (there is a test on that).
@@ -419,7 +416,6 @@ def headless_create(
         scrub_incoherent_model_env_and_notify(
             spawn_env,
             routed=overlay_restores_model_env(account_env, route_env),
-            known=[_k for _k, _v in _incoherent],
         )
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials
@@ -530,10 +526,8 @@ def bg_create(
     # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
     from fno.agents.model_routing import incoherent_model_env, route_settings_path_for
 
-    # Computed once and reused below for the spawn_env scrub: os.environ's
-    # model vars are unchanged between here and there (scrub_ambient_identity
-    # never touches them), so re-deriving the same five-key predicate a
-    # second time would just repeat this answer.
+    # Computed once here because the settings-file float below needs the
+    # answer before _build_argv; the spawn_env scrub rescans on its own.
     _incoherent = incoherent_model_env()
     settings_path = route_settings_path_for(route_env, account_env)
     # Without a route/account there is no settings file, so an env-only scrub
@@ -592,7 +586,6 @@ def bg_create(
     scrub_incoherent_model_env_and_notify(
         spawn_env,
         routed=overlay_restores_model_env(account_env, route_env),
-        known=[_k for _k, _v in _incoherent],
     )
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"

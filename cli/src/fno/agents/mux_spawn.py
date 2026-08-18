@@ -1169,21 +1169,19 @@ def _mesh_env_wrapper(
     # model vars still win. `env -u` on an unset var is a harmless no-op.
     if provider == "claude":
         from fno.agents.model_routing import (
-            incoherent_model_env,
             incoherent_model_env_notice,
+            incoherent_model_env_unset_args,
             overlay_restores_model_env,
         )
 
-        _incoherent = incoherent_model_env()
-        if _incoherent:
-            # Build the -u flags directly from the already-computed names
-            # rather than calling incoherent_model_env_unset_args() (which
-            # would rescan os.environ for the same five keys again).
-            for _k, _v in _incoherent:
-                unset += ["-u", _k]
+        _flags = incoherent_model_env_unset_args()
+        if _flags:
+            unset += _flags
+            # The names ride the flag pairs (-u NAME), so the notice reads
+            # them back rather than scanning the env a second time.
             print(
                 incoherent_model_env_notice(
-                    [_k for _k, _v in _incoherent],
+                    _flags[1::2],
                     routed=overlay_restores_model_env(account_env, resolved_route),
                 ),
                 file=sys.stderr,

@@ -537,40 +537,30 @@ def test_rust_mirror_var_list_matches_model_env_keys():
     )
 
 
-def test_seam_scrub_covers_the_rust_exec_lane(monkeypatch, capsys):
-    # A bg/headless spawn execs the Rust client with os.environ, and that
-    # binary hands the child the env verbatim - a scrub only inside the Python
-    # substrate seams is decorative on that lane. The seam scrub is the one
-    # edit both runtimes see.
-    from fno.agents.rust_runtime import _scrub_incoherent_model_env_at_seam
+def test_rust_mirror_has_a_settings_floor_writer():
+    # The bg serving session is forked by the claude daemon with the DAEMON's
+    # own env, so an env-only scrub never reaches it. The compiled client is
+    # reachable without the Python front door (fno-agents spawn, the loop
+    # runtime), so the mirror must carry its own --settings floor writer, not
+    # just the env scrub.
+    from pathlib import Path
 
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.2[1m]")
-    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
-    _scrub_incoherent_model_env_at_seam(BASE)
-    assert "ANTHROPIC_MODEL" not in os.environ
-    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in os.environ
-    err = capsys.readouterr().err
-    assert "ANTHROPIC_MODEL" in err
-    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" in err
-
-
-def test_seam_scrub_leaves_a_non_claude_spawn_and_a_route_alone(monkeypatch, capsys):
-    from fno.agents.rust_runtime import _scrub_incoherent_model_env_at_seam
-
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_MODEL", "glm-5.2[1m]")
-    # A non-claude harness never reads these vars; stripping them from its
-    # child would be unrelated.
-    _scrub_incoherent_model_env_at_seam([*BASE, "-H", "codex"])
-    assert os.environ["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
-    assert capsys.readouterr().err == ""
-    # A real route (foreign base URL) is never stripped: the endpoint serves
-    # those model ids, so the composed route reaches the child unchanged.
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", ZAI_ENV["ANTHROPIC_BASE_URL"])
-    _scrub_incoherent_model_env_at_seam(BASE)
-    assert os.environ["ANTHROPIC_MODEL"] == "glm-5.2[1m]"
-    assert capsys.readouterr().err == ""
+    mirror = (
+        Path(__file__).resolve().parents[3]
+        / "crates/fno-agents/src/model_env_scrub.rs"
+    )
+    src = mirror.read_text()
+    assert "pub fn write_scrub_settings" in src, (
+        "model_env_scrub.rs lost the settings-floor writer: the daemon fork "
+        "keeps the poisoned env on every Rust-lane bg spawn"
+    )
+    bg = (
+        Path(__file__).resolve().parents[3]
+        / "crates/fno-agents/src/claude_ask.rs"
+    )
+    assert "write_scrub_settings" in bg.read_text(), (
+        "claude_ask.rs bg_create stopped floating the model-scrub settings file"
+    )
 
 
 if __name__ == "__main__":

@@ -83,10 +83,16 @@ MODEL_ENV_VARS=(
 
 # Collect every var naming a foreign model. Anthropic ids start with "claude-"
 # and the bare tier aliases resolve to Anthropic models, so both are coherent.
+# Trim and case-fold before the case: Python's is_anthropic_model strips and
+# lowercases, and the hook must agree with it on "Claude-Haiku-4-5" or "opus "
+# rather than warning about a var the spawn seams correctly leave alone.
 OFFENDERS=""
 FIRST_FOREIGN_MODEL=""
 for VAR in "${MODEL_ENV_VARS[@]}"; do
   VAL="${!VAR:-}"
+  VAL="${VAL#"${VAL%%[![:space:]]*}"}"
+  VAL="${VAL%"${VAL##*[![:space:]]}"}"
+  VAL="$(printf '%s' "$VAL" | tr '[:upper:]' '[:lower:]')"
   [[ -z "$VAL" ]] && continue
   case "$VAL" in
     claude-*|opus|sonnet|haiku|fable) continue ;;

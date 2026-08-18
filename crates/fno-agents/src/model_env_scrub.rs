@@ -12,6 +12,8 @@
 //! stripped: a foreign base URL serves those model ids, so the predicate
 //! returns empty and the composed overlay reaches the child unchanged.
 
+use std::path::PathBuf;
+
 /// The five model vars, one list with the Python `MODEL_ENV_KEYS`.
 pub const MODEL_ENV_KEYS: [&str; 5] = [
     "ANTHROPIC_MODEL",
@@ -104,8 +106,11 @@ pub fn incoherent_model_env(get: &dyn Fn(&str) -> Option<String>) -> Vec<(String
 /// Scrub the incoherent model vars off a child `Command` and emit the one
 /// stderr line naming them. Called BEFORE any overlay env is set on the same
 /// command, so a route or account that re-supplies a var still wins
-/// (`Command::env` after `env_remove` is last-wins).
-pub fn scrub_onto(cmd: &mut std::process::Command) -> Vec<String> {
+/// (`Command::env` after `env_remove` is last-wins). `overlay` is that
+/// about-to-be-applied env: an overlay re-supplying a model var changes the
+/// notice's fallback sentence (Python's `routed=` kwarg), because "falls back
+/// to its account's own default" is false for that child.
+pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
     let dropped = incoherent_model_env(&|k| std::env::var(k).ok());
     for (key, _) in &dropped {
         cmd.env_remove(key);
@@ -116,18 +121,60 @@ pub fn scrub_onto(cmd: &mut std::process::Command) -> Vec<String> {
             .map(|(k, _)| k.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        let routed = overlay.iter().any(|(k, _)| MODEL_ENV_KEYS.contains(k));
+        let fallback = if routed {
+            "The child receives that route's own model instead."
+        } else {
+            "The child falls back to its account's own default."
+        };
         eprintln!(
             "fno: dropped {names} from this child's env: they name a non-Anthropic model \
              while ANTHROPIC_BASE_URL is unset or names an anthropic.com host, so the \
              child would ask Anthropic for a model it does not serve and every call on \
-             that tier would error. The child falls back to its account's own default. \
+             that tier would error. {fallback} \
              This env was inherited, usually from a long-lived `claude` background daemon \
              started from a shell that held those exports; no config edit clears a \
              running daemon. Pin the tier defaults in ~/.claude/settings.json `env` \
              (that wins over an inherited value) or restart the daemon."
         );
     }
-    dropped.into_iter().map(|(k, _)| k).collect()
+}
+
+/// Write a `--settings` JSON flooring `dropped` model vars to "" under the
+/// agents root's `route-settings/` dir and return its path. The Rust-side twin
+/// of Python's `materialize_model_scrub_settings`: a `claude --bg` serving
+/// session is forked by the claude daemon with the DAEMON's own env, so an env
+/// scrub on the front-end command never reaches it - only a settings file
+/// does. Content-addressed (blake3 of the payload) and mode 0600, matching the
+/// Python writer's contract; a route overlay present in the env makes
+/// `incoherent_model_env` empty, so this file can only be the unrouted floor.
+pub fn write_scrub_settings(dropped: &[(String, String)]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut env = serde_json::Map::new();
+    for (key, _) in dropped {
+        env.insert(key.clone(), serde_json::Value::String(String::new()));
+    }
+    let payload = serde_json::to_string(&serde_json::json!({ "env": env }))?;
+    let digest = blake3::hash(payload.as_bytes()).to_hex();
+    let dir = crate::paths::AgentsHome::from_env()
+        .root()
+        .join("route-settings");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("model-scrub-{}.json", &digest[..16]));
+    let tmp = dir.join(format!(".{}.tmp", &digest[..16]));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(payload.as_bytes())?;
+    f.sync_all().ok();
+    drop(f);
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -153,6 +200,38 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].0, "ANTHROPIC_MODEL");
         assert_eq!(found[1].0, "ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    }
+
+    #[test]
+    fn scrub_settings_floors_exactly_the_dropped_vars() {
+        // A bg serving session is forked with the DAEMON's env, so only this
+        // file reaches it: it must floor each dropped var to "" (claude reads
+        // an empty settings value as unset) under the agents tree, and the
+        // write must be repeatable (content-addressed, same path twice).
+        let dir = std::env::temp_dir().join(format!(
+            "fno-scrub-settings-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::env::set_var("FNO_AGENTS_HOME", dir.join("agents"));
+        let dropped = vec![
+            ("ANTHROPIC_MODEL".to_string(), "glm-5.2[1m]".to_string()),
+            (
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+                "glm-4.5-air".to_string(),
+            ),
+        ];
+        let path = write_scrub_settings(&dropped).expect("settings floor writes");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let env = v.get("env").unwrap().as_object().unwrap();
+        assert_eq!(env.len(), 2);
+        assert_eq!(env["ANTHROPIC_MODEL"], "");
+        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "");
+        assert!(path.starts_with(dir.join("agents/route-settings")));
+        assert_eq!(write_scrub_settings(&dropped).unwrap(), path);
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

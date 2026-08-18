@@ -378,6 +378,11 @@ def check_spawn_tier_remap(
 # real route (base URL + token + model as one unit) is never stripped because
 # the coherence question never fires under a foreign base URL.
 
+#: The words that leave a boolean env flag OFF. One tuple so the Bedrock/Vertex
+#: lane gate and :func:`env_scrub_truthy` cannot disagree on what counts as
+#: opted in (the Rust mirror and the hook carry their own copies).
+ENV_FALSY_WORDS = ("", "0", "false", "no", "off")
+
 
 def base_url_is_anthropic(env: Optional[Mapping[str, str]] = None) -> bool:
     """True when ANTHROPIC_BASE_URL is unset or names an anthropic.com host.
@@ -414,13 +419,7 @@ def incoherent_model_env(env: Optional[Mapping[str, str]] = None) -> tuple[tuple
     if env is None:
         env = os.environ
     for lane_flag in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
-        if (env.get(lane_flag) or "").strip().lower() not in (
-            "",
-            "0",
-            "false",
-            "no",
-            "off",
-        ):
+        if (env.get(lane_flag) or "").strip().lower() not in ENV_FALSY_WORDS:
             return ()
     if not base_url_is_anthropic(env):
         return ()
@@ -457,29 +456,17 @@ def scrub_incoherent_model_env_and_notify(
     environ: Optional[dict[str, str]] = None,
     *,
     routed: bool = False,
-    known: Optional[Sequence[str]] = None,
 ) -> tuple[str, ...]:
     """:func:`scrub_incoherent_model_env`, printing the shared stderr notice
     when anything was dropped - the one call each spawn seam makes instead of
     hand-rolling "scrub, check dropped, print" at every site (headless_create,
     bg_create, resume_cli's wake, the Rust exec seam each did this
     independently before this helper existed).
-
-    ``known`` skips the rescan when the caller already ran
-    :func:`incoherent_model_env` for another reason - bg_create's
-    settings-file decision runs it first, and reusing that answer here avoids
-    evaluating the same five-key predicate against the same env twice for one
-    spawn.
     """
     import sys
 
     target = os.environ if environ is None else environ
-    if known is None:
-        dropped = scrub_incoherent_model_env(target)
-    else:
-        dropped = tuple(known)
-        for key in dropped:
-            target.pop(key, None)
+    dropped = scrub_incoherent_model_env(target)
     if dropped:
         print(incoherent_model_env_notice(dropped, routed=routed), file=sys.stderr)
     return dropped
@@ -560,13 +547,7 @@ def env_scrub_truthy(env: Optional[Mapping[str, str]] = None) -> bool:
     the common off-words are falsy."""
     if env is None:
         env = os.environ
-    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in (
-        "",
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in ENV_FALSY_WORDS
 
 
 def env_scrub_warning(

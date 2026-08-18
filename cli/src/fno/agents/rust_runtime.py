@@ -719,33 +719,6 @@ def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
-def _scrub_incoherent_model_env_at_seam(args: Sequence[str]) -> None:
-    """Drop an incoherent inherited model env from ``os.environ`` at the spawn
-    seam, so the Rust client inherits the scrub too.
-
-    The substrate seams scrub their own child-env copies, but a bg/headless
-    spawn auto-routes to the Rust client through an ``exec``, and that binary
-    hands the child ``os.environ`` verbatim (no ANTHROPIC_* handling at all) -
-    so a scrub only inside the Python substrates is decorative on that lane.
-    ``route_to_rust`` execs with ``os.environ``, so scrubbing here is the one
-    edit both runtimes see; same shape as :func:`_scrub_account_auth_at_seam`.
-
-    Runs AFTER the account scrub (so an overlay that re-supplies model vars is
-    judged post-overlay) and AFTER :func:`_refuse_inherited_tier_remap`: a
-    spawn that NAMES a tier alias under an ambient remap still refuses - the
-    caller picked a model whose meaning was hijacked and deserves the exit -
-    while the unnamed inherited vars get stripped, not refused. Claude-only
-    like the account scrub: an explicit non-claude harness never reads these
-    vars.
-    """
-    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
-    if harness != "claude":
-        return
-    from fno.agents.model_routing import scrub_incoherent_model_env_and_notify
-
-    scrub_incoherent_model_env_and_notify()
-
-
 def env_scrub_spawn_warning(
     args: Sequence[str], env: Optional[Mapping[str, str]] = None
 ) -> Optional[str]:
@@ -1044,12 +1017,17 @@ def make_agents_group_cls() -> type:
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
-                    _scrub_incoherent_model_env_at_seam(args)
                     # The env-scrub warning is NOT emitted here: a Python-route
                     # spawn falls through to dispatch_spawn / dispatch_spawn_pane,
                     # which emit it, so warning at the seam too would print it
                     # twice. The Rust-exec branches below emit it before they
-                    # exec, since the binary never reaches dispatch.
+                    # exec, since the binary never reaches dispatch. The
+                    # incoherent-model scrub is likewise NOT applied to
+                    # os.environ here: bg_create floats its --settings floor
+                    # off a fresh incoherent_model_env() read of os.environ,
+                    # and a seam-level scrub would empty it before that read;
+                    # the Rust client's own spawn arms scrub their child env
+                    # and float the same floor themselves.
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
