@@ -368,6 +368,9 @@ fno_real_within() {
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno-py`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
 report_success() {
+	# A blank version must not print as one: the version is the one fact this
+	# line exists to carry (the twin of verified_receipt in bootstrap.rs).
+	[ -n "$FNO_VERIFIED_VERSION" ] || FNO_VERIFIED_VERSION="(version unreadable)"
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
 	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
 	# on PATH would otherwise suppress the fix, yet `fno` would run that other
@@ -432,20 +435,29 @@ main() {
 	# to (re)install that exact source, so it skips the no-op and provisions.
 	if [ -z "${FNO_INSTALL_WHEEL:-}" ] && [ "${FNO_VERSION+x}" != x ]; then
 		if resolve_real; then
-			# The venv bin dir is the discriminator (same reasoning as run()
-			# in bootstrap.rs): it survives the rewrite that deletes the
-			# script inside it, and its absence means no install ever
-			# existed, where a 3s wait is a first-run tax.
-			_ready=1
-			if [ -d "${FNO_REAL%/*}" ]; then
-				fno_real_within || _ready=
+			# Two-dir discriminator, same as run() in bootstrap.rs: the
+			# bootstrap cache dir survives the --force that removes the venv
+			# whole, and the venv bin dir marks a box carrying an install.
+			# Both absent means no install ever existed, where a 3s wait is
+			# a first-run tax.
+			_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}"
+			_skip_adopt=
+			if [ -d "$_cache_dir/fno-bootstrap" ] || [ -d "${FNO_REAL%/*}" ]; then
+				fno_real_within || _skip_adopt=1
 			else
-				[ -x "$FNO_REAL" ] || _ready=
+				[ -x "$FNO_REAL" ] || _skip_adopt=1
 			fi
-			if [ -n "$_ready" ] && verify_ours_within; then
-				say "fno is already installed and verified - nothing to do."
-				report_success
-				return 0
+			if [ -z "$_skip_adopt" ]; then
+				if verify_ours_within; then
+					say "fno is already installed and verified - nothing to do."
+					report_success
+					return 0
+				fi
+				# The Rust adopt arm propagates this refusal out of run()
+				# rather than falling through to provision: a package that
+				# answers the probe is never --force-installed over, and a
+				# torn read reports instead of reinstalling blindly.
+				die "cannot verify the installed fno ($FNO_VERIFY_REASON); refusing to install over it."
 			fi
 		fi
 	fi
