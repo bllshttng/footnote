@@ -536,3 +536,402 @@ async fn drift_warned_on_list_stderr_only() {
     std::fs::remove_file(&dcopy).ok();
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+// ---------------------------------------------------------------------------
+// x-4c87: a nonempty registry must never decode to an empty roster silently.
+// The live outage (2026-08-16): a stale daemon whose v11 reader refused the
+// v14 store swallowed the read failure into `Registry::default()` and answered
+// `count: 0` beside a healthy `discovered_count`, while mail lookup printed
+// `agent '<name>' not found` for live workers. The fixtures below are the
+// sanitized same-schema equivalent: real worker row shapes, one row carrying a
+// value the typed model cannot represent (an unknown status variant).
+// ---------------------------------------------------------------------------
+
+/// A sanitized 3-row registry (2 valid, 1 the typed reader cannot represent),
+/// written RAW so the typed writer can never heal or reformat it first.
+fn write_divergent_registry(home: &AgentsHome) {
+    let row = |name: &str, status: &str| {
+        format!(
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"schema_version":14,"agents":[{},{},{}]}}"#,
+        row("worker-alpha", "live"),
+        row("worker-beta", "hibernating"),
+        row("worker-gamma", "live")
+    );
+    std::fs::write(home.registry_json(), body).expect("seed divergent registry");
+}
+
+/// A valid 2-row registry at the current schema.
+fn write_valid_registry(home: &AgentsHome) {
+    let row = |name: &str| {
+        format!(
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"live","created_at":"2026-08-16T00:00:00Z"}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"schema_version":14,"agents":[{},{}]}}"#,
+        row("worker-alpha"),
+        row("worker-gamma")
+    );
+    std::fs::write(home.registry_json(), body).expect("seed valid registry");
+}
+
+/// AC5-HP: a divergent registry (3 raw rows, typed decode fails) must refuse
+/// daemon startup: no serving socket is published, the process exits nonzero,
+/// and stderr names the registry path plus both row counts. The
+/// `unwrap_or_default()` this replaced let the daemon come up believing zero
+/// agents and serve that false zero to every caller.
+#[tokio::test]
+async fn registry_startup_refuses_a_divergent_nonempty_registry() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    write_divergent_registry(&home);
+
+    let mut child = Command::new(DAEMON_BIN)
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("daemon spawns");
+
+    // Bounded wait for exit: the refusal happens before bind, so the process
+    // should die in well under a second. A daemon that STARTS serving instead
+    // hangs until idle-exit, and the deadline turns that into a failure here
+    // rather than a stuck test.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("daemon is waitable") {
+            Some(status) => break status,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            None => {
+                unsafe {
+                    libc::kill(child.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                panic!("daemon served instead of refusing a divergent registry");
+            }
+        }
+    };
+    assert!(
+        !status.success(),
+        "daemon must exit nonzero on a divergent registry"
+    );
+    assert!(
+        !home.supervisor_sock().exists(),
+        "no serving socket may be published over a divergent registry"
+    );
+    let mut stderr_buf = String::new();
+    if let Some(mut s) = child.stderr.take() {
+        use std::io::Read;
+        let _ = s.read_to_string(&mut stderr_buf);
+    }
+    let stderr = stderr_buf;
+    let reg_path = home.registry_json();
+    assert!(
+        stderr.contains(reg_path.to_str().unwrap()),
+        "stderr names the registry path: {stderr}"
+    );
+    assert!(
+        stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=0"),
+        "stderr carries both row counts: {stderr}"
+    );
+    assert!(stderr.contains("inspect"), "points at the file: {stderr}");
+    for banned in ["force", "skip", "ignore", "bypass", "no-verify"] {
+        assert!(
+            !stderr.to_lowercase().contains(banned),
+            "diagnostic must not name an override remedy ({banned}): {stderr}"
+        );
+    }
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC6-ERR + AC9-CON: with the daemon up and the registry THEN breaking, list
+/// and list --all must exit nonzero with `registry read failed` and must not
+/// print a successful payload that puts `count: 0` beside a positive
+/// discovered count.
+#[tokio::test]
+async fn registry_list_refuses_over_a_broken_registered_lane() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    write_valid_registry(&home);
+    let mut daemon = start_daemon(&home);
+
+    // Healthy first: the registered lane really carried the 2 rows.
+    let out = Command::new(CLIENT_BIN)
+        .args(["list", "--all", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client list runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "pre-break list failed: {stdout}");
+    assert!(stdout.contains("worker-alpha"), "row missing: {stdout}");
+
+    // Break the registered lane out from under the running daemon.
+    write_divergent_registry(&home);
+
+    for args in [
+        ["list", "--all", "--json"].as_slice(),
+        ["list", "--json"].as_slice(),
+    ] {
+        let out = Command::new(CLIENT_BIN)
+            .args(args)
+            .env("FNO_AGENTS_HOME", home.root())
+            .output()
+            .expect("client list runs");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "{args:?} must exit nonzero over a broken registry, got success: {stdout}"
+        );
+        assert!(
+            stderr.contains("registry read failed"),
+            "stderr must name the failed read: {stderr}"
+        );
+        assert!(
+            stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=0"),
+            "stderr must carry both counts: {stderr}"
+        );
+        assert!(
+            !stdout.contains("\"count\""),
+            "no successful payload may publish a count over a broken lane: {stdout}"
+        );
+    }
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC7-ERR + AC8-HP: the mail-delivery name lookup (agent.switchboard_v2,
+/// the handler behind `fno mail send`) reports an unreadable registry as an
+/// internal read failure -- never `AgentNotFound` for a name its raw rows
+/// demonstrably carry. A readable registry that genuinely lacks the name
+/// still returns `AgentNotFound`.
+#[tokio::test]
+async fn registry_lookup_distinguishes_unreadable_from_absent() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+
+    // Unreadable registry: the recipient IS present in the raw rows. The
+    // daemon starts on a HEALTHY registry (a divergent one refuses startup,
+    // see registry_startup_refuses_a_divergent_nonempty_registry) and the
+    // registry then breaks under it -- the live shape: a newer writer lands
+    // a row the running reader cannot represent.
+    write_valid_registry(&home);
+    let mut daemon = start_daemon(&home);
+    // Barrier: wait out the startup reconcile sweep before breaking the
+    // registry. The sweep's read-modify-write of a registry it read as VALID
+    // would otherwise overwrite the divergent fixture the moment it lands
+    // between its locked read and its write (a flake seen only in the full
+    // parallel run, where the sweep is slow enough to lose the race).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        if events.contains("daemon_started") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    write_divergent_registry(&home);
+
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(
+            11,
+            "agent.switchboard_v2",
+            json!({
+                "to": "worker-alpha",
+                "from": "worker-omega",
+                "body": "ping",
+                "recipient_identity": {},
+                "mirror": false,
+            }),
+        ),
+    )
+    .await
+    .expect("switchboard call");
+    let err = resp.error().expect("broken registry must error the lookup");
+    assert!(
+        err.message.contains("registry read failed"),
+        "must name the failed read, got: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("raw_rows=3") && err.message.contains("decoded_rows=0"),
+        "must carry both counts: {}",
+        err.message
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+
+    // Control: a readable registry without the name keeps the absent contract.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    write_valid_registry(&home);
+    let mut daemon = start_daemon(&home);
+
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(
+            12,
+            "agent.switchboard_v2",
+            json!({
+                "to": "ghost-worker",
+                "from": "worker-omega",
+                "body": "ping",
+                "recipient_identity": {},
+                "mirror": false,
+            }),
+        ),
+    )
+    .await
+    .expect("switchboard call");
+    let err = resp.error().expect("absent name must still error");
+    assert!(
+        err.message.contains("'ghost-worker' not found"),
+        "a true miss keeps AgentNotFound wording: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("registry read failed"),
+        "a readable miss is not a read failure: {}",
+        err.message
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC4-EDGE control: a genuinely empty registry (a real empty array) starts
+/// the daemon and serves a legitimate count of zero.
+#[tokio::test]
+async fn registry_true_empty_registry_still_serves_zero() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    std::fs::write(home.registry_json(), r#"{"schema_version":14,"agents":[]}"#).unwrap();
+    let mut daemon = start_daemon(&home);
+
+    let out = Command::new(CLIENT_BIN)
+        .args(["list", "--all", "--json"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("client list runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "a true empty is a valid zero-agent state: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("\"count\": 0"),
+        "count 0 published: {stdout}"
+    );
+    assert!(stdout.contains("\"agents\": []"), "empty roster: {stdout}");
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// codex P1 on PR 924: the row-count assertion must hold on every read the
+/// daemon serves, not only at startup. A daemon that starts on a healthy store
+/// and then meets a NEWER writer's registry (one row this binary cannot
+/// represent) must refuse the read, never serve the partial roster as the
+/// complete one -- the startup assertion never re-runs.
+#[tokio::test]
+async fn registry_runtime_upgrade_refuses_a_partial_roster() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    write_valid_registry(&home);
+    let mut daemon = start_daemon(&home);
+
+    // Barrier: the startup reconcile sweep's read-modify-write settles before
+    // the future-schema fixture lands (same race the lookup test fences).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        if events.contains("daemon_started") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // A v15 store: the tolerant reader keeps the two rows it can represent and
+    // drops the announced third (an unknown status value). Raw 3, decoded 2.
+    let row = |name: &str, status: &str| {
+        format!(
+            r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
+        )
+    };
+    let fixture = format!(
+        r#"{{"schema_version":15,"agents":[{},{},{}]}}"#,
+        row("worker-alpha", "live"),
+        row("worker-beta", "flux"),
+        row("worker-gamma", "live")
+    );
+
+    // The idle-tick sweeps (scrape, GC) read-modify-write the registry and can
+    // HEAL a future-schema fixture mid-race (seen once on a slow CI runner):
+    // the healed file is then a valid registry and serving it is correct. A
+    // healed file breaks the test's precondition, not the code, so re-seed and
+    // retry. A file still holding the 3-raw-row v15 shape that GETS SERVED is
+    // the real failure and always panics here.
+    let mut attempt = 0;
+    loop {
+        std::fs::write(home.registry_json(), &fixture).expect("seed future-schema registry");
+        let out = Command::new(CLIENT_BIN)
+            .args(["list", "--json"])
+            .env("FNO_AGENTS_HOME", home.root())
+            .output()
+            .expect("client list runs");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                stderr.contains("registry read failed"),
+                "must name the failed read: {stderr}"
+            );
+            assert!(
+                stderr.contains("raw_rows=3") && stderr.contains("decoded_rows=2"),
+                "must carry both counts: {stderr}"
+            );
+            break;
+        }
+        attempt += 1;
+        let on_disk = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
+        assert!(
+            on_disk != fixture,
+            "daemon served the 3-raw-row future-schema roster as complete: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            attempt < 5,
+            "an idle-tick sweep keeps healing the fixture before the read; on-disk: {}",
+            on_disk
+        );
+    }
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}

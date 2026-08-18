@@ -147,11 +147,11 @@ crates/fno-agents/src/bin/client.rs:63
 crates/fno-agents/src/claims.rs:10
 crates/fno-agents/src/claude_adopt.rs:3
 crates/fno-agents/src/claude_ask.rs:9
-crates/fno-agents/src/client.rs:25
+crates/fno-agents/src/client.rs:28
 crates/fno-agents/src/client_verbs.rs:77
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:154
+crates/fno-agents/src/daemon.rs:155
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:49
@@ -172,7 +172,7 @@ crates/fno-agents/src/readiness.rs:13
 crates/fno-agents/src/roster_progress.rs:7
 crates/fno-agents/src/scrape.rs:10
 crates/fno-agents/src/spawn_gate.rs:12
-crates/fno-agents/src/state.rs:44
+crates/fno-agents/src/state.rs:54
 crates/fno-agents/src/stream_worker.rs:19
 crates/fno-agents/src/subprocess_ask.rs:6
 crates/fno-agents/src/verify_evidence.rs:9

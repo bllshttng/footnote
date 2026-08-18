@@ -158,9 +158,17 @@ pub struct RecoveryReport {
 /// unit-tested against a hand-built `~/.fno/agents/` tree. The ordering
 /// invariant (READ `drive_active` BEFORE clearing it, finding #12 Critical) is
 /// enforced by [`crate::state::PtyState::take_active_drive`], which this calls.
-pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
+///
+/// Since x-4c87 an unreadable registry is a startup failure, not an empty
+/// roster: recovery ran on `unwrap_or_default()` reads, so a store the typed
+/// reader could not decode made the daemon come up believing zero agents and
+/// answer every later caller from that false zero.
+pub fn recover(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+) -> Result<RecoveryReport, state::StateError> {
     let mut report = RecoveryReport::default();
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    let registry = load_registry_asserted(&home.registry_json())?;
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -337,7 +345,7 @@ pub fn recover(home: &AgentsHome, emitter: &EventEmitter) -> RecoveryReport {
         }
     }
 
-    report
+    Ok(report)
 }
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
@@ -589,6 +597,11 @@ struct HarnessStoreIndex {
 impl HarnessStoreIndex {
     /// Test seam: fixed roots, so the per-harness keying is unit-testable
     /// against temp trees instead of the developer's real `~/.claude`/`~/.codex`.
+    /// (Called only from the lib test suite. Deliberately NOT gated with the
+    /// test cfg attribute: the emit-kind scanner in lib.rs truncates each file
+    /// at the first byte-level occurrence of that attribute's text, so a
+    /// mid-file gate would classify every later production emit as test-only.)
+    #[allow(dead_code)]
     fn with_roots(claude_root: std::path::PathBuf, codex_root: std::path::PathBuf) -> Self {
         HarnessStoreIndex {
             claude_root: Some(claude_root),
@@ -1820,6 +1833,14 @@ fn flock_self_test(home: &AgentsHome) -> Result<(), DaemonError> {
 pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
 
+    // Startup row-count assertion (x-4c87 AC5), BEFORE the socket is bound: a
+    // registry with rows on disk that the typed reader cannot fully decode must
+    // refuse startup here -- exit nonzero, stderr naming the path and both
+    // counts -- rather than bind, serve, and answer every caller from a
+    // silently emptied roster (the false "0 registered agents" outage: a stale
+    // daemon swallowing its own read failure while discovery kept answering).
+    load_registry_asserted(&home.registry_json())?;
+
     // State: cold_start.
     let listener = match bind_supervisor_socket(&home).await {
         Ok(l) => l,
@@ -1832,7 +1853,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
 
     // State: recovering. Recovery must complete before we accept a request.
     emit_state(&emitter, DaemonState::Recovering);
-    let report = recover(&home, &emitter);
+    let report = recover(&home, &emitter)?;
 
     // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
     // as part of recovery and BEFORE the accept loop serves any client, so the
@@ -2154,17 +2175,50 @@ where
     }
 }
 
-/// Offload the blocking flock + file read of `state::load_registry` to the
+/// The daemon-face x-4c87 read: the typed decode plus the raw-count
+/// assertion, on EVERY roster read the daemon serves (startup, recovery, and
+/// every RPC handler). The tolerant state reader still returns a PARTIAL
+/// registry for a future-schema store with announced row drops, which the
+/// read-modify-write path needs; a daemon that serves that partial roster as
+/// the complete roster is the false-zero outage at runtime, because the
+/// startup assertion never re-runs (codex P1 on PR 924).
+fn load_registry_asserted(path: &std::path::Path) -> Result<state::Registry, state::StateError> {
+    let (registry, raw_rows) = state::load_registry_with_counts(path)?;
+    if registry.entries.len() != raw_rows {
+        return Err(state::StateError::InvariantViolation(
+            state::registry_row_divergence_msg(path, raw_rows, registry.entries.len()),
+        ));
+    }
+    Ok(registry)
+}
+
+/// Offload the blocking flock + file read of `load_registry_asserted` to the
 /// blocking pool so it never stalls an async handler's runtime thread
-/// (ab-e86e326b). Mirrors the existing `handle_status` offload and the
-/// `run_blocking` wrapper. A join failure or a read error both collapse to the
-/// empty registry, matching the `.unwrap_or_default()` the inline callers used.
-async fn load_registry_offloaded(path: PathBuf) -> state::Registry {
-    tokio::task::spawn_blocking(move || state::load_registry(&path))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default()
+/// (ab-e86e326b). Mirrors the `update_registry_offloaded` wrapper and the
+/// `run_blocking` helper. Since x-4c87 a join failure maps to a `StateError`
+/// (like `update_registry_offloaded`) and a read error propagates: both used
+/// to collapse to the empty registry, which turned an unreadable registry into
+/// the valid-looking answer "zero agents" for every caller below.
+async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state::StateError> {
+    match tokio::task::spawn_blocking(move || load_registry_asserted(&path)).await {
+        Ok(result) => result,
+        Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
+            "load_registry task panicked: {e}"
+        )))),
+    }
+}
+
+/// The x-4c87 RPC face of a registry-read failure: every handler that consults
+/// the registered roster reports `registry read failed` carrying the state
+/// error (which names the registry path, both row counts, and the comparison
+/// to run) instead of answering from a silently emptied roster. `AgentNotFound`
+/// stays reserved for a successful read with no matching row.
+fn registry_read_failed(id: u64, e: state::StateError) -> Response {
+    Response::err(
+        id,
+        ErrorCode::Internal,
+        format!("registry read failed: {e}"),
+    )
 }
 
 /// Offload the blocking read-modify-write of `state::update_registry` to the
@@ -2611,8 +2665,13 @@ async fn spawn_claude_stream_lane(
     };
 
     // 2. Lock-free pre-checks for clean messages (the authoritative re-checks run
-    //    atomically under the registry lock at registration).
-    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    //    atomically under the registry lock at registration). A read failure is
+    //    fatal to the spawn (x-4c87): an empty-roster default here would read
+    //    every existing name as free.
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     if let Some(existing) = registry.find(name) {
         return Response::err(
             req.id,
@@ -2995,7 +3054,10 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -3504,7 +3566,13 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         );
     }
 
-    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    // x-4c87: a blind read must not claim a live recipient is absent. The
+    // `unwrap_or_default()` this replaces made every mail send to a
+    // demonstrably live worker print `agent '<name>' not found` first.
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let to_entry = match registry.find(&to) {
         Some(e) => e.clone(),
         None => {
@@ -3600,9 +3668,30 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
     if mirror && from != to {
         // Re-load the registry: driving B can take up to the turn budget (~120s),
         // during which A may have been restarted with a new short_id. The pre-turn
-        // snapshot could point at A's old socket (gemini-review HIGH).
-        let fresh = load_registry_offloaded(ctx.home.registry_json()).await;
-        if let Some(from_entry) = fresh.find(&from).filter(|entry| {
+        // snapshot could point at A's old socket (gemini-review HIGH). A read
+        // failure here DEMOTES the mirror the same way a mirror transport
+        // failure does below: B's turn already completed, so failing the whole
+        // request would discard a delivered reply and invite a duplicate
+        // re-send (code-review on PR 924).
+        let fresh = match load_registry_offloaded(ctx.home.registry_json()).await {
+            Ok(r) => Some(r),
+            Err(e) => {
+                let _ = ctx.emitter.emit(
+                    "agent_deliver_demoted",
+                    &json!({
+                        "name": from,
+                        "from_name": to,
+                        "transport": "switchboard-mirror",
+                        // No provider field: a provider-named binding holding a
+                        // harness literal is the axis-vocabulary violation the
+                        // content scan prohibits (check-axis-vocabulary).
+                        "reason": format!("registry re-read failed: {e}"),
+                    }),
+                );
+                None
+            }
+        };
+        if let Some(from_entry) = fresh.as_ref().and_then(|f| f.find(&from)).filter(|entry| {
             from_identity.is_some_and(|identity| switchboard_identity_matches(entry, identity))
         }) {
             let from_sock = ctx.home.worker_sock(&from_entry.short_id);
@@ -3618,7 +3707,6 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
                             &json!({
                                 "name": from,
                                 "from_name": to,
-                                "provider": "claude",
                                 "transport": "switchboard-mirror",
                                 "reason": e,
                             }),
@@ -3846,7 +3934,15 @@ where
     };
     let filter_cwd_norm = filter_cwd.as_deref().map(&norm_path);
 
-    let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
+    // x-4c87: an unreadable registry is an RPC error, never a valid empty
+    // roster with discovered-only rows beside it. `unwrap_or_default()` here is
+    // what let a broken registered lane publish `count: 0` next to a healthy
+    // `discovered_count` and read as "no agents". This handler is sync, so it
+    // takes the asserted blocking read inline.
+    let registry = match load_registry_asserted(&ctx.home.registry_json()) {
+        Ok(reg) => reg,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let classified: Vec<_> = registry
         .entries
         .iter()
@@ -4121,13 +4217,13 @@ where
 /// and its CI parity check, and a breaking rename would buy wording alone.
 async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // load_registry does blocking flock I/O; offload it from the async worker
-    // thread (Gemini review). The drive-table read below stays async.
-    let reg_path = ctx.home.registry_json();
-    let registry = tokio::task::spawn_blocking(move || state::load_registry(&reg_path))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+    // thread (Gemini review). The drive-table read below stays async. A read
+    // failure is an RPC error (x-4c87): `unwrap_or_default()` here published
+    // zero-agent status counts over a broken registry.
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(reg) => reg,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let mut by_status: Map<String, Value> = Map::new();
     let mut restarting: u64 = 0;
     let mut channels_registered: u64 = 0;
@@ -4223,7 +4319,10 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
-    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let entry =
         match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
             Ok(Some(entry)) => entry,
@@ -4610,7 +4709,10 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let registry = load_registry_offloaded(ctx.home.registry_json()).await;
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(r) => r,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let entry =
         match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
             Ok(Some(entry)) => entry,
@@ -5061,7 +5163,13 @@ fn run_reconcile_sweep(
     // that follows.
     late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout);
 
-    let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
+    // x-4c87: a broken registry is a failed sweep, never a successful zero-row
+    // scan. `unwrap_or_default()` here answered the client-facing reconcile
+    // RPC with `scanned: 0` over a store full of rows (code-review on PR 924).
+    let registry = match load_registry_asserted(&home.registry_json()) {
+        Ok(r) => r,
+        Err(e) => return Err(format!("registry read failed: {e}")),
+    };
 
     // Fairness: probe least-recently-reconciled first (None < Some), so a
     // budget-exhausted sweep eventually covers every entry (finding #1).
@@ -5800,7 +5908,14 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
             )
         }
     };
-    let registry = state::load_registry(&ctx.home.registry_json()).unwrap_or_default();
+    // x-4c87: a channel lookup over an unreadable registry reports the failed
+    // read, never a false `ChannelUnknown` for a channel its rows carry. The
+    // asserted read also refuses a partial roster (this handler is sync, so it
+    // takes the blocking read inline as before).
+    let registry = match load_registry_asserted(&ctx.home.registry_json()) {
+        Ok(reg) => reg,
+        Err(e) => return registry_read_failed(req.id, e),
+    };
     let found = registry
         .entries
         .iter()
@@ -7091,7 +7206,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         });
         state::write_state_atomic(&home.state_json("wkA"), &st).unwrap();
 
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert_eq!(report.recovered_drives, vec!["wkA".to_string()]);
 
         // drive_crashed emitted, carrying the session id (proves read-before-clear).
@@ -7153,7 +7268,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
         // No state.json written for "ghost".
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert_eq!(
             report.inconsistent,
             vec![("ghost".to_string(), InconsistencyReason::MissingStateJson)]
@@ -7188,7 +7303,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
         // No state.json written for either row.
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert!(
             report.inconsistent.is_empty(),
             "claude shellout/adopted rows must not be flagged inconsistent: {:?}",
@@ -7299,7 +7414,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         st.status = AgentStatus::Live;
         state::write_state_atomic(&home.state_json("dead"), &st).unwrap();
 
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert_eq!(report.reaped_pids, vec![0x7fff_fff0]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(reg.find("dead").unwrap().status, AgentStatus::Exited);
@@ -7616,7 +7731,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         st.status = AgentStatus::Live;
         state::write_state_atomic(&home.state_json("recycled"), &st).unwrap();
 
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert_eq!(report.reaped_pids, vec![me]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(reg.find("recycled").unwrap().status, AgentStatus::Exited);
@@ -7632,7 +7747,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         st.status = AgentStatus::Live;
         state::write_state_atomic(&home.state_json("loner"), &st).unwrap();
 
-        let report = recover(&home, &emitter);
+        let report = recover(&home, &emitter).expect("startup recovery");
         assert_eq!(report.archived_orphans, vec!["loner".to_string()]);
         assert!(!home.agent_dir("loner").exists(), "orphan dir moved aside");
         assert!(home.orphaned_dir().exists());
@@ -9773,7 +9888,9 @@ done
         assert_eq!(res["status"], "live");
         assert_eq!(res["lane"], "stream");
 
-        let reg = load_registry_offloaded(home.registry_json()).await;
+        let reg = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry readable");
         let row = reg.find("cl").expect("adopted row missing");
         assert_eq!(row.harness_name(), "claude");
         assert_eq!(row.host_mode.as_deref(), Some("interactive"));
@@ -9826,7 +9943,9 @@ done
             "DOA resume child must be rejected, not registered"
         );
         assert_eq!(resp.error().unwrap().code, ErrorCode::SpawnFailed);
-        let reg = load_registry_offloaded(home.registry_json()).await;
+        let reg = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry readable");
         assert!(
             reg.find("cl").is_none(),
             "no row may be registered for a DOA adopt"
