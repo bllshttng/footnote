@@ -1031,8 +1031,20 @@ mod tests {
         // assertion and read as proof of a split that is not there.
         let events = format!(
             "{}\n{}\n",
-            mail_escalation("2026-07-03T02:00:00Z", "question", "etl", "web", "which auth?"),
-            mail_escalation("2026-07-03T03:00:00Z", "reachable-miss", "sender", "9a06", "ping"),
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "web",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T03:00:00Z",
+                "reachable-miss",
+                "sender",
+                "9a06",
+                "ping"
+            ),
         );
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items.len(), 2, "one row per recipient, both present");

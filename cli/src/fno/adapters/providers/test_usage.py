@@ -790,6 +790,10 @@ class TestDispatchOneQuotaDefer:
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
         monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        # The journal too, not just the root: the hermetic sandbox pins
+        # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
+        # so a test reading <root>/.fno/events.jsonl back must name that file.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         from fno import paths
         paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
@@ -827,6 +831,10 @@ class TestDispatchOneQuotaDefer:
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
         monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        # The journal too, not just the root: the hermetic sandbox pins
+        # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
+        # so a test reading <root>/.fno/events.jsonl back must name that file.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         from fno import paths
         paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)
@@ -867,6 +875,10 @@ class TestRequiredBotHeadroomCheck:
 
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rt.json"))
         monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        # The journal too, not just the root: the hermetic sandbox pins
+        # FNO_EVENTS_PATH for the whole pytest process and it outranks the root,
+        # so a test reading <root>/.fno/events.jsonl back must name that file.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         from fno import paths
         paths.resolve_repo_root.cache_clear()
         monkeypatch.chdir(tmp_path)

@@ -305,6 +305,11 @@ class TestReapDeadClaims:
         # non-write, which is what this test asserts) lands under tmp_path.
         from fno.paths import resolve_repo_root
         resolve_repo_root.cache_clear()
+        # The journal is pinned as well as the root. The hermetic sandbox sets
+        # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
+        # of the root, so a test reading the cwd-derived journal back has to
+        # name that same file.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         acquire_claim("k", HOLDER_A, pid=_dead_pid(), root=tmp_path)
 
         summary = reap_dead_claims(roots=[tmp_path], apply=False)
@@ -344,6 +349,11 @@ class TestReapDeadClaims:
         # means this test passes as part of the suite but fails run alone.
         from fno.paths import resolve_repo_root
         resolve_repo_root.cache_clear()
+        # The journal is pinned as well as the root. The hermetic sandbox sets
+        # FNO_EVENTS_PATH for the whole pytest process and it is checked ahead
+        # of the root, so a test reading the cwd-derived journal back has to
+        # name that same file.
+        monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
         import json
 
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap

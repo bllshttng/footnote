@@ -37,8 +37,11 @@ def test_record_denominator_choice_classifies_each_exit(monkeypatch, tmp_path):
 
     (tmp_path / ".fno").mkdir()
     # init's cwd is the repo root; the helper writes to the cwd-relative default
-    # events path, so chdir to the tmp repo to keep the test hermetic.
+    # events path, so chdir to the tmp repo to keep the test hermetic. The
+    # journal needs pinning too: the hermetic sandbox sets FNO_EVENTS_PATH for
+    # the whole pytest process, and it is checked ahead of the resolved root.
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
 
     target_cli._record_denominator_choice("/x/p.md", None, None)  # plan
     target_cli._record_denominator_choice("", 1, None)  # deliverables:1
