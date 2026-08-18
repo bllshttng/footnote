@@ -444,6 +444,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "headRefOid": "h" * 40,
         }, ""),
     )
     # Stub the review read (no gh) so the frozen contract is deterministic.
@@ -464,6 +465,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out == {
         "pr": "42",
+        "head": "h" * 40,
         "verdict": "green",
         "settled": True,
         "green": True,

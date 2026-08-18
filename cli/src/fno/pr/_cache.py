@@ -3,14 +3,18 @@
 The GraphQL quota is per-USER, and the REST SECONDARY limit counts request
 rate, so N sessions polling one PR trip it no matter which transport they
 use. Only collapsing those N reads into one helps. This module is that
-collapse: one shared row per (repo, PR) in a flock-protected file under the
-fno state dir, refreshed at most once per TTL by whichever session missed.
+collapse: one shared row per (repo, PR, HEAD) in a flock-protected file under
+the fno state dir, refreshed at most once per TTL by whichever session missed.
+The head is part of the key because a verdict is a fact about one commit: a
+row cached for head A must never answer for head B, whose check set may not
+exist yet (the operator's court zero-checks fail-open).
 
 A 403 secondary-limit failure poisons the row for a while: `backoff_until`
 pushes the next real read out by 2^k * 60s (capped at 900s), and a caller
-inside the window is served the last good verdict stamped `stale_reason` -
-never a fresh-looking row, and never a silent retry that sustains the very
-refusal it is waiting out. Transient (non-secondary) failures are NOT
+inside the window is served the last row DEGRADED to unknown/unsettled with
+`stale_reason` - never its green verdict, never a fresh-looking row, and
+never a silent retry that sustains the very refusal it is waiting out.
+Transient (non-secondary) failures are NOT
 cached: a loud error must reach every caller, not be replayed from disk.
 
 Code defaults, deliberately not operator config: TTL 60s, backoff base 60s,
@@ -93,10 +97,21 @@ def _serve(row: dict, *, stale: bool) -> int:
         # than a served line followed by a second, live-read line.
         return -1
     if stale:
+        # Fail-closed stale serve (operator's court): inside a backoff window
+        # the fresh check set is UNREADABLE, so the row's green is a fact
+        # about a past read, not about the head now. Degrade the served line
+        # to unknown/unsettled/not-ready - a watcher grepping settled:true
+        # waits out the window instead of waking on unverifiable green.
+        out["stale_verdict"] = out.get("verdict")
+        out["verdict"] = "unknown"
+        out["green"] = False
+        out["settled"] = False
+        out["ready"] = False
         out["stale_reason"] = (
-            "secondary rate limit backoff - serving the last cached verdict, "
-            "not a fresh read"
+            "secondary rate limit backoff - the check set is unreadable, so "
+            "this is the last cached row degraded to unknown, not a verdict"
         )
+        code = 3
     out["cached"] = True
     sys.stdout.write(json.dumps(out) + "\n")
     # A degraded-coverage note must survive the coalescing this module exists
@@ -111,11 +126,15 @@ def _serve(row: dict, *, stale: bool) -> int:
 def cached_status(pr: str, cwd: Optional[str] = None) -> int:
     """`fno pr status` through the coalescing cache: the CLI chokepoint.
 
-    TTL-hit or backoff-window callers get the shared row and make zero
-    network calls (which also skips the review/coverage reads, themselves
-    GraphQL). Everyone else runs the real verb once and refreshes the row.
+    Rows are keyed by (repo, PR, head): a verdict is a fact about ONE commit,
+    and serving a green row cached for head A after a push moved the PR to
+    head B answered "settled" for a head whose check set was still empty (the
+    operator's court zero-checks finding). One cheap REST read buys the
+    current head on every call; the expensive reads (check-runs, status,
+    reviews, coverage) still collapse to one per TTL. Backoff-window callers
+    get the last row DEGRADED to unknown (see `_serve`), never its verdict.
     """
-    from fno.pr._rest import _repo_slug
+    from fno.pr._rest import _repo_slug, fetch_pr_info_rest
     from fno.pr._status import run_status
 
     slug = _repo_slug(cwd)
@@ -125,7 +144,27 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         # make the raw string a filesystem path component under cache_dir()).
         # Serve uncached rather than key every caller onto one global row.
         return run_status(pr, cwd)
-    key = f"{slug.replace('/', '--')}-{pr}"
+
+    slug_key = slug.replace("/", "--")
+    info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
+    if info is None:
+        # Head unreadable (secondary window, network): fail CLOSED. Serve the
+        # PR's newest existing row degraded (unknown, unsettled - keeps the
+        # zero-network collapse without ever answering green off data nobody
+        # can verify); with no row at all, the loud live read decides.
+        candidates = []
+        for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
+            try:
+                candidates.append((candidate.stat().st_mtime, candidate))
+            except OSError:
+                continue  # a racing prune won; fewer candidates, not a crash
+        for _, candidate in sorted(candidates, reverse=True):
+            row = read_row(candidate.stem)
+            code = _serve(row, stale=True) if row else -1
+            if code >= 0:
+                return code
+        return run_status(pr, cwd)
+    key = f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}"
 
     def _servable(row: Optional[dict], at: float) -> int:
         """Fast-path serve: fresh row, else a row inside its backoff window.
@@ -214,6 +253,12 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
                     {"ts": now, "exit": code, "output": output,
                      "fail_count": 0, "backoff_until": 0},
                 )
+                # One row per PR: a served verdict must describe the current
+                # head, so superseded heads' rows (and locks) go now, not on
+                # a periodic sweep nobody would write.
+                for old in p.parent.glob(f"{slug_key}-{pr}-*"):
+                    if old not in (p, lock_path):
+                        old.unlink(missing_ok=True)
             return code
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)

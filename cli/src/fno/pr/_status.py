@@ -280,6 +280,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         json.dumps(
             {
                 "pr": pr,
+                # The commit this verdict describes, so a caller can pin the
+                # answer to a head instead of trusting it across a push.
+                "head": pr_json.get("headRefOid"),
                 "verdict": verdict,
                 # total > 0 is load bearing: an empty rollup and an all-green
                 # one both have zero unsettled entries, and only one of them
