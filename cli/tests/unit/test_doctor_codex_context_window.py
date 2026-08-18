@@ -168,7 +168,11 @@ def test_emitted_line_names_the_numbers_and_the_cache_provenance(tmp_path, monke
     assert "258400" in line
     assert "gpt-5.6-sol" in line
     assert "2026-08-18T19:13:37.907036Z" in line
-    assert "records none" in line
+    # The cap turns on surface AND originator, so the line must not pin it to
+    # the originator alone: codex exec and codex app-server are served
+    # differently under one originator string.
+    assert "surface and originator both" in line
+    assert "records neither" in line
     # No file-wide tier claim: one cache holds sol at base and luna above it.
     assert "tier" not in line
 

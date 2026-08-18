@@ -1785,11 +1785,13 @@ def _codex_context_window_report() -> dict[str, Any]:
     Scope is the model config.toml selects.  ``-m`` and a profile both override
     it per thread, so this describes the default, never "every thread".
 
-    The cached ``max_context_window`` is served per originator header while the
-    cache records no originator and every launcher shares one copy, so the last
-    fetch sets the cap for every thread started since.  That cap is per MODEL,
-    not per file: one fetch here holds gpt-5.6-sol at 272000 beside gpt-5.4 at
-    1000000, so no single file-wide tier label is truthful.  Read-only.
+    The cached ``max_context_window`` is served per fetching client - both its
+    surface and its originator, since ``codex exec`` and ``codex app-server``
+    are served differently under one originator - while the cache records
+    neither and every launcher shares one copy.  So the last fetch sets the cap
+    for every thread started since.  That cap is per MODEL, not per file: one
+    fetch here holds gpt-5.6-sol at 272000 beside gpt-5.4 at 1000000, so no
+    single file-wide tier label is truthful.  Read-only.
 
     A silent path returns a ``reason`` rather than ``{}`` so ``--json`` says
     which of "nothing to report" and "could not tell" happened."""
@@ -1856,9 +1858,9 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
         line += (
             f" models_cache.json also caps {report['model']} at "
             f"{report['max_context_window']} (fetched {report['cache_fetched_at']} by codex "
-            f"{report['cache_client_version']}). That cap is served per originator header "
-            "and the cache records none, so whichever launcher fetched last set it for "
-            "every thread started since."
+            f"{report['cache_client_version']}). That cap is served per fetching client, "
+            "surface and originator both, and the cache records neither, so whichever "
+            "launcher fetched last set it for every thread started since."
         )
     out(line)
 
