@@ -175,7 +175,7 @@ crates/fno-agents/src/spawn_gate.rs:12
 crates/fno-agents/src/state.rs:54
 crates/fno-agents/src/stream_worker.rs:19
 crates/fno-agents/src/subprocess_ask.rs:6
-crates/fno-agents/src/verify_evidence.rs:9
+crates/fno-agents/src/verify_evidence.rs:8
 crates/fno-agents/src/wait.rs:4
 crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:94
