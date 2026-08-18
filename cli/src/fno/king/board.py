@@ -375,8 +375,8 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # verdict needs the absence of every unfinished and failed marker.
         states: set[str] = set()
         for check in pr.get("statusCheckRollup") or []:
-            for field in ("conclusion", "status", "state"):
-                value = check.get(field)
+            for key in ("conclusion", "status", "state"):
+                value = check.get(key)
                 if value:
                     states.add(str(value).upper())
         if states & {"FAILURE", "CANCELLED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED"}:
