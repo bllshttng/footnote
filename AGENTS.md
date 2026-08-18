@@ -26,7 +26,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel proven to reach every harness at session start, and codex sees this body, not linked rule bodies.
 
-**Cap: bytes, not the count.** Every entry is paid at every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first, near 5: fund an entry by trading bytes here, never by raising the ceiling.
+**Cap: bytes, not the count.** Every entry is paid at every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first, near 5. This prose is at its floor: funding a new entry is unsolved.
 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove an entry in the PR where its guard lands.
 

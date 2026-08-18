@@ -42,7 +42,7 @@ set -euo pipefail
 # trail for this constant 674 bytes wrong.
 # The gate is now two-sided (see RATCHET_NUDGE_BYTES below): a cut large enough
 # to push spare past the band fails until the ceiling follows it down.
-# RAISED to 36830, the minimum that fits the measured text, deliberately with
+# RAISED to 36824, the minimum that fits the measured text, deliberately with
 # ZERO spare rather than a round number. The corpus header says to fund growth
 # by trading bytes here and never by raising this. That instruction assumes
 # tradeable restatement exists in the pitfalls corpus. It was measured and it
@@ -59,17 +59,22 @@ set -euo pipefail
 #
 # Zero spare is the point: the next preamble byte of any kind fails this gate
 # and has to fund itself. Do not read 36830 as room.
-CEILING_BYTES=36830
+CEILING_BYTES=36824
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
 #
 # Set the ceiling at measured + band/2, so both directions get the same room.
-# EXCEPTION, and it is the current state: 36830 is measured EXACTLY, with zero
+# EXCEPTION, and it is the current state: 36824 is measured EXACTLY, with zero
 # spare, because the fund-by-trading lever it assumes is exhausted (see the
 # ceiling comment above and the refusal text below). Do not "restore" this to
 # measured + band/2 as a tidy-up; that silently undoes the zero-spare intent
 # and hands back the headroom the measurement was spent to remove.
+#
+# The last 6 bytes came from deleting a false absolute in the corpus header
+# ("never by raising the ceiling"), not from a trade. This ceiling followed
+# that saving DOWN rather than banking it as slack, because zero spare is the
+# whole point: a saving kept as headroom is a saving spent by the next edit.
 # Sitting just under the band instead leaves almost no slack for a cut, and the
 # gate then fires on the very edits it wants to encourage; sitting at
 # measured + band leaves none at all, since any cut at all trips it.
