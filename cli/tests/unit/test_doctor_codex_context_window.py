@@ -357,3 +357,51 @@ def test_a_live_app_server_daemon_is_named_as_the_thing_holding_the_cap_down(
 
     sock.touch()
     assert "app-server daemon is live" in _emit(doctor._codex_context_window_report())[0]
+
+
+def test_the_daemon_warning_reaches_the_raised_cap_branch(tmp_path, monkeypatch) -> None:
+    """The raised-cap case is the one that NEEDS the warning: the daemon is
+    what pulls 828400 back to 258400.  The clause used to sit in the other
+    branch, so the run about to lose 570k tokens was the one told nothing."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=872000)
+    (tmp_path / "app-server-control").mkdir()
+    (tmp_path / "app-server-control" / "app-server-control.sock").touch()
+
+    line = _emit(doctor._codex_context_window_report())[0]
+
+    assert "above its 272000 base" in line
+    assert "drops this to 258400" in line
+    assert "app-server daemon is live" in line
+
+
+def test_a_malformed_profiles_table_returns_a_reason_not_a_raise(
+    tmp_path, monkeypatch
+) -> None:
+    """The caller swallows exceptions, so a raise drops the key from --json
+    and destroys the difference between nothing-to-report and could-not-tell."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, config_extra='profile = "big"\nprofiles = "oops"')
+
+    assert doctor._codex_context_window_report()["model"] == "gpt-5.6-sol"
+
+    _write(
+        tmp_path,
+        configured=1000000,
+        config_extra='profile = "big"\n[profiles]\nbig = "also-oops"',
+    )
+
+    assert doctor._codex_context_window_report()["model"] == "gpt-5.6-sol"
+
+
+def test_a_synthesized_cap_is_not_called_the_base(tmp_path, monkeypatch) -> None:
+    """A missing max_context_window makes `cap` a copy of the base that the
+    cache never carried, and a cap BELOW base is upstream nonsense.  Neither
+    earns the phrase 'its base' in a check about numbers that lie."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=200000)
+
+    line = _emit(doctor._codex_context_window_report())[0]
+
+    assert "puts gpt-5.6-sol at 200000" in line
+    assert "its base" not in line

@@ -1815,7 +1815,13 @@ def _codex_context_window_report() -> dict[str, Any]:
     window_source = "model_context_window"
     profile = config.get("profile")
     if isinstance(profile, str):
-        table = (config.get("profiles") or {}).get(profile) or {}
+        # A malformed `profiles` (a scalar, or a scalar entry) must return a
+        # reason, not raise: the caller swallows exceptions, which drops the
+        # key from --json and loses the "could not tell" the reason exists for.
+        profiles = config.get("profiles")
+        table = profiles.get(profile) if isinstance(profiles, dict) else None
+        if not isinstance(table, dict):
+            table = {}
         if "model" in table:
             source = f"profiles.{profile}.model"
         if "model_context_window" in table:
@@ -1907,21 +1913,32 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
                 f" models_cache.json holds {report['model']} at {cap}, above its {base} "
                 f"base {provenance}. A base-tier fetch drops this to {base_tier}."
             )
-        else:
+        elif cap == base:
             line += (
                 f" models_cache.json caps {report['model']} at {cap}, its base "
                 f"{provenance}, so whichever launcher fetched last set it for every "
                 "thread started since."
             )
-            if report.get("app_server_running"):
-                # Deliberately no remedy.  The only lever that raises the cap
-                # is stopping this daemon, and `_codex_app_server_report` right
-                # above requires the same socket for live mail to a codex peer.
-                # Naming a fix here means telling the operator to break that.
-                line += (
-                    " A codex app-server daemon is live here and every app-server "
-                    "fetch lands the base cap, so it will keep pulling this back down."
-                )
+        else:
+            # cap < base is upstream nonsense, and a synthesized cap the cache
+            # never carried lands here too.  State the number, claim nothing.
+            line += (
+                f" models_cache.json puts {report['model']} at {cap} {provenance}, "
+                "so whichever launcher fetched last set it for every thread "
+                "started since."
+            )
+        # Belongs on every branch, and most of all on the RAISED-cap one: the
+        # daemon is the thing that pulls a raised cap back down, so the run
+        # about to lose the difference is the one that needs telling.
+        if report.get("app_server_running"):
+            # Deliberately no remedy.  The only lever that raises the cap is
+            # stopping this daemon, and `_codex_app_server_report` right above
+            # requires the same socket for live mail to a codex peer.  Naming a
+            # fix here means telling the operator to break that.
+            line += (
+                " A codex app-server daemon is live here and every app-server "
+                "fetch lands the base cap, so it will keep pulling this back down."
+            )
     out(line)
 
 
