@@ -113,13 +113,16 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // instantly; a CHANGED binary (e.g. a same-path `uv tool install --force`
     // of a different package) is re-verified before exec, so the "never run a
     // foreign fno" invariant still holds after the first bootstrap.
-    // One waited subject per call. The adopt arm below resolves the SAME path
-    // this arm already waited on, so when the sentinel arm has exhausted a
-    // budget here, the adopt arm takes single-shot looks instead: re-running
-    // the full waits down there charged the same call twice - 6s and up to 32
-    // spawns against a tree this call had just spent 3s learning would not
-    // answer - for a second opinion the budget cannot produce.
-    let mut wait_already_spent = false;
+    // One waited SUBJECT per call, accounted per subject. The adopt arm below
+    // resolves the SAME path this arm already waited on, so a budget exhausted
+    // here buys a single-shot look at THAT subject down there - but only that
+    // subject: the two arms wait on two different predicates (the executable
+    // look and the identity probe), and a call that spent only the executable
+    // budget has not asked the identity question yet. Charging the unspent
+    // verify a single-shot too turned a settleable instrument failure into a
+    // hard refusal.
+    let mut executable_budget_spent = false;
+    let mut verify_budget_spent = false;
     if let Some((real, recorded_mtime)) = read_sentinel() {
         // `is_executable` answers false for a purely TRANSIENT reason too: an
         // install in flight deletes and recreates this exact file, and it is
@@ -167,11 +170,14 @@ fn run(args: &[OsString]) -> BootResult<()> {
             // always has. Whether that --force should ever refuse over a
             // stranger is a real design question, and it is not decided here.
             let _ = fs::remove_file(sentinel_path());
-            wait_already_spent = true;
+            executable_budget_spent = true;
+            verify_budget_spent = true;
         } else {
             // Stale sentinel (wheel uninstalled): drop it and re-provision.
+            // Only the EXECUTABLE budget was spent on this path; the identity
+            // probe never ran, so the adopt arm below still owes it a wait.
             let _ = fs::remove_file(sentinel_path());
-            wait_already_spent = true;
+            executable_budget_spent = true;
         }
     }
 
@@ -212,15 +218,15 @@ fn run(args: &[OsString]) -> BootResult<()> {
     if let Some(real) = resolve_via_uv_tool_dir() {
         let mid_rewrite_possible =
             sentinel_dir().is_dir() || real.parent().is_some_and(|bin| bin.is_dir());
-        // `wait_already_spent` (see the sentinel arm) drops this to single-shot
-        // looks: the same call already exhausted the budget on this exact path.
-        let ready = if mid_rewrite_possible && !wait_already_spent {
+        // The per-subject flags from the sentinel arm: a budget THIS call spent
+        // on this exact path buys a single-shot look at that subject only.
+        let ready = if mid_rewrite_possible && !executable_budget_spent {
             executable_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)
         } else {
             is_executable(&real)
         };
         if ready {
-            if wait_already_spent {
+            if verify_budget_spent {
                 verify_ours(&real)?;
             } else {
                 verify_ours_within(&real, VERIFY_ATTEMPTS, VERIFY_POLL)?;
