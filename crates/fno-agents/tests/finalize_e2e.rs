@@ -36,6 +36,7 @@ struct Env {
     gh_calls: PathBuf,
     fno_calls: PathBuf,
     outstanding_store: PathBuf,
+    pr_info: PathBuf,
 }
 
 /// Build a hermetic env. `register_fails` makes the register-task stub exit 1.
@@ -99,10 +100,26 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20       open(store, 'w').write(json.dumps(data))\n\
          \x20   print('q-test')\n\
          \x20   sys.exit(0)\n\
+         if args[:2] == ['pr', 'info']:\n\
+         \x20   p = os.environ.get('FNO_STUB_PR_INFO', 'pr-info.json')\n\
+         \x20   if os.path.exists(p):\n\
+         \x20       sys.stdout.write(open(p).read())\n\
+         \x20       sys.exit(0)\n\
+         \x20   sys.exit(1)\n\
          sys.exit(1)\n",
     )
     .unwrap();
     fs::set_permissions(&fno_stub, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // REST `fno pr info` payload the stubs serve: finalize resolves the
+    // branch PR through the CLI's REST reader now, not gh, so the harness
+    // answers from a file a test can delete to play "no open PR".
+    let pr_info = cwd.join("pr-info.json");
+    fs::write(
+        &pr_info,
+        "{\"pr\": 358, \"url\": \"https://github.com/o/r/pull/358\", \"state\": \"OPEN\"}",
+    )
+    .unwrap();
 
     // Manifest (frontmatter + body graph_node_id, like the real one).
     let state = cwd.join(".fno/target-state.md");
@@ -169,6 +186,20 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     // fno.verify_advise stub (W6): record the full argv so the ship tests can
     // assert the flag shape finalize passes (a rename on either side of the
     // Rust->Python boundary fails here, not silently in production).
+    // fno.cli stub: finalize's post-stamp frontmatter validation shells
+    // `python3 -m fno.cli plan validate <path>`; record it and pass, so the
+    // call is observable and the loud non-fatal branch stays quiet in a
+    // healthy run.
+    fs::write(
+        pypath.join("fno/cli.py"),
+        "import sys\n\
+         args = sys.argv[1:]\n\
+         if args[:2] == ['plan', 'validate']:\n\
+         \x20    open('calls.log','a').write('plan-validate %s\\n' % ' '.join(args[2:]))\n\
+         \x20    sys.exit(0)\n\
+         sys.exit(1)\n",
+    )
+    .unwrap();
     fs::write(
         pypath.join("fno/verify_advise.py"),
         "import sys\n\
@@ -190,6 +221,7 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
         gh_calls,
         fno_calls: root.join("fno-calls.log"),
         outstanding_store: root.join("outstanding-store.json"),
+        pr_info,
     }
 }
 
@@ -1071,7 +1103,24 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
     let bin = env.cwd.join("shimbin");
     fs::create_dir_all(&bin).unwrap();
     write_shim(&bin, "gh", gh_body);
-    write_shim(&bin, "fno", "#!/bin/sh\necho \"fno $*\" >> calls.log\n");
+    // The quota adapter finalize shells for review evidence carries gh-shaped
+    // argv (`fno-gh-coverage pr view --json reviews,comments`), so the same
+    // body answers it; without the adapter on PATH every optional-app read
+    // failed closed as a spawn error and the evidence cases never ran.
+    write_shim(&bin, "fno-gh-coverage", gh_body);
+    // `fno` records its argv and answers the REST PR read from the payload
+    // file (FNO_STUB_PR_INFO below); a missing file plays "no open PR".
+    write_shim(
+        &bin,
+        "fno",
+        "#!/bin/sh\n\
+         echo \"fno $*\" >> calls.log\n\
+         case \"$*\" in\n\
+         \x20\x20 'pr info'*)\n\
+         \x20\x20   if [ -f \"$FNO_STUB_PR_INFO\" ]; then cat \"$FNO_STUB_PR_INFO\"; exit 0; fi\n\
+         \x20\x20   exit 1 ;;\n\
+         esac\n",
+    );
     let path = format!(
         "{}:{}",
         bin.display(),
@@ -1102,6 +1151,7 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         // auto-merge argv assertions would pass or fail for the wrong reason. The
         // file need not exist: an unreadable candidate yields the same defaults.
         .env("FNO_CONFIG", env.cwd.join(".fno/config.toml"))
+        .env("FNO_STUB_PR_INFO", &env.pr_info)
         .current_dir(&env.cwd)
         .output()
         .expect("run finalize")
@@ -1126,10 +1176,12 @@ fn finalize_stamps_pr_number_on_nonship() {
     );
 }
 
-/// AC1-FR: a node id but no open PR (gh fails) -> no stamp call, still exit 0.
+/// AC1-FR: a node id but no open PR (the REST reader fails) -> no stamp call,
+/// still exit 0.
 #[test]
 fn finalize_skips_stamp_when_no_pr() {
     let env = setup("S-nopr", false);
+    fs::remove_file(&env.pr_info).unwrap();
     let out = run_finalize_shimmed(&env, "Budget", "#!/bin/sh\nexit 1\n");
     assert!(out.status.success(), "no-PR skip must exit 0");
     assert!(
