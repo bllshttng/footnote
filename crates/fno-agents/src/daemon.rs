@@ -4784,7 +4784,7 @@ fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
                     .as_ref()
                     .map(|output| String::from_utf8_lossy(&output.stderr).to_ascii_lowercase())
                     .unwrap_or_default();
-                if detail.contains("no live pane owns") || detail.contains("not found") {
+                if mux_pane_is_absent(&detail) {
                     return Ok(false);
                 }
                 return Err(format!("mux pane kill exited {code}: {}", detail.trim()));
@@ -4800,6 +4800,13 @@ fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
             Err(error) => return Err(format!("mux pane kill wait failed: {error}")),
         }
     }
+}
+
+fn mux_pane_is_absent(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("no such pane")
+        || detail.contains("no live pane owns")
+        || detail.contains("not found")
 }
 
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
@@ -6644,6 +6651,12 @@ mod tests {
             .entries
             .is_empty());
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn mux_missing_pane_receipt_is_idempotent_absence() {
+        assert!(mux_pane_is_absent("fno mux: no such pane: 24"));
+        assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 
     #[test]
