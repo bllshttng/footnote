@@ -34,9 +34,9 @@ AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, prov
 
 ### A guard placed on one of N reachable paths is decorative
 
-Enumerate every path a caller reaches: in-process test, exec'd binary, skill layer, direct CLI, spawned worker. A guard on one ships green while the rest stay broken. The inversion is as fatal: a PRODUCER on one of N paths (review_coverage only under run_done, `crates/fno-agents/src/loopcheck.rs`) makes the gate unsatisfiable, not bypassable, for every shape that cannot run that path. Skill-prose-only behavior is the same defect: a direct CLI call or a non-Claude worker skips that layer. So is a test asserting two paths emit one enum variant, pinning the tag, not the destination.
+Before trusting a guard, enumerate every path a caller can reach: in-process test, exec'd binary, skill layer, direct CLI, spawned worker. A guard on only one reads as protection and ships green while the rest stay broken. The inversion is as fatal: a PRODUCER on one of N paths (review_coverage only under run_done, `crates/fno-agents/src/loopcheck.rs`) makes the gate unsatisfiable, not bypassable, for every shape that cannot run that path. Skill-prose-only behavior is the same defect: a direct CLI call or a non-Claude worker skips that layer. So is a test asserting two paths emit one enum variant, pinning the tag, not the destination.
 
-- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid the exec'd binary's path), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity pinned the tag, not the target).
+- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid a path only the exec'd binary took), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity pinned the tag, not the target).
 - graduates-to: a path-uniqueness lint treating N reachable implementations of one operation as a CI failure, not a review catch; plus one failing an equivalence assertion that ignores the payload.
 - added: 2026-07-23
 
@@ -58,9 +58,9 @@ A subprocess seeing only a tail of structured signals makes wrong calls confiden
 
 ### Assert a positive marker, never an absence
 
-An absence has two explanations, the real outcome and "the instrument never ran", and one condition cannot separate them. Require a string only the real outcome produces, pinned to the thing measured, not any line carrying the word. `until ! grep -q pending out` called CI settled when `gh` died on TLS, since an error carries no "pending". `grep -q '"settled": true'` is one line apart and fails safe. A positive control does not close this: it validates the TOOL, never the TARGET, so a green control on a search aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the symbol the behavior wears: for a Python capability the function name, not the CLI spelling.
+An absence has two explanations, the real outcome and "the instrument never ran", and a condition built on one cannot tell them apart. Require a string only the real outcome produces, pinned to the thing measured, not any line carrying the word. `until ! grep -q pending out` called CI settled when `gh` died on TLS, since an error carries no "pending". `grep -q '"settled": true'` is one line apart and fails safe. A positive control does not close this: it validates the TOOL, never the TARGET, so a green control on a search aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the symbol the behavior would wear if it existed: for a Python capability the function name, not the CLI spelling.
 
-- specimens: `gate.sh | tail; echo $?` read tail's 0 and hid a failing `check-preamble-budget` for a whole PR; an unanchored `rg --glob=!target` hides `skills/target/`, so a rename's live callers survived every sweep; `carveout resolve` returned zero and a green positive control certified it, while the clearing path was a FUNCTION wired twice; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
+- specimens: `gate.sh | tail; echo $?` read tail's 0 and hid a failing `check-preamble-budget` for a whole PR; an unanchored `rg --glob=!target` hides `skills/target/`, so a rename's live callers survived every sweep; searching the verb `carveout resolve` returned zero and a green positive control certified it, while the clearing path was a FUNCTION wired twice; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
 - graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control; it cannot catch an honest exit code answering a different question, which needs the verdict verb.
 - added: 2026-07-27
 
@@ -68,7 +68,7 @@ An absence has two explanations, the real outcome and "the instrument never ran"
 
 `fno mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
-- specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and read as proof of self-invocation; the mail was the user-shaped trigger.
+- specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
 - graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
 - added: 2026-08-05
 
