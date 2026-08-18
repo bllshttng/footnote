@@ -128,6 +128,7 @@ def test_unreadable_created_grandfathers_and_says_so(tmp_path):
     plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: last tuesday\n"))
     out = _run(plan)
     assert out.returncode == 0, out.stdout
+    assert "UNEVALUATED" in out.stdout
     assert "is not a readable date" in out.stdout
 
 
@@ -261,6 +262,61 @@ def test_decompose_child_scaffold_carries_created(tmp_path):
     group = validate_groups([{"slug": "1", "title": "G1", "waves": "1-2"}], None)[0]
     text = scaffold_separate_plan(group, "ab-epic0001", "big.md", created="2026-08-20")
     assert "created: 2026-08-20" in text
+
+
+def test_a_block_scalar_reason_may_contain_bullets(tmp_path):
+    # `reason: |` opens a block scalar whose body can hold anything. The walk
+    # read those bullets as new entries and shredded a plan PyYAML parses fine.
+    plan = tmp_path / "scalar.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: absorb\n"
+        "  absorbed:\n"
+        "    - id: x-ab12\n"
+        "      reason: |\n"
+        "        same lock, wave B, because:\n"
+        "        - the steal predicate is the same file\n"
+        "        - fairness cannot help behind a stuck holder\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+    assert "entry with no id" not in out.stdout
+
+
+def test_an_empty_flow_sequence_stays_legal(tmp_path):
+    # `[ ]` with whitespace is a legal empty sequence, and the flow-style
+    # refusal is aimed at populated flow lists only.
+    plan = tmp_path / "empty-flow.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n  outcome: proceed_alone\n  proceed_alone_against: [ ]\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+
+
+def test_decompose_child_is_born_undecided_not_failing(tmp_path):
+    # Stamping created un-grandfathers the scaffold, so it must also carry a
+    # well-formed block. It is marked undecided, and the stub-marker gate is
+    # what refuses the child until a human records the real outcome.
+    from fno.graph._decompose import STUB_MARKERS, scaffold_separate_plan, validate_groups
+
+    group = validate_groups([{"slug": "1", "title": "G1", "waves": "1-2"}], None)[0]
+    text = scaffold_separate_plan(group, "ab-epic0001", "big.md", created="2026-08-20")
+    assert "consolidation:" in text
+    assert "<!-- Consolidation:" in text
+    assert "<!-- Consolidation:" in STUB_MARKERS
+
+
+def test_model_accepts_both_reversal_shapes():
+    from fno.plan.schema import ConsolidationBlock
+
+    one = {"outcome": "absorb", "absorbed": [{"id": "x-ab12", "reason": "r"}],
+           "reversal": "fno backlog unsupersede x-ab12"}
+    many = dict(one, reversal=["fno backlog unsupersede x-ab12", "and another"])
+    assert ConsolidationBlock.model_validate(one).reversal
+    assert ConsolidationBlock.model_validate(many).reversal
 
 
 def test_blueprint_owns_the_consolidation_frontmatter_key():

@@ -205,6 +205,7 @@ STUB_MARKERS: tuple[str, ...] = (
     "<!-- From the epic's File Ownership Map",
     "<!-- The checks that prove",
     "<!-- Why (from epic):",  # the empty-why sentinel (US4)
+    "<!-- Consolidation:",  # the undecided-consolidation sentinel
 )
 
 # The seed the scaffold leaves in `## Why (from epic)` when the epic doc yields
@@ -324,6 +325,11 @@ def scaffold_separate_plan(
         f'status: idea\n'
         f'kind: quick-plan\n'
         f'created: {created_date}\n'
+        f'consolidation:\n'
+        f'  # <!-- Consolidation: run the step 2d gate against this child and\n'
+        f'  #      record one outcome with a reason per id considered. -->\n'
+        f'  outcome: proceed_alone\n'
+        f'  proceed_alone_against: []\n'
         f'parent_epic: {epic_id}\n'
         f'source_doc: {source_doc}\n'
         f'---\n\n'

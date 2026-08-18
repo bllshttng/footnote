@@ -247,6 +247,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         "<!-- From the epic's File Ownership Map"
         "<!-- The checks that prove"
         "<!-- Why (from epic):"
+        "<!-- Consolidation:"
     )
     _found_stub=0
     for _m in "${STUB_MARKERS[@]}"; do
@@ -716,7 +717,7 @@ check_consolidation_file() {
             created="${created:0:4}-${created:4:2}-${created:6:2}"
         fi
         if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-            warn "$label: no consolidation: block, and created ${created:-<missing>} is not a readable date - grandfathered, but backfill the block and a YYYY-MM-DD created before the next blueprint of this node"
+            warn "$label: consolidation gate UNEVALUATED - no block, and created ${created:-<missing>} is not a readable date, so this plan cannot be told from a pre-gate one. Not a pass: add a YYYY-MM-DD created and the block"
         elif [[ "$created" > "$gate_date" ]]; then
             c_error "$label: no consolidation: block in frontmatter - the step 2d gate must record exactly one outcome (absorb | append | proceed_alone), and silence is not an outcome"
         else
@@ -730,7 +731,7 @@ check_consolidation_file() {
     # Flow-style lists (`absorbed: [{id: ...}]`) are valid YAML this awk walk
     # cannot parse - error with the fix rather than misreading them. An empty
     # `[]` is not flow style in this sense and stays legal.
-    if printf '%s\n' "$block" | grep -Eq '^[[:space:]]*(absorbed|appended_to|proceed_alone_against):[[:space:]]*\[[^]]'; then
+    if printf '%s\n' "$block" | grep -Eq '^[[:space:]]*(absorbed|appended_to|proceed_alone_against):[[:space:]]*\[[[:space:]]*[^][:space:]]'; then
         c_error "$label: consolidation id lists must use block style (a '- id:' entry with its own 'reason:'), not a flow-style list"
     fi
 
@@ -773,6 +774,13 @@ check_consolidation_file() {
             return v
         }
         function flush() { if (sec != "" && started) printf "%s\037%s\037%s\n", sec, cur, rsn }
+        # FIRST rule on purpose: the body of a block scalar can contain
+        # anything, bullets included, and a later rule would claim those lines.
+        in_scalar {
+            match($0, /^[[:space:]]*/)
+            if ($0 ~ /^[[:space:]]*$/ || RLENGTH > scalar_indent) next
+            in_scalar=0
+        }
         /^[[:space:]]*(absorbed|appended_to|proceed_alone_against):/ {
             flush(); started=0; cur=""; rsn=""
             sec=$0
@@ -792,9 +800,17 @@ check_consolidation_file() {
             line=$0; sub(/^[[:space:]]*id:[[:space:]]*/, "", line); cur=clean(line); next
         }
         sec != "" && started && /^[[:space:]]*reason:/ {
-            line=$0; sub(/^[[:space:]]*reason:[[:space:]]*/, "", line)
+            line=$0
+            match($0, /^[[:space:]]*/); key_indent=RLENGTH
+            sub(/^[[:space:]]*reason:[[:space:]]*/, "", line)
             sub(/[[:space:]]+$/, "", line); gsub(/^["'"'"']|["'"'"']$/, "", line)
-            rsn=line; next
+            # `reason: |` / `reason: >` opens a block scalar whose body is every
+            # MORE-indented line that follows, bullets included. Without this the
+            # walk read those bullets as new list entries and shredded a valid
+            # plan into phantom ids.
+            if (line ~ /^[|>]/) { in_scalar=1; scalar_indent=key_indent; rsn="(block scalar)" }
+            else { in_scalar=0; rsn=line }
+            next
         }
         # Any other key CLOSES the current section. Without this the walk stayed
         # inside the last id list forever, so a later list-valued key (reversal:,

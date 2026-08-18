@@ -58,7 +58,11 @@ class ConsolidationBlock(BaseModel):
     absorbed: list[ConsolidationEntry] = Field(default_factory=list)
     appended_to: list[ConsolidationEntry] = Field(default_factory=list)
     proceed_alone_against: list[ConsolidationEntry] = Field(default_factory=list)
-    reversal: str | None = None
+    # Scalar OR list: one reversing command, or the several an absorb of
+    # several nodes needs. The bash gate accepts both, and a model that
+    # took only a scalar produced the 'plan is unreadable or invalid'
+    # divergence downstream rather than a validation error here.
+    reversal: str | list[str] | None = None
 
     @model_validator(mode="after")
     def _outcome_has_its_decision(self) -> "ConsolidationBlock":

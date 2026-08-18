@@ -512,7 +512,10 @@ def find_collisions(
             )
             if registered is _UNSET_PLAN or not registered:
                 self_id = claimed
-            elif _resolve_plan_path(str(registered), _find_repo_root()) == candidate_plan_path:
+            elif (
+                _resolve_plan_path(str(registered), _find_repo_root()).resolve()
+                == candidate_plan_path.resolve()
+            ):
                 self_id = claimed
 
     out: list[Collision] = []
