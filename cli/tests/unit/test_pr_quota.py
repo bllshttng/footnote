@@ -90,3 +90,20 @@ def test_only_coverage_spelling_can_claim_the_reserve(tmp_path):
     )
     assert result.returncode == 2
     assert calls == []
+
+
+def test_bare_gh_cannot_reenter_the_worker_proxy(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setenv("FNO_REAL_GH", "/real/gh")
+    result = _quota.execute_graphql(
+        "discretionary",
+        ["pr", "view", "930", "--json", "reviews"],
+        runner=_runner(5000, calls),
+        real_gh="gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0
+    assert calls == [
+        ["/real/gh", "api", "rate_limit"],
+        ["/real/gh", "pr", "view", "930", "--json", "reviews"],
+    ]

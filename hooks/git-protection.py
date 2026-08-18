@@ -1329,7 +1329,10 @@ def _find_graphql_pr_reads(segments):
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
-        if not argv or argv[0].rsplit("/", 1)[-1].lower() != "gh":
+        if not argv:
+            continue
+        executable = argv[0].rsplit("/", 1)[-1].lower()
+        if executable not in {"gh", "$fno_real_gh", "${fno_real_gh}"}:
             continue
         lowered = [token.lower() for token in argv]
         if len(argv) >= 3 and lowered[1:3] == ["pr", "checks"]:

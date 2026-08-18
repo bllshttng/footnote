@@ -83,11 +83,16 @@ def validate_receipt(
     if not isinstance(samples, int) or samples < required_samples:
         missing.append(f"samples>={required_samples}")
     minimum = receipt.get("min_remaining")
-    if not isinstance(minimum, int) or minimum <= receipt.get("floor", FLOOR):
+    if receipt.get("floor") != FLOOR:
+        missing.append(f"floor={FLOOR}")
+    if not isinstance(minimum, int) or minimum <= FLOOR:
         missing.append(f"min_remaining>{FLOOR}")
     workers = receipt.get("min_live_workers")
     if not isinstance(workers, int) or workers < min_workers:
         missing.append(f"min_live_workers>={min_workers}")
+    probes = receipt.get("discretionary_probes")
+    if not isinstance(probes, int) or probes < required_samples:
+        missing.append(f"discretionary_probes>={required_samples}")
     if receipt.get("coverage") != "covered":
         missing.append("coverage=covered")
     reviewed = receipt.get("reviewed_count")
@@ -122,13 +127,29 @@ def run_soak(args: argparse.Namespace) -> int:
     started = time.monotonic()
     quota_samples: list[int] = []
     worker_samples: list[int] = []
+    discretionary_probes = 0
     while True:
-        remaining = quota_remaining(cwd)
+        before = quota_remaining(cwd)
         workers = live_workers(cwd, fno_bin)
+        probe_code, probe, probe_error = run_json(
+            [
+                fno_bin, "pr", "graphql-exec", "--purpose", "discretionary", "--",
+                "api", "graphql", "-f", "query=query { viewer { login } }",
+            ],
+            cwd=cwd,
+        )
+        login = (((probe.get("data") or {}).get("viewer") or {}).get("login"))
+        if probe_code != 0 or not login:
+            raise RuntimeError(
+                f"discretionary probe failed: {probe_error or probe or probe_code}"
+            )
+        discretionary_probes += 1
+        remaining = quota_remaining(cwd)
         quota_samples.append(remaining)
         worker_samples.append(workers)
         print(
-            f"sample={len(quota_samples)} graphql_remaining={remaining} live_workers={workers}",
+            f"sample={len(quota_samples)} graphql_before={before} "
+            f"graphql_remaining={remaining} live_workers={workers} discretionary=ok",
             flush=True,
         )
         elapsed = time.monotonic() - started
@@ -154,6 +175,7 @@ def run_soak(args: argparse.Namespace) -> int:
         "floor": FLOOR,
         "min_remaining": min(quota_samples),
         "min_live_workers": min(worker_samples),
+        "discretionary_probes": discretionary_probes,
         "pr": args.pr,
         "head_sha": head,
         "coverage_exit": coverage_code,

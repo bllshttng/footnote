@@ -113,7 +113,7 @@ def test_codex_create_without_agent_self_skips_injection(
     monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
     monkeypatch.setattr(
         "fno.setup.github_cli.worker_environment",
-        lambda base: {**base, "PATH": "/proxy:/usr/bin", "FNO_REAL_GH": "/real/gh"},
+        lambda base: {**base, "PATH": "/proxy:/usr/bin"},
     )
 
     output_path = tmp_path / "out.jsonl"
@@ -129,7 +129,7 @@ def test_codex_create_without_agent_self_skips_injection(
             # agent_self omitted
         )
 
-    assert captured["env"]["FNO_REAL_GH"] == "/real/gh"
+    assert "FNO_REAL_GH" not in captured["env"]
 
 
 # ---------------------------------------------------------------------------

@@ -1578,6 +1578,44 @@ fn is_secondary_limit_stderr(stderr: &str) -> bool {
     stderr.to_lowercase().contains("secondary rate limit")
 }
 
+fn internal_gh_adapter(gh_bin: &str) -> bool {
+    Path::new(gh_bin)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "fno-gh-loopcheck" | "fno-gh-coverage"))
+}
+
+fn coverage_adapter(gh_bin: &str) -> String {
+    let path = Path::new(gh_bin);
+    if path.file_name().and_then(|name| name.to_str()) != Some("fno-gh-loopcheck") {
+        return gh_bin.to_string();
+    }
+    match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent
+            .join("fno-gh-coverage")
+            .to_string_lossy()
+            .into_owned(),
+        None => "fno-gh-coverage".to_string(),
+    }
+}
+
+fn is_graphql_read(read: &str) -> bool {
+    matches!(
+        read,
+        "pr_view"
+            | "pr_view_parse"
+            | "pr_checks"
+            | "pr_checks_parse"
+            | "pr_reviews"
+            | "pr_reviews_parse"
+            | "pr_commits"
+            | "pr_commits_parse"
+    )
+}
+
 /// Whether ANY session on this machine hit the secondary limit recently.
 /// The secondary limit is per-USER, not per-session: a fleet of concurrent
 /// sessions shares one burst budget, so a refusal scoped to the reading
@@ -2001,6 +2039,27 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
+    let rest_adapter = internal_gh_adapter(gh_bin);
+    let metadata_read = if rest_adapter {
+        "pr_info_rest"
+    } else {
+        "pr_view"
+    };
+    let metadata_parse = if rest_adapter {
+        "pr_info_rest_parse"
+    } else {
+        "pr_view_parse"
+    };
+    let checks_read = if rest_adapter {
+        "pr_status_rest"
+    } else {
+        "pr_checks"
+    };
+    let checks_parse = if rest_adapter {
+        "pr_status_rest_parse"
+    } else {
+        "pr_checks_parse"
+    };
     // An explicit PR selector for the branch-resolved gh calls (x-3a3f):
     // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
     // standalone review-coverage verb can evaluate a PR from a checkout that is
@@ -2024,7 +2083,7 @@ fn read_pr_info(
         ])
         .current_dir(cwd)
         .output()
-        .map_err(|e| ("pr_view".to_string(), e.to_string()))?;
+        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
 
     if !pr_view_out.status.success() {
         if is_no_pr_stderr(&pr_view_out.stderr) {
@@ -2054,11 +2113,11 @@ fn read_pr_info(
                 },
             });
         }
-        return Err(("pr_view".to_string(), stderr_tail(&pr_view_out.stderr)));
+        return Err((metadata_read.to_string(), stderr_tail(&pr_view_out.stderr)));
     }
 
     let pr_json: Value = serde_json::from_slice(&pr_view_out.stdout)
-        .map_err(|_| ("pr_view_parse".to_string(), String::new()))?;
+        .map_err(|_| (metadata_parse.to_string(), String::new()))?;
 
     let state = PrState::from_gh_str(
         pr_json
@@ -2143,14 +2202,14 @@ fn read_pr_info(
             .args(["--json", "name,state,bucket,startedAt,workflow"])
             .current_dir(cwd)
             .output()
-            .map_err(|e| ("pr_checks".to_string(), e.to_string()))?;
+            .map_err(|e| (checks_read.to_string(), e.to_string()))?;
 
         if !checks_out.status.success() {
-            return Err(("pr_checks".to_string(), stderr_tail(&checks_out.stderr)));
+            return Err((checks_read.to_string(), stderr_tail(&checks_out.stderr)));
         }
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
-            .map_err(|_| ("pr_checks_parse".to_string(), String::new()))?;
+            .map_err(|_| (checks_parse.to_string(), String::new()))?;
         // One dedup feeds every reader of this payload, so the conclusion, the
         // failing-name set, and the pending flag can never answer off different
         // rollups (a superseded run read as the current one is the exact lie
@@ -6397,8 +6456,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
         }
 
         // Run done() for code units
+        let done_gh_bin = if intent == Intent::Promise {
+            coverage_adapter(gh_bin)
+        } else {
+            gh_bin.to_string()
+        };
         let done_result = run_done(
-            gh_bin,
+            &done_gh_bin,
             git_bin,
             &cwd,
             settings.ci_declared_none,
@@ -7107,17 +7171,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // must not blame GraphQL for a REST read's own failure - that
                 // reads as "stop retrying gh pr view" advice for a call that was
                 // never gh pr view and might succeed on the very next fire.
-                let is_graphql_read = matches!(
-                    failed_read.as_str(),
-                    "pr_view"
-                        | "pr_view_parse"
-                        | "pr_checks"
-                        | "pr_checks_parse"
-                        | "pr_reviews"
-                        | "pr_reviews_parse"
-                        | "pr_commits"
-                        | "pr_commits_parse"
-                );
+                let is_graphql_read = is_graphql_read(&failed_read);
                 // Checked BEFORE the primary-quota branch and independent of
                 // it: a secondary (burst/concurrency) refusal has its OWN
                 // stderr signature and can fire with the primary quota
@@ -8619,7 +8673,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 // refusing gh is the doomed kind. Quota exhaustion, the other
                 // cause, still probes for the reset time its reason names.
                 let secondary = is_secondary_limit_stderr(&tail);
-                let quota = if secondary {
+                let quota = if secondary || !is_graphql_read(&read) {
                     None
                 } else {
                     probe_graphql_quota(&gh_bin, &cwd)
@@ -8637,7 +8691,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             // secondary-limit classification as the --pr arm: a refusal with no
             // PR number must not spawn the probe the other arm already skips.
             let secondary = is_secondary_limit_stderr(&tail);
-            let quota = if secondary {
+            let quota = if secondary || !is_graphql_read(&read) {
                 None
             } else {
                 probe_graphql_quota(&gh_bin, &cwd)
@@ -14885,5 +14939,24 @@ mod done_probe_tests {
             .done_probes
             .unwrap()
             .is_err());
+    }
+
+    #[test]
+    fn quota_promised_done_check_uses_the_fixed_coverage_adapter() {
+        assert_eq!(coverage_adapter("fno-gh-loopcheck"), "fno-gh-coverage");
+        assert_eq!(
+            coverage_adapter("/tmp/bin/fno-gh-loopcheck"),
+            "/tmp/bin/fno-gh-coverage"
+        );
+        assert_eq!(coverage_adapter("/tmp/fake-gh"), "/tmp/fake-gh");
+    }
+
+    #[test]
+    fn quota_rest_failures_do_not_claim_graphql_exhaustion() {
+        assert!(is_graphql_read("pr_reviews"));
+        assert!(is_graphql_read("pr_reviews_parse"));
+        assert!(!is_graphql_read("pr_info_rest"));
+        assert!(!is_graphql_read("pr_status_rest"));
+        assert!(!is_graphql_read("pr_status_rest_parse"));
     }
 }
