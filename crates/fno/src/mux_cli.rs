@@ -26,7 +26,7 @@
 //! - `shell-init`: `{shell, snippet}` (the raw snippet without `--json`).
 //! - `doctor`: `{ok: bool, checks: [{check, verdict: ok|warn|fail|n/a, detail,
 //!   remedy}]}`.
-//! - `pane ls|read|run|send|wait|kill|claim|release|split|break|focus`: the
+//! - `pane` verbs (the list lives in [`PANE_VERBS`], named once): the
 //!   per-reply shapes in [`render_reply`].
 
 use std::ffi::OsString;
@@ -2031,12 +2031,13 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// Parse the tokens after `mux pane` into a [`ParsedPane`]. Pure, so the whole
 /// grammar (verbs, flags, the exit-code-bearing outcomes) is unit-testable
 /// without a socket.
-/// The `pane` verbs, named ONCE. Two messages quote this list - the
-/// missing-verb one and the unknown-verb one - and they had already drifted:
+/// The `pane` verbs, named ONCE. Three surfaces quote this list - the
+/// missing-verb message, the unknown-verb one, and the `main.rs` usage line -
+/// and the first two had already drifted before the constant existed:
 /// `split` and `break` shipped without reaching the first, so an operator who
 /// typed a bare `fno mux pane` to discover the surface was told verbs that
 /// exist do not.
-const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
+pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
 
 fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args

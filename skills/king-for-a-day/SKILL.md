@@ -314,6 +314,8 @@ Re-planning is a *new* pass with fresh context reading the map, which is the poi
 
 Everything above ships a pass. Court adds the duties below and runs them until the wave completes. The mechanics of every verb here - placement, injection, lifecycle, reads - are in [references/court-operations.md](references/court-operations.md); this section is the *contract*, that reference is the *operations manual*.
 
+Before you reach for any CLI verb, load [references/cli-commands.md](references/cli-commands.md).
+
 The whole of court is three-quarters contract, because the hard plumbing already shipped: `fno agents spawn --substrate pane` accepts `--workspace` and `--split left|right|up|down` end to end, with a min-size fallback to a tab in the same workspace. What follows is the contract that makes you use it.
 
 ### On crowning
