@@ -68,6 +68,14 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
         )
     except (FileNotFoundError, RuntimeError):
         return env
+    except ImportError:
+        # The proxy is optional PATH sugar over the inherited environment: a
+        # caller that cannot even resolve the state dir (a bare interpreter
+        # without the config layer's venv-only deps - the codex ask parity
+        # harness drives exactly that, and CI has gh on PATH so the gh-missing
+        # soft-return never fires there) inherits the parent env, same as a
+        # missing gh. An OSError while INSTALLING still surfaces loudly.
+        return env
     old_path = env.get("PATH", "")
     env["PATH"] = str(result.proxy.parent) + (os.pathsep + old_path if old_path else "")
     env.pop("FNO_REAL_GH", None)
