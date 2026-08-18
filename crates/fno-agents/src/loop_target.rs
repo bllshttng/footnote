@@ -412,8 +412,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut target_queue: Option<TargetQueue> = None;
     let mut king_queue: Option<crate::loop_king::KingQueue> = None;
     if is_king {
-        let fno_bin =
-            std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+        let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
         match crate::loop_king::KingQueue::from_manifest(&cwd, fno_bin) {
             Ok(q) => king_queue = Some(q),
             Err(e) => {
@@ -585,14 +584,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     } else {
         None
     };
-    let outcome = match run_loop(
-        queue,
-        &dispatcher,
-        &budget,
-        &journal,
-        &cancel,
-        per_unit_cap,
-    ) {
+    let outcome = match run_loop(queue, &dispatcher, &budget, &journal, &cancel, per_unit_cap) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("fno-agents loop run: fatal loop error: {e}");

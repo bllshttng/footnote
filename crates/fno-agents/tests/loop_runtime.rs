@@ -1106,7 +1106,11 @@ fn king_queue_reads_a_payload_even_when_the_board_exits_non_zero() {
     // exit code alone would throw away the answer.
     let tmp = TempDir::new().unwrap();
     king_project(tmp.path(), "k-partial");
-    let stub = king_board_stub(tmp.path(), r#"{"actionable":1,"unreadable":1,"queues":[]}"#, 1);
+    let stub = king_board_stub(
+        tmp.path(),
+        r#"{"actionable":1,"unreadable":1,"queues":[]}"#,
+        1,
+    );
 
     let mut q = KingQueue::from_manifest(tmp.path(), stub.display().to_string()).unwrap();
     assert!(q.next().unwrap().is_some());
@@ -1149,5 +1153,9 @@ fn a_king_walk_terminates_nowork_without_dispatching() {
     .unwrap();
 
     assert!(matches!(outcome.reason, TerminationReason::NoWork));
-    assert_eq!(dispatcher.count(), 0, "an empty board must dispatch nothing");
+    assert_eq!(
+        dispatcher.count(),
+        0,
+        "an empty board must dispatch nothing"
+    );
 }

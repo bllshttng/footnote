@@ -6722,7 +6722,10 @@ fn king_arm_allows_silently_when_no_king_manifest_exists() {
 
     assert_eq!(code, 0);
     assert_eq!(d["decision"], "allow");
-    assert!(!events.exists(), "a non-king session must write no king events");
+    assert!(
+        !events.exists(),
+        "a non-king session must write no king events"
+    );
 }
 
 #[test]
@@ -6734,7 +6737,11 @@ fn king_arm_never_reads_the_target_manifest() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
-    fs::write(cwd.join(".fno/target-state.md"), "---\nsession_id: t-1\n---\n").unwrap();
+    fs::write(
+        cwd.join(".fno/target-state.md"),
+        "---\nsession_id: t-1\n---\n",
+    )
+    .unwrap();
     let state = king_manifest(cwd, "k-iso");
     let events = cwd.join("events.jsonl");
     let bin_dir = TempDir::new().unwrap();
@@ -6804,8 +6811,16 @@ fn king_progress_is_an_action_against_a_target_id_not_seen_before() {
 
     // Two dry fires, then a real action: the counter goes back to zero, so the
     // next fire blocks rather than giving up.
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-progress"}));
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-progress"}));
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-progress"}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-progress"}),
+    );
     king_event(
         &events,
         "king_action",
@@ -6827,8 +6842,16 @@ fn king_noprogress_ends_a_board_that_refuses_to_shrink() {
     let bin_dir = TempDir::new().unwrap();
     let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
 
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-stuck"}));
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-stuck"}));
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-stuck"}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-stuck"}),
+    );
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
@@ -6855,13 +6878,24 @@ fn a_repeated_king_action_is_not_progress() {
 
     let wake = serde_json::json!({"session_id": "k-repeat", "kind": "wake", "target_id": "x-1234"});
     king_event(&events, "king_action", wake.clone());
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-repeat"}));
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-repeat"}),
+    );
     king_event(&events, "king_action", wake.clone());
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-repeat"}));
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-repeat"}),
+    );
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
-    assert_eq!(code, 0, "a repeated action must not hold the loop open: {d}");
+    assert_eq!(
+        code, 0,
+        "a repeated action must not hold the loop open: {d}"
+    );
     assert_eq!(d["termination_reason"], "NoProgress");
 }
 
@@ -6875,7 +6909,11 @@ fn another_kings_events_do_not_move_this_kings_counter() {
     let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
 
     for _ in 0..5 {
-        king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-other"}));
+        king_event(
+            &events,
+            "king_loop_check",
+            serde_json::json!({"session_id": "k-other"}),
+        );
     }
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
@@ -6894,8 +6932,16 @@ fn an_empty_board_wins_over_a_dry_fire_streak() {
     let bin_dir = TempDir::new().unwrap();
     let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
 
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-drained"}));
-    king_event(&events, "king_loop_check", serde_json::json!({"session_id": "k-drained"}));
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-drained"}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-drained"}),
+    );
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
     assert_eq!(code, 0);
@@ -6918,5 +6964,8 @@ fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
     assert_eq!(code, 2);
     let d: serde_json::Value = serde_json::from_str(&json).unwrap();
     let err = d["error"].as_str().unwrap();
-    assert!(err.contains("emperor") && err.contains("king"), "got: {err}");
+    assert!(
+        err.contains("emperor") && err.contains("king"),
+        "got: {err}"
+    );
 }

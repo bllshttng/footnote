@@ -86,7 +86,7 @@ impl KingQueue {
     /// Actionable row count from `fno king board --json`.
     ///
     /// The board exits non-zero when a queue is unreadable and still prints a
-    /// full payload, so the payload is parsed regardless of exit status. Only
+    /// full payload, so the payload is parsed regardless of that exit code. Only
     /// an absent or unparseable one is a read failure, and that is an error
     /// rather than a zero: a walk that read "0" from a broken reader would
     /// report the board clean and stop respawning a king that still has work.
@@ -96,7 +96,9 @@ impl KingQueue {
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
             .output()
-            .map_err(|e| LoopError::Queue(format!("cannot run {} king board: {e}", self.fno_bin)))?;
+            .map_err(|e| {
+                LoopError::Queue(format!("cannot run {} king board: {e}", self.fno_bin))
+            })?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let value: Value = serde_json::from_str(&stdout).map_err(|e| {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -191,8 +193,7 @@ mod tests {
 
     #[test]
     fn body_text_after_the_frontmatter_is_not_parsed_as_fields() {
-        let (id, _) =
-            parse_king_fields("---\nfno_id: k-1\n---\nfno_id: not-this\n").unwrap();
+        let (id, _) = parse_king_fields("---\nfno_id: k-1\n---\nfno_id: not-this\n").unwrap();
         assert_eq!(id, "k-1");
     }
 }
