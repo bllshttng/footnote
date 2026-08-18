@@ -59,6 +59,12 @@ def record(
         "--decided-by",
         help="Who decided. Defaults to the operator; name the agent under a beastmode grant.",
     ),
+    authority: Optional[str] = typer.Option(
+        None,
+        "--authority",
+        help="How the decider was entitled to decide: 'operator' (default) or "
+        "'beastmode'. Pass it when an agent decided under a grant.",
+    ),
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if ctx.invoked_subcommand is not None:
@@ -77,7 +83,10 @@ def record(
             subject=subject,
             question_id=question_id,
             decided_by=decided_by or "operator",
-            authority_source="operator" if not decided_by else "beastmode",
+            # Stated, never inferred. Reading `--decided-by "J.N. Choi"` as a
+            # beastmode grant writes wrong provenance into the one field a
+            # reader months later trusts to say how a ruling was entitled.
+            authority_source=authority or "operator",
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
@@ -222,6 +231,8 @@ def reindex_cmd() -> None:
     note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
     if counts.get("repaired"):
         note += f", {counts['repaired']} damaged row(s) moved aside"
+    if counts.get("unusable"):
+        note += f", {counts['unusable']} row(s) the schema will not accept"
     if counts.get("invalid"):
         note += f", {counts['invalid']} rows could not be written"
     typer.echo(note, err=True)

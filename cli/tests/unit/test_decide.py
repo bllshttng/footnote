@@ -840,6 +840,72 @@ def test_the_json_surface_reports_damaged_rows(
     assert payload["total"] == 1
 
 
+def test_reindex_refuses_to_report_done_on_an_unreadable_graph(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A query can answer usefully without the graph. A backfill cannot: it
+    would fold zero projection rows and still print "+0 decisions" on exit 0."""
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "decide reindex: failed" in res.output
+
+
+def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`fno decide reindex` is what an IndexWriteError sends people to. One
+    legacy row the schema will never accept must not make it exit 1 forever."""
+    import fno.events as events_mod
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    index.unlink()
+
+    real = events_mod.validate
+    calls = {"n": 0}
+
+    def picky(event):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("source 'target' left the enum")
+        return real(event)
+
+    monkeypatch.setattr(events_mod, "validate", picky)
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 0, res.output
+    assert "the schema will not accept" in res.output
+
+
+def test_authority_source_is_stated_never_inferred(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Reading --decided-by as a beastmode grant writes wrong provenance into
+    the field a reader months later trusts."""
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert payload["decisions"][0]["authority_source"] == "operator"
+
+    runner.invoke(
+        decide_app,
+        [
+            "--subject", "pr-921",
+            "--decision", "held",
+            "--decided-by", "worker-a",
+            "--authority", "beastmode",
+        ],
+    )
+    granted = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
+    )
+    assert granted["decisions"][0]["authority_source"] == "beastmode"
+
+
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
     """It behaved this way only because it named no retention and the default
     is durable. The record the recall promise rests on is then one schema edit

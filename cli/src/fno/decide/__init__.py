@@ -266,8 +266,13 @@ def _read_index(path: Path, *, warn: bool = True) -> "tuple[list[dict], int]":
     return rows, damaged
 
 
-def _graph_entries() -> "list[dict]":
+def _graph_entries(*, required: bool = False) -> "list[dict]":
     """The machine-wide graph, archive included, or [] if it cannot be read.
+
+    ``required=True`` re-raises instead of degrading. A QUERY can answer
+    usefully without the graph, so it warns and falls back to literal matching.
+    A BACKFILL cannot: folding zero projection rows and reporting "+0
+    decisions" on exit 0 is the partial-backfill-reads-as-done outcome.
 
     The path is passed EXPLICITLY: read_graph's default argument froze at
     import, so a redirected graph is the one read here.
@@ -284,6 +289,8 @@ def _graph_entries() -> "list[dict]":
             graph_store.read_graph_strict(graph_store.GRAPH_JSON)
         )
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
+        if required:
+            raise
         # Advisory, but NOT silent. Without the graph the reader falls back to
         # literal matching, so a ruling recorded under a slug stops answering
         # the canonical id the receipt printed. A degraded read that says
@@ -417,13 +424,12 @@ def _projection_events() -> "list[dict]":
     project - the half of the backfill a per-journal fold cannot see.
     """
     from fno.events import operator_decision
-    from fno.graph import store as graph_store
 
     events: "list[dict]" = []
-    # Path passed EXPLICITLY: read_graph's default argument froze at import.
-    entries = graph_store.entries_with_archive(
-        graph_store.read_graph(graph_store.GRAPH_JSON)
-    )
+    # The SAME strict-and-noisy read the query path uses. The soft reader
+    # answers [] on a corrupt graph, which would fold zero projection rows and
+    # still print "+0 decisions" on exit 0 - a backfill reading as done.
+    entries = _graph_entries(required=True)
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -542,7 +548,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
     a recall query reads. Projections still run, because they are machine-wide
     and reach decisions no journal here can see.
     """
-    from fno.events import append_event
+    from fno.events import append_event, validate
 
     index = _index_path()
     repaired = _compact_index(index)
@@ -551,6 +557,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
     counted: "set[str]" = set()
     already = 0
     invalid = 0
+    unusable = 0
     added = 0
 
     paths = list(sources) if sources is not None else _default_journals()
@@ -572,8 +579,17 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
                 already += 1
             continue
         try:
+            # Validate FIRST, so a row the schema will never accept is told
+            # apart from a store that will not take a write. Retrying the
+            # former forever wedges the recovery verb; retrying the latter is
+            # exactly what the operator should do.
+            validate(event)
+        except Exception:  # noqa: BLE001 - permanent: this row can never land
+            unusable += 1
+            continue
+        try:
             append_event(event, events_path=index)
-        except Exception:  # noqa: BLE001 - one unusable row must not cost the rest
+        except Exception:  # noqa: BLE001 - transient: the store refused a write
             invalid += 1
             continue
         known.add(did)
@@ -583,6 +599,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         "added": added,
         "already": already,
         "invalid": invalid,
+        "unusable": unusable,
         "repaired": repaired,
         "total": len(known),
     }

@@ -163,11 +163,12 @@ def clear(
             # (closed_by records the typing session on the close event);
             # decided_by must not depend on whether the closing session could
             # be resolved.
+            recorded: "str | None" = None
             if answer is not None:
                 from fno.decide import record_decision
 
                 record = open_by_id[qid]
-                record_decision(
+                recorded = record_decision(
                     decision=answer,
                     subject=record.node,
                     question_id=qid,
@@ -175,13 +176,30 @@ def clear(
                     asked_by=record.session_id,
                     asked_at=record.ts or None,
                     events_root=root,
+                )["decision_id"]
+            try:
+                append_event(
+                    operator_question_closed(
+                        question_id=qid, answer=answer, closed_by=closed_by
+                    ),
+                    events_path=events_path(root),
                 )
-            append_event(
-                operator_question_closed(
-                    question_id=qid, answer=answer, closed_by=closed_by
-                ),
-                events_path=events_path(root),
-            )
+            except Exception as exc:  # noqa: BLE001
+                # The close failed AFTER the decision landed (a contended
+                # journal lock, ENOSPC). The generic handler below would say
+                # "failed to close", the operator would re-run with --answer,
+                # and one answer would be recorded twice under two ids with no
+                # supersedes link. Name the id and the safe way out instead.
+                if recorded is None:
+                    raise
+                typer.echo(
+                    f"outstanding: the answer to {qid} is recorded as {recorded}, "
+                    f"but closing the question failed: {exc}. It stays open. "
+                    f"Close it with no --answer; clearing with --answer again "
+                    f"records the same ruling a second time.",
+                    err=True,
+                )
+                raise typer.Exit(1)
         except IndexWriteError as exc:
             # The other producer of operator_decision, and it must give the
             # same guidance: the durable event landed, so the documented
@@ -196,6 +214,11 @@ def clear(
                 err=True,
             )
             raise typer.Exit(1)
+        except typer.Exit:
+            # typer.Exit derives from RuntimeError, so the generic handler
+            # below would swallow the precise message just raised and replace
+            # it with "failed to close".
+            raise
         except Exception as exc:  # noqa: BLE001
             typer.echo(f"outstanding: failed to close {qid}: {exc}", err=True)
             raise typer.Exit(1)
