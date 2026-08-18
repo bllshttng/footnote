@@ -2970,8 +2970,9 @@ fn resolve_selector(
     }
     // One identity, possibly several rows. No writer clears `mux` on exit, so
     // an exited spelling can carry a stale pane ref: prefer a LIVE pane-hosted
-    // row, then any pane-hosted row (status lies in both directions), then
-    // whatever is left - a paneless duplicate never masks the live pane.
+    // row, then any pane-hosted row (the exited flag lies in both
+    // directions), then whatever is left - a paneless duplicate never masks
+    // the live pane.
     let row = tier
         .iter()
         .find(|a| !a.exited && a.mux.is_some())
