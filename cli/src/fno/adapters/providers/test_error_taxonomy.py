@@ -8,6 +8,8 @@ to decide swap-or-surface for any provider call.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from fno.adapters.providers.error_taxonomy import (
@@ -483,3 +485,77 @@ class TestClassifyError:
         rule = classify_error(200, body)
         assert rule is not None
         assert rule.text == "too many requests"
+
+
+class TestResetStampHarvest:
+    """AC2: the refusal body carries WHEN the window reopens; keep the number."""
+
+    def test_offset_bearing_iso_stamp_parses(self) -> None:
+        err = normalize(
+            429, None, "rate limit exceeded; resets at 2026-08-18T07:19:38+08:00"
+        )
+        assert err.resets_at == pytest.approx(
+            datetime.fromisoformat("2026-08-18T07:19:38+08:00").timestamp()
+        )
+        assert err.reset_stamp_unparsed is None
+
+    def test_trailing_z_parses(self) -> None:
+        err = normalize(429, None, "rate limit; resets_at=2026-08-18T07:19:38Z")
+        assert err.resets_at == pytest.approx(
+            datetime.fromisoformat("2026-08-18T07:19:38+00:00").timestamp()
+        )
+
+    def test_reset_keyed_epoch_parses(self) -> None:
+        err = normalize(429, None, '{"error":"rate limit","resets_at":1787008778}')
+        assert err.resets_at == 1787008778.0
+
+    def test_a_bare_number_is_not_read_as_an_epoch(self) -> None:
+        # A ten-digit number in a refusal body is as likely a request id as a
+        # timestamp, so only a reset-shaped KEY promotes one.
+        err = normalize(429, None, "rate limit exceeded (request 1787008778)")
+        assert err.resets_at is None
+        assert err.reset_stamp_unparsed is None
+
+    def test_ac2_edge_naive_stamp_with_no_timezone_refuses(self) -> None:
+        # Locked Decision 6. The z.ai stamps are Singapore time and the claude
+        # weekly reset was quoted Pacific; guessing is wrong by eight hours in
+        # one direction or the other, and both are worse than today's backoff.
+        err = normalize(
+            None, None, "Claude usage limit reached. Resets 2026-08-18 07:19:38"
+        )
+        assert err.resets_at is None
+        assert err.reset_stamp_unparsed == "2026-08-18 07:19:38"
+
+    def test_naive_stamp_with_a_configured_timezone_parses(self) -> None:
+        err = normalize(
+            None,
+            None,
+            "Claude usage limit reached. Resets 2026-08-18 07:19:38",
+            reset_timezone="Asia/Singapore",
+        )
+        assert err.resets_at == pytest.approx(
+            datetime.fromisoformat("2026-08-18T07:19:38+08:00").timestamp()
+        )
+        assert err.reset_stamp_unparsed is None
+
+    def test_an_unknown_timezone_name_refuses_like_a_missing_one(self) -> None:
+        err = normalize(
+            None,
+            None,
+            "usage limit reached. Resets 2026-08-18 07:19:38",
+            reset_timezone="Mars/Olympus_Mons",
+        )
+        assert err.resets_at is None
+        assert err.reset_stamp_unparsed == "2026-08-18 07:19:38"
+
+    def test_ac2_neg_a_body_with_no_stamp_sets_neither_field(self) -> None:
+        err = normalize(429, None, "rate limit exceeded, retry later")
+        assert err.resets_at is None
+        assert err.reset_stamp_unparsed is None
+
+    def test_a_non_quota_body_still_harvests_a_stamp(self) -> None:
+        # The harvest is independent of the class: a 503 that names its own
+        # retry time is just as useful to the lock.
+        err = normalize(503, None, "overloaded; retry after 2026-08-18T07:19:38Z")
+        assert err.error_class is ErrorClass.PROVIDER_5XX
+        assert err.resets_at is not None

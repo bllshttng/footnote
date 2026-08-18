@@ -108,6 +108,15 @@ class ProviderRecord(BaseModel):
     credentials_source: Path | None = None
     env: dict[str, str] | None = None
 
+    # The IANA timezone the provider quotes its reset stamps in. Only consulted
+    # when a refusal body carries a NAIVE stamp: the z.ai stamps are Singapore
+    # time and the claude weekly reset was quoted Pacific, so guessing is wrong
+    # by up to eight hours in either direction, and being wrong either unlocks a
+    # capped provider early or locks a healthy one out for an extra window.
+    # Unset, a naive stamp is refused and the existing backoff cooldown stands.
+    # An offset-bearing stamp and an epoch never need this.
+    reset_timezone: str | None = None
+
     # Optional metadata
     account_id: str | None = None
     tags: list[str] = Field(default_factory=list)

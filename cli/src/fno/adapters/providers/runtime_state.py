@@ -526,6 +526,7 @@ def _next_health(
     rule: ErrorRule,
     now: float,
     model: str | None = None,
+    resets_at: float | None = None,
 ) -> ProviderHealth:
     """Compute the next ProviderHealth given an ErrorRule + current state.
 
@@ -542,6 +543,20 @@ def _next_health(
     provider regardless of model so a second 429 on a sibling model
     feels the longer step. When ``model`` is None, behavior is the
     Plan A baseline (write ``rate_limited_until`` only).
+
+    When ``resets_at`` is supplied and lies in the future, it replaces the
+    computed cooldown as ``rate_limited_until``. This is the whole point of
+    harvesting it: a 429 whose body said the window reopens nine hours out was
+    writing a 2000ms lock, so the provider unlocked seconds after a multi-hour
+    cap and every reroute path routed straight back in. The backoff LEVEL still
+    increments, because the ramp is a per-provider property and a second cap
+    should still feel the longer step.
+
+    A harvested reset writes ``rate_limited_until`` even on the model path: an
+    account-wide usage cap is not a per-model throttle, and ``headroom()`` reads
+    only the provider-level lock. The model lock is still written alongside, so
+    that path loses nothing. When ``resets_at`` is None or already past, the
+    arithmetic is untouched and the write is byte-identical to today.
     """
     if rule.backoff:
         old_level = current.backoff_level
@@ -552,13 +567,18 @@ def _next_health(
         next_level = current.backoff_level
         cooldown_ms = rule.cooldown_ms or 0
     until_ts = now + (cooldown_ms / 1000.0)
+    # A reset the provider itself named beats a backoff we guessed. Guarded on
+    # "in the future" so a stale or misparsed stamp can never SHORTEN a lock.
+    harvested = resets_at if (resets_at is not None and resets_at > now) else None
     if model is not None:
         new_locks = dict(current.model_locks)
         new_locks[model] = until_ts
         return ProviderHealth(
             provider_id=current.provider_id,
             backoff_level=next_level,
-            rate_limited_until=current.rate_limited_until,
+            rate_limited_until=(
+                harvested if harvested is not None else current.rate_limited_until
+            ),
             last_error_at=now,
             model_locks=new_locks,
         )
@@ -570,7 +590,7 @@ def _next_health(
     return ProviderHealth(
         provider_id=current.provider_id,
         backoff_level=next_level,
-        rate_limited_until=until_ts,
+        rate_limited_until=harvested if harvested is not None else until_ts,
         last_error_at=now,
         model_locks=dict(current.model_locks),
     )
@@ -581,6 +601,7 @@ def update_provider_health(
     rule: ErrorRule,
     model: str | None = None,
     now: float | None = None,
+    resets_at: float | None = None,
 ) -> ProviderHealth:
     """Atomically increment backoff state for ``provider_id``.
 
@@ -596,6 +617,15 @@ def update_provider_health(
     because the cooldown ramp is a per-provider property regardless of
     which model errored (Locked Decision 5). When ``model`` is None,
     behavior matches the Plan A baseline.
+
+    ``resets_at`` is the epoch harvested from the refusal body by
+    ``error_taxonomy.normalize``. Supplied and in the future, it becomes
+    ``rate_limited_until`` in place of the computed cooldown, so the lock
+    holds for the real window rather than for a backoff step. It is written
+    to the lock and NOT to the usage snapshot on purpose: ``headroom()``
+    reads the lock with no TTL and drops a snapshot older than
+    ``DEFAULT_USAGE_TTL_SECONDS``, and a snapshot-based write decays to
+    UNKNOWN after five minutes - which never means exhausted.
 
     Does NOT swallow programmer errors: ValueError on a malformed
     ErrorRule, TypeError from a future refactor mismatch, etc.,
@@ -630,7 +660,9 @@ def update_provider_health(
             current = health_map.get(
                 provider_id, ProviderHealth(provider_id=provider_id)
             )
-            new_health = _next_health(current, rule, now, model=model)
+            new_health = _next_health(
+                current, rule, now, model=model, resets_at=resets_at
+            )
             health_map[provider_id] = new_health
             new_state = ProviderRuntimeState(
                 provider_health=health_map,

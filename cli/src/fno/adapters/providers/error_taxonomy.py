@@ -11,7 +11,9 @@ not a code-only patch.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 _BODY_EXCERPT_LEN = 256
@@ -57,6 +59,31 @@ _SWAP_TRIGGER_CLASSES = frozenset({
 
 _MODEL_ID_MAX_LEN = 256
 
+# A refusal body carries WHEN the window reopens, and today that number is
+# thrown away: the 429 rule is exponential backoff, so a nine-hour cap wrote a
+# 2000ms lock and every reroute path was free to route straight back in.
+#
+# Three shapes, tried in this order. An offset-bearing stamp and an epoch are
+# unambiguous and parse on their own. A naive stamp does NOT: the z.ai stamps
+# are Singapore time and the claude weekly reset was quoted Pacific, and being
+# wrong by eight hours either unlocks a capped provider early or locks a healthy
+# one out for an extra window. So a naive stamp needs an explicit
+# ``accounts.<id>.reset_timezone`` and returns None without one. None means
+# "keep today's backoff", which is the current behavior, so refusing costs
+# nothing and guessing costs a window.
+_ISO_OFFSET_STAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})"
+)
+_ISO_NAIVE_STAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?"
+)
+# An epoch is read only when a reset-shaped key names it. A bare ten-digit
+# number in a refusal body is as likely to be a request id as a timestamp.
+_EPOCH_STAMP_RE = re.compile(
+    r"""reset[a-zA-Z_]*["'\s:=]+(\d{9,11})""",
+)
+
 
 @dataclass(frozen=True)
 class NormalizedError:
@@ -78,6 +105,22 @@ class NormalizedError:
     Producers are responsible for clamping to ``_MODEL_ID_MAX_LEN``
     before construction (symmetric with ``body_excerpt`` truncation in
     ``normalize``).
+
+    ``resets_at`` is the epoch the refusal body says the window reopens,
+    harvested by :func:`_parse_reset_stamp`. It is the number the whole
+    provider-cap failover turns on: without it a nine-hour cap writes a
+    2000ms backoff lock and every reroute path routes back into the
+    provider that just refused. None means "no reset was readable", and
+    every consumer must then keep its existing backoff arithmetic.
+
+    ``reset_stamp_unparsed`` is the stamp that WAS present and could not
+    be resolved to an epoch - a naive stamp with no configured timezone.
+    It exists so a refusal can say "I saw a time and refused to guess it"
+    rather than being indistinguishable from a body with no time at all.
+
+    Both fields are optional, following the ``model`` field's precedent:
+    the closed part of this taxonomy is the ErrorClass set, not the
+    dataclass shape.
     """
 
     error_class: ErrorClass
@@ -86,6 +129,8 @@ class NormalizedError:
     body_excerpt: str
     triggers_swap: bool
     model: str | None = None
+    resets_at: float | None = None
+    reset_stamp_unparsed: str | None = None
 
     def __post_init__(self) -> None:
         expected = self.error_class.value in _SWAP_TRIGGER_CLASSES
@@ -106,6 +151,46 @@ class NormalizedError:
             raise ValueError(
                 "NormalizedError.model must be a non-empty string when set"
             )
+
+
+def _parse_reset_stamp(
+    body: str, tz: str | None
+) -> tuple[float | None, str | None]:
+    """``(epoch, unparsed_stamp)`` for the reset time named in ``body``.
+
+    Exactly one of the two is ever non-None. An offset-bearing ISO-8601 stamp
+    and a reset-keyed epoch resolve on their own. A naive stamp resolves only
+    against an explicit ``tz`` (IANA name, from ``accounts.<id>.reset_timezone``)
+    and is otherwise returned as the unparsed half - Locked Decision 6: a
+    wrong-by-eight-hours reset either unlocks a capped provider early or locks a
+    healthy one out for an extra window, and both are worse than falling back to
+    the existing backoff.
+
+    An unknown timezone name is the same refusal as no timezone at all.
+    """
+    if not body or not isinstance(body, str):
+        return None, None
+    from fno.adapters.providers.usage import _iso_to_epoch
+
+    m = _ISO_OFFSET_STAMP_RE.search(body)
+    if m is not None:
+        return _iso_to_epoch(m.group(0)), None
+    m = _EPOCH_STAMP_RE.search(body)
+    if m is not None:
+        return float(m.group(1)), None
+    m = _ISO_NAIVE_STAMP_RE.search(body)
+    if m is None:
+        return None, None
+    stamp = m.group(0)
+    if not tz:
+        return None, stamp
+    try:
+        from zoneinfo import ZoneInfo
+
+        parsed = datetime.fromisoformat(stamp.replace(" ", "T"))
+        return parsed.replace(tzinfo=ZoneInfo(tz)).timestamp(), None
+    except Exception:  # noqa: BLE001 - a bad tz name refuses like a missing one
+        return None, stamp
 
 
 def _matches_quota_body(body: str) -> bool:
@@ -248,6 +333,7 @@ def normalize(
     *,
     parser_failed: bool = False,
     model: str | None = None,
+    reset_timezone: str | None = None,
 ) -> NormalizedError:
     """Classify a provider call outcome.
 
@@ -268,6 +354,11 @@ def normalize(
             failover controller can write a model-specific lock instead
             of a provider-level one. Clamped to 256 bytes before
             construction (symmetric with ``body_excerpt`` truncation).
+        reset_timezone: IANA timezone name for this record, from
+            ``accounts.<id>.reset_timezone``. Only consulted when the
+            body carries a NAIVE reset stamp; an offset-bearing stamp
+            and an epoch never need it. Absent, a naive stamp is
+            refused rather than guessed (Locked Decision 6).
 
     Returns:
         ``NormalizedError`` with ``error_class`` set per the taxonomy and
@@ -282,6 +373,7 @@ def normalize(
     clamped_model = (
         model[:_MODEL_ID_MAX_LEN] if isinstance(model, str) else model
     )
+    resets_at, unparsed = _parse_reset_stamp(body, reset_timezone)
     return NormalizedError(
         error_class=error_class,
         raw_status=http_status,
@@ -289,4 +381,6 @@ def normalize(
         body_excerpt=body[:_BODY_EXCERPT_LEN],
         triggers_swap=triggers_swap,
         model=clamped_model,
+        resets_at=resets_at,
+        reset_stamp_unparsed=unparsed,
     )

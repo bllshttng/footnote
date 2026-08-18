@@ -843,3 +843,81 @@ class TestConcurrencyModelLocks:
         assert len(h.model_locks) == 10
         assert h.backoff_level == 10  # exactly 10 increments, no lost updates
         assert h.rate_limited_until is None  # never written under model arg
+
+
+class TestHarvestedResetBecomesTheLock:
+    """AC2: the reset the provider named beats the backoff we guessed."""
+
+    def test_ac2_hp_harvested_reset_holds_past_the_usage_ttl(
+        self, state_path: Path
+    ) -> None:
+        # The whole feature in one assertion pair. A 429 whose body said the
+        # window reopens nine hours out used to write a 2000ms lock, so the
+        # provider unlocked seconds after a multi-hour cap. The SECOND assertion
+        # is the point: a usage-snapshot write would pass at now+60 and fail at
+        # now+3600, because the snapshot TTL is 300s while the lock is read with
+        # no TTL at all.
+        from fno.adapters.providers.error_taxonomy import normalize
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        now = time.time()
+        nine_hours_out = now + 9 * 3600
+        stamp = (
+            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(nine_hours_out))
+            + "+00:00"
+        )
+        err = normalize(429, None, f"rate limit exceeded; resets at {stamp}")
+        assert err.resets_at is not None
+
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=err.resets_at,
+        )
+
+        h = read_state().provider_health["zai"]
+        assert h.rate_limited_until == pytest.approx(err.resets_at, abs=1.0)
+        assert h.backoff_level == 1  # the ramp still increments
+
+        for offset in (60.0, 3600.0):
+            verdict = headroom("zai", now=now + offset)
+            assert verdict.state is HeadroomState.EXHAUSTED, offset
+            assert verdict.resets_at == pytest.approx(err.resets_at, abs=1.0)
+
+    def test_ac2_neg_no_reset_is_byte_identical_to_today(
+        self, state_path: Path
+    ) -> None:
+        now = time.time()
+        update_provider_health("P", ErrorRule(status=429, backoff=True), now=now)
+        baseline = read_state().provider_health["P"].rate_limited_until
+
+        reset_provider_health("P")
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), now=now, resets_at=None
+        )
+        assert read_state().provider_health["P"].rate_limited_until == baseline
+        assert baseline == pytest.approx(now + BASE_BACKOFF_MS / 1000.0)
+
+    def test_a_past_reset_never_shortens_the_lock(self, state_path: Path) -> None:
+        # A stale or misparsed stamp must fall back to the backoff rather than
+        # unlock the provider retroactively.
+        now = time.time()
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), now=now, resets_at=now - 500,
+        )
+        h = read_state().provider_health["P"]
+        assert h.rate_limited_until == pytest.approx(now + BASE_BACKOFF_MS / 1000.0)
+
+    def test_model_path_still_gets_the_provider_level_lock(
+        self, state_path: Path
+    ) -> None:
+        # An account-wide usage cap is not a per-model throttle, and headroom()
+        # reads only the provider-level lock - so a harvested reset must land
+        # there even when the caller knows which model errored.
+        now = time.time()
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), model="m1", now=now,
+            resets_at=now + 9 * 3600,
+        )
+        h = read_state().provider_health["P"]
+        assert h.rate_limited_until == pytest.approx(now + 9 * 3600)
+        assert "m1" in h.model_locks
