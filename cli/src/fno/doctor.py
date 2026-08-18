@@ -1891,13 +1891,17 @@ def _codex_context_window_report(app_server_present: bool | None = None) -> dict
     if cap is None:
         return {"reason": f"cache-schema-drift: no max_context_window for {slug}"}
     base_synthesized = base is None
-    if base_synthesized:
+    # Narrowed on `base` itself, not through the flag: mypy cannot follow the
+    # indirection, and the resulting `int > None` error is a real one.
+    if base is None:
         base = cap
     # A missing percent must not silence a clamp that needs no percent to
     # compute.  Carry it as None and let the line omit the claim, rather than
     # defaulting to a number upstream did not send.  A float is legitimate
-    # here, since 95.0 is served.
-    percent = _number(percent, lo=0, hi=100, keep_float=True)
+    # here, since 95.0 is served.  `lo=1` for the same reason the window
+    # fields use it: a zero percent is an impossible window, and rejecting it
+    # falls through to the honest 100% assumption.
+    percent = _number(percent, lo=1, hi=100, keep_float=True)
 
     effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
     return {
@@ -1942,7 +1946,8 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
     report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
     if not (report.get("overstated") or report.get("leans_on_cached_cap")):
         return
-    kept = "" if report.get("percent") is None else f" (codex keeps {report['percent']}%)"
+    # `:g` because a float percent is legitimate: 95.0 must read as 95.
+    kept = "" if report.get("percent") is None else f" (codex keeps {report['percent']:g}%)"
     line = (
         f"fno doctor: codex {report['model_source']}={report['model']} with "
         f"{report['window_source']}={report['configured']} runs at an effective "

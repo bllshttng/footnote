@@ -379,6 +379,28 @@ def test_an_impossible_window_is_rejected_by_the_same_gate(tmp_path, monkeypatch
         }, bad
 
 
+def test_a_zero_percent_falls_back_rather_than_printing_zero(
+    tmp_path, monkeypatch
+) -> None:
+    """Same impossible-number class the window fields already reject.  A zero
+    percent printed "an effective 0 (codex keeps 0%)" as fact."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, percent=0)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["percent"] is None
+    assert report["effective"] == 272000
+
+
+def test_a_float_percent_renders_without_a_trailing_zero(tmp_path, monkeypatch) -> None:
+    """A float percent is accepted on purpose, so 95.0 must read as 95."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, percent=95.0)
+
+    assert "codex keeps 95%" in _emit(doctor._codex_context_window_report())[0]
+
+
 def test_a_real_served_window_clears_the_ceiling(tmp_path, monkeypatch) -> None:
     """The bound must never reject a number codex actually serves."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
