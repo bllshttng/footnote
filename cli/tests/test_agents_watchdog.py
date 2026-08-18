@@ -1319,3 +1319,32 @@ def test_store_only_row_reap_names_the_scope_mismatch_not_just_an_exit_code(
     outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=stop_not_found)
     assert outcome == "refused"
     assert "registry" in detail, detail
+
+
+def test_the_roster_warns_before_it_outgrows_its_budget(monkeypatch):
+    """A fixed budget against a growing fleet fails silently on the day the
+    fleet crosses it, and the resulting refusal reads as a broken fleet
+    rather than a budget to raise. The approach to the line must speak."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    slow = watchdog.ROSTER_TIMEOUT_S * watchdog.ROSTER_HEADROOM + 1
+    clock = iter([1000.0, 1000.0 + slow])
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(clock))
+    monkeypatch.setattr(
+        claude_mod, "claude_agents_rows",
+        lambda **k: ([{"sessionId": "aaaa1111-0000", "state": "working"}], []),
+    )
+    _rows, warnings = watchdog.fleet_rows()
+    assert any("of its" in w and "budget" in w for w in warnings), warnings
+    assert any("ROSTER_TIMEOUT_S" in w for w in warnings)
+
+
+def test_a_fast_roster_probe_stays_quiet(monkeypatch):
+    """The warning is a headroom signal, not a per-sweep banner."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    clock = iter([1000.0, 1000.5])
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(clock))
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda **k: ([], []))
+    _rows, warnings = watchdog.fleet_rows()
+    assert warnings == []

@@ -57,6 +57,8 @@ A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake 
 
 A sweep that reads zero rows refuses, and the refusal writes nothing. A binary update once made the roster read 0 rows against an intact 19-row registry file. A zero-row sweep writes `counts={}` with a fresh mtime, and that reads as a healthy quiet fleet. An empty fleet and a broken instrument must never produce the same output. The refusal starves the sweep file, so staleness reads loud within two ticks and never certifies a fleet that was not read.
 
+The most common way to read zero rows is the enumeration budget, not a broken binary. `claude agents --json --all` is a fleet-wide live-status probe, and it grows with the fleet: 3.4s on 43 rows against the 3.0s interactive default that `claude_agents_rows` ships. That default timed out on an operator's own `fno-agents resume` calls for a whole night before anyone read the fallback line as a defect. The sweep buys its own 30s budget (`ROSTER_TIMEOUT_S`) because no human waits on a tick, and it warns once it spends half of that. A fixed budget against a growing fleet is a bug that gets worse with success. The approach to the line has to speak before the line is crossed.
+
 ## Push, not pull
 
 A verdict the king has to remember to fetch goes unread. When `config.recovery.watchdog_mail_to` names a handle (or `--mail <handle>` is passed), the sweep mails a one-screen digest of the non-leave verdicts with their basis strings. The digest is gated on change. The signature of the non-leave set rides in the sweep file, and an unchanged signature sends nothing. A row stuck for a day reads once, not on every tick. A `project:<slug>` recipient addresses the project mailbox instead of one agent.

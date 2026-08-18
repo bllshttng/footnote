@@ -86,7 +86,13 @@ _WAKE_STATES = frozenset({"blocked", "stopped"})
 #: times out, returns zero rows, and trips ROSTER_REFUSAL on EVERY tick -
 #: a watchdog that never sweeps while reporting itself merely stale. The
 #: sweep runs on a tick with no human waiting, so it buys the whole fleet.
+#: The 3.0s default was not theoretical: `fno-agents resume` printed
+#: "timed out after 3.0s, falling back to registry-only view" on an
+#: operator's own commands, repeatedly, before anyone read it as a defect.
 ROSTER_TIMEOUT_S = 30.0
+
+#: Fraction of the roster budget that may be spent before the sweep warns.
+ROSTER_HEADROOM = 0.5
 
 #: Hard age ceiling on the wake lane (king ruling 2026-08-17): a session
 #: stopped for two months has a dead node, a stale branch, and a context that
@@ -567,7 +573,21 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
     from fno.agents.registry import load_registry
     from fno.recovery import _node_id_from_worktree
 
+    probe_started = time.time()
     raw, warnings = claude_agents_rows(timeout=ROSTER_TIMEOUT_S)
+    elapsed = time.time() - probe_started
+    if elapsed > ROSTER_TIMEOUT_S * ROSTER_HEADROOM:
+        # A fixed budget measured against a GROWING fleet fails silently on
+        # the day the fleet outgrows it: the probe times out, the sweep reads
+        # zero rows, and the refusal reads as a broken fleet rather than a
+        # budget that needs raising. Nothing else warns, so the approach to
+        # the line has to be the thing that speaks.
+        warnings = [
+            *warnings,
+            f"roster probe took {elapsed:.1f}s of its {ROSTER_TIMEOUT_S:.0f}s "
+            f"budget for {len(raw)} row(s); past the budget the sweep reads "
+            f"zero rows and refuses. Raise ROSTER_TIMEOUT_S",
+        ]
     by_sid: dict[str, Any] = {}
     try:
         for entry in load_registry():
@@ -977,7 +997,16 @@ def worktree_refusal(cwd: str) -> Optional[str]:
     """Why this worktree may NOT be reaped, or None when it is clean. Named so
     the refusal is actionable: unstaged changes and unpushed commits are work
     that exists nowhere else. A branch with no upstream reads as unpushed -
-    a worktree whose commits are not on any remote is exactly that."""
+    a worktree whose commits are not on any remote is exactly that.
+
+    ``claude rm`` refuses a dirty worktree too, and reap never passes
+    ``--force``, so that guard still backstops this one. This check is a
+    DELIBERATE duplicate for three reasons: it runs before the STOP, where
+    claude's runs at the rm, by which point refusing leaves a session dead
+    and its row kept; it names the reason in a dry-run receipt, so a reader
+    sees why a row will not reap without executing anything; and it is the
+    lane's own hook, where the co-tenancy check the harness cannot make (it
+    sees one session, never the fleet) is the one that matters most."""
     if not cwd:
         return "no recorded cwd"
     try:
