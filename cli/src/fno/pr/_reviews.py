@@ -684,11 +684,13 @@ def publish_coverage_status(
             "-f", f"context={COVERAGE_STATUS_CONTEXT}",
             "-f", f"description={description}",
         ]
-        res = None
-        for _attempt in range(3):
-            res = runner(args, cwd=gh_dir, timeout=30)
+        res = runner(args, cwd=gh_dir, timeout=30)
+        for _retry in range(2):
             if res.ok:
                 return True, ""
+            res = runner(args, cwd=gh_dir, timeout=30)
+        if res.ok:
+            return True, ""
         why = (res.stderr or res.stdout or f"gh exited {res.returncode}").strip()
         return False, why[:200]
     except Exception as exc:  # noqa: BLE001 - a publisher must never raise
