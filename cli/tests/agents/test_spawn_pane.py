@@ -1248,6 +1248,21 @@ def test_mesh_env_wrapper_scrubs_identity_for_every_provider() -> None:
         assert "CODEX_THREAD_ID" in unset_names
 
 
+def test_mesh_env_wrapper_forwards_the_graphql_proxy_path(monkeypatch) -> None:
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {**base, "PATH": "/quota-proxy:/usr/bin"},
+    )
+    wrapper = _mesh_env_wrapper(
+        "child", "codex", role=None, argv=["codex", "exec", "do this"]
+    )
+    assert "PATH=/quota-proxy:/usr/bin" in wrapper
+    assert not any(token.startswith("FNO_REAL_GH=") for token in wrapper)
+
+
 def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
     """resolve_provenance: explicit slug/plan skip the graph read; a linked plan
     yields FNO_PLAN, an empty one drops it; no node -> {}."""
