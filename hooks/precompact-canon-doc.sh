@@ -19,7 +19,12 @@
 # failure) when fno / gh / the registry is unreadable or absent.
 set -uo pipefail
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
+  PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
+else
+  PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
+fi
 FNO_DIR=".fno"
 # The session-id fallback chain lives in the shared postcompact lib so a marker
 # change lands once. Unreadable lib: keep the local chain quiet, never fail.

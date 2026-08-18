@@ -22,7 +22,12 @@ FNO_DIR=".fno"
 # The fallback is BASH_SOURCE-relative, never `git rev-parse`: this hook runs
 # with cwd set to the SESSION's repo, which is not the plugin, so a git toplevel
 # would resolve GUARD_LIB into an unrelated checkout and source whatever it finds.
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
+    PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
+else
+    PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$SOURCE_ROOT}}"
+fi
 GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 

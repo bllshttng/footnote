@@ -19,7 +19,12 @@ set -uo pipefail
 
 # BASH_SOURCE-relative, never `git rev-parse`: cwd is the session's repo, not
 # the plugin (the fix banked from 502af79f2).
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
+    PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
+else
+    PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$SOURCE_ROOT}}"
+fi
 CARRIER_LIB="$PLUGIN_ROOT/scripts/lib/postcompact-carrier.sh"
 BRIEF="$PLUGIN_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
 

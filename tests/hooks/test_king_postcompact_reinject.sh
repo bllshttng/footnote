@@ -48,6 +48,7 @@ registry_fixture() {
 }
 
 CROWNED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"king","status":"live","crown_level":1,"crown_scope":"fno"}'
+CROWNED_HARNESS_ROW='{"session_id":"short-king","harness_session_id":"'"$SID"'","name":"king","status":"live","crown_level":1,"crown_scope":"fno"}'
 UNCROWNED_ROW='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","name":"worker","status":"live","crown_level":null,"crown_scope":null}'
 
 run_king() { # $1 = event JSON ; FNO_PLATFORM env selects the lane
@@ -60,23 +61,24 @@ registry_fixture "$CROWNED_ROW"
 FNO_PLATFORM=claude
 OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
 RC=$?
-echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+[[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
     | contains("level 1 over fno") and contains("Encode, then abdicate")' >/dev/null 2>&1 \
   && pass "crowned claude: additionalContext carries crown + first rule" \
-  || fail "crowned claude payload wrong: $OUT"
-[[ $RC -eq 0 ]] && pass "crowned claude exits 0" || fail "crowned claude rc=$RC"
+  || fail "crowned claude rc=$RC payload=$OUT"
 
 # 2. Crowned row, no source field, codex lane resolved through CODEX_THREAD_ID:
 #    the real codex PostCompact event carries no session_id at all, so the SID
 #    must come from the env marker the registry row's harness_session_id holds.
 #    systemMessage carrier, never the claude-only hookSpecificOutput key.
+registry_fixture "$CROWNED_HARNESS_ROW"
 FNO_PLATFORM=codex
-OUT="$(printf '%s' '{}' | env CODEX_THREAD_ID="$SID" FNO_PLATFORM=codex bash "$KING" 2>/dev/null)"
+OUT="$(printf '%s' '{}' | env CODEX_THREAD_ID="$SID" FNO_PLATFORM=codex \
+  PLUGIN_ROOT="$REPO_ROOT" CLAUDE_PLUGIN_ROOT="$TMP/foreign-claude-plugin" \
+  bash "$KING" 2>/dev/null)"
 RC=$?
-echo "$OUT" | jq -e 'has("systemMessage") and (has("hookSpecificOutput") | not)' >/dev/null 2>&1 \
+[[ $RC -eq 0 ]] && echo "$OUT" | jq -e 'has("systemMessage") and (has("hookSpecificOutput") | not)' >/dev/null 2>&1 \
   && pass "crowned codex via CODEX_THREAD_ID: systemMessage carrier" \
-  || fail "crowned codex payload wrong: $OUT"
-[[ $RC -eq 0 ]] && pass "crowned codex exits 0" || fail "crowned codex rc=$RC"
+  || fail "crowned codex rc=$RC payload=$OUT"
 
 # 3. Uncrowned row (both crown fields null): nothing to re-teach, silence.
 registry_fixture "$UNCROWNED_ROW"

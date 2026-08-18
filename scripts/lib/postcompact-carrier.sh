@@ -64,16 +64,24 @@ for k in ("source", "session_id", "transcript_path"):
 # postcompact_resolve_sid EVENT_SID TRANSCRIPT - echo this session's id.
 # $1: session_id from the event (claude carries it; codex PostCompact does not).
 # $2: transcript_path from the event (its basename is the claude session id).
-# Env fallbacks follow HARNESS_SESSION_MARKERS precedence: CODEX_THREAD_ID is
-# codex's durable identity and the value the registry row's harness_session_id
-# holds, so any other codex env id matches no row. One home for the chain, so
-# the next marker change lands once instead of per hook.
+# Env fallbacks are harness-specific. Cross-harness sessions can inherit the
+# other harness's marker, so selecting the first non-empty marker can attach a
+# hook to the wrong session. One home for the chain means the next marker
+# change lands once instead of per hook.
 postcompact_resolve_sid() {
     local sid="${1:-}" transcript="${2:-}"
     if [[ -z "$sid" && -n "$transcript" ]]; then
         sid="$(basename "$transcript")"
         sid="${sid%.jsonl}"
     fi
-    [[ -n "$sid" ]] || sid="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+    if [[ -z "$sid" ]]; then
+        if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
+            sid="${CODEX_THREAD_ID:-${CODEX_SESSION_ID:-}}"
+        elif [[ "${FNO_PLATFORM:-}" == "claude" || -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+            sid="${CLAUDE_CODE_SESSION_ID:-}"
+        else
+            sid="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${CODEX_SESSION_ID:-}}}"
+        fi
+    fi
     printf '%s' "$sid"
 }

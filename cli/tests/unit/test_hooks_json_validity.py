@@ -490,10 +490,10 @@ def test_observer_expected_lists_match_their_group_source_ids() -> None:
                     command = hook.get("command", "")
                     source = re.search(r"--source-id (\S+)", command)
                     expected = re.search(r"--expected (\S+)", command)
-                    if not (source and expected):
-                        continue
-                    source_ids.append(source.group(1))
-                    expected_lists.append(expected.group(1))
+                    if source:
+                        source_ids.append(source.group(1))
+                    if expected:
+                        expected_lists.append(expected.group(1))
                 if not source_ids:
                     continue
                 # Every observer-wrapped command in the group must declare the
@@ -511,3 +511,27 @@ def test_observer_expected_lists_match_their_group_source_ids() -> None:
                         f"--expected {expected!r} != registered source ids "
                         f"{sorted(registration)}"
                     )
+
+
+def test_both_postcompact_reinject_hooks_are_registered_on_supported_harnesses() -> None:
+    expected_sources = [
+        "target-postcompact-reinject",
+        "king-postcompact-reinject",
+    ]
+    cases = (
+        (HOOKS_JSON, "SessionStart", "compact"),
+        (CODEX_HOOKS_JSON, "PostCompact", ""),
+    )
+    for path, event, matcher in cases:
+        entries = json.loads(path.read_text(encoding="utf-8"))["hooks"][event]
+        entry = next(item for item in entries if item.get("matcher", "") == matcher)
+        commands = [hook.get("command", "") for hook in entry["hooks"]]
+        source_ids = [
+            re.search(r"--source-id (\S+)", command).group(1)
+            for command in commands
+            if "context-observe-hook.sh" in command
+        ]
+        assert source_ids == expected_sources, (
+            f"{path.name} {event} matcher={matcher!r} reinject set drifted: "
+            f"{source_ids}"
+        )

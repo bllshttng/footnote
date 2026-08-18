@@ -133,7 +133,7 @@
           },
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/precompact-canon-doc.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/precompact-canon-doc.sh"
           }
         ]
       }
