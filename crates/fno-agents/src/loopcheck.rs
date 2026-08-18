@@ -2920,9 +2920,7 @@ fn publish_coverage_status(
     // gate axis). Counting it made this writer post failure on configs the
     // Python merge gate answers "no lane" to - two writers of one context
     // posting opposite states.
-    let lane = !(required_bots.is_empty()
-        && optional_bots.is_empty()
-        && reviewers.is_empty());
+    let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
     if !lane {
         return;
     }
