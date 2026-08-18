@@ -113,13 +113,21 @@ def test_ask_writes_under_its_own_root_never_the_shared_pin(pinned, runner) -> N
     own, while `operator_question` is exempt and sits there until a human
     clears it by hand.
 
-    It is contained differently. `ask` resolves a root and passes an explicit
-    `events_path=`, so it never reaches the unpathed default the pin covers.
-    That is the property asserted here, in both directions: the row lands under
-    the resolved root, and the shared sandbox journal stays untouched. Drop the
-    explicit path and the row moves to the pin, which this test fails on -
-    and in production, where no pin is set, that same drop would silently move
-    every operator question from the canonical checkout to a worktree.
+    It is contained differently, and less completely. `ask` resolves a root and
+    passes an explicit `events_path=`, so it never reaches the unpathed default
+    the pin covers. That is the property asserted here, in both directions: the
+    row lands under the resolved root, and the shared sandbox journal stays
+    untouched. Drop the explicit path and the row moves to the pin, which this
+    test fails on. In production, where no pin is set, that same drop silently
+    moves every operator question from the canonical checkout to a worktree.
+
+    The residual this does NOT close: `ask` resolves its root through
+    `resolve_carveout_root`, which honors `FNO_REPO_ROOT`, and `neutralise`
+    leaves that var unset on purpose. So a future test calling `ask` with no
+    root fixture writes an `operator_question` into the developer's real
+    checkout. Every current `ask` test pins the root, so nothing leaks today.
+    Pin `FNO_REPO_ROOT` in any new one, and note that this kind is exempt from
+    the fold's 24h window, so such a row never ages out on its own.
     """
     from fno.outstanding.cli import outstanding_app
 

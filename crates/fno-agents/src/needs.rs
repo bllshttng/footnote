@@ -157,7 +157,11 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     // accumulator and the session gate below would drop them. They get their own
     // per-recipient accumulator (latest (epoch, seq) wins) and render
     // squadless-live in the client.
-    let mut mail_escalations: HashMap<String, (u64, usize, NeedItem)> = HashMap::new();
+    // Keyed on (recipient, kind), not recipient alone. A standing question and a
+    // delivery miss to the same handle are different things, and the client
+    // renders one while dropping the other, so collapsing them would let a later
+    // miss erase an escalation a human still owes an answer to.
+    let mut mail_escalations: HashMap<(String, String), (u64, usize, NeedItem)> = HashMap::new();
     // operator_question / operator_question_closed, keyed by question_id (not
     // per-recipient-latest-wins like mail_escalation above): several distinct
     // decisions can be open on the operator at once, so every open question_id
@@ -230,8 +234,8 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
         // mail_escalation is folded before the session gate: it carries no
         // session_id (it is mail between agents), so the gate below would drop
-        // it. One NeedItem per recipient, latest wins; its kind comes from that
-        // latest row's reason.
+        // it. One NeedItem per (recipient, kind), latest of that pair wins; the
+        // kind comes from the row's reason.
         if kind == Some("mail_escalation") {
             let Some(recipient) = str_field(&v, "recipient") else {
                 continue;
@@ -257,12 +261,13 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             seq += 1;
             // Same (epoch, seq) ordering as the session accumulator: a cross-source
             // concat never lets an older line clobber a newer escalation.
+            let acc_key = (recipient.to_string(), need_kind.to_string());
             if mail_escalations
-                .get(recipient)
+                .get(&acc_key)
                 .is_none_or(|(e, s, _)| (epoch, seq) >= (*e, *s))
             {
                 mail_escalations.insert(
-                    recipient.to_string(),
+                    acc_key,
                     (
                         epoch,
                         seq,
@@ -1051,6 +1056,44 @@ mod tests {
         let mut kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
         kinds.sort();
         assert_eq!(kinds, vec!["mail_delivery_miss", "mail_question"]);
+    }
+
+    #[test]
+    fn a_later_delivery_miss_does_not_erase_a_standing_question() {
+        // The trap the kind split opens if the map stays keyed on recipient
+        // alone: latest-wins would replace the question row with a
+        // mail_delivery_miss, which the client drops, so an escalation the code
+        // itself calls a human's problem vanishes from the panel. A worker asks
+        // `ops` a question, then anyone else's send to `ops` misses, and the
+        // question is gone. The debounce is per (sender, recipient), so a
+        // second sender never suppresses the miss.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "ops",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T03:00:00Z",
+                "reachable-miss",
+                "web",
+                "ops",
+                "ping"
+            ),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        let question = items
+            .iter()
+            .find(|i| i.kind == "mail_question")
+            .expect("the standing question survives a later delivery miss");
+        assert!(question.evidence.contains("which auth?"));
+        assert!(
+            items.iter().any(|i| i.kind == "mail_delivery_miss"),
+            "and the miss is still folded, under its own kind"
+        );
     }
 
     #[test]

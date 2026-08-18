@@ -111,7 +111,7 @@ Leave them. The finding is the cwd fallback, not the directories it produced. `.
 
 The per-checkout journal `<repo>/.fno/events.jsonl` resolves through `paths.project_events_json()`. `FNO_EVENTS_PATH` overrides it. The override exists because repo-root resolution cannot be sandboxed. `fno.hermetic.neutralise` deliberately leaves `FNO_REPO_ROOT` unset. So an unpathed `append_event` under test writes a real row into the developer's checkout, and both operator readers fold that file. On 2026-08-17 six test fixtures sat in the needs panel beside two genuine operator questions.
 
-`neutralise` pins the override at one line. It reaches the pytest, shell, and cargo trees, because all three come through that function. Reach for the pin, not for a marker the fold recognises. A fold that must know about test data carries an exception list, and the next fixture that misses the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and reads the journal back must name the same file in `FNO_EVENTS_PATH`. The pin outranks the root.
+`neutralise` pins the override at one line, and that env reaches the pytest, shell, and cargo trees. Two of the three writers read it: the Python resolver and `scripts/lib/events.sh`. A Rust claim write still resolves its own root, so the cargo tree is not contained by the pin. Reach for the pin, not for a marker the fold recognises. A fold that must know about test data carries an exception list, and the next fixture that misses the list refills the queue in silence. A test that sets `FNO_REPO_ROOT` itself and reads the journal back must name the same file in `FNO_EVENTS_PATH`. The pin outranks the root.
 
 ## Adding a new root writer
 

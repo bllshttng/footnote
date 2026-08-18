@@ -43,27 +43,30 @@ got=$(EVENTS_FILE="$tmp/explicit.jsonl" FNO_EVENTS_PATH="$tmp/pinned.jsonl" bash
 assert_eq "explicit EVENTS_FILE outranks the pin" "$tmp/explicit.jsonl" "$got"
 
 # 3. The containment itself: an emit from inside the checkout lands on the pin
-#    and leaves the checkout journal byte-identical. Asserted in both directions,
+#    and never reaches the checkout journal. Asserted in both directions,
 #    because the pinned-journal half is the positive control - an emit that
 #    silently did nothing would satisfy the untouched-checkout half alone.
+#
+#    Counted by this test's own marker rather than by bytes. In a worktree that
+#    journal is a symlink to the canonical file, which live sessions and daemons
+#    append to while this runs, so a byte comparison goes red on somebody else's
+#    write. Only this emit can move the marker count.
+MARKER=test_events_path_pin
 checkout_journal="$REPO_ROOT/.fno/events.jsonl"
-before_bytes=0
-[[ -f "$checkout_journal" ]] && before_bytes=$(wc -c < "$checkout_journal")
+count_marker() {
+    [[ -f "$1" ]] || { echo 0; return; }
+    grep -c "$MARKER" "$1" 2>/dev/null || echo 0
+}
+before_marks=$(count_marker "$checkout_journal")
 
 env -u EVENTS_FILE FNO_EVENTS_PATH="$tmp/emit.jsonl" bash -c \
     'cd "$2" || exit 1; source "$1" >/dev/null 2>&1; emit_event target test_events_path_pin "{}"' \
     _ "$EVENTS_LIB" "$REPO_ROOT" >/dev/null 2>&1
 
-pinned_rows=0
-if [[ -f "$tmp/emit.jsonl" ]]; then
-    pinned_rows=$(grep -c 'test_events_path_pin' "$tmp/emit.jsonl" 2>/dev/null)
-    [[ -z "$pinned_rows" ]] && pinned_rows=0
-fi
-assert_eq "the emit reached the pinned journal" "1" "$pinned_rows"
+assert_eq "the emit reached the pinned journal" "1" "$(count_marker "$tmp/emit.jsonl")"
 
-after_bytes=0
-[[ -f "$checkout_journal" ]] && after_bytes=$(wc -c < "$checkout_journal")
-assert_eq "the checkout journal is byte-identical" "$before_bytes" "$after_bytes"
+after_marks=$(count_marker "$checkout_journal")
+assert_eq "the checkout journal gained no row from this emit" "$before_marks" "$after_marks"
 
 if [[ $fail -eq 0 ]]; then
     echo "PASS test-events-path-pin.sh"

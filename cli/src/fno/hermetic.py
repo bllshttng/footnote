@@ -352,8 +352,14 @@ def neutralise(
     # unpathed append_event under test lands a production-shaped row on a live
     # operator surface. Six such fixture rows were measured in the panel on
     # 2026-08-17. Pin the journal itself instead of teaching either reader to
-    # recognise test data: one var, and it reaches the pytest, shell, and cargo
-    # trees because all three come through this function.
+    # recognise test data.
+    #
+    # This env reaches the pytest, shell, and cargo trees, because all three come
+    # through this function. Only the Python and shell writers READ the var, so
+    # the cargo tree is not contained by it: a Rust claim write still resolves
+    # `worktree_repo_root(cwd)` in crates/fno-agents/src/claims.rs. Those are
+    # `claim_` rows, which no operator surface folds, and closing them is its own
+    # node. The pytest and shell trees carry the panel-visible producers.
     out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
 
     out.update(caches)
