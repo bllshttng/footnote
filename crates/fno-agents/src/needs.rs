@@ -591,6 +591,10 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
         // mail_delivery_miss rides the same rule: the client drops it from the
         // operator view, but it stays in the JSON for a wake consumer, and a
         // node-keyed stamp would label it dead when nothing was ever claimed.
+        // `worker_refused` carries no node either (it is registry-derived,
+        // not ledger-resolved), and unlike those rows it needs no honest
+        // fiction: the item exists ONLY because `refused_worker_items` just
+        // probed the row and it answered -- refused-but-reachable IS live.
         if matches!(
             item.kind.as_str(),
             "mail_question"
@@ -598,6 +602,7 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
                 | "operator_question"
                 | "carveout_stale"
                 | "stale_claims"
+                | "worker_refused"
         ) {
             item.live = true;
             continue;
@@ -728,6 +733,60 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
     })
 }
 
+/// One item per registry row the progress axis classifies `refused`
+/// (x-cbd9 Task 3.4): alive, reachable, and unable to think, because its
+/// endpoint was handed a model it cannot serve. Nothing else rotates this
+/// state today -- `status` reads `live`, the pid is real, and every roster
+/// reader that stops at reachability keeps it forever. This is the leg that
+/// makes the progress axis actionable rather than decorative.
+///
+/// Reads the live registry directly (IO layer, like [`carveout_age_item`] /
+/// [`stale_claim_item`]), never from `events.jsonl`: a refusal is a current
+/// FACT about a row, not an event that happened once. One truth probe per
+/// row -- the same probe `fno agents list` already pays for `status` -- so
+/// this leg costs nothing a live roster read did not already cost.
+/// Best-effort: an unreadable registry or a probe failure degrades to no
+/// items, never a crash of `fno agents needs`.
+fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
+    let registry = match crate::daemon::load_registry_asserted(&home.registry_json()) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut items = Vec::new();
+    for e in &registry.entries {
+        let handle = crate::daemon::registry_truth_handle(e);
+        let probe = crate::claude_ask::family1_truth_probe(&handle);
+        let (progress, _basis) = crate::daemon::progress_from_truth(
+            probe.as_ref(),
+            e.harness_name(),
+            e.route_settings_path.as_deref(),
+        );
+        if progress != "refused" {
+            continue;
+        }
+        let model = probe
+            .as_ref()
+            .and_then(|p| p.observed_model.get("model"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown model");
+        items.push(NeedItem {
+            kind: "worker_refused".to_string(),
+            session_id: e.harness_session_id.clone().unwrap_or_else(|| e.name.clone()),
+            // No ledger resolution here (this leg is registry-derived, not
+            // event-derived, unlike every other item in this file) -- the
+            // client joins on `name` instead, same as `carveout_age_item` /
+            // `stale_claim_item`.
+            node: None,
+            name: Some(e.name.clone()),
+            title: Some(format!("{} refused: answering as {model}", e.name)),
+            ts: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            evidence: format!("{} is alive and reachable but answering as {model}, not a claude model", e.name),
+            live: false, // stamped by stamp_liveness
+        });
+    }
+    items
+}
+
 /// Current epoch seconds; `0` if the clock is somehow before the epoch.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -848,6 +907,7 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
             items.push(item);
         }
     }
+    items.extend(refused_worker_items(home));
 
     let items = stamp_liveness(items);
 

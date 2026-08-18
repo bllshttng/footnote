@@ -98,7 +98,7 @@ def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_cla
         "count": 0,
         "discovered_sessions": [],
         "discovered_count": 0,
-        "filters_applied": {"cwd": None, "provider": None, "status": None},
+        "filters_applied": {"cwd": None, "provider": None, "status": None, "progress": None},
         "schema_version": 2,
     }
     assert result.exit_code == 0
@@ -202,6 +202,51 @@ def test_list_agents_filter_by_status(
     assert json.loads(
         list_agents(status="orphaned", json_out=True, tty=True).output
     )["count"] == 0
+
+
+def test_list_agents_filter_by_progress_is_independent_of_status(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """AC15-HP: the two axes filter independently.
+
+    The exact motivating specimen: both rows are ``working`` and reachable
+    (``status == "live"`` on both), and one is answering as a foreign model.
+    ``--progress refused`` narrows to that row alone, while ``--status live``
+    still returns both -- a refused worker is fully reachable.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(name="healthy", status="live"),
+            _claude(name="refused", status="live", short_id="def67890"),
+        ]
+    )
+    _patch_claude_agents_json(
+        {"abc12345": {"live_status": "Working"}, "def67890": {"live_status": "Working"}}
+    )
+    from fno.agents import session_truth
+
+    def _fake_truth(handle, **_kwargs):
+        model = (
+            {"kind": "observed", "model": "glm-5.2[1m]"}
+            if handle == "refused"
+            else {"kind": "observed", "model": "claude-opus-4-1"}
+        )
+        return {"state": "working", "observed_model": model}
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", _fake_truth)
+
+    refused_only = json.loads(
+        list_agents(progress="refused", json_out=True, tty=True).output
+    )
+    assert refused_only["count"] == 1
+    assert refused_only["agents"][0]["name"] == "refused"
+    assert refused_only["filters_applied"]["progress"] == "refused"
+
+    still_live = json.loads(
+        list_agents(status="live", json_out=True, tty=True).output
+    )
+    assert still_live["count"] == 2, "the status axis must not shrink when progress is filtered separately"
 
 
 def test_list_agents_filter_by_cwd_resolves_relative(

@@ -66,8 +66,57 @@ def _registry_handles() -> dict[str, str]:
         return {}
 
 
+def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
+    """name -> progress verdict, for the fno-registry-sourced rows only.
+
+    This is the surface that showed 8513 MB across 31 live pids with no way
+    to see which of them were parked (specimen 1), so it must show progress
+    beside RSS on the same line. Foreign claude rows (``source == "claude"``,
+    no fno registry entry) are out of scope: there is no ``harness`` /
+    ``route_settings_path`` context here to judge a refusal against.
+
+    One transcript read per row (``resolve_session_truth``), reused for both
+    the reachability verdict and the progress verdict -- the same shape
+    ``fno.agents.read`` uses so this view does not pay a second read for the
+    same evidence.
+    """
+    from fno.agents.reachability import classify_progress, classify_reachability, registry_falsifier
+    from fno.agents.registry import load_registry
+    from fno.agents.session_truth import resolve_session_truth
+
+    try:
+        entries = {e.name: e for e in load_registry()}
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}
+
+    out: dict[str, Optional[str]] = {}
+    for w in workers:
+        if w.source != "fno":
+            continue
+        entry = entries.get(w.name)
+        if entry is None:
+            continue
+        truth = resolve_session_truth(w.name)
+        truth_state = truth.get("state")
+        reach = classify_reachability(
+            truth_state=truth_state,
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(entry),
+        )
+        prog = classify_progress(
+            truth_state=truth_state,
+            reachability=reach.verdict,
+            observed_model=truth.get("observed_model"),
+            harness=w.harness,
+            route_settings_path=entry.route_settings_path,
+        )
+        out[w.name] = prog.verdict
+    return out
+
+
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles = _registry_handles()
+    progress = _progress_map(workers)
     rows = []
     for w in workers:
         # Null when this session has no registry row (a foreign claude session
@@ -86,6 +135,9 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "pid": w.pid,
                 "rss_mb": _rss_mb(w.pid),
                 "status": w.status,
+                # The orthogonal axis beside `status`: null for a foreign
+                # claude row this view has no harness/route context to judge.
+                "progress": progress.get(w.name),
                 "crown": crowns.get(w.name),  # US9: null when uncrowned
             }
         )
@@ -181,7 +233,10 @@ def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
 
     out: list[str] = []
     out.extend(c.warnings)
-    header = f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} {'PID':>7} {'RSS_MB':>7} STATUS"
+    header = (
+        f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} "
+        f"{'PID':>7} {'RSS_MB':>7} {'PROGRESS':<17} STATUS"
+    )
     out.append(header)
     if not rows:
         out.append("no live workers")
@@ -196,7 +251,8 @@ def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['pid'] or '-':>7} "
-            f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} {r['status']}"
+            f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
+            f"{r['progress'] or '-':<17} {r['status']}"
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")

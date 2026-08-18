@@ -22,6 +22,7 @@ from fno.agents import format as fmt
 from fno.agents import truth_status
 from fno.agents.reachability import (
     WIRE_STATUS,
+    classify_progress,
     classify_reachability,
     reachability,
     registry_falsifier,
@@ -55,6 +56,7 @@ def list_agents(
     cwd: Optional[str] = None,
     provider: Optional[str] = None,
     status: Optional[str] = None,
+    progress: Optional[str] = None,
     json_out: bool = False,
     tty: bool = True,
     discover: bool = True,
@@ -82,6 +84,7 @@ def list_agents(
         "cwd": resolved_cwd,
         "provider": provider,
         "status": status,
+        "progress": progress,
     }
 
     try:
@@ -163,8 +166,23 @@ def list_agents(
             age_s=truth.get("last_activity_age_s"),
             falsifier=registry_falsifier(entry),
         )
+        # The orthogonal axis, off the SAME truth reading already in hand: no
+        # second transcript read is paid. reachability answers "can I reach
+        # this process"; progress answers "is it advancing, awaiting the
+        # operator, parked, or refused" -- a refused worker is fully reachable.
+        prog = classify_progress(
+            truth_state=truth_state,
+            reachability=reach.verdict,
+            observed_model=observed_model,
+            harness=entry.harness,
+            route_settings_path=entry.route_settings_path,
+        )
         rendered_status = WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:
+            continue
+        # A second, independent axis: filtered separately from `status` above
+        # so `--progress parked` never shrinks what `--status live` returns.
+        if progress is not None and prog.verdict != progress:
             continue
         live_status: Optional[str] = None
         if entry.harness == "claude" and entry.short_id:
@@ -201,6 +219,8 @@ def list_agents(
             observed_model=observed_model,
             reachability=reach.verdict,
             basis=reach.basis,
+            progress=prog.verdict,
+            progress_basis=prog.basis,
             last_activity_age_s=reach.age_s,
             last_event_at=last_event_at,
             last_message=last_message,
@@ -244,6 +264,8 @@ def list_agents(
                 # one session instead of two.
                 row = sess.to_row()
                 if status is not None and row.get("status") != status:
+                    continue
+                if progress is not None and row.get("progress") != progress:
                     continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so

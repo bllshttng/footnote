@@ -2275,7 +2275,9 @@ where
 /// read-modify-write path needs; a daemon that serves that partial roster as
 /// the complete roster is the false-zero outage at runtime, because the
 /// startup assertion never re-runs (codex P1 on PR 924).
-fn load_registry_asserted(path: &std::path::Path) -> Result<state::Registry, state::StateError> {
+pub(crate) fn load_registry_asserted(
+    path: &std::path::Path,
+) -> Result<state::Registry, state::StateError> {
     let (registry, raw_rows) = state::load_registry_with_counts(path)?;
     if registry.entries.len() != raw_rows {
         return Err(state::StateError::InvariantViolation(
@@ -3948,7 +3950,7 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// compatibility-fallback case included, since an unmeasured row has no
 /// progress state to report either), then the refusal predicate, then the
 /// truth-state arms.
-fn progress_from_truth(
+pub(crate) fn progress_from_truth(
     probe: Option<&crate::claude_ask::TruthProbe>,
     harness: &str,
     route_settings_path: Option<&str>,
@@ -3970,7 +3972,7 @@ fn progress_from_truth(
     }
 }
 
-fn registry_truth_handle(entry: &RegistryEntry) -> String {
+pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
     if let Some(session_id) = entry.harness_session_id.as_deref() {
         return session_id.to_string();
     }
