@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
@@ -559,7 +560,13 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
         match: Any = by_sid.get(sid)
         name = str(getattr(match, "name", None) or r.get("name") or sid)
         cwd = str(r.get("cwd") or getattr(match, "cwd", "") or "")
-        node = _node_id_from_worktree(cwd) if cwd else None
+        # The manifest is per-ROW identity only when the cwd is that row's own
+        # linked worktree. On a shared checkout (worktree.policy = "never", or
+        # any row launched in the canonical root) every session reads the SAME
+        # graph_node_id, so a done node would make every quiet sibling reapable.
+        # There the ledger's session-keyed join is the only honest answer, and
+        # a miss leaves node None, which condemns nothing.
+        node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
         if node is None:
             if ledger_nodes is None:
                 ledger_nodes = _ledger_nodes()
@@ -577,6 +584,20 @@ def fleet_rows() -> tuple[list[Row], list[str]]:
             f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
         ]
     return out, warnings
+
+
+def _is_linked_worktree(cwd: str) -> bool:
+    """Is ``cwd`` a linked git worktree (its own checkout), not a shared one?
+
+    A linked worktree's ``.git`` is a FILE holding a gitdir pointer; the
+    canonical checkout's is a DIRECTORY. Only in the former is the
+    ``.fno/target-state.md`` manifest one node for one session."""
+    if not cwd:
+        return False
+    try:
+        return (Path(cwd) / ".git").is_file()
+    except OSError:
+        return False
 
 
 def _claim_view(node: str) -> dict:
@@ -789,10 +810,14 @@ def sweep_staleness(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {"age_s": None, "stale": True, "source": None, "at": None}
     age = max(0.0, now_s - stat.st_mtime)
+    source = str(data.get("source") or "")
     return {
         "age_s": int(age),
-        "stale": age > stale_after_s,
-        "source": str(data.get("source") or ""),
+        # A hand-run sweep refreshes the file but proves nothing about the
+        # launchd cadence, and the cadence is what this read exists to
+        # measure. Only a tick-sourced write can clear staleness.
+        "stale": age > stale_after_s or source != "tick",
+        "source": source,
         "at": str(data.get("at") or ""),
     }
 
@@ -927,8 +952,23 @@ def worktree_refusal(cwd: str) -> Optional[str]:
     return None
 
 
+#: The shipped content-confirm cadence (dispatch._mux_content_confirm): resume
+#: returns when the live STATE reads working, which is before the injected turn
+#: is flushed to the transcript, so a one-shot read reports a landed wake as
+#: refused.
+_CONFIRM_ATTEMPTS = 40
+_CONFIRM_INTERVAL_S = 0.25
+
+
 def confirm_wake_landed(
-    row_id: str, cwd: str, message: str, before_epoch: Optional[float]
+    row_id: str,
+    cwd: str,
+    message: str,
+    before_epoch: Optional[float],
+    *,
+    attempts: Optional[int] = None,
+    interval_s: Optional[float] = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """The message must appear in the recipient transcript AFTER the pre-wake
     marker, as a record whose whole text EQUALS the message - a substring
@@ -938,6 +978,21 @@ def confirm_wake_landed(
     contract as mail_inject's confirm_content_after). The scan runs deeper
     than the classification tail so a chatty attach cannot push the message
     out of the confirmation window."""
+    # Read at call time, not as a def-time default, so the cadence stays one
+    # knob a caller (and a test) can turn.
+    tries = _CONFIRM_ATTEMPTS if attempts is None else attempts
+    wait = _CONFIRM_INTERVAL_S if interval_s is None else interval_s
+    for attempt in range(max(1, tries)):
+        if attempt:
+            sleep(wait)
+        if _confirm_once(row_id, cwd, message, before_epoch):
+            return True
+    return False
+
+
+def _confirm_once(
+    row_id: str, cwd: str, message: str, before_epoch: Optional[float]
+) -> bool:
     facts = tail_facts(row_id, cwd, max_records=_CONFIRM_RECORDS)
     if facts is None:
         return False
@@ -960,6 +1015,20 @@ def confirm_wake_landed(
 LANES = {"wake": frozenset({WAKE}), "all": frozenset({WAKE, REROUTE, REAP})}
 
 
+class RotationBudget:
+    """One global provider rotation per sweep.
+
+    ``_default_failover`` mutates the ACTIVE provider in settings.yaml, and
+    its storm cap is keyed per row, so N reroute rows would rotate N times
+    and walk the whole account queue to queue-exhausted in one invocation.
+    The shipped recovery sweep guards this with the same one-shot flag
+    (``fno.recovery.run_recovery_sweep``); the watchdog must not be the lane
+    that re-opens it."""
+
+    def __init__(self) -> None:
+        self.rotated = False
+
+
 def apply_verdict(
     v: Verdict,
     *,
@@ -967,6 +1036,7 @@ def apply_verdict(
     cwd: str = "",
     runner=subprocess.run,
     failover_fn: Optional[Callable[[Any, Any], str]] = None,
+    rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
     ``(outcome, detail)`` with outcome in applied | refused | reported.
@@ -983,7 +1053,9 @@ def apply_verdict(
         if v.verdict == WAKE:
             return _apply_wake(v, cwd=cwd, runner=runner)
         if v.verdict == REROUTE:
-            return _apply_reroute(v, cwd=cwd, failover_fn=failover_fn)
+            return _apply_reroute(
+                v, cwd=cwd, failover_fn=failover_fn, rotation=rotation
+            )
         if v.verdict == REAP:
             return _apply_reap(v, cwd=cwd, runner=runner)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1012,7 +1084,11 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
 
 
 def _apply_reroute(
-    v: Verdict, *, cwd: str, failover_fn: Optional[Callable[[Any, Any], str]]
+    v: Verdict,
+    *,
+    cwd: str,
+    failover_fn: Optional[Callable[[Any, Any], str]],
+    rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
     """Reroute through the FULL failover, not a bare respawn.
 
@@ -1025,6 +1101,12 @@ def _apply_reroute(
     rather than looping the fleet on the dead account."""
     from fno.recovery import Candidate, _default_failover, classify_session_error
 
+    if rotation is not None and rotation.rotated:
+        return (
+            "reported",
+            f"reroute held: the active provider already rotated this sweep "
+            f"({v.basis}). Re-run after the swap settles",
+        )
     if not cwd:
         return "refused", "reroute refused: no recorded worktree to respawn into"
     facts = tail_facts(v.row_id, cwd)
@@ -1041,6 +1123,12 @@ def _apply_reroute(
         cwd=cwd, name=v.row_id,
     )
     outcome = fn(candidate, err)
+    if rotation is not None and outcome in (
+        "swapped", "rotated-no-worker", "notified",
+    ):
+        # Every one of these rotated the global active provider, whether or
+        # not a replacement started.
+        rotation.rotated = True
     if outcome == "swapped":
         return "applied", f"failover swapped ({v.basis})"
     if outcome == "notified":

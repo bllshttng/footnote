@@ -391,6 +391,8 @@ class _Proc:
 def test_wake_reports_failure_when_message_missing_despite_working_state(
     monkeypatch,
 ):
+    monkeypatch.setattr(watchdog, "_CONFIRM_ATTEMPTS", 3)
+    monkeypatch.setattr(watchdog, "_CONFIRM_INTERVAL_S", 0.0)
     """The state field reading working is not evidence: wake.sh printed
     working -> working for a wake whose message never landed."""
     v = Verdict("dddd4444-0000", "k1", "stopped", WAKE, "stopped 30m", "resume")
@@ -405,6 +407,8 @@ def test_wake_reports_failure_when_message_missing_despite_working_state(
 
 
 def test_wake_applies_when_message_lands(monkeypatch):
+    monkeypatch.setattr(watchdog, "_CONFIRM_ATTEMPTS", 3)
+    monkeypatch.setattr(watchdog, "_CONFIRM_INTERVAL_S", 0.0)
     v = Verdict("dddd4444-0000", "k1", "stopped", WAKE, "stopped 30m", "resume")
     reads = {"n": 0}
 
@@ -424,6 +428,8 @@ def test_wake_applies_when_message_lands(monkeypatch):
 
 
 def test_lifecycle_subprocesses_run_in_the_rows_worktree(monkeypatch):
+    monkeypatch.setattr(watchdog, "_CONFIRM_ATTEMPTS", 3)
+    monkeypatch.setattr(watchdog, "_CONFIRM_INTERVAL_S", 0.0)
     """A registry-less row from another project must resolve in its own
     project: the delegated resume carries the row's cwd, never the sweep
     caller's ambient one."""
@@ -450,6 +456,8 @@ def test_lifecycle_subprocesses_run_in_the_rows_worktree(monkeypatch):
 
 
 def test_untimestamped_continue_record_does_not_confirm_wake(monkeypatch):
+    monkeypatch.setattr(watchdog, "_CONFIRM_ATTEMPTS", 3)
+    monkeypatch.setattr(watchdog, "_CONFIRM_INTERVAL_S", 0.0)
     """A torn/summary record with no timestamp of its own is presence, not a
     landing: it must not confirm a wake whose message never arrived."""
     before_epoch = NOW_1840 - 5 * 60
@@ -471,6 +479,8 @@ def test_wake_lane_only_wakes_even_with_lanes_all_available():
 
 
 def test_wake_confirmation_requires_the_exact_message(monkeypatch):
+    monkeypatch.setattr(watchdog, "_CONFIRM_ATTEMPTS", 3)
+    monkeypatch.setattr(watchdog, "_CONFIRM_INTERVAL_S", 0.0)
     """A substring match read 'Let me continue with the tests' as a landed
     wake. The record's whole text must equal the message."""
     before = NOW_1840 - 5 * 60
@@ -700,6 +710,134 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
 # ---------------------------------------------------------------------------
 # Enumeration (change 3): a stopped row survives into the returned map
 # ---------------------------------------------------------------------------
+
+def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
+    """_default_failover mutates the GLOBAL active provider and its storm cap
+    is per row, so eight blocked rows would walk the whole account queue in
+    one --apply-all. The sweep rotates once, like the recovery sweep."""
+    monkeypatch.setattr(
+        watchdog, "tail_facts", lambda *a, **k: _facts(RATE_LIMIT_TAIL, age_min=125)
+    )
+    calls = []
+
+    def failover(candidate, err):
+        calls.append(candidate.name)
+        return "swapped"
+
+    rotation = watchdog.RotationBudget()
+    rows = [
+        Verdict(f"cccc333{i}-0000", f"r{i}", "blocked", REROUTE, "429", "redispatch")
+        for i in range(4)
+    ]
+    outcomes = [
+        apply_verdict(
+            v, lanes="all", cwd=f"/tmp/r{i}",
+            failover_fn=failover, rotation=rotation,
+        )
+        for i, v in enumerate(rows)
+    ]
+    assert len(calls) == 1, calls
+    assert outcomes[0][0] == "applied"
+    for outcome, detail in outcomes[1:]:
+        assert outcome == "reported"
+        assert "already rotated this sweep" in detail
+    # With no budget passed the caller keeps the old per-row behavior.
+    calls.clear()
+    apply_verdict(rows[0], lanes="all", cwd="/tmp/r0", failover_fn=failover)
+    assert len(calls) == 1
+
+
+def test_wake_confirmation_polls_for_the_flushed_turn(monkeypatch):
+    """resume returns when the live STATE reads working, before the injected
+    turn is flushed, so a one-shot read reports a landed wake as refused."""
+    reads = {"n": 0}
+
+    def fake_tail(*a, **k):
+        reads["n"] += 1
+        if reads["n"] < 4:
+            return _facts("stopped mid turn")
+        return _facts("continue", age_min=0)
+
+    monkeypatch.setattr(watchdog, "tail_facts", fake_tail)
+    slept = []
+    assert watchdog.confirm_wake_landed(
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        attempts=6, interval_s=0.01, sleep=slept.append,
+    )
+    assert slept, "a polling confirm must have waited at least once"
+
+    # A wake that never lands still reports refused after the attempts run out.
+    monkeypatch.setattr(
+        watchdog, "tail_facts", lambda *a, **k: _facts("stopped mid turn")
+    )
+    assert not watchdog.confirm_wake_landed(
+        "dddd4444-0000", "/tmp/k1", "continue", NOW_1840 - 600,
+        attempts=3, interval_s=0.0, sleep=lambda _s: None,
+    )
+
+
+def test_shared_checkout_rows_never_inherit_one_manifest_node(
+    monkeypatch, tmp_path
+):
+    """Under worktree.policy = never every session runs in the canonical
+    checkout and reads the SAME graph_node_id. A done node must not make every
+    quiet sibling reapable, so the manifest decides only for a LINKED worktree
+    and the session-keyed ledger decides otherwise."""
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+    import fno.paths as paths_mod
+
+    shared = tmp_path / "canonical"
+    (shared / ".fno").mkdir(parents=True)
+    (shared / ".git").mkdir()  # a canonical checkout: .git is a DIRECTORY
+    (shared / ".fno" / "target-state.md").write_text("graph_node_id: x-done\n")
+
+    linked = tmp_path / "wt"
+    (linked / ".fno").mkdir(parents=True)
+    (linked / ".git").write_text("gitdir: /elsewhere\n")  # linked: a FILE
+    (linked / ".fno" / "target-state.md").write_text("graph_node_id: x-mine\n")
+
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [
+        {"graph_node_id": "x-done", "sessions": ["aaaa1111-0000"]},
+    ]}))
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+    monkeypatch.setattr(
+        registry_mod, "load_registry", lambda: (_ for _ in ()).throw(OSError())
+    )
+    monkeypatch.setattr(claude_mod, "claude_agents_rows", lambda: ([
+        {"sessionId": "aaaa1111-0000", "state": "working", "cwd": str(shared)},
+        {"sessionId": "bbbb2222-0000", "state": "working", "cwd": str(shared)},
+        {"sessionId": "cccc3333-0000", "state": "working", "cwd": str(linked)},
+    ], []))
+
+    rows, _warnings = watchdog.fleet_rows()
+    by_id = {r.row_id: r for r in rows}
+    # The ledger names the one session that really ran the node.
+    assert by_id["aaaa1111-0000"].node == "x-done"
+    # Its sibling on the same checkout inherits nothing.
+    assert by_id["bbbb2222-0000"].node is None
+    # A linked worktree still reads its own manifest.
+    assert by_id["cccc3333-0000"].node == "x-mine"
+
+
+def test_a_manual_sweep_never_certifies_the_cadence(monkeypatch, tmp_path):
+    """A hand-run sweep refreshes the file but proves nothing about the
+    launchd cadence, and the cadence is what the staleness read measures."""
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+    import os
+
+    watchdog.write_sweep_file("manual", {LEAVE: 3}, NOW_1840)
+    os.utime(path, (NOW_1840 - 30, NOW_1840 - 30))
+    fresh_manual = watchdog.sweep_staleness(now_s=NOW_1840)
+    assert fresh_manual["stale"] is True
+    assert fresh_manual["source"] == "manual"
+
+    watchdog.write_sweep_file("tick", {LEAVE: 3}, NOW_1840)
+    os.utime(path, (NOW_1840 - 30, NOW_1840 - 30))
+    assert watchdog.sweep_staleness(now_s=NOW_1840)["stale"] is False
+
 
 def test_stopped_row_survives_claude_agents_json(monkeypatch):
     from fno.agents.harnesses import claude as claude_mod

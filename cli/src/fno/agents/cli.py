@@ -2719,9 +2719,16 @@ def cmd_watchdog(
             print(f"watchdog mail: {receipt}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
+    # A filtered run publishes only its own rows, so it must not stamp the
+    # whole non-leave set: doing so tells the next tick that ghost/wake rows
+    # it never emitted were already published.
+    events_payload = (
+        payload if only is None
+        else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
+    )
     wd.write_sweep_file(
         "manual", payload["counts"], now, signature,
-        events_signature=wd.verdict_signature(payload),
+        events_signature=wd.verdict_signature(events_payload),
     )
 
     # Classification events ride every mode: a verdict emitted only under a
@@ -2756,9 +2763,13 @@ def cmd_watchdog(
 
     lanes = "all" if apply_all else "wake"
     results = []
+    # One global provider rotation per sweep, shared across every row.
+    rotation = wd.RotationBudget()
     for v, row in pairs:
         try:
-            outcome, detail = wd.apply_verdict(v, lanes=lanes, cwd=row.cwd)
+            outcome, detail = wd.apply_verdict(
+                v, lanes=lanes, cwd=row.cwd, rotation=rotation
+            )
         except Exception as exc:  # noqa: BLE001 - one broken row never aborts the rest
             outcome, detail = "refused", f"{v.verdict} action crashed: {exc!r}"
         results.append({"row_id": v.row_id, "verdict": v.verdict,

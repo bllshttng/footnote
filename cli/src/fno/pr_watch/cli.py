@@ -464,9 +464,16 @@ def tick() -> None:
                             },
                         )
                     if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
-                        outcome, detail = _wd.apply_verdict(
-                            verdict, lanes="wake", cwd=row.cwd
-                        )
+                        try:
+                            outcome, detail = _wd.apply_verdict(
+                                verdict, lanes="wake", cwd=row.cwd
+                            )
+                        except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+                            # The outer except would end the loop, and the
+                            # sweep file already stamped the whole set, so the
+                            # remaining rows' events would be suppressed for
+                            # good.
+                            outcome, detail = "refused", f"wake crashed: {exc!r}"
                         acted += 1
                         _wd.emit_event(
                             "watchdog_applied" if outcome == "applied" else "watchdog_refused",
