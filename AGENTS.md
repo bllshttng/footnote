@@ -160,7 +160,7 @@ At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `s
 
 ### Multi-repo features
 
-A session works only in its own project. A multi-repo feature is one backlog node per project linked by `blocked_by`, each shipping its own PR: `/blueprint` decomposes, `/do` spawns foreign unblocked waves via `fno agents spawn --cwd <root>`, `fno backlog advance` dispatches dependents on merge.
+A session works only in its own project. A multi-repo feature is one node per project linked by `blocked_by`, each shipping its own PR: `/blueprint` decomposes, `/do` spawns foreign unblocked waves via `fno agents spawn --cwd <root>`, `fno backlog advance` dispatches dependents on merge.
 
 ### Return contract for execution agents
 
@@ -170,7 +170,7 @@ Preferred (claude): a JSON object in a fenced ```json block (or `<result>{...}</
 {"result": "SUCCESS", "task": "2.1", "commit": "abc123", "summary": "..."}
 ```
 
-`result` ∈ `SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`; `task` required. Fallback (codex/gemini): the `RESULT:`/`TASK:`/... line grammar, fail-closed. Canonical parser: `parse_task_result` in `skills/do/orchestrator.py`.
+`result` ∈ `SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`; `task` required. Fallback (codex/gemini): the `RESULT:`/`TASK:`/... line grammar, fail-closed. Parser: `parse_task_result` in `skills/do/orchestrator.py`.
 
 ### Deviation rules
 
@@ -178,26 +178,26 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 ## CLI subsystems (summary + doc)
 
-- **`fno claim`** - the single work-claim primitive; atomic lockfiles under `.fno/claims/`. `fno target init` already claims the node - never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
-- **`fno mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced in code at the stop gate (`loopcheck.rs`) and `fno pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
-- **`fno decide`** - `--subject <node|pr-N|area> --decision "..."` records a ruling; `fno decide list [--subject X]` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
+- **`fno claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced at the stop gate (`loopcheck.rs`) and `fno pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
+- **`fno decide`** - records a ruling per subject; `decide list --subject X` recovers, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
-- **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
-- **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.
-- **`fno agents watchdog`** - external fleet sweep from transcript truth: wake / reroute / reap / ghost per row. Dry run by default; `--apply` (wake) and `--apply-all` (reroute; reap needs `config.recovery.watchdog_reap`, it deletes worktrees). Tick cadence behind `config.recovery.watchdog`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)
-- **`fno doctor`** - detects stale deployed `fno` vs source; `--fix` delegates to `fno update`. Compares against merged source only. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
-- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes share one neighbourhood and must not be confused: harness (the binary, `-H`), provider (the model vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both a harness and a provider, so never infer the axis from a value. Definitions and the allowlist procedure live in [docs/architecture/axis-vocabulary.md](docs/architecture/axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`.
-- **Stage table (per-stage axis)** - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch; `route`=vendor/model (`--route`, fail-closed) sits beside `provider`=harness. [stage table](docs/architecture/role-based-model-routing.md).
-- **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
+- **`fno target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
+- **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). `-p` is reachable only via explicit `headless`; never default to it.
+- **`fno agents watchdog`** - fleet sweep from transcript truth: wake / reroute / reap. Dry run by default; `--apply` (wake), `--apply-all` (reroute; reap needs `config.recovery.watchdog_reap`, it deletes worktrees). Cadence behind `config.recovery.watchdog`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)
+- **`fno doctor`** - detects stale deployed `fno` vs merged source only; `--fix` delegates to `fno update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
+- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider; never infer the axis from a value. Definitions in [axis-vocabulary](docs/architecture/axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`.
+- **Stage table (per-stage axis)** - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch; `route`=vendor/model (`--route`, fail-closed) beside `provider`=harness. [stage table](docs/architecture/role-based-model-routing.md).
+- **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` lists everything (`help <group> --all` per group). New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
 - **Control-plane LOC ratchet** - positive line-count delta across control-plane paths fails CI unless the PR body has a `loc-exception:` line. [loc-ratchet](docs/architecture/loc-ratchet.md).
-- **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`.
-- **Target self-handoff** - a `/target` session can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
+- **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
+- **Target self-handoff** - `/target` can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review); two memory-pass checkpoints; stuck terminals write postmortems. [memory-system](docs/architecture/memory-system.md).
 
 ## Skill / agent development
 
 - **Skill:** `skills/<name>/SKILL.md` (+ optional `references/`, `scripts/`). **Agent:** `agents/<name>.md` with frontmatter.
-- **Self-containment (CI-enforced):** driver skills (`/target`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse happens at build time via `skill-bundles.yaml` + `fno bundle` (`fno bundle check` gates freshness).
+- **Self-containment (CI-enforced):** driver skills (`/target`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse is build-time via `skill-bundles.yaml` + `fno bundle` (`bundle check` gates freshness).
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/do/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 

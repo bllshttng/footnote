@@ -972,12 +972,10 @@ def _auto_merge_armed_manifests() -> dict[str, int]:
     except Exception:  # noqa: BLE001 - advisory; never crash doctor
         pass
     try:
-        from fno import paths as _paths
-
-        repo = _paths.resolve_repo_root()
+        repo = _resolve_source(None)
         if repo:
             bases.append(Path(repo) / ".claude" / "worktrees")
-    except Exception:  # noqa: BLE001 - resolve_repo_root may shell out to git
+    except Exception:  # noqa: BLE001 - advisory; never crash doctor
         pass
 
     try:
@@ -1710,6 +1708,17 @@ def _emit_human(
             "fno doctor: codex hooks load from both config.toml and hooks.json; "
             "run `fno setup cli-hooks-codex --migrate-legacy-hooks-json` to "
             "converge (or `fno doctor --codex-hooks` for detail)."
+        )
+
+    # Advisory legacy pre-push hook (destination-ref gate): names the remedy
+    # verb. Only the legacy install prints; absent/foreign/unchecked are
+    # silent. Never changes status/exit.
+    if (result.get("pre_push_hook") or {}).get("status") == "legacy":
+        out(
+            "fno doctor: the installed pre-push hook gates on the pushing "
+            "checkout's branch, so it refuses every push from a canonical "
+            "checkout on main. Run `bash scripts/install-pre-push-hook.sh` "
+            "to replace it (the old file is backed up)."
         )
 
     # Plugin hook launch probe (x-d991): a hook command that cannot start fails
@@ -2575,6 +2584,38 @@ def _plugin_hooks_launch_report() -> dict[str, Any]:
     }
 
 
+def _pre_push_hook_report(src: Optional[Path]) -> dict[str, Any]:
+    """Advisory: a legacy pre-push hook that gates on the pushing checkout's
+    current branch refuses every push from a checkout on main, whatever the
+    destination ref. Detection is delegated to the installer's ``--check`` so
+    there is exactly one implementation of "is the installed hook the bad
+    one". Never changes status/exit; an absent or foreign hook is not a
+    defect and reports nothing."""
+    candidates = []
+    if src is not None:
+        candidates.append(src / "scripts" / "install-pre-push-hook.sh")
+    candidates.append(
+        Path(__file__).resolve().parents[3] / "scripts" / "install-pre-push-hook.sh"
+    )
+    script = next((c for c in candidates if c.is_file()), None)
+    if script is None:
+        return {"status": "unchecked"}
+    try:
+        proc = subprocess.run(
+            ["bash", str(script), "--check"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(Path.cwd()),
+        )
+    except Exception:
+        return {"status": "unchecked"}
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if "legacy" in out:
+        return {"status": "legacy"}
+    return {"status": "ok"}
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
@@ -2779,6 +2820,11 @@ def doctor_command(
     # hook through the real ``$SHELL -lc`` path and reports any that cannot
     # start. Loud on failure; never changes the staleness exit code.
     result["plugin_hooks"] = _plugin_hooks_launch_report()
+
+    # Advisory legacy pre-push hook: gates on the pushing checkout's branch,
+    # so it refuses every push from a canonical checkout on main. Never
+    # changes status/exit.
+    result["pre_push_hook"] = _pre_push_hook_report(src)
 
     # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
     # LaunchAgent DOES change the exit code - an installed-but-dead agent is
