@@ -296,6 +296,10 @@ def tick() -> None:
 
             now = _time.time()
             payload, rows = _wd.run_sweep(now_s=now)
+            # Read BEFORE any write and defaulted here: the refused branch
+            # writes nothing, and an unbound read after the if/else crashed
+            # every refused tick into the outer except.
+            prev_events_sig = ""
             if payload.get("refused"):
                 # x-4c87: zero rows read is an instrument failure, not an
                 # empty fleet. No sweep file, no mail, no gate advance - the

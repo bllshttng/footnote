@@ -165,6 +165,19 @@ def test_taxonomy_quota_phrasings_mark_the_window():
     assert v.verdict == LEAVE
 
 
+def test_chatty_attach_cannot_push_a_live_window_out_of_scope():
+    """A 5-hour usage limit outlives any 15-record tail: the window reads the
+    60-record classification window, so restore noise between the 429 and
+    the sweep cannot reopen a closed window."""
+    stamp = "API Error: usage limit reached. resets at 02:48:21 SGT"
+    noise = [(NOW_1840 - 60 * i, f"restore noise {i}") for i in range(30, 0, -1)]
+    records = [(NOW_1840 - 31 * 60, stamp), *noise]
+    facts = TailFacts(records, records[-1][0], " ".join(t for _, t in records))
+    window, epoch, _stamp = rate_limit_window(facts.records, NOW_1840)
+    assert window == "live"
+    assert epoch == datetime(2026, 8, 16, 18, 48, 21, tzinfo=timezone.utc).timestamp()
+
+
 def test_old_passed_plus_new_live_429_is_reroute_not_wake():
     row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
     old = "API Error: 429 rate limit, window resets at 02:10:00 SGT"
@@ -475,11 +488,19 @@ def test_wake_confirmation_requires_the_exact_message(monkeypatch):
 def test_wake_confirmation_scans_past_the_classification_tail(monkeypatch):
     """A chatty attach pushes the message past the 15-record classification
     tail. Confirmation reads deeper, so a landed wake never reads refused."""
-    marker = NOW_1840 - 200 * 60
+    marker = NOW_1840 - 400 * 60
     records = [(marker, "continue")] + [
-        (marker + i * 30, f"restore noise {i}") for i in range(1, 41)
+        (marker + i * 10, f"restore noise {i}") for i in range(1, 101)
     ]
     facts = TailFacts(records, records[-1][0], " ".join(t for _, t in records))
+    # The message sits beyond the 60-record classification window and inside
+    # the deeper confirmation window.
+    assert all(
+        t != "continue" for _e, t in facts.records[-watchdog._TAIL_RECORDS:]
+    )
+    assert any(
+        t == "continue" for _e, t in facts.records[-watchdog._CONFIRM_RECORDS:]
+    )
     monkeypatch.setattr(watchdog, "tail_facts", lambda *a, **k: facts)
     assert watchdog.confirm_wake_landed(
         "dddd4444-0000", "/tmp/k1", "continue", marker - 60
@@ -494,20 +515,20 @@ def test_tail_window_bounds_the_role_triple_too(monkeypatch, tmp_path):
     import fno.provenance.observed as obs
 
     lines = [{
-        "timestamp": "2026-08-16T16:00:00Z",
+        "timestamp": "2026-08-16T15:00:00Z",
         "message": {"role": "assistant",
                     "content": [{"type": "text", "text": "ancient turn"}]},
     }]
-    for i in range(20):
-        lines.append({"timestamp": f"2026-08-16T17:{i:02d}:00Z",
+    for i in range(80):
+        lines.append({"timestamp": f"2026-08-16T1{i % 2}:{i:02d}:00Z",
                       "text": f"progress {i}"})
     path = tmp_path / "t.jsonl"
     path.write_text("\n".join(json.dumps(x) for x in lines))
     monkeypatch.setattr(obs, "resolve_transcript_path", lambda *a, **k: path)
 
     facts = watchdog.tail_facts("sid", "/tmp")
-    assert len(facts.records) == 15
-    assert facts.records[-1][1] == "progress 19"
+    assert len(facts.records) == watchdog._TAIL_RECORDS
+    assert facts.records[-1][1] == "progress 79"
     # The ancient role-bearing record fell outside the window, so the triple
     # reads empty rather than stale.
     assert facts.last_role is None and facts.last_text == ""

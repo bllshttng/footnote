@@ -99,11 +99,14 @@ REAP_QUIET_AFTER_S = 900
 _RESET_STAMP_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})\s*(?:SGT|UTC\+8)")
 _SGT_OFFSET_S = 8 * 3600
 _TAIL_BYTES = 64 * 1024
-_TAIL_RECORDS = 15
-#: A chatty attach (restore markers, compaction lines) can push the wake
-#: message past the 15-record classification tail between the resume and the
-#: confirmation read, so confirmation scans deeper than classification.
-_CONFIRM_RECORDS = 60
+#: 60, not 15: a chatty attach (restore markers, compaction lines) must not
+#: push a still-live 429 out of the window the wake gate reads - the burned
+#: turn inside a closed window is the module's measured failure, and a
+#: 5-hour usage limit outlives any 15-record tail.
+_TAIL_RECORDS = 60
+#: Confirmation scans deeper still, so a landed wake message is never read
+#: as refused because the attach that followed it was chatty.
+_CONFIRM_RECORDS = 120
 
 #: The generated no-session holder form (target_cli._successor_claim_holder
 #: and init-target-state.sh's claim_owner_id): ``<UTC stamp>-<pid junk>-<hex>``.
@@ -449,15 +452,18 @@ def tail_facts(
 
 
 def _has_tool_use(e: dict) -> bool:
-    """Does this record carry a tool call? A row whose last event is a tool
-    call is a session WORKING (the c696fddd case: re-tasked after its PR
-    merged), and reap must never fire on it."""
+    """Does this record carry tool activity - a call OR a result? A trailing
+    tool_result is a round trip mid-flight (the result landed, the next
+    assistant turn has not), which is a session WORKING exactly like a
+    trailing tool_use (the c696fddd case: re-tasked after its PR merged),
+    and reap must never fire on either."""
     msg = e.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, list):
         return False
     return any(
-        isinstance(p, dict) and p.get("type") == "tool_use" for p in content
+        isinstance(p, dict) and p.get("type") in ("tool_use", "tool_result")
+        for p in content
     )
 
 
@@ -899,6 +905,11 @@ def worktree_refusal(cwd: str) -> Optional[str]:
             ["git", "-C", cwd, "status", "--porcelain"],
             capture_output=True, text=True, timeout=30, check=False,
         )
+        if dirty.returncode != 0:
+            # A failed status with empty stdout reads as clean unless the
+            # exit is checked - an index.lock held by the very agent working
+            # there must read as NOT-reapable, not as a clean tree.
+            return f"git status failed in {cwd} (exit {dirty.returncode})"
         n_dirty = len([ln for ln in (dirty.stdout or "").splitlines() if ln.strip()])
         if n_dirty:
             return f"{n_dirty} uncommitted change(s) in {cwd}"

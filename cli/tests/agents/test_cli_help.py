@@ -71,7 +71,7 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     assert "--print-command" in out
 
 
-# x-71b6: the advertised `fno agents` menu (the eight In-N-Out verbs).
+# x-71b6: the advertised `fno agents` menu (the In-N-Out verbs).
 _ADVERTISED_AGENTS_VERBS = {
     "spawn", "list", "logs", "watch", "attach", "stop", "resume", "status",
     "watchdog",

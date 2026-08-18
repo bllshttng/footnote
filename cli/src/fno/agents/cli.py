@@ -2719,7 +2719,10 @@ def cmd_watchdog(
             print(f"watchdog mail: {receipt}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001 - mail never breaks the sweep
         print(f"watchdog mail failed: {exc}", file=sys.stderr)
-    wd.write_sweep_file("manual", payload["counts"], now, signature)
+    wd.write_sweep_file(
+        "manual", payload["counts"], now, signature,
+        events_signature=wd.verdict_signature(payload),
+    )
 
     # Classification events ride every mode: a verdict emitted only under a
     # dry run left apply modes with no event record at all, while the tick
