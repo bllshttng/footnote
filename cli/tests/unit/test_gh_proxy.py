@@ -92,6 +92,18 @@ def test_worker_environment_surfaces_proxy_install_io_failure(monkeypatch):
         worker_environment({"PATH": "/usr/bin"})
 
 
+def test_worker_environment_inherits_env_when_config_layer_is_unimportable(monkeypatch):
+    """A bare interpreter without the venv-only config deps (the codex ask
+    parity harness drives exactly that, with gh on PATH as CI has it) must
+    inherit the parent env, not crash every ask-path spawn at import time."""
+    def fail(**kwargs):
+        raise ModuleNotFoundError("No module named 'tomli_w'")
+
+    monkeypatch.setattr("fno.setup.github_cli.ensure_proxy", fail)
+    env = worker_environment({"PATH": "/usr/bin", "KEEP": "yes"})
+    assert env == {"PATH": "/usr/bin", "KEEP": "yes"}
+
+
 def test_delegate_replaces_proxy_to_preserve_tty(monkeypatch):
     seen = {}
 
