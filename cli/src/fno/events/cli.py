@@ -37,6 +37,13 @@ _PROTOCOL_DATA_STR_CAP = 500
 # gate counts.
 GLOBAL_MIRROR_TYPES = frozenset({"review_attestation"})
 
+# Event types whose emit ALSO mirrors the verdict to GitHub as the reviewer
+# lane's bot identity (x-93ea). Deliberately a SEPARATE set from
+# GLOBAL_MIRROR_TYPES: global-log membership answers "which events earn a
+# cross-checkout copy" and will drift for its own reasons; joining it must
+# not silently gain a GitHub posting call whose data may carry no verdict.
+PUBLISH_REVIEW_TYPES = frozenset({"review_attestation"})
+
 
 @cli.callback()
 def _event_callback(
@@ -472,12 +479,17 @@ def emit(
     # worker all land here - so the producer has exactly one reachable path
     # rather than sitting on one of N paths while the others silently skip it.
     #
+    # Gated on PUBLISH_REVIEW_TYPES, NOT GLOBAL_MIRROR_TYPES: that set answers
+    # "which events earn a global-log copy" and its membership will drift for
+    # global-log reasons; a type joining it must not silently gain GitHub
+    # posting (a data-less verdict would refuse on every emit).
+    #
     # Best-effort, same posture as the global-log mirror above: the durable
     # append has already succeeded and a network failure must never fail the
     # emit. Unconfigured lane -> publish_review returns skipped without any
     # network call, so a stock install sees one stderr receipt line and nothing
     # else changes.
-    if type_ in GLOBAL_MIRROR_TYPES:
+    if type_ in PUBLISH_REVIEW_TYPES:
         try:
             from fno.pr._publish_review import publish_review
 

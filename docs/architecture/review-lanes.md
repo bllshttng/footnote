@@ -445,6 +445,8 @@ GitHub refuses an approving review from the PR author. With one account authorin
 
 The mirror is fail-closed inside `publish_review` (`cli/src/fno/pr/_publish_review.py`). An unconfigured lane or token skips. A bot that is the PR author refuses. A stale head pin refuses. An unmappable verdict refuses. The result carries the `reviewDecision` GitHub reports back, never the POST receipt. One stderr receipt line prints on every branch: `bot-review: posted ...`, `bot-review: skipped (...)`, `bot-review: refused (...)`. The backfill door is the hidden verb `fno pr publish-review --pr N`. Its verdict defaults to the newest head-pinned attestation for HEAD.
 
+One ordering fact: the first review of a branch runs BEFORE its PR exists, so the emit-time mirror skips with no open PR. The `/pr create` flow closes that gap. Its step 2d runs `fno pr publish-review --pr <n>` the moment the PR opens. The verb mirrors only a verdict the local gate already accepted. If a flow bypasses `/pr` and skips the mirror, branch protection makes the miss visible: the PR cannot merge until the approve exists.
+
 ### Operator setup, in order
 
 The identity cannot be created by code. Four steps:

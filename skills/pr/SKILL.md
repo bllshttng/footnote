@@ -137,6 +137,16 @@ The pr-creator worker returns a `RESULT:` line. Parse it:
 
 A failed worker is never reported as a silent success. If the worker died without a `RESULT:` line, treat it as a failure and report that no PR was created.
 
+### 2d. Mirror the local verdict to GitHub (on SUCCESS only)
+
+The review that gated this branch ran BEFORE the PR existed. The emit-time mirror finds no open PR at that moment, so the attestation does not auto-post. With the PR now open, mirror it:
+
+```bash
+fno pr publish-review --pr <N>
+```
+
+The verb defaults its verdict to the newest head-pinned attestation for HEAD. It refuses on a collision or a stale pin. It can only re-post a verdict the local gate already accepted. On an unconfigured lane it prints one `bot-review: skipped` receipt and nothing else happens. Report the receipt line verbatim. A `refused` or `failed` receipt is a finding to surface. It is never a reason to stop the pipeline.
+
 ## Step 3: check mode (poll for external review)
 
 Load [check.md](references/check.md) and execute it in full, in this context. That body is the canonical review-polling flow: determine the configured reviewers, wait for review, fetch inline comments, parse priority badges, implement the findings, push fixes, and reply to each reviewer in-thread. It runs in the router's own main context (no subagent) and reaches no other skill at runtime.

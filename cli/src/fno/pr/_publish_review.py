@@ -23,6 +23,7 @@ doors.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -30,7 +31,12 @@ from typing import Optional
 from fno.pr._proc import ToolMissing, run
 
 # gh calls are bounded so a hung network stack cannot hang the emit chokepoint.
-_GH_TIMEOUT = 30.0
+# The mirror can fire inside the code-review-attest PostToolUse hook, whose
+# harness budget is 60s for the WHOLE hook: 7 sequential subprocesses at a 30s
+# cap each would blow it pathologically. 10s per call plus a 40s overall
+# deadline keeps the worst case inside the budget; a realistic run is ~2s.
+_GH_TIMEOUT = 10.0
+_MIRROR_DEADLINE = 40.0
 
 _VERDICT_EVENTS = {"pass": "APPROVE", "fail": "REQUEST_CHANGES"}
 
@@ -85,6 +91,34 @@ def _gh_scalar(args, cwd: str) -> Optional[str]:
     if not out or out == "null":
         return None
     return out
+
+
+def _gh_fields(args, cwd: str) -> Optional[dict]:
+    """Multi-field ``gh pr view --json`` read as a dict, or None on failure."""
+    res = run(["gh", *args], cwd=cwd, timeout=_GH_TIMEOUT)
+    if not res.ok or not res.stdout.strip():
+        return None
+    import json
+
+    try:
+        parsed = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _slug_from_url(url: str) -> str:
+    """owner/repo parsed from a PR url (https://github.com/owner/repo/pull/N).
+
+    Anchored on the ``pull`` segment rather than fixed indices so a host with
+    a subpath still resolves, and a non-PR url reads as "" (skip) not garbage.
+    """
+    segs = [seg for seg in url.split("/") if seg]
+    if "pull" in segs:
+        i = segs.index("pull")
+        if i >= 3:
+            return f"{segs[i - 2]}/{segs[i - 1]}"
+    return ""
 
 
 def _receipt(status: str, reason: str) -> str:
@@ -146,6 +180,7 @@ def _publish_review(
     cwd: str,
     dry_run: bool,
 ) -> PublishResult:
+    deadline = time.monotonic() + _MIRROR_DEADLINE
     # 1. Config + token. Missing either is a skip, not an error: an unconfigured
     #    lane must behave byte-identically to today apart from the receipt line.
     try:
@@ -183,32 +218,44 @@ def _publish_review(
             receipt=_receipt("skipped", f"${token_env} unset or empty"),
         )
 
-    # 2. The PR to post on: explicit (the verb) or the open PR for the current
-    #    branch (the emit chokepoint holds no PR number). Resolution sits AFTER
-    #    the config check so an unconfigured install makes no network calls.
-    if pr_number is None:
-        raw = _gh_scalar(["pr", "view", "--json", "number", "--jq", ".number"], cwd)
-        try:
-            pr_number = int(raw) if raw else None
-        except ValueError:
-            pr_number = None
-        if pr_number is None:
-            return PublishResult(
-                status="skipped",
-                reason="no open PR for HEAD",
-                receipt=_receipt("skipped", "no open PR for HEAD"),
-            )
+    # 2-4. One combined gh read answers the PR to post on, its author, its
+    #    head, and the repo slug (parsed from the PR url). Collapsing what was
+    #    four sequential subprocesses into one keeps the hook-invoked emit
+    #    inside its budget: the whole mirror is git rev-parse + this read +
+    #    POST + readback. Resolution sits AFTER the config check so an
+    #    unconfigured install makes no network calls at all.
+    if time.monotonic() > deadline:
+        return PublishResult(
+            status="skipped",
+            reason="mirror deadline exceeded",
+            receipt=_receipt("skipped", "mirror deadline exceeded"),
+        )
+    args = ["pr", "view"]
+    if pr_number is not None:
+        args.append(str(pr_number))
+    fields = _gh_fields(args + ["--json", "number,author,headRefOid,url"], cwd)
+    if not fields:
+        reason = (
+            "no open PR for HEAD"
+            if pr_number is None
+            else f"could not read #{pr_number}"
+        )
+        return PublishResult(
+            status="skipped",
+            reason=reason,
+            receipt=_receipt("skipped", reason),
+        )
+    resolved_number = fields.get("number")
+    pr_number = int(resolved_number) if isinstance(resolved_number, int) else pr_number
+    slug = _slug_from_url(fields.get("url") or "")
 
-    # 3. Identity collision. This is the whole defect the node exists to fix:
-    #    posting as the PR author would have GitHub accept the call and record
-    #    COMMENTED - manufacturing the exact empty-reviewDecision lie. Compare
-    #    bot-suffix-stripped logins (GitHub appends ``[bot]`` to app logins).
+    # Identity collision. This is the whole defect the node exists to fix:
+    # posting as the PR author would have GitHub accept the call and record
+    # COMMENTED - manufacturing the exact empty-reviewDecision lie. Compare
+    # bot-suffix-stripped logins (GitHub appends ``[bot]`` to app logins).
     from fno.pr._reviews import _strip_bot
 
-    author = _gh_scalar(
-        ["pr", "view", str(pr_number), "--json", "author", "--jq", ".author.login"],
-        cwd,
-    )
+    author = ((fields.get("author") or {}).get("login") or "")
     if not author:
         return PublishResult(
             status="skipped",
@@ -223,13 +270,10 @@ def _publish_review(
             receipt=_receipt("refused", detail),
         )
 
-    # 4. Head pin. The attestation is evidence about ONE commit; approving a PR
-    #    whose head has moved past it approves commits nobody reviewed. A stale
-    #    approval is worse than no approval.
-    pr_head = _gh_scalar(
-        ["pr", "view", str(pr_number), "--json", "headRefOid", "--jq", ".headRefOid"],
-        cwd,
-    )
+    # Head pin. The attestation is evidence about ONE commit; approving a PR
+    # whose head has moved past it approves commits nobody reviewed. A stale
+    # approval is worse than no approval.
+    pr_head = fields.get("headRefOid") or ""
     if not pr_head:
         return PublishResult(
             status="skipped",
@@ -268,9 +312,12 @@ def _publish_review(
     # 6. The POST, authenticated as the bot in the subprocess env ONLY: the
     #    caller's own gh auth must survive this call unchanged, and the token
     #    must not leak into any other subprocess this process later spawns.
-    slug = _gh_scalar(
-        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd
-    )
+    if time.monotonic() > deadline:
+        return PublishResult(
+            status="skipped",
+            reason="mirror deadline exceeded",
+            receipt=_receipt("skipped", "mirror deadline exceeded"),
+        )
     if not slug:
         return PublishResult(
             status="skipped",
@@ -333,7 +380,18 @@ def newest_head_attestation(cwd: str) -> Optional[dict]:
     mirror the verdict a local reviewer actually recorded, not one typed from
     memory. Reads the project log and the cross-checkout global log (the
     attestation lands in both), last-wins on ts; None when nothing pins HEAD.
+
+    Never raises: the verb documents one receipt line per branch, and a
+    malformed row (non-dict data) or a hung git call must read as "no
+    attestation" (clean exit 2), not a traceback.
     """
+    try:
+        return _newest_head_attestation(cwd)
+    except Exception:  # noqa: BLE001 - default resolution degrades to None
+        return None
+
+
+def _newest_head_attestation(cwd: str) -> Optional[dict]:
     import json as _json
 
     head = _git_head(cwd)
@@ -359,10 +417,10 @@ def newest_head_attestation(cwd: str) -> Optional[dict]:
                 row = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
-            if row.get("type") != "review_attestation":
+            if not isinstance(row, dict) or row.get("type") != "review_attestation":
                 continue
-            data = row.get("data") or {}
-            if data.get("head_sha") != head:
+            data = row.get("data")
+            if not isinstance(data, dict) or data.get("head_sha") != head:
                 continue
             ts = row.get("ts") or ""
             if ts >= newest_ts:  # >= : a same-second re-emit is the newer verdict
