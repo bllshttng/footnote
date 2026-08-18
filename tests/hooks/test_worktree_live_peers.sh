@@ -118,13 +118,17 @@ reset_live
 touch "$LIVE_DIR/peer-session"
 GNU_STAT_BIN="$TMP_DIR/gnu-stat-bin"
 mkdir -p "$GNU_STAT_BIN"
-cat >"$GNU_STAT_BIN/stat" <<'EOF'
+# The stamp means "written a moment ago": bake a fixed recent-past time into the
+# stub. A read-time date +%s can tick past the helper's frozen now on a slow
+# runner, and the (correct) future-stamp rejection then silences the advisory.
+GNU_STAT_STAMP=$(( $(date +%s) - 5 ))
+cat >"$GNU_STAT_BIN/stat" <<EOF
 #!/usr/bin/env bash
-if [[ "${1:-}" == -c && "${2:-}" == %Y ]]; then
-  date +%s
+if [[ "\${1:-}" == -c && "\${2:-}" == %Y ]]; then
+  echo "$GNU_STAT_STAMP"
   exit 0
 fi
-if [[ "${1:-}" == -f ]]; then
+if [[ "\${1:-}" == -f ]]; then
   printf '  File: "fake"\n    ID: 0\n'
   exit 0
 fi
