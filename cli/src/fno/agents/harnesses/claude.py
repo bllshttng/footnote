@@ -399,21 +399,27 @@ def headless_create(
     )
     from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
-    # incoherent_model_env() joins the build condition: without it the
-    # no-overlay path leaves spawn_env None and the child inherits a poisoned
-    # model env verbatim. A coherent, overlay-free, marker-free call still
-    # passes None and inherits byte-identically (there is a test on that).
+    # Computed once and reused below: without it the no-overlay path leaves
+    # spawn_env None and the child inherits a poisoned model env verbatim,
+    # and re-deriving the same five-key scan inside the scrub call below
+    # would repeat this answer (spawn_env's model vars are unchanged from
+    # os.environ's at that point - scrub_ambient_identity never touches them).
+    _incoherent = incoherent_model_env()
+    # A coherent, overlay-free, marker-free call still passes None and
+    # inherits byte-identically (there is a test on that).
     if (
         account_env
         or route_env
         or any(m in os.environ for m in AMBIENT_IDENTITY_ENV)
-        or incoherent_model_env()
+        or _incoherent
     ):
         spawn_env = dict(os.environ)
         scrub_ambient_identity(spawn_env)
         # Strip before the overlay below so a real route still wins.
         scrub_incoherent_model_env_and_notify(
-            spawn_env, routed=overlay_restores_model_env(account_env, route_env)
+            spawn_env,
+            routed=overlay_restores_model_env(account_env, route_env),
+            known=[_k for _k, _v in _incoherent],
         )
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials

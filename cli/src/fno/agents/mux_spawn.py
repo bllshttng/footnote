@@ -1171,13 +1171,16 @@ def _mesh_env_wrapper(
         from fno.agents.model_routing import (
             incoherent_model_env,
             incoherent_model_env_notice,
-            incoherent_model_env_unset_args,
             overlay_restores_model_env,
         )
 
         _incoherent = incoherent_model_env()
         if _incoherent:
-            unset += incoherent_model_env_unset_args()
+            # Build the -u flags directly from the already-computed names
+            # rather than calling incoherent_model_env_unset_args() (which
+            # would rescan os.environ for the same five keys again).
+            for _k, _v in _incoherent:
+                unset += ["-u", _k]
             print(
                 incoherent_model_env_notice(
                     [_k for _k, _v in _incoherent],
