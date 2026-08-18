@@ -177,16 +177,12 @@ def _coverage_sources(repo: str) -> list[str]:
 
 def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     """The PR's current ``headRefOid`` for a staleness check, or None."""
-    if shutil.which("gh") is None:
+    from fno.pr._rest import fetch_pr_info_rest
+
+    info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+    if info is None:
         return None
-    res = _gh(["pr", "view", str(pr_number), "--json", "headRefOid"], repo)
-    if not res.ok:
-        return None
-    try:
-        oid = str(json.loads(res.stdout).get("headRefOid", "")).strip()
-    except (ValueError, TypeError):
-        return None
-    return oid or None
+    return str(info.get("head_sha") or "").strip() or None
 
 
 _REPO_FROM_URL = re.compile(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/")
@@ -1341,18 +1337,11 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     # ToolMissing is deliberately NOT caught: the module contract reserves 127
     # for a missing gh, and both sibling handlers emit it. Swallowing it here
     # would demote that to a generic exit-1 "checks are unknown".
-    res = _gh(
-        ["pr", "view", str(pr_number), "--json", "state,statusCheckRollup,headRefOid"],
-        repo,
-    )
-    if not res.ok:
-        return _miss(f"gh exited {res.returncode}")
-    if not (res.stdout or "").strip():
-        return _miss("gh returned no output")
-    try:
-        data = json.loads(res.stdout)
-    except json.JSONDecodeError:
-        return _miss("gh returned unparseable JSON")
+    from fno.pr._rest import fetch_pr_rest
+
+    data, reason = fetch_pr_rest(str(pr_number), cwd=repo, runner=run)
+    if data is None:
+        return _miss(reason or "REST checks read failed")
     rollup = data.get("statusCheckRollup") or []
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
