@@ -24,7 +24,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel reaching every harness at session start, and codex sees this body, not linked rule bodies.
+Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel proven to reach every harness at session start, and codex sees this body, not linked rule bodies.
 
 **Cap: bytes, not the count.** Every entry is paid at every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first, near 5: fund an entry by trading bytes here, never by raising the ceiling.
 
@@ -34,7 +34,7 @@ AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, prov
 
 ### A guard placed on one of N reachable paths is decorative
 
-Enumerate every path a caller reaches: in-process test, exec'd binary, skill layer, direct CLI, spawned worker. A guard on one ships green while the rest stay broken. The inversion is as fatal: a PRODUCER on one of N paths (review_coverage only under run_done, `crates/fno-agents/src/loopcheck.rs`) makes the gate unsatisfiable, not bypassable. Skill-prose-only behavior is the same defect: a direct CLI call or a non-Claude worker skips that layer. So is a test asserting two paths emit one enum variant, pinning the tag, not the destination.
+Enumerate every path a caller reaches: in-process test, exec'd binary, skill layer, direct CLI, spawned worker. A guard on one ships green while the rest stay broken. The inversion is as fatal: a PRODUCER on one of N paths (review_coverage only under run_done, `crates/fno-agents/src/loopcheck.rs`) makes the gate unsatisfiable, not bypassable, for every shape that cannot run that path. Skill-prose-only behavior is the same defect: a direct CLI call or a non-Claude worker skips that layer. So is a test asserting two paths emit one enum variant, pinning the tag, not the destination.
 
 - specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid the exec'd binary's path), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity pinned the tag, not the target).
 - graduates-to: a path-uniqueness lint failing N reachable implementations of one operation, plus one failing an equivalence assertion that ignores the payload.
@@ -42,7 +42,7 @@ Enumerate every path a caller reaches: in-process test, exec'd binary, skill lay
 
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
-Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
+Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
 
 - specimens: `skills/target/SKILL.md` "Gotchas" (manifest claim fields are an init-time snapshot, not ownership truth).
 - graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) and transcript-keyed liveness.
@@ -50,7 +50,7 @@ Receipts, manifest snapshots, process argv and liveness probes have each lied ab
 
 ### Judgment delegated to a subprocess on a truncated context produces junk
 
-A subprocess seeing only a tail of structured signals makes wrong calls confidently. The deprecated distill path saw a 50-line tail and made junk. Keep judgment (candidate selection, promotion, review) on full-context main threads and delegate only mechanical work.
+A subprocess seeing only a tail of structured signals makes wrong calls confidently. The deprecated distill path saw a 50-line tail and made junk. Keep ALL judgment (candidate selection, promotion, review) on full-context main threads and delegate only mechanical work.
 
 - specimens: `docs/architecture/memory-system.md:77` (Haiku distillation deprecated for cause).
 - graduates-to: a check refusing to route a judgment call to a headless or bg subprocess.
@@ -58,7 +58,7 @@ A subprocess seeing only a tail of structured signals makes wrong calls confiden
 
 ### Assert a positive marker, never an absence
 
-An absence has two explanations, the real outcome and "the instrument never ran", and one condition cannot separate them. Require a string only the real outcome produces, pinned to the thing measured. `until ! grep -q pending out` called CI settled when `gh` died on TLS, since an error carries no "pending". `grep -q '"settled": true'` is one line apart and fails safe. A positive control validates the TOOL, never the TARGET, so one aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the symbol the behavior wears: for a Python capability the function name, not the CLI spelling.
+An absence has two explanations, the real outcome and "the instrument never ran", and one condition cannot separate them. Require a string only the real outcome produces, pinned to the thing measured, not any line carrying the word. `until ! grep -q pending out` called CI settled when `gh` died on TLS, since an error carries no "pending". `grep -q '"settled": true'` is one line apart and fails safe. A positive control validates the TOOL, never the TARGET, so one aimed at the wrong SYMBOL still reads as proof. Before trusting a zero, name the symbol the behavior wears: for a Python capability the function name, not the CLI spelling.
 
 - specimens: `gate.sh | tail; echo $?` read tail's 0 and hid a failing `check-preamble-budget` for a whole PR; an unanchored `rg --glob=!target` hides `skills/target/`, so a rename's live callers survived every sweep; `carveout resolve` returned zero and a green positive control certified it, while the clearing path was a FUNCTION wired twice; inversely a `verdict=` monitor fired on `PASS: verdict=canonical-protected` at step 10 of 124.
 - graduates-to: an assert helper refusing an absence-only success condition and failing a zero-hit probe with no positive control. An honest exit code answering a different question needs the verdict verb.
@@ -66,10 +66,10 @@ An absence has two explanations, the real outcome and "the instrument never ran"
 
 ### A capability probe delivered over the mail bus can only ever return yes
 
-`fno mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent made it unaided. The valid test is a run with no user-shaped prompt in the transcript.
+`fno mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
 - specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and read as proof of self-invocation; the mail was the user-shaped trigger.
-- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by mail.
+- graduates-to: a probe distinguishing user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
 - added: 2026-08-05
 
 ## Repository
