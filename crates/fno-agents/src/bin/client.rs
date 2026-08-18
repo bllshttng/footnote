@@ -2142,8 +2142,7 @@ fn str_arg(
 /// - `stop`: prints `stopped: <name> (<short_id>)` using the `short_id` the
 ///   daemon now includes in every stop success payload. Falls back to
 ///   `stopped: <name>` when `short_id` is absent (e.g. an old daemon).
-/// - `rm`: prints `removed: <name>` (the client already has the name as the
-///   positional arg; no field from the daemon payload is needed).
+/// - `rm`: names each surface the daemon proved removed or unverified.
 /// - `list`: Task 3.1 — JSON when `json_flag` or not a TTY; table otherwise.
 /// - `reconcile`: Task 3.1 — JSON when `json_flag` or not a TTY; human summary otherwise.
 fn format_success(
@@ -2182,7 +2181,47 @@ fn format_success(
                 Some(format!("stopped: {name}"))
             }
         }
-        "rm" => Some(format!("removed: {name}")),
+        "rm" => {
+            let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
+            let pane_removed = result.get("pane_removed").and_then(Value::as_bool) == Some(true);
+            if harness == "claude" {
+                let harness_removed = result.get("harness_removed");
+                let reason = result
+                    .get("harness_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let row_id = result
+                    .get("harness_row_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return match harness_removed.and_then(Value::as_bool) {
+                    Some(true) if pane_removed => {
+                        Some(format!("removed: {name} (fno + claude + mux)"))
+                    }
+                    Some(true) => Some(format!("removed: {name} (fno + claude)")),
+                    Some(false) if reason.contains("already absent") && pane_removed => Some(
+                        format!("removed: {name} (fno + mux; claude row already absent)"),
+                    ),
+                    Some(false) if reason.contains("already absent") => {
+                        Some(format!("removed: {name} (fno; claude row already absent)"))
+                    }
+                    Some(false) => Some(format!(
+                        "removed: {name} (fno only; claude row {row_id} survives: {reason})"
+                    )),
+                    None if pane_removed => Some(format!(
+                        "removed: {name} (fno + mux; claude list unreadable, harness side unverified)"
+                    )),
+                    None => Some(format!(
+                        "removed: {name} (fno only; claude list unreadable, harness side unverified)"
+                    )),
+                };
+            }
+            if pane_removed {
+                Some(format!("removed: {name} (fno + mux)"))
+            } else {
+                Some(format!("removed: {name}"))
+            }
+        }
         "list" => {
             let agents = &result["agents"];
             let filters = result
@@ -3054,12 +3093,37 @@ mod tests {
         assert_eq!(out, Some("stopped: foo".to_string()));
     }
 
-    /// AC1-HP: rm -> "removed: <name>"
+    /// A verified Claude cascade names both surfaces in the receipt.
     #[test]
     fn format_success_rm() {
-        let result = json!({"removed": true, "was_orphaned": false});
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true,
+            "was_orphaned": false
+        });
         let out = format_success("rm", "bar-agent", &result, false, true, false);
-        assert_eq!(out, Some("removed: bar-agent".to_string()));
+        assert_eq!(out, Some("removed: bar-agent (fno + claude)".to_string()));
+    }
+
+    #[test]
+    fn format_success_rm_never_claims_an_unread_harness_is_gone() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": null,
+            "harness_reason": "claude list unreadable"
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false);
+        assert_eq!(
+            out,
+            Some(
+                "removed: bar-agent (fno only; claude list unreadable, harness side unverified)"
+                    .to_string()
+            )
+        );
     }
 
     /// AC2-HP: unknown verb returns None (falls back to pretty-print).

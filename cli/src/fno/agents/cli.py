@@ -2816,6 +2816,9 @@ def cmd_watchdog(
             print(f"warning: {warning}", file=sys.stderr)
         counts = " ".join(f"{k}={v}" for k, v in sorted(shown_counts.items()))
         typer.echo(f"{len(pairs)} row(s): {counts}")
+        typer.echo(
+            f"terminal harness rows: {payload.get('terminal_harness_rows', 0)}"
+        )
         return
 
     lanes = "all" if apply_all else "wake"
@@ -2930,13 +2933,13 @@ def cmd_rm(
         ),
     ),
 ) -> None:
-    """Remove an agent: harness session record first, registry row after.
+    """Remove an agent: harness or mux session first, registry row after.
 
     Per-harness teardown:
 
     \b
-      claude    `claude rm <short_id>` (session record + worktree, via
-                claude's own delegation contract)
+      claude    bg session: `claude rm <short_id>`; pane session:
+                `fno mux pane kill --session <session> <pane_id>`
       codex     drops the session's entry from ~/.codex/session_index.jsonl
       opencode  registry-only; `rm` will not delete an opencode session,
                 because that also deletes its child sessions and its whole
@@ -2947,11 +2950,11 @@ def cmd_rm(
     Your history is never removed here -- teardown drops the harness's
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
-    the orphan. Removing an agent does not stop a running session; use
-    ``fno agents stop`` for that.
+    the orphan in the receipt. A live row is refused, and a blocked row names model
+    rotation as its remedy. Terminal rows need no separate stop first.
 
-    Worktrees are NOT removed here for non-claude harnesses (nothing on
-    the registry row marks a cwd as an isolated worktree). Reap them with
+    Worktrees are NOT removed here (the harness row does not prove that its
+    cwd is disposable). Reap them with
     ``fno worktree cleanup --merged --apply``.
     """
     from fno.agents.dispatch import DispatchAskError, rm_agent

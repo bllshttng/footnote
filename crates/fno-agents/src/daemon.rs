@@ -592,6 +592,7 @@ struct HarnessStoreIndex {
     /// unreadable directory: every later lookup answers None, fail closed.
     claude: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
     codex: Option<Result<Vec<(String, std::path::PathBuf)>, ()>>,
+    claude_agents: Option<crate::claude_roster::ClaudeAgentsSnapshot>,
 }
 
 impl HarnessStoreIndex {
@@ -670,6 +671,11 @@ impl HarnessStoreIndex {
                 .map(|(_, p)| p.clone())
                 .collect(),
         )
+    }
+
+    fn claude_agents(&mut self) -> &crate::claude_roster::ClaudeAgentsSnapshot {
+        self.claude_agents
+            .get_or_insert_with(crate::claude_roster::read_all_agents)
     }
 }
 
@@ -755,86 +761,146 @@ fn row_idle_secs(
 }
 
 /// Remove a reaped row's session from its OWN harness's store (AC6). Returns
-/// `Some((row_id, reason))` when the harness store still held the session and
-/// the removal REFUSED or failed; `None` on success or when there is nothing
-/// this reaper may touch (session already gone, no session id, or a harness
-/// whose removal contract is registry-only). The registry reap is already
-/// done and is never rolled back by anything here.
+/// `Some((row_id, reason))` when harness removal refused or failed; `None` on
+/// success, verified absence, or a registry-only harness. Garbage collection
+/// calls this after its registry reap; explicit `rm` uses the detailed outcome
+/// before its registry write so a failure stays retryable.
 ///
 /// claude: `claude rm <short_id>` - the same surface `fno agents rm` shells
-/// out to, bounded here by CASCADE_TIMEOUT, and only fired when the caller's
-/// store index still sees the session (no refusal noise for work already
-/// done). codex: drop the session's entry from `~/.codex/session_index.jsonl`
+/// out to, bounded here by CASCADE_TIMEOUT, when `claude agents --json --all`
+/// still sees the row or that list is unreadable. codex: drop the session's
+/// entry from `~/.codex/session_index.jsonl`
 /// (transcript files stay; this is the index record, matching the Python rm
 /// teardown arm). opencode/gemini: registry-only by contract - nothing to
 /// cascade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CascadeOutcome {
+    Removed,
+    AlreadyAbsent(String),
+    Unverified(String),
+    Failed(String),
+    NotApplicable,
+}
+
+impl CascadeOutcome {
+    fn removed_json(&self) -> Value {
+        match self {
+            Self::Removed => Value::Bool(true),
+            Self::AlreadyAbsent(_) | Self::Failed(_) => Value::Bool(false),
+            Self::Unverified(_) | Self::NotApplicable => Value::Null,
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::AlreadyAbsent(reason) | Self::Unverified(reason) | Self::Failed(reason) => {
+                Some(reason)
+            }
+            Self::Removed | Self::NotApplicable => None,
+        }
+    }
+
+    fn failure(&self, row_id: &str) -> Option<(String, String)> {
+        match self {
+            Self::Failed(reason) => Some((row_id.to_string(), reason.clone())),
+            _ => None,
+        }
+    }
+}
+
+fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
+    if !e.short_id.is_empty() {
+        return Some(e.short_id.clone());
+    }
+    e.harness_session_id
+        .as_deref()
+        .filter(|session_id| !session_id.is_empty())
+        .map(|session_id| session_id.chars().take(8).collect())
+}
+
+fn cascade_harness_session_result_with(
+    e: &state::RegistryEntry,
+    claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
+    claude_rm: &dyn Fn(&str) -> Result<(), String>,
+) -> CascadeOutcome {
+    let row_id = claude_row_id(e).unwrap_or_else(|| e.name.clone());
+    match e.harness_name() {
+        "claude" => {
+            let Some(short_id) = claude_row_id(e) else {
+                return CascadeOutcome::Failed(
+                    "claude cascade has no short id and no session id".into(),
+                );
+            };
+            let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
+            let list_known = snapshot.is_known();
+            if list_known && snapshot.find(&short_id).is_none() {
+                return CascadeOutcome::AlreadyAbsent(format!(
+                    "claude row {short_id} already absent"
+                ));
+            }
+            match claude_rm(&short_id) {
+                Ok(()) if list_known => CascadeOutcome::Removed,
+                Ok(()) => CascadeOutcome::Unverified(format!(
+                    "claude list unreadable: {}",
+                    snapshot.warning_text()
+                )),
+                Err(reason) => CascadeOutcome::Failed(reason),
+            }
+        }
+        "codex" => {
+            let Some(sid) = e.harness_session_id.as_deref() else {
+                return CascadeOutcome::NotApplicable;
+            };
+            let index = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".codex")
+                .join("session_index.jsonl");
+            match cascade_codex_index(&index, sid, &row_id) {
+                Ok(true) => CascadeOutcome::Removed,
+                Ok(false) => CascadeOutcome::AlreadyAbsent("codex index row already absent".into()),
+                Err((_, reason)) => CascadeOutcome::Failed(reason),
+            }
+        }
+        _ => CascadeOutcome::NotApplicable,
+    }
+}
+
 fn cascade_harness_session_with(
     index: &mut HarnessStoreIndex,
     e: &state::RegistryEntry,
 ) -> Option<(String, String)> {
-    let row_id = if e.short_id.is_empty() {
-        e.name.clone()
+    let row_id = claude_row_id(e).unwrap_or_else(|| e.name.clone());
+    let snapshot = if e.harness_name() == "claude" {
+        Some(index.claude_agents().clone())
     } else {
-        e.short_id.clone()
+        None
     };
-    match e.harness_name() {
-        "claude" => {
-            // Only cascade when the store still holds the session: a row whose
-            // session is already gone has nothing to remove, and re-running
-            // `claude rm` on a missing id would report a refusal for work that
-            // is already done. An unjudgeable store (None) also skips.
-            if !matches!(index.matches(e), Some(hits) if !hits.is_empty()) {
-                return None;
+    cascade_harness_session_result_with(e, snapshot.as_ref(), &run_claude_rm).failure(&row_id)
+}
+
+fn run_claude_rm(short_id: &str) -> Result<(), String> {
+    let mut child = std::process::Command::new("claude")
+        .args(["rm", short_id])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("claude rm failed to start: {error}"))?;
+    let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!("claude rm exited {}", status.code().unwrap_or(-1)))
             }
-            let short_id = if e.short_id.is_empty() {
-                return Some((row_id, "claude cascade needs a short id".to_string()));
-            } else {
-                e.short_id.clone()
-            };
-            let spawned = std::process::Command::new("claude")
-                .args(["rm", &short_id])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn();
-            let mut child = match spawned {
-                Ok(child) => child,
-                Err(err) => return Some((row_id, format!("claude rm failed to start: {err}"))),
-            };
-            // Bounded wait, mirroring the truth probe's loop: kill on deadline
-            // so a hung `claude rm` cannot wedge the sweep.
-            let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) if status.success() => return None,
-                    Ok(Some(status)) => {
-                        return Some((
-                            row_id,
-                            format!("claude rm exited {}", status.code().unwrap_or(-1)),
-                        ))
-                    }
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Ok(None) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Some((row_id, "claude rm timed out".to_string()));
-                    }
-                    Err(err) => return Some((row_id, format!("claude rm wait failed: {err}"))),
-                }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
             }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("claude rm timed out".into());
+            }
+            Err(error) => return Err(format!("claude rm wait failed: {error}")),
         }
-        "codex" => {
-            let sid = e.harness_session_id.as_deref()?;
-            let index = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".codex")
-                .join("session_index.jsonl");
-            cascade_codex_index(&index, sid, &row_id)
-        }
-        // opencode (cascade would delete child sessions and message history),
-        // gemini (deprecated, registry-only), and anything unknown: registry
-        // removal is the whole contract for these rows.
-        _ => None,
     }
 }
 
@@ -847,11 +913,11 @@ fn cascade_codex_index(
     index: &std::path::Path,
     sid: &str,
     row_id: &str,
-) -> Option<(String, String)> {
+) -> Result<bool, (String, String)> {
     let text = match std::fs::read_to_string(index) {
         Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(err) => return Some((row_id.to_string(), format!("codex index unreadable: {err}"))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err((row_id.to_string(), format!("codex index unreadable: {err}"))),
     };
     // Index line surgery: drop only lines whose parsed session id equals this
     // row's. A line that fails to parse stays (never destroy the index to
@@ -866,15 +932,15 @@ fn cascade_codex_index(
         )
         .collect();
     if kept.len() == text.lines().count() {
-        return None; // no entry to drop: nothing to cascade
+        return Ok(false);
     }
     let mut rewritten = kept.join("\n");
     if !rewritten.is_empty() {
         rewritten.push('\n');
     }
     match std::fs::write(index, rewritten) {
-        Ok(()) => None,
-        Err(err) => Some((
+        Ok(()) => Ok(true),
+        Err(err) => Err((
             row_id.to_string(),
             format!("codex index write failed: {err}"),
         )),
@@ -4699,7 +4765,61 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     }
 }
 
+fn run_mux_pane_kill(session: &str, pane_id: u64) -> Result<bool, String> {
+    let pane_id = pane_id.to_string();
+    let mut child = std::process::Command::new("fno")
+        .args(["mux", "pane", "kill", "--session", session, &pane_id])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("mux pane kill failed to start: {error}"))?;
+    let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(true),
+            Ok(Some(status)) => {
+                let code = status.code().unwrap_or(-1);
+                let output = child.wait_with_output().ok();
+                let detail = output
+                    .as_ref()
+                    .map(|output| String::from_utf8_lossy(&output.stderr).to_ascii_lowercase())
+                    .unwrap_or_default();
+                if detail.contains("no live pane owns") || detail.contains("not found") {
+                    return Ok(false);
+                }
+                return Err(format!("mux pane kill exited {code}: {}", detail.trim()));
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("mux pane kill timed out".into());
+            }
+            Err(error) => return Err(format!("mux pane kill wait failed: {error}")),
+        }
+    }
+}
+
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
+    handle_rm_with(
+        ctx,
+        req,
+        &crate::claude_roster::read_all_agents,
+        &run_claude_rm,
+        &run_mux_pane_kill,
+    )
+    .await
+}
+
+async fn handle_rm_with(
+    ctx: &Ctx,
+    req: &Request,
+    read_claude_agents: &(dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot + Sync),
+    claude_rm: &(dyn Fn(&str) -> Result<(), String> + Sync),
+    mux_pane_kill: &(dyn Fn(&str, u64) -> Result<bool, String> + Sync),
+) -> Response {
     let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
@@ -4726,12 +4846,61 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
             Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
         };
     let name = entry.name.clone();
+    let claude_agents = if entry.harness_name() == "claude" {
+        Some(read_claude_agents())
+    } else {
+        None
+    };
+    if claude_agents
+        .as_ref()
+        .and_then(|snapshot| claude_row_id(&entry).and_then(|id| snapshot.find(&id)))
+        .and_then(|row| row.state.as_deref())
+        == Some("blocked")
+    {
+        return Response::err(
+            req.id,
+            ErrorCode::Busy,
+            format!(
+                "agent {name} is blocked (model outage); rotate it to another model rather than reaping it."
+            ),
+        );
+    }
     if entry.status == AgentStatus::Live && !force {
         return Response::err(
             req.id,
             ErrorCode::Busy,
             format!("agent {name} is still live; use `stop` first or pass --force"),
         );
+    }
+    let harness_row_id = claude_row_id(&entry);
+    let harness_outcome =
+        cascade_harness_session_result_with(&entry, claude_agents.as_ref(), claude_rm);
+    if let CascadeOutcome::Failed(reason) = &harness_outcome {
+        if !force {
+            return Response::err(
+                req.id,
+                ErrorCode::Internal,
+                format!("agent {name}: harness removal failed: {reason}"),
+            );
+        }
+    }
+    let pane_outcome = if let Some(mux) = entry.mux.as_ref() {
+        match mux_pane_kill(&mux.session, mux.pane_id) {
+            Ok(true) => CascadeOutcome::Removed,
+            Ok(false) => CascadeOutcome::AlreadyAbsent("mux pane already absent".into()),
+            Err(reason) => CascadeOutcome::Failed(reason),
+        }
+    } else {
+        CascadeOutcome::NotApplicable
+    };
+    if let CascadeOutcome::Failed(reason) = &pane_outcome {
+        if !force {
+            return Response::err(
+                req.id,
+                ErrorCode::Internal,
+                format!("agent {name}: mux pane removal failed: {reason}"),
+            );
+        }
     }
     // Force-removing a live agent must stop its worker first, or it leaks a PTY
     // process that `list`/`stop` can no longer address by name (Codex P2).
@@ -4761,14 +4930,32 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
             format!("agent {name}: removal did not persist: {e}"),
         );
     }
+    let result = json!({
+        "removed": true,
+        "registry_removed": true,
+        "harness": entry.harness_name(),
+        "harness_row_id": harness_row_id,
+        "harness_removed": harness_outcome.removed_json(),
+        "harness_reason": harness_outcome.reason(),
+        "pane_removed": pane_outcome.removed_json(),
+        "pane_reason": pane_outcome.reason(),
+        "was_orphaned": was_orphaned,
+    });
     let _ = ctx.emitter.emit(
         "agent_removed",
-        &json!({"name": name, "was_orphaned": was_orphaned}),
+        &json!({
+            "name": name,
+            "registry_removed": true,
+            "harness": entry.harness_name(),
+            "harness_row_id": harness_row_id,
+            "harness_removed": harness_outcome.removed_json(),
+            "harness_reason": harness_outcome.reason(),
+            "pane_removed": pane_outcome.removed_json(),
+            "pane_reason": pane_outcome.reason(),
+            "was_orphaned": was_orphaned,
+        }),
     );
-    Response::ok(
-        req.id,
-        json!({"removed": true, "was_orphaned": was_orphaned}),
-    )
+    Response::ok(req.id, result)
 }
 
 /// `reachability` per-call timeout (LD30): a single provider probe is bounded.
@@ -6163,6 +6350,302 @@ mod tests {
         }
     }
 
+    fn claude_rm_row(name: &str, short_id: &str, session_id: &str) -> RegistryEntry {
+        let mut row = ask_row(name, Some("2020-01-01T00:00:00Z"));
+        row.short_id = short_id.to_string();
+        row.harness = Some("claude".into());
+        row.harness_session_id = Some(session_id.into());
+        row
+    }
+
+    #[tokio::test]
+    async fn rm_cascades_claude_before_removing_the_registry_row() {
+        let home = short_home("rmclaude");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "aaaa1111",
+            "aaaa1111-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let called = std::sync::Mutex::new(Vec::new());
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("aaaa1111", Some("stopped")),
+                ])
+            },
+            &|short_id| {
+                called.lock().unwrap().push(short_id.to_string());
+                Ok(())
+            },
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(called.into_inner().unwrap(), vec!["aaaa1111"]);
+        assert_eq!(response.result().unwrap()["harness_removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_keeps_registry_row_when_claude_refuses_without_force() {
+        let home = short_home("rmrefuse");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "bbbb2222",
+            "bbbb2222-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("bbbb2222", Some("stopped")),
+                ])
+            },
+            &|_| Err("claude rm exited 1".into()),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert!(response
+            .error()
+            .unwrap()
+            .message
+            .contains("claude rm exited 1"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+
+        let forced_request = Request::new(
+            2,
+            "agent.rm",
+            json!({"name": "stopped-worker", "force": true}),
+        );
+        let forced_response = handle_rm_with(
+            &ctx,
+            &forced_request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("bbbb2222", Some("stopped")),
+                ])
+            },
+            &|_| Err("claude rm exited 1".into()),
+            &|_, _| Ok(true),
+        )
+        .await;
+        assert_eq!(forced_response.result().unwrap()["harness_removed"], false);
+        assert_eq!(
+            forced_response.result().unwrap()["harness_reason"],
+            "claude rm exited 1"
+        );
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_falls_back_to_the_session_uuid_prefix() {
+        let home = short_home("rmfallback");
+        let row = claude_rm_row("stopped-worker", "", "cccc3333-1111-2222-3333-444444444444");
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let called = std::sync::Mutex::new(Vec::new());
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("cccc3333", Some("stopped")),
+                ])
+            },
+            &|short_id| {
+                called.lock().unwrap().push(short_id.to_string());
+                Ok(())
+            },
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert!(response.result().is_some());
+        assert_eq!(called.into_inner().unwrap(), vec!["cccc3333"]);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_blocked_claude_row_with_rotation_remedy() {
+        let home = short_home("rmblocked");
+        let mut row = claude_rm_row(
+            "blocked-worker",
+            "dddd4444",
+            "dddd4444-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(
+            1,
+            "agent.rm",
+            json!({"name": "blocked-worker", "force": true}),
+        );
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("dddd4444", Some("blocked")),
+                ])
+            },
+            &|_| panic!("blocked row must not reach claude rm"),
+            &|_, _| panic!("blocked row must not reach mux kill"),
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("rotate"));
+        assert!(!message.contains("--force"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_unknown_claude_list_cascades_but_reports_unverified() {
+        let home = short_home("rmunverified");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "eeee5555",
+            "eeee5555-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let called = std::sync::atomic::AtomicBool::new(false);
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::unknown("list timed out"),
+            &|_| {
+                called.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            },
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert!(called.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(response.result().unwrap()["harness_removed"].is_null());
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_kills_a_mux_pane_before_removing_its_registry_row() {
+        let home = short_home("rmpane");
+        let mut row = ask_row("pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("gemini".into());
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 24,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "pane-worker"}));
+        let killed = std::sync::Mutex::new(Vec::new());
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("non-Claude row must not read the Claude list"),
+            &|_| panic!("non-Claude row must not call claude rm"),
+            &|session, pane_id| {
+                killed.lock().unwrap().push((session.to_string(), pane_id));
+                Ok(true)
+            },
+        )
+        .await;
+
+        assert_eq!(killed.into_inner().unwrap(), vec![("main".to_string(), 24)]);
+        assert_eq!(response.result().unwrap()["pane_removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_clears_a_stale_registry_row_after_the_mux_pane_is_already_absent() {
+        let home = short_home("rmmissingpane");
+        let mut row = ask_row("stale-pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("gemini".into());
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 24,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stale-pane-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("non-Claude row must not read the Claude list"),
+            &|_| panic!("non-Claude row must not call claude rm"),
+            &|_, _| Ok(false),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["pane_removed"], false);
+        assert_eq!(
+            response.result().unwrap()["pane_reason"],
+            "mux pane already absent"
+        );
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     #[test]
     fn gc_sweep_reaps_stamped_stamps_unstamped_keeps_live() {
         let home = tmp_home("gc-sweep");
@@ -6808,7 +7291,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             ),
         )
         .unwrap();
-        assert_eq!(cascade_codex_index(&index, "missing", "row"), None);
+        assert_eq!(cascade_codex_index(&index, "missing", "row"), Ok(false));
         let after_noop = std::fs::read_to_string(&index).unwrap();
         assert_eq!(
             after_noop.lines().count(),
@@ -6816,9 +7299,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             "no match: byte-for-byte no-op"
         );
 
-        // Dropping IS the success path: success also answers None, so the
-        // proof is the file, not the return.
-        assert_eq!(cascade_codex_index(&index, "aaa", "row"), None);
+        assert_eq!(cascade_codex_index(&index, "aaa", "row"), Ok(true));
         let after = std::fs::read_to_string(&index).unwrap();
         assert!(!after.contains("\"aaa\""), "the matching entry is gone");
         assert!(after.contains("\"bbb\""), "other entries stay");
@@ -6830,7 +7311,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // A missing index is a no-op, not a refusal.
         assert_eq!(
             cascade_codex_index(&dir.path().join("nope.jsonl"), "aaa", "row"),
-            None
+            Ok(false)
         );
     }
 
