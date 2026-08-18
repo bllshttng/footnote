@@ -296,6 +296,25 @@ def _record_window_seconds(provider_id: str) -> float | None:
     return None
 
 
+def record_reset_timezone(provider_id: str) -> str | None:
+    """``accounts.<id>.reset_timezone``, or None.
+
+    Only a NAIVE reset stamp needs it. Fail-open for the same reason as
+    :func:`_record_window_seconds`: a config read that raises on the lock-write
+    path would turn "we could not resolve a timezone" into "the lock was never
+    written", which is strictly worse than falling back to the backoff.
+    """
+    try:
+        from fno.adapters.providers.cli import _load
+
+        for rec in _load().records:
+            if rec.id == provider_id:
+                return getattr(rec, "reset_timezone", None) or None
+    except Exception:  # noqa: BLE001 - a config miss refuses the stamp, not the write
+        return None
+    return None
+
+
 def project_window(
     provider_id: str,
     *,

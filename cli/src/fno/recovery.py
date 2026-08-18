@@ -679,6 +679,15 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         resolve_fallback_chain,
     )
 
+    if _node_is_done(node):
+        # The walk's memory exists to stop ONE node relapping its own links. A
+        # finished node that kept it would read "all-tried" forever and hold on
+        # some unrelated future cap, so the walk is dropped with the node. Done
+        # here rather than in ``_redispatch``: that path is reached on every
+        # respawn and must stay free of state-root I/O.
+        fleet_state.clear_node(node)
+        return "rotated-no-worker"
+
     tried = fleet_state.links_tried(node)
     try:
         chain = resolve_fallback_chain(_node_size(node), exclude=tried)

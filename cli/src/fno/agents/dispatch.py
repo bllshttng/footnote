@@ -2207,16 +2207,31 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
     if not tail:
         return
     try:
-        from fno.adapters.providers.error_taxonomy import classify_error
+        from fno.adapters.providers.error_taxonomy import (
+            classify_error,
+            reset_epoch_from,
+        )
         from fno.adapters.providers.loader import effective_active
-        from fno.adapters.providers.runtime_state import update_provider_health
+        from fno.adapters.providers.runtime_state import (
+            record_reset_timezone,
+            update_provider_health,
+        )
 
         rule = classify_error(None, tail)
         if rule is None:
             return
         provider_id = _account_id_for_env(account_env) or effective_active()
         if provider_id:
-            update_provider_health(provider_id, rule)
+            # The tail that proves the death usually also names when the window
+            # reopens. Without it this wrote a seconds-scale backoff over a
+            # multi-hour cap, and the next pick handed the successor the account
+            # that had just refused.
+            update_provider_health(
+                provider_id, rule,
+                resets_at=reset_epoch_from(
+                    tail, record_reset_timezone(provider_id),
+                ),
+            )
     except Exception:  # noqa: BLE001 - never let a health write break teardown
         pass
 

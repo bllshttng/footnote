@@ -193,6 +193,18 @@ def _parse_reset_stamp(
         return None, stamp
 
 
+def reset_epoch_from(body: str | None, tz: str | None = None) -> float | None:
+    """The reset epoch ``body`` names, or None. The one-call form.
+
+    For the three code paths that write the provider lock. Each holds the
+    refusal TEXT and the record id but no ``NormalizedError``, and each was
+    writing a backoff step over a body that named the real answer. A shared
+    helper rather than three parses, so a stamp shape added for one path lands
+    on all three.
+    """
+    return _parse_reset_stamp(body or "", tz)[0]
+
+
 def _matches_quota_body(body: str) -> bool:
     lowered = body.lower()
     return any(marker in lowered for marker in _QUOTA_BODY_MARKERS)

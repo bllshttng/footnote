@@ -348,7 +348,19 @@ def dispatch_with_combo(
             # next provider in the rotated order takes over.
             rule = classify_error(outcome.status, outcome.body)
             if rule is not None:
-                update_provider_health(provider_id, rule)
+                from fno.adapters.providers.error_taxonomy import reset_epoch_from
+                from fno.adapters.providers.runtime_state import (
+                    record_reset_timezone,
+                )
+
+                # A 429 whose body names its own reset must lock for THAT
+                # window, not for a 2000ms backoff step.
+                update_provider_health(
+                    provider_id, rule,
+                    resets_at=reset_epoch_from(
+                        outcome.body, record_reset_timezone(provider_id),
+                    ),
+                )
             continue
         # Non-swap-trigger failure: surface immediately. The provider DID
         # serve the slot (the failure is the caller's problem to handle, not

@@ -406,9 +406,24 @@ class FailoverController:
         # behavior matches Plan A baseline (provider-level lock).
         rule = classify_error(error.raw_status, error.body_excerpt)
         if rule is not None:
+            # The reset the provider itself named beats the backoff step this
+            # rule would otherwise write. `normalize` resolves an offset-bearing
+            # stamp on its own; a NAIVE stamp needs the record's configured
+            # timezone, and this is the first point that knows which record.
+            resets_at = error.resets_at
+            if resets_at is None:
+                from fno.adapters.providers.error_taxonomy import reset_epoch_from
+                from fno.adapters.providers.runtime_state import (
+                    record_reset_timezone,
+                )
+
+                resets_at = reset_epoch_from(
+                    error.body_excerpt, record_reset_timezone(current_provider_id),
+                )
             try:
                 update_provider_health(
                     current_provider_id, rule, model=error.model,
+                    resets_at=resets_at,
                 )
             except (OSError, json.JSONDecodeError) as exc:
                 logger.warning(
