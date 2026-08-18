@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +171,7 @@ def _read_index(path: Path) -> "list[dict]":
         return []
 
     rows: "list[dict]" = []
+    damaged = 0
     with path.open(encoding="utf-8") as fh:
         for line in fh:
             # Substring prefilter before json.loads, the same shape as
@@ -180,15 +182,28 @@ def _read_index(path: Path) -> "list[dict]":
             try:
                 rec = json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                damaged += 1
                 continue
             if not isinstance(rec, dict) or rec.get("type") != DECISION_EVENT:
                 continue
             data = rec.get("data")
             if not isinstance(data, dict) or not data.get("decision_id"):
+                damaged += 1
                 continue
             row = dict(data)
             row["ts"] = rec.get("ts")
             rows.append(row)
+
+    if damaged:
+        # One bad row must not cost the others, so the row is skipped. But it
+        # is never skipped SILENTLY: a truncated append would otherwise make an
+        # unreadable record and an empty one look the same, which is the
+        # absence-as-success failure this index exists to prevent.
+        print(
+            f"decide: {damaged} damaged row(s) in {path} were skipped; "
+            f"run `fno decide reindex` to recover them from the journals.",
+            file=sys.stderr,
+        )
     return rows
 
 
@@ -289,24 +304,37 @@ def _projection_events() -> "list[dict]":
 
 
 def _default_journals() -> "list[Path]":
-    """The journals a backfill folds, deduped by inode.
+    """Every journal on this machine that can hold a decision, deduped by inode.
 
-    A worktree symlinks ``.fno/events.jsonl`` at the canonical file, so the
-    same 54 MB journal is reachable under several names; reading it once per
-    name is the difference between a fast command and a hung one.
+    EVERY project root, not just this one. A free-text decision recorded from
+    another repo has no graph projection to recover it, so a backfill that
+    folds only the invoking repo leaves exactly the records this verb exists to
+    find. The per-read fold of all 83 roots is what LD1 rejected as too slow;
+    paying it once, in an explicit backfill, is a different bargain.
+
+    Deduping matters more here than the enumeration. A linked checkout symlinks
+    ``.fno/events.jsonl`` at the canonical file, so one 54 MB journal is
+    reachable under several names, and reading it once per name is the
+    difference between a slow command and a hung one.
     """
     from fno.carveout.core import resolve_carveout_root
-    from fno.outstanding.core import events_path
+    from fno.outstanding.core import _capture_project_roots, events_path
     from fno.paths import global_events_json, resolve_repo_root
+
+    def _machine_wide() -> "list[Path]":
+        # Reused rather than re-derived: this fact (the roots the machine-wide
+        # graph names) has one owner, and a second copy is a second thing to
+        # keep in parity.
+        return [events_path(r) for r in _capture_project_roots(resolve_repo_root())]
 
     candidates: "list[Path]" = []
     for produce in (
-        lambda: events_path(resolve_repo_root()),
-        lambda: events_path(resolve_carveout_root()),
-        global_events_json,
+        _machine_wide,
+        lambda: [events_path(resolve_carveout_root())],
+        lambda: [global_events_json()],
     ):
         try:
-            candidates.append(Path(produce()))
+            candidates.extend(Path(p) for p in produce())
         except Exception:  # noqa: BLE001 - a root that will not resolve has no journal
             continue
 

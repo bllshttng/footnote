@@ -390,6 +390,54 @@ def test_reindex_recovers_a_projection_row_that_stored_no_subject(
     assert [d["decision_id"] for d in payload["decisions"]] == ["d-legacy1"]
 
 
+def test_reindex_folds_every_project_root_the_graph_names(
+    root: Path, tmp_graph: Path, index: Path, tmp_path: Path
+):
+    """A free-text decision recorded from another repo has no graph projection
+    to recover it. A backfill that folds only the invoking repo leaves exactly
+    the records this verb exists to find."""
+    from fno.decide import _default_journals, reindex
+
+    sibling = tmp_path / "other-repo"
+    (sibling / ".fno").mkdir(parents=True)
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries.append(_node("x-9999", cwd=str(sibling)))
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    from fno.decide import record_decision
+
+    did = record_decision(
+        decision="the sibling repo ruled this", subject="pr-777", events_root=sibling
+    )["decision_id"]
+    index.unlink()
+
+    assert any(sibling in p.parents for p in _default_journals()), _default_journals()
+    assert reindex()["added"] >= 1
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-777", "--json"]).stdout
+    )
+    assert [d["decision_id"] for d in payload["decisions"]] == [did]
+
+
+def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
+    root: Path, tmp_graph: Path, index: Path, capsys
+):
+    """A truncated append must not make an unreadable record and an empty one
+    look the same. The good rows still come back."""
+    from fno.decide import _read_index
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write('{"type":"operator_decision","data":{"decision_id":"d-tru\n')
+
+    capsys.readouterr()
+    rows = _read_index(index)
+    err = capsys.readouterr().err
+    assert [r["decision"] for r in rows] == ["merged"], "one bad row costs no others"
+    assert "1 damaged row(s)" in err
+    assert "fno decide reindex" in err
+
+
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
     """It behaved this way only because it named no retention and the default
     is durable. The record the recall promise rests on is then one schema edit

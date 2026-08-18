@@ -5,11 +5,11 @@ A ruling stated in chat dies with the context. The operator then asks, weeks lat
 ## The verb
 
 ```bash
-fno decide --subject x-8f44 --decision "recall moves to a machine-wide index" \
+fno decide --subject pr-1234 --decision "recall moves to a machine-wide index" \
   --rationale "the global journal rotates and a union read is 793 MB" \
   --option "global journal" --option "machine-wide index"
 
-fno decide list --subject x-8f44   # newest first, superseded rows marked
+fno decide list --subject pr-1234  # newest first, superseded rows marked
 fno decide list                    # the recent decisions across every subject
 fno decide reindex                 # backfill records written before the index
 ```
