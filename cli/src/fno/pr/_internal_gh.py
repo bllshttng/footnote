@@ -25,16 +25,32 @@ _METADATA_FIELDS = {
 
 
 def _option(args: Sequence[str], name: str) -> str | None:
-    try:
-        return args[args.index(name) + 1]
-    except (ValueError, IndexError):
-        return None
+    for index, arg in enumerate(args):
+        if arg == name:
+            return args[index + 1] if index + 1 < len(args) else None
+        if arg.startswith(name + "="):
+            return arg.partition("=")[2]
+    return None
 
 
 def _pr_number(args: Sequence[str], *, cwd: str | None, runner: Callable) -> tuple[int | None, str]:
-    for arg in args[2:]:
-        if arg.isdigit():
-            return int(arg), ""
+    selector: int | None = None
+    value_options = {"--repo", "--json", "--jq", "-q", "--template"}
+    index = 2
+    while index < len(args):
+        arg = args[index]
+        if arg in value_options:
+            index += 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        if not arg.isdigit() or selector is not None:
+            return None, f"unsupported or ambiguous PR selector: {arg}"
+        selector = int(arg)
+        index += 1
+    if selector is not None:
+        return selector, ""
     return _rest.resolve_current_pr_number_rest(
         cwd=cwd, runner=runner, repo=_option(args, "--repo")
     )
@@ -43,6 +59,8 @@ def _pr_number(args: Sequence[str], *, cwd: str | None, runner: Callable) -> tup
 def _rest_runner(real_gh: str, runner: Callable) -> Callable:
     def invoke(cmd, **kwargs):
         argv = [real_gh, *cmd[1:]] if cmd and cmd[0] == "gh" else list(cmd)
+        if argv and argv[0] == real_gh:
+            kwargs.setdefault("env", _quota.delegate_environment())
         return runner(argv, **kwargs)
 
     return invoke
@@ -128,7 +146,11 @@ def execute(
         return _quota.execute_graphql(
             purpose, args, runner=runner, real_gh=gh, cwd=cwd
         )
-    return runner([gh, *args], cwd=cwd)
+    if len(args) >= 2 and args[:2] in (["pr", "list"], ["pr", "status"]):
+        return _quota.execute_graphql(
+            purpose, args, runner=runner, real_gh=gh, cwd=cwd
+        )
+    return runner([gh, *args], cwd=cwd, env=_quota.delegate_environment())
 
 
 def _main(purpose: str) -> None:

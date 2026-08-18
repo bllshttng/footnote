@@ -35,7 +35,6 @@ class VerifyKind(str, enum.Enum):
 
 class GraphqlPurpose(str, enum.Enum):
     discretionary = "discretionary"
-    coverage = "coverage"
 
 
 @pr_app.command(
@@ -155,6 +154,30 @@ def info(
         typer.echo(json.dumps({"pr": pr_number, "error": reason}, separators=(",", ":")))
         raise typer.Exit(code=4)
     typer.echo(json.dumps(payload, separators=(",", ":")))
+
+
+@pr_app.command(
+    "list",
+    help="List PR number, state, title, head ref, and URL through REST.",
+)
+def list_cmd(
+    state: str = typer.Option("open", "--state", help="open, closed, or all"),
+    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+) -> None:
+    from fno.pr import _rest
+
+    if state not in {"open", "closed", "all"}:
+        typer.echo(json.dumps({"error": "--state must be open, closed, or all"}))
+        raise typer.Exit(code=2)
+    slug = repo or _rest._repo_slug(os.getcwd())
+    if not slug:
+        typer.echo(json.dumps({"error": "could not resolve owner/repo"}))
+        raise typer.Exit(code=4)
+    rows, reason = _rest.list_prs_rest(slug, state=state, cwd=os.getcwd(), details=True)
+    if rows is None:
+        typer.echo(json.dumps({"error": reason}, separators=(",", ":")))
+        raise typer.Exit(code=4)
+    typer.echo(json.dumps(rows, separators=(",", ":")))
 
 
 @pr_app.command(

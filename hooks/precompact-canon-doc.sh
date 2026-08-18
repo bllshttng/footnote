@@ -105,10 +105,10 @@ if command -v fno >/dev/null 2>&1; then
 fi
 
 PR_RAW=""
-if command -v gh >/dev/null 2>&1; then
-  # Omit the section entirely if gh is missing, there is no remote, or gh fails
+if command -v fno >/dev/null 2>&1; then
+  # Omit the section entirely if fno is missing, there is no remote, or REST fails
   # - never a failed hook (the vertical-generalization epic takes fno past code).
-  PR_RAW="$(gh pr list --json number,title,state,headRefName --limit 10 2>/dev/null || true)"
+  PR_RAW="$(fno pr list --state open 2>/dev/null || true)"
 fi
 
 # ---------------------------------------------------------------------------

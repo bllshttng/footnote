@@ -15,13 +15,16 @@ SKIP_NAMES = {
 TEXT_SUFFIXES = {".md", ".py", ".rs", ".sh", ".toml", ".yaml", ".yml"}
 PATTERNS = {
     "argv-pr": re.compile(
-        r'(?:["\']gh["\']\s*,\s*)?["\']pr["\']\s*,\s*["\'](?:view|checks)["\']'
+        r'(?:["\']gh["\']\s*,\s*)?["\']pr["\']\s*,\s*["\'](?:view|checks|list|status)["\']'
     ),
     "argv-api": re.compile(
         r'(?:["\']gh["\']\s*,\s*)?["\']api["\']\s*,\s*["\']graphql["\']'
     ),
-    "shell-pr": re.compile(r"\bgh\s+pr\s+(?:view\b[^\n]*--json|checks\b)"),
-    "shell-api": re.compile(r"\bgh\s+api\s+graphql\b"),
+    "shell-pr": re.compile(
+        r"\bgh\s+(?:(?:-R|--repo|--hostname)(?:=|\s+)?\S+\s+)*"
+        r"pr\s+(?:view|checks|list|status)\b"
+    ),
+    "shell-api": re.compile(r"\bgh\s+api\b[^\n]*\bgraphql\b"),
 }
 
 

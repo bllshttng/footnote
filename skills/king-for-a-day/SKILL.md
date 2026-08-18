@@ -210,7 +210,7 @@ Wiring `blocked_by` *after* linking loses that race and stampedes a wave that wa
 fno backlog epic status <epic>          # children: status, worker, PR
 fno backlog get <id>                    # one node in full
 fno agents top                          # who is actually running right now
-gh pr list --state open --json number,title,headRefName
+fno pr list --state open
 ```
 
 Read the epic's plan doc too.
