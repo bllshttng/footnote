@@ -1121,6 +1121,17 @@ pub fn run(socket: PathBuf) -> i32 {
             return 1;
         }
     };
+    match crate::pty::raise_fd_limit() {
+        Ok(Some((before, after))) => {
+            eprintln!("fno mux: open-file limit raised from {before} to {after}");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "fno mux: warn: could not raise the open-file limit: {e}; panes will cap early"
+            );
+        }
+    }
     let _guard = SocketGuard(socket.clone());
 
     // Stamp this server's wire version next to its socket (x-1a85) so `fno mux

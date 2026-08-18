@@ -134,6 +134,28 @@ pub enum PtyError {
     #[error("failed to open pty: {0}")]
     OpenPty(String),
     #[error(
+        "failed to open pty: this mux server is at its open-file ceiling \
+         ({open} of {limit} fds in use). Raise it with setrlimit(RLIMIT_NOFILE) at \
+         server start, or restart the server to reclaim descriptors (this kills live panes). \
+         `fno agents spawn --substrate bg` needs no pane. Underlying: {detail}"
+    )]
+    OpenPtyFdLimit {
+        open: usize,
+        limit: libc::rlim_t,
+        detail: String,
+    },
+    #[error(
+        "failed to spawn pty child: this mux server is at its open-file ceiling \
+         ({open} of {limit} fds in use). Raise it with setrlimit(RLIMIT_NOFILE) at \
+         server start, or restart the server to reclaim descriptors (this kills live panes). \
+         `fno agents spawn --substrate bg` needs no pane. Underlying: {detail}"
+    )]
+    SpawnFdLimit {
+        open: usize,
+        limit: libc::rlim_t,
+        detail: String,
+    },
+    #[error(
         "openpty did not return within {0:?}; the host pty layer may be wedged (check: ls /dev). \
              This pane was refused, the mux server is still serving"
     )]
@@ -235,6 +257,13 @@ impl PtyShell {
                     break;
                 }
                 // rc drops here on failure -> its temp dir is removed.
+                Err(e) if is_typed_emfile(e.as_ref()) => {
+                    drop(fork);
+                    return Err(classify_spawn_fd_ceiling(format!(
+                        "{}: {e}",
+                        cand.to_string_lossy()
+                    )));
+                }
                 Err(e) => errors.push(format!("{}: {e}", cand.to_string_lossy())),
             }
         }
@@ -272,9 +301,14 @@ impl PtyShell {
         }
         let child = {
             let _fork = fork_guard();
-            pair.slave
-                .spawn_command(cmd)
-                .map_err(|e| PtyError::Spawn(format!("{program}: {e}")))?
+            pair.slave.spawn_command(cmd).map_err(|e| {
+                let detail = format!("{program}: {e}");
+                if is_typed_emfile(e.as_ref()) {
+                    classify_spawn_fd_ceiling(detail)
+                } else {
+                    PtyError::Spawn(detail)
+                }
+            })?
         };
         wire(pair, child, pane_id, out_tx, exit_tx, shell_rc)
     }
@@ -413,6 +447,148 @@ fn set_total_timeouts(n: usize) {
     TOTAL_TIMEOUTS.with(|c| c.set(n));
 }
 
+/// The soft `RLIMIT_NOFILE` to install, or `None` when the current soft limit
+/// already stands at the installable ceiling. `cap` is the platform's
+/// per-process file cap, when it has one separate from the hard limit.
+fn target_fd_limit(
+    soft: libc::rlim_t,
+    hard: libc::rlim_t,
+    cap: Option<libc::rlim_t>,
+) -> Option<libc::rlim_t> {
+    let target = cap.map_or(hard, |cap| hard.min(cap));
+    if target == libc::RLIM_INFINITY {
+        return None;
+    }
+    (target > soft).then_some(target)
+}
+
+/// macOS reports an infinite hard limit even though the kernel enforces a
+/// finite per-process maximum. Read that installable ceiling directly.
+#[cfg(target_vendor = "apple")]
+fn fd_cap() -> Option<libc::rlim_t> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_MAXFILESPERPROC];
+    let mut cap: libc::c_int = 0;
+    let mut cap_len = std::mem::size_of_val(&cap);
+    // SAFETY: `mib` names one integer sysctl and the output buffer is a live
+    // `c_int` whose exact size is supplied through `cap_len`.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            &mut cap as *mut _ as *mut libc::c_void,
+            &mut cap_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && cap > 0).then_some(cap as libc::rlim_t)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn fd_cap() -> Option<libc::rlim_t> {
+    None
+}
+
+fn fd_limits() -> Result<(libc::rlim_t, libc::rlim_t), std::io::Error> {
+    let mut limits = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: `getrlimit` initializes the supplied `rlimit` on success.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limits.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the successful call above initialized the value.
+    let limits = unsafe { limits.assume_init() };
+    Ok((limits.rlim_cur, limits.rlim_max))
+}
+
+/// Count descriptors without opening another descriptor. The diagnostic runs
+/// only after EMFILE, where `/dev/fd` cannot be opened and an accept loop can
+/// consume any descriptor released from a traditional emergency reserve.
+fn count_open_fds(limit: libc::rlim_t) -> usize {
+    let upper = limit.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
+    (0..upper)
+        .filter(|fd| {
+            // SAFETY: F_GETFD only inspects the integer descriptor and does not
+            // read through a pointer or allocate a new descriptor.
+            let rc = unsafe { libc::fcntl(*fd, libc::F_GETFD) };
+            rc != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+        })
+        .count()
+}
+
+/// Raise this process's soft open-file limit to the installable ceiling.
+/// Returns the values read before and after the change, never the requested
+/// value in place of the kernel's answer.
+pub fn raise_fd_limit() -> Result<Option<(libc::rlim_t, libc::rlim_t)>, std::io::Error> {
+    let (before, hard) = fd_limits()?;
+    let Some(target) = target_fd_limit(before, hard, fd_cap()) else {
+        return Ok(None);
+    };
+    let limits = libc::rlimit {
+        rlim_cur: target,
+        rlim_max: hard,
+    };
+    // SAFETY: `limits` preserves the current hard limit and only raises the
+    // soft limit to a value bounded by both the hard and platform limits.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limits) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (after, _) = fd_limits()?;
+    Ok((after > before).then_some((before, after)))
+}
+
+/// `portable-pty` formats the original `io::Error` into text, so EMFILE is no
+/// longer available for downcasting here. Match both forms its debug string
+/// can retain.
+fn is_fd_ceiling(message: &str) -> bool {
+    message.contains("Too many open files") || message.contains("code: 24,")
+}
+
+fn is_typed_emfile(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.raw_os_error() == Some(libc::EMFILE))
+        {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
+fn fd_ceiling_state() -> Option<(usize, libc::rlim_t)> {
+    let (limit, _) = fd_limits().ok()?;
+    let open = count_open_fds(limit);
+    Some((open, limit))
+}
+
+fn classify_open_pty_error(detail: String) -> PtyError {
+    if is_fd_ceiling(&detail) {
+        if let Some((open, limit)) = fd_ceiling_state() {
+            return PtyError::OpenPtyFdLimit {
+                open,
+                limit,
+                detail,
+            };
+        }
+    }
+    PtyError::OpenPty(detail)
+}
+
+fn classify_spawn_fd_ceiling(detail: String) -> PtyError {
+    if let Some((open, limit)) = fd_ceiling_state() {
+        PtyError::SpawnFdLimit {
+            open,
+            limit,
+            detail,
+        }
+    } else {
+        PtyError::Spawn(detail)
+    }
+}
+
 /// Open a fresh PTY pair at `rows`x`cols` (clamped to >=1).
 ///
 /// The real `openpty(3)` call runs on a throwaway thread with a bounded
@@ -475,7 +651,7 @@ fn open_pty(rows: u16, cols: u16) -> Result<portable_pty::PtyPair, PtyError> {
             TOTAL_TIMEOUTS.with(|c| c.set(0));
             Ok(pair)
         }
-        Ok(Err(e)) => Err(PtyError::OpenPty(e)),
+        Ok(Err(e)) => Err(classify_open_pty_error(e)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             // This thread's spawned probe leaks (an uninterruptible kernel
             // sleep no timeout can cancel); MAX_TIMEOUTS_BEFORE_GIVING_UP
@@ -775,6 +951,7 @@ fn spawn_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
 
     /// Serializes every test in this module that reaches `open_pty`. The
     /// wedge cooldown itself is thread-local (see `LAST_OPENPTY_TIMEOUT`
@@ -867,6 +1044,61 @@ mod tests {
             shell_candidates(Some(OsStr::new("/bin/sh"))),
             vec![OsString::from("/bin/sh")]
         );
+    }
+
+    #[test]
+    fn fd_limit_target_clamps_infinite_hard_limit_to_platform_cap() {
+        assert_eq!(
+            target_fd_limit(256, libc::RLIM_INFINITY, Some(245_760)),
+            Some(245_760)
+        );
+    }
+
+    #[test]
+    fn fd_limit_target_refuses_uninstallable_infinity() {
+        assert_eq!(target_fd_limit(256, libc::RLIM_INFINITY, None), None);
+    }
+
+    #[test]
+    fn fd_limit_target_is_idempotent_at_ceiling() {
+        assert_eq!(target_fd_limit(4_096, 4_096, Some(8_192)), None);
+        assert_eq!(target_fd_limit(4_096, 8_192, Some(4_096)), None);
+    }
+
+    #[test]
+    fn fd_count_scans_existing_descriptors_without_a_reserve() {
+        let marker = std::fs::File::open("/dev/null").unwrap();
+        let marker_fd = marker.as_raw_fd();
+        let count = count_open_fds(marker_fd as libc::rlim_t + 1);
+        assert!(count > 0);
+        // The scan observes the marker without consuming or replacing it.
+        assert_ne!(unsafe { libc::fcntl(marker_fd, libc::F_GETFD) }, -1);
+    }
+
+    #[test]
+    fn openpty_emfile_text_is_classified_as_fd_ceiling() {
+        assert!(is_fd_ceiling(
+            "failed to openpty: Os { code: 24, kind: Uncategorized, message: Too many open files }"
+        ));
+        assert!(is_fd_ceiling(
+            "failed to openpty: Os { code: 24, kind: Uncategorized }"
+        ));
+        assert!(!is_fd_ceiling(
+            "failed to openpty: Os { code: 2, kind: NotFound, message: No such file or directory }"
+        ));
+    }
+
+    #[test]
+    fn fd_ceiling_error_names_usage_limit_and_remedy() {
+        let message = PtyError::OpenPtyFdLimit {
+            open: 255,
+            limit: 256,
+            detail: "Too many open files".into(),
+        }
+        .to_string();
+        assert!(message.contains("255 of 256"), "{message}");
+        assert!(message.contains("setrlimit"), "{message}");
+        assert!(message.contains("open-file ceiling"), "{message}");
     }
 
     #[test]
