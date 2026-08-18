@@ -347,6 +347,23 @@ verify_ours_within() {
 	done
 }
 
+# `[ -x "$FNO_REAL" ]`, re-checked until it passes or the shared 3s budget
+# runs out: the sh twin of `executable_within` in crates/fno/src/bootstrap.rs.
+# The commit that taught both Rust -x gates to wait left these two call sites
+# single-shot, and one look during a concurrent --force (the script is absent
+# ~490ms) skips the adopt arm or kills a healthy post-install, and control
+# falls into another --force - the storm, reached one look earlier than the
+# torn-verify case.
+fno_real_within() {
+	_n=0
+	while :; do
+		[ -x "$FNO_REAL" ] && return 0
+		_n=$((_n + 1))
+		[ "$_n" -gt 15 ] && return 1
+		sleep 0.2
+	done
+}
+
 # --- success report --------------------------------------------------------
 # Report the verified version (AC5-UI) and, when uv's tool bin is not on PATH,
 # make a later `fno-py`/`fno-agents` call resolvable rather than a bare 127 (AC3-UI).
@@ -414,10 +431,22 @@ main() {
 	# (AC4-HP, AC4-EDGE). An explicit FNO_VERSION / FNO_INSTALL_WHEEL is a request
 	# to (re)install that exact source, so it skips the no-op and provisions.
 	if [ -z "${FNO_INSTALL_WHEEL:-}" ] && [ "${FNO_VERSION+x}" != x ]; then
-		if resolve_real && [ -x "$FNO_REAL" ] && verify_ours_within; then
-			say "fno is already installed and verified - nothing to do."
-			report_success
-			return 0
+		if resolve_real; then
+			# The venv bin dir is the discriminator (same reasoning as run()
+			# in bootstrap.rs): it survives the rewrite that deletes the
+			# script inside it, and its absence means no install ever
+			# existed, where a 3s wait is a first-run tax.
+			_ready=1
+			if [ -d "${FNO_REAL%/*}" ]; then
+				fno_real_within || _ready=
+			else
+				[ -x "$FNO_REAL" ] || _ready=
+			fi
+			if [ -n "$_ready" ] && verify_ours_within; then
+				say "fno is already installed and verified - nothing to do."
+				report_success
+				return 0
+			fi
 		fi
 	fi
 
@@ -441,7 +470,7 @@ main() {
   looked for: (no path built - \`uv tool dir\` failed or printed nothing)
 Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
-	if [ ! -x "$FNO_REAL" ]; then
+	if ! fno_real_within; then
 		if [ -e "$FNO_REAL" ]; then
 			_why="something is there but it is not an executable file"
 		else
