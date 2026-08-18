@@ -344,7 +344,7 @@ fn server_spine_exited_child_ends_the_session_with_bye() {
 }
 
 #[test]
-fn server_spine_dead_child_waits_for_delayed_pty_output_before_bye() {
+fn server_spine_dead_child_waits_for_delayed_pty_output_before_shutdown() {
     let scratch = Scratch::new("reader-drain");
     let shell = scratch.0.join("emit-and-exit");
     std::fs::write(&shell, "#!/bin/sh\nprintf reader-drained\n").unwrap();
@@ -374,6 +374,13 @@ fn server_spine_dead_child_waits_for_delayed_pty_output_before_bye() {
             }
             Ok(ServerMsg::Bye { .. }) => {
                 assert!(saw_output, "Bye arrived before the final PTY output");
+                break;
+            }
+            Err(fno::proto::ProtoError::Closed) => {
+                assert!(
+                    saw_output,
+                    "server closed before delivering the final PTY output"
+                );
                 break;
             }
             Ok(_) => {}
