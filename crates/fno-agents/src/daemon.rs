@@ -4998,11 +4998,16 @@ async fn handle_rm_with(
         "pane_reason": pane_outcome.reason(),
         "was_orphaned": was_orphaned,
     });
-    let event_error = ctx
-        .emitter
-        .emit("agent_removed", &event)
-        .err()
-        .map(|error| error.to_string());
+    let event_payload_len = serde_json::to_string(&event)
+        .map(|encoded| encoded.len())
+        .unwrap_or(usize::MAX);
+    let event_error = match ctx.emitter.emit("agent_removed", &event) {
+        Err(error) => Some(error.to_string()),
+        Ok(()) if event_payload_len > crate::events::MAX_EVENT_PAYLOAD_BYTES => Some(format!(
+            "agent_removed event replaced by event_payload_too_large ({event_payload_len} bytes)"
+        )),
+        Ok(()) => None,
+    };
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -6659,6 +6664,44 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_reports_when_an_oversized_event_is_replaced() {
+        let home = short_home("rmeventoversize");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "bbbb2223",
+            "bbbb2223-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(
+            1,
+            "agent.rm",
+            json!({"name": "stopped-worker", "force": true}),
+        );
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("bbbb2223", Some("stopped")),
+                ])
+            },
+            &|_| Err("x".repeat(crate::events::MAX_EVENT_PAYLOAD_BYTES * 2)),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["event_written"], false);
+        assert!(response.result().unwrap()["event_reason"]
+            .as_str()
+            .unwrap()
+            .contains("event_payload_too_large"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 

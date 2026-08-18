@@ -2185,7 +2185,7 @@ fn format_success(
             let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
             let mut removed = vec!["fno"];
             let mut notes = Vec::new();
-            if harness == "claude" {
+            if !harness.is_empty() {
                 let reason = result
                     .get("harness_reason")
                     .and_then(Value::as_str)
@@ -2195,14 +2195,18 @@ fn format_success(
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 match result.get("harness_removed").and_then(Value::as_bool) {
-                    Some(true) => removed.push("claude"),
+                    Some(true) => removed.push(harness),
                     Some(false) if reason.contains("already absent") => {
-                        notes.push("claude row already absent".to_string())
+                        notes.push(format!("{harness} row already absent"))
                     }
-                    Some(false) => notes.push(format!("claude row {row_id} survives: {reason}")),
-                    None => {
+                    Some(false) => notes.push(format!("{harness} row {row_id} survives: {reason}")),
+                    None if harness == "claude" => {
                         notes.push("claude list unreadable, harness side unverified".to_string())
                     }
+                    None if !reason.is_empty() => {
+                        notes.push(format!("{harness} side unverified: {reason}"))
+                    }
+                    None => {}
                 }
             }
             let pane_reason = result
@@ -2237,7 +2241,10 @@ fn format_success(
                     .unwrap_or("unknown error");
                 notes.push(format!("event record not written: {reason}"));
             }
-            if harness != "claude" && result.get("pane_removed").is_none_or(Value::is_null) {
+            if removed.len() == 1
+                && notes.is_empty()
+                && result.get("pane_removed").is_none_or(Value::is_null)
+            {
                 return Some(format!("removed: {name}"));
             }
             let has_survivor = notes
@@ -3196,6 +3203,26 @@ mod tests {
             out,
             Some(
                 "removed: bar-agent (fno + claude; event record not written: disk full)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn format_success_rm_names_a_forced_codex_survivor() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "codex",
+            "harness_row_id": "session-1",
+            "harness_removed": false,
+            "harness_reason": "index is read-only"
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false);
+        assert_eq!(
+            out,
+            Some(
+                "removed: bar-agent (fno only; codex row session-1 survives: index is read-only)"
                     .to_string()
             )
         );
