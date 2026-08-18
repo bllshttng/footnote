@@ -81,6 +81,12 @@ expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   "index(\\\"$py_label\\\")" "the Rust publisher (override label)"
 expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
   '"$LABEL" = "'"$py_label"'"' "the refresher workflow (override label)"
+# The withdrawal arm's case pattern, not just the labeled arm's compare: a
+# rename that updates every other pinned surface but leaves this arm falling
+# to `*)` keeps parity green while a withdrawn override never invalidates its
+# own green - the valve stays open with every check passing.
+expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
+  "${py_label}*)" "the refresher withdrawal arm (override description prefix)"
 expect_fixed "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
   "${py_label}*)" "the post-merge audit (override label)"
 
