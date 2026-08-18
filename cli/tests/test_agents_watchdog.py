@@ -38,6 +38,12 @@ NOW_1840 = datetime(2026, 8, 16, 18, 40, 0, tzinfo=timezone.utc).timestamp()
 NOW_1850 = datetime(2026, 8, 16, 18, 50, 0, tzinfo=timezone.utc).timestamp()
 RATE_LIMIT_TAIL = "API Error: 429 rate limit, window resets at 02:48:21 SGT"
 
+# What a FINISHED session's tail actually looks like. The literal word
+# "done" is not a finished session and never was: reap takes the promise
+# marker classify_tail keys on, so a fixture that skips it is testing a
+# session that merely stopped writing.
+FINISHED_TAIL = "<promise>PR is green and reviewed</promise>"
+
 
 def _facts(
     text: str, age_min: float = 5, role: str = "assistant", kind: str = "text"
@@ -75,7 +81,9 @@ def test_healthy_injectable_row_is_leave():
     rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp/w1")]
     [v] = _run(rows, {"aaaa1111-0000": _facts("still on it")})
     assert v.verdict == LEAVE
-    assert "reachable" in v.basis
+    # The basis states what was measured (state + last-write age), never
+    # "reachable" - nothing here probes reachability.
+    assert "no lane applies" in v.basis
 
 
 def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
@@ -201,7 +209,7 @@ def test_identity_joins_on_claim_holder_not_name():
         Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a"),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
-    transcripts = {r.row_id: _facts("ok", age_min=30) for r in rows}
+    transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
     vs = _run(
         rows,
         transcripts,
@@ -220,7 +228,7 @@ def test_node_done_reaps_and_own_claim_does_not():
         Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1"),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
-    transcripts = {r.row_id: _facts("ok", age_min=30) for r in rows}
+    transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
     vs = _run(
         rows,
         transcripts,
@@ -1253,9 +1261,9 @@ def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
     vs = _run(
         rows,
         {
-            "aaaa1111-0000": _facts("done", age_min=30),
+            "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=30),
             "bbbb2222-0000": _facts("tool_use Bash", age_min=0, kind="tool"),
-            "cccc3333-0000": _facts("done", age_min=30),
+            "cccc3333-0000": _facts(FINISHED_TAIL, age_min=30),
         },
         nodes={"x-done": {"status": "done"}},
     )
@@ -1453,7 +1461,7 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     vs = _run(
         rows,
         {
-            "aaaa1111-0000": _facts("done", age_min=120),
+            "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=120),
             "bbbb2222-0000": _facts("still working", age_min=0),
         },
         nodes={"x-done": {"status": "done"}},
@@ -1465,7 +1473,7 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     # evidence that the sibling left.
     vs = _run(
         rows,
-        {"aaaa1111-0000": _facts("done", age_min=120)},
+        {"aaaa1111-0000": _facts(FINISHED_TAIL, age_min=120)},
         nodes={"x-done": {"status": "done"}},
     )
     assert vs[0].verdict == STALE, vs[0].basis
@@ -1474,8 +1482,8 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     vs = _run(
         rows,
         {
-            "aaaa1111-0000": _facts("done", age_min=120),
-            "bbbb2222-0000": _facts("done", age_min=120),
+            "aaaa1111-0000": _facts(FINISHED_TAIL, age_min=120),
+            "bbbb2222-0000": _facts(FINISHED_TAIL, age_min=120),
         },
         nodes={"x-done": {"status": "done"}},
     )
@@ -1547,7 +1555,7 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     only way to YES is through three positive markers.
     """
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
-    quiet = _facts("finished", age_min=120)
+    quiet = _facts(FINISHED_TAIL, age_min=120)
 
     def boom(_n):
         raise OSError("store unreadable")
@@ -1646,3 +1654,55 @@ def test_reap_refuses_a_cwd_it_cannot_prove_is_a_worktree(monkeypatch):
     outcome, detail = watchdog._apply_reap(v, cwd="/repos/main", runner=never)
     assert outcome == "refused"
     assert "not a linked worktree" in detail
+
+
+def test_a_session_still_in_play_is_never_reaped():
+    """Silence is a reading about the last write, never a verdict that the
+    work is over. A worker parked on <watching>, one holding a question, and
+    one waiting out a rate limit are all silent and all still in play."""
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    nodes = {"x-done": {"status": "done"}}
+
+    parked = _facts("<watching>ci</watching>", age_min=200)
+    [v] = _run([row], {"aaaa1111-0000": parked}, nodes=nodes)
+    assert v.verdict != REAP and "watching" in v.basis
+
+    asking = _facts("Which branch should I target?", age_min=200)
+    [v] = _run([row], {"aaaa1111-0000": asking}, nodes=nodes)
+    assert v.verdict != REAP and "your-move" in v.basis
+
+    # Silence inside a live 429 window is the rate limit, not a finished job.
+    [v] = _run([row], {"aaaa1111-0000": _facts(RATE_LIMIT_TAIL, age_min=200)},
+               nodes=nodes)
+    assert v.verdict != REAP
+
+    # A session that died mid-turn still reaps: the deliverable ruling says
+    # a done node reaps at any age, and a stalled tail owes a move nobody is
+    # coming to make.
+    [v] = _run([row], {"aaaa1111-0000": _facts("half a sentence", age_min=200)},
+               nodes=nodes)
+    assert v.verdict == REAP and "stalled" in v.basis
+
+
+def test_a_hand_run_sweep_does_not_report_the_cadence_stale(tmp_path, monkeypatch):
+    """One file serves both cadences, so a manual write used to erase the
+    only evidence the tick had run. Status then blamed the daemon for the
+    operator having looked."""
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: tmp_path / "sweep.json")
+
+    watchdog.write_sweep_file("tick", {LEAVE: 3}, NOW_1840)
+    watchdog.write_sweep_file("manual", {LEAVE: 3}, NOW_1840 + 60)
+
+    state = watchdog.sweep_staleness(NOW_1840 + 120, stale_after_s=3600)
+    assert state["stale"] is False, state
+    # And a cadence that really died still reads stale, hand-run or not.
+    dead = watchdog.sweep_staleness(NOW_1840 + 7200, stale_after_s=3600)
+    assert dead["stale"] is True, dead
+
+
+def test_a_filtered_hand_run_keeps_the_rows_it_filtered_out():
+    """Stamping only the subset silently retracts every filtered-out row, so
+    the next tick re-emits all of them."""
+    merged = watchdog.union_signature("a:wake;b:ghost", "b:ghost;c:reap")
+    assert merged == "a:wake;b:ghost;c:reap"
+    assert watchdog.union_signature("", "a:wake") == "a:wake"

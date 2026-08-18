@@ -2731,12 +2731,17 @@ def cmd_watchdog(
         payload if only is None
         else {**payload, "verdicts": [v._asdict() for v, _ in pairs]}
     )
-    # Read the previous stamp BEFORE overwriting it, exactly as the tick
-    # does: the change gate compares against the PREVIOUS sweep.
+    # A filtered run publishes a SUBSET, so its stamp has to be the union of
+    # what it just published and what was already published. Stamping the
+    # subset alone drops every filtered-out row from the record, and the next
+    # tick re-emits all of them.
     prev_events_sig = wd._last_events_signature()
+    signature_to_stamp = wd.union_signature(
+        prev_events_sig, wd.verdict_signature(events_payload)
+    ) if only is not None else wd.verdict_signature(events_payload)
     wd.write_sweep_file(
         "manual", payload["counts"], now, signature,
-        events_signature=wd.verdict_signature(events_payload),
+        events_signature=signature_to_stamp,
     )
 
     # Classification events ride every mode: a verdict emitted only under a

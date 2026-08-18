@@ -101,7 +101,12 @@ ROSTER_HEADROOM = 0.5
 #: ceiling the row reads ``stale`` (a needs-human bucket) and NEVER reaches an
 #: action lane: the 429 reset stamp carries no date, so on an old tail its
 #: time-of-day reading is garbage, which also poisons reroute.
-WAKE_MAX_AGE_S = 24 * 3600
+#: Twelve hours, not twenty-four: `parse_sgt_stamp` picks the nearest of
+#: yesterday/today/tomorrow, so a stamp carrying no date is only unambiguous
+#: for half a day. Measured: a reset that truly passed 13h ago parses as 11h
+#: in the FUTURE and reads live. A ceiling above the parser's own resolution
+#: hands the action lanes a window that opened half a day ago.
+WAKE_MAX_AGE_S = 12 * 3600
 
 #: Reap is the one verdict that must satisfy THREE signals (king ruling
 #: 2026-08-17, the c696fddd case): the basis says the process is real, the
@@ -300,6 +305,7 @@ def reap_decision(
     now_s: float,
     quiet_after_s: float,
     cotenants: int,
+    window: str = "none",
 ) -> tuple[str, str]:
     """The ONLY path to a reap verdict. Returns ``(answer, basis)``.
 
@@ -318,11 +324,26 @@ def reap_decision(
     failure mode of a bug here is a row a human has to look at, which is the
     direction this lane is allowed to fail in.
 
-    The three positive signals a reap needs, all of them present:
-    the DELIVERABLE is settled (the node is done, or another live session
-    holds its claim), the worktree is this row's ALONE, and the transcript
-    says the session is QUIET - a parsed last event, past the idle
-    threshold, that is not a tool call.
+    The positive signals a reap needs, all of them present: the DELIVERABLE
+    is settled (the node is done, or another live session holds its claim),
+    the worktree is this row's ALONE, no 429 window is open, and the
+    transcript says the session DECLARED ITSELF FINISHED.
+
+    That last one used to be silence past a 900s bar, which is the defect
+    this whole predicate exists to end: silence is a reading about the last
+    write, never a verdict about whether the work is over. A worker parked on
+    ``<watching>`` is silent. A worker waiting out a rate limit is silent. A
+    worker re-tasked and thinking is silent. So the destructive lane now asks
+    ``classify_tail`` and refuses every reading that says the session is
+    still IN PLAY: parked on ``<watching>``, holding a question the operator
+    owes an answer to, or simply still working. What remains is ``done`` (it
+    said so) and ``stalled`` (it died mid-turn and owes a move nobody is
+    coming to make), which is the pair the deliverable ruling is about - a
+    node whose PR merged reaps at any age.
+
+    Refusing ``working`` also lifts the quiet bar to the stalled threshold as
+    a side effect, which fixes the inversion where the DESTRUCTIVE lane
+    accepted 900s of silence while the harmless wake lane demanded 7200s.
     """
     if not row.node:
         return REAP_NO, ""
@@ -378,6 +399,15 @@ def reap_decision(
             f"{reap_basis} but no parseable last event, so quiet is unproven"
         )
 
+    # Read four: a session waiting out a rate limit is silent and is NOT
+    # finished. Reap outranks reroute in the table, so without this the
+    # destructive lane got first look at exactly the rows reroute exists for.
+    if window == "live":
+        return REAP_UNKNOWN, (
+            f"{reap_basis} but a 429 window is open, so silence is the rate "
+            f"limit, not a finished session"
+        )
+
     age_s = max(0.0, now_s - facts.last_event_epoch)
     if age_s <= quiet_after_s:
         return REAP_NO, (
@@ -389,8 +419,19 @@ def reap_decision(
             f"{reap_basis} but last event is a tool call, never reaped on "
             f"tool activity"
         )
+
+    # Read five: the marker itself. `done` is the promise a session emits
+    # when it finishes; everything else is a session that stopped writing
+    # for some other reason, and "stopped writing" is not "stopped working".
+    truth = classify_tail(facts.last_role, facts.last_text, age_s)
+    if truth in _ENGAGED_TAILS:
+        return REAP_NO, (
+            f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m, "
+            f"but the tail reads {truth}, which is a session still in play"
+        )
     return REAP_YES, (
-        f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m"
+        f"{reap_basis}, tail reads {truth}, quiet "
+        f"{_mins(now_s, facts.last_event_epoch)}m"
     )
 
 
@@ -424,6 +465,10 @@ def _verdict_one(
         return Verdict(row.row_id, row.name, row.state, GHOST,
                        f"no transcript for {row.row_id}", "report")
 
+    window, reset_epoch, stamp = ("none", None, "")
+    if facts is not None:
+        window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
+
     if row.node:
         answer, reap_basis = reap_decision(
             row,
@@ -433,6 +478,7 @@ def _verdict_one(
             now_s=now_s,
             quiet_after_s=quiet_after_s,
             cotenants=cotenants,
+            window=window,
         )
         if answer is REAP_YES:
             return Verdict(row.row_id, row.name, row.state, REAP,
@@ -462,14 +508,20 @@ def _verdict_one(
                 "report",
             )
 
-    window, reset_epoch, stamp = ("none", None, "")
-    if facts is not None:
-        window, reset_epoch, stamp = rate_limit_window(facts.records, now_s)
-
     # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
     # (proved twice by hand); the session must be stopped before the window
     # opens or it wakes into a duplicate.
-    if row.state == "blocked" and window == "live" and reset_epoch is not None:
+    if (
+        row.state == "blocked"
+        and window == "live"
+        and reset_epoch is not None
+        # A tail with no parsed timestamp skips the age ceiling above, so
+        # without this the one lane that stops and respawns a session acted
+        # on a row of unknown age. The wake lane below already refuses this
+        # exact input; the louder lane must not be the laxer one.
+        and facts is not None
+        and facts.last_event_epoch is not None
+    ):
         reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
         return Verdict(
             row.row_id, row.name, row.state, REROUTE,
@@ -511,8 +563,14 @@ def _verdict_one(
 
     # leave: everything else, including every healthy injectable row - the
     # watchdog never competes with the normal inject path.
+    # Never "reachable": nothing here probes reachability, and the eight
+    # stale-`working` rows that motivated this module read exactly this line
+    # while their transcripts had not moved in 30+ minutes. A basis states
+    # what was measured, which is the age of the last write and the state the
+    # roster claims - two facts that can disagree, and did.
     basis = (
-        f"reachable, last turn {_age_clause(now_s, facts.last_event_epoch)} ago"
+        f"state {row.state}, last turn "
+        f"{_age_clause(now_s, facts.last_event_epoch)} ago, no lane applies"
         if facts is not None
         else f"no transcript, state {row.state}"
     )
@@ -781,6 +839,12 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
 _CANONICAL_STATE = {"Working": "working", "Needs input": "blocked",
                     "Idle": "idle", "Done": "done"}
 
+#: Tail readings that mean the session is still IN PLAY, so a reap on one is
+#: a kill and not a cleanup. ``watching`` is a worker parked by the loop
+#: runtime, ``your-move`` is one holding a question for a human, ``working``
+#: is one whose silence has not yet reached the stalled threshold.
+_ENGAGED_TAILS = frozenset({"watching", "your-move", "working"})
+
 #: A row in a terminal state occupies no worktree. Non-terminal is the test,
 #: not an allowlist of live-looking words: an unknown state must read as
 #: possibly-live, and so protect a shared tree, rather than as gone.
@@ -988,18 +1052,24 @@ def write_sweep_file(
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({
-                "source": source,
-                "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-                "counts": counts,
-                "signature": signature,
-                "events_signature": events_signature,
-            }),
-            encoding="utf-8",
-        )
+        # The cadence stamp survives a hand-run. One file serves both
+        # cadences, so a manual write used to erase the only evidence the
+        # TICK had run, and `pr-watch status` then read a healthy cadence as
+        # "FLEET WATCHDOG STALE, last sweep 0m old" - a line that blames the
+        # daemon for the operator having looked.
+        last_tick = now_s if source == "tick" else _last_tick_epoch()
+        payload: dict[str, Any] = {
+            "source": source,
+            "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "counts": counts,
+            "signature": signature,
+            "events_signature": events_signature,
+        }
+        if last_tick is not None:
+            payload["last_tick_epoch"] = last_tick
+        path.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
 
@@ -1043,6 +1113,19 @@ SWEEP_INTERVAL_S = 600
 SWEEP_STALE_AFTER_S = 2 * SWEEP_INTERVAL_S
 
 
+def _last_tick_epoch() -> Optional[float]:
+    """The epoch of the last TICK-sourced sweep, carried across hand-runs."""
+    try:
+        data = json.loads(sweep_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    value = data.get("last_tick_epoch")
+    if isinstance(value, (int, float)):
+        return float(value)
+    # A file written before this field existed still proves a tick ran.
+    return None
+
+
 def sweep_staleness(
     now_s: Optional[float] = None, *, stale_after_s: float = SWEEP_STALE_AFTER_S
 ) -> dict:
@@ -1055,14 +1138,29 @@ def sweep_staleness(
         data = json.loads(sweep_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {"age_s": None, "stale": True, "source": None, "at": None}
-    age = max(0.0, now_s - stat.st_mtime)
     source = str(data.get("source") or "")
+    # A hand-run refreshes the file but proves nothing about the launchd
+    # cadence, and the cadence is what this read exists to measure. So the
+    # age is measured from the last TICK, not from the file: otherwise
+    # running the sweep by hand both hides a dead cadence (fresh mtime) and,
+    # once that was fixed by requiring source == "tick", reported a healthy
+    # one as stale. Neither reading was about the thing being asked.
+    tick_epoch = data.get("last_tick_epoch")
+    if isinstance(tick_epoch, (int, float)):
+        age = max(0.0, now_s - float(tick_epoch))
+    elif source == "tick":
+        age = max(0.0, now_s - stat.st_mtime)
+    else:
+        # No cadence evidence at all: a hand-run is the only sweep on record.
+        return {
+            "age_s": int(max(0.0, now_s - stat.st_mtime)),
+            "stale": True,
+            "source": source,
+            "at": str(data.get("at") or ""),
+        }
     return {
         "age_s": int(age),
-        # A hand-run sweep refreshes the file but proves nothing about the
-        # launchd cadence, and the cadence is what this read exists to
-        # measure. Only a tick-sourced write can clear staleness.
-        "stale": age > stale_after_s or source != "tick",
+        "stale": age > stale_after_s,
         "source": source,
         "at": str(data.get("at") or ""),
     }
@@ -1078,6 +1176,19 @@ def verdict_signature(payload: dict) -> str:
         if v["verdict"] != LEAVE
     )
     return ";".join(parts)
+
+
+def union_signature(*signatures: str) -> str:
+    """Merge signatures into one, preserving the sorted-parts shape.
+
+    A filtered hand-run publishes a SUBSET, so its stamp must say "these, and
+    whatever was already said" - stamping the subset alone silently retracts
+    every row it filtered out and the next tick re-emits them all.
+    """
+    parts: set[str] = set()
+    for signature in signatures:
+        parts.update(part for part in signature.split(";") if part)
+    return ";".join(sorted(parts))
 
 
 def digest_text(payload: dict, limit: int = 8) -> str:
