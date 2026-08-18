@@ -189,6 +189,18 @@ fi
 # jq-missing and binary-missing error paths so they bounded-continue ONLY for an
 # active session; with no state file every failure still emits `{}` (allow).
 if [[ ! -f "$STATE_FILE" ]]; then
+    # A guard on one of two reachable stop paths is decorative. The king loop
+    # ships claude-only in v1, so this adapter cannot gate a king session, and
+    # the wrong thing to do about that is fall through to the allow above as if
+    # nothing were running. It NAMES the manifest and refuses instead: an agy
+    # king would otherwise exit clean on its first quiet turn while its board
+    # still held work, which is the exact failure the king loop exists to fix,
+    # reproduced on the one path that never got the fix.
+    if [[ -f "$ROOT/.fno/king-state.md" ]]; then
+        echo "agy stop-hook: REFUSING to gate .fno/king-state.md - the king loop is claude-only in v1." >&2
+        echo "agy stop-hook: this king is running unsupervised on agy; run it on claude, or remove the manifest to stop unsupervised." >&2
+        emit '{"decision":"continue","reason":"king manifest present but the king loop is claude-only; this adapter cannot decide its terminal"}'
+    fi
     emit '{}'
 fi
 
