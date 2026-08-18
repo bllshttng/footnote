@@ -408,6 +408,50 @@ def test_a_malformed_cache_shape_returns_a_reason_not_a_raise(tmp_path, monkeypa
         assert "reason" in report, shape
 
 
+def test_a_boolean_never_passes_for_a_number(tmp_path, monkeypatch) -> None:
+    """`isinstance(True, int)` is True, so an unguarded check turns a boolean
+    into arithmetic: percent True computed 2720 and printed "keeps True%"."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    _write(tmp_path, configured=1000000, percent=True)
+    assert doctor._codex_context_window_report()["percent"] is None
+
+    _write(tmp_path, configured=None)
+    (tmp_path / "config.toml").write_text(
+        'model = "gpt-5.6-sol"\nmodel_context_window = true\n'
+    )
+    assert doctor._codex_context_window_report() == {"reason": "no-configured-window"}
+
+
+def test_an_entry_with_a_cap_but_no_base_still_names_the_cache(
+    tmp_path, monkeypatch
+) -> None:
+    """The cap did all the clamping, so dropping the whole cache caveat hides
+    the one fact that explains the number."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=272000)
+    payload = json.loads((tmp_path / "models_cache.json").read_text())
+    del payload["models"][0]["context_window"]
+    (tmp_path / "models_cache.json").write_text(json.dumps(payload))
+
+    report = doctor._codex_context_window_report()
+
+    assert report["base_synthesized"] is True
+    assert report["leans_on_cached_cap"] is True
+    line = _emit(report)[0]
+    assert "models_cache.json" in line
+    assert "its base" not in line
+
+
+def test_the_caller_passes_its_own_socket_probe_through(tmp_path, monkeypatch) -> None:
+    """One probe per doctor pass, so --json cannot carry two answers."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000)
+
+    assert doctor._codex_context_window_report(app_server_present=True)["app_server_running"]
+    assert not doctor._codex_context_window_report(app_server_present=False)["app_server_running"]
+
+
 def test_a_float_cap_is_honored_like_a_float_percent(tmp_path, monkeypatch) -> None:
     """Rejecting a float cap substituted the base and reported a clamp that is
     not real, a false positive in the direction the check exists to catch."""
