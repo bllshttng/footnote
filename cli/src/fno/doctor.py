@@ -1809,12 +1809,17 @@ def _codex_context_window_report() -> dict[str, Any]:
     # top-level `model` past one describes a model no thread runs.  A profile
     # sets an arbitrary subset though: name the profile key only once that
     # table actually carried `model`, else the provenance itself is a lie.
+    # The window has the same exposure as the slug: a profile that supplies it
+    # leaves the reader grepping config.toml for a number that is not there.
     source = "model"
+    window_source = "model_context_window"
     profile = config.get("profile")
     if isinstance(profile, str):
         table = (config.get("profiles") or {}).get(profile) or {}
         if "model" in table:
             source = f"profiles.{profile}.model"
+        if "model_context_window" in table:
+            window_source = f"profiles.{profile}.model_context_window"
         config = {**config, **table}
 
     configured = config.get("model_context_window")
@@ -1833,13 +1838,21 @@ def _codex_context_window_report() -> dict[str, Any]:
     cap = entry.get("max_context_window")
     base = entry.get("context_window")
     percent = entry.get("effective_context_window_percent")
-    if not isinstance(cap, int) or not isinstance(percent, (int, float)):
+    if not isinstance(cap, int):
+        cap = base if isinstance(base, int) else None
+    if cap is None:
         return {"reason": f"cache-schema-drift: {slug}"}
+    # A missing percent must not silence a clamp that needs no percent to
+    # compute.  Carry it as None and let the line omit the claim, rather than
+    # defaulting to a number upstream did not send.
+    if not isinstance(percent, (int, float)):
+        percent = None
 
-    effective = int(min(configured, cap) * percent // 100)
+    effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
     return {
         "model": slug,
         "model_source": source,
+        "window_source": window_source,
         "configured": configured,
         "max_context_window": cap,
         "context_window": base if isinstance(base, int) else cap,
@@ -1866,12 +1879,16 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
     report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
     if not (report.get("overstated") or report.get("leans_on_cached_cap")):
         return
+    kept = "" if report.get("percent") is None else f" (codex keeps {report['percent']}%)"
     line = (
         f"fno doctor: codex {report['model_source']}={report['model']} with "
-        f"model_context_window={report['configured']} runs at an effective "
-        f"{report['effective']} (codex keeps {report['percent']}%). The TUI footer shows "
-        "the configured value, not this one."
+        f"{report['window_source']}={report['configured']} runs at an effective "
+        f"{report['effective']}{kept}."
     )
+    # Only claim the footer lies once it actually does.  A raised cap can be
+    # load-bearing while the effective window still equals the configured one.
+    if report.get("overstated"):
+        line += " The TUI footer shows the configured value, not this one."
     # The cached cap is load-bearing whenever the configured value clears the
     # model's base, whether the cap clamped it or a raised cap spared it.
     if report.get("leans_on_cached_cap"):
@@ -1894,6 +1911,10 @@ def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
                 "thread started since."
             )
             if report.get("app_server_running"):
+                # Deliberately no remedy.  The only lever that raises the cap
+                # is stopping this daemon, and `_codex_app_server_report` right
+                # above requires the same socket for live mail to a codex peer.
+                # Naming a fix here means telling the operator to break that.
                 line += (
                     " A codex app-server daemon is live here and every app-server "
                     "fetch lands the base cap, so it will keep pulling this back down."

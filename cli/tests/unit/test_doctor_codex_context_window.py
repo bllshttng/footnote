@@ -273,6 +273,61 @@ def test_emitter_is_silent_on_a_reason_only_report() -> None:
     assert _emit({"reason": "no-configured-window"}) == []
 
 
+def test_a_missing_percent_still_reports_the_clamp(tmp_path, monkeypatch) -> None:
+    """The clamp needs no percent to compute, so dropping that key upstream
+    must not silence the primary lie.  The line then claims no percent."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=272000, percent=None)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["effective"] == 272000
+    assert report["percent"] is None
+    line = _emit(report)[0]
+    assert "runs at an effective 272000." in line
+    assert "codex keeps" not in line
+
+
+def test_a_missing_cap_falls_back_to_the_base_window(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=1000000, cached_max=None)
+
+    assert doctor._codex_context_window_report()["effective"] == 258400
+
+
+def test_the_footer_claim_is_withheld_when_the_footer_is_honest(tmp_path, monkeypatch) -> None:
+    """percent 100 with a raised cap: the cache is load-bearing so the line
+    speaks, but the effective window IS the configured one, so the line must
+    not also claim the footer overstates."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(tmp_path, configured=400000, cached_max=1000000, percent=100)
+
+    report = doctor._codex_context_window_report()
+
+    assert report["overstated"] is False
+    assert report["leans_on_cached_cap"] is True
+    line = _emit(report)[0]
+    assert "The TUI footer" not in line
+    assert "above its 272000 base" in line
+
+
+def test_a_profile_supplied_window_is_named_as_such(tmp_path, monkeypatch) -> None:
+    """A reader who greps config.toml for the printed number has to find it."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    _write(
+        tmp_path,
+        configured=100000,
+        config_extra='profile = "big"\n[profiles.big]\nmodel_context_window = 1000000',
+    )
+
+    report = doctor._codex_context_window_report()
+
+    assert report["configured"] == 1000000
+    assert report["window_source"] == "profiles.big.model_context_window"
+    assert report["model_source"] == "model"
+    assert "profiles.big.model_context_window=1000000" in _emit(report)[0]
+
+
 def test_a_live_app_server_daemon_is_named_as_the_thing_holding_the_cap_down(
     tmp_path, monkeypatch
 ) -> None:
