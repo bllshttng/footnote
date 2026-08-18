@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -538,6 +539,17 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
     )
     assert gemini["status"] == "omitted"
     assert gemini["error"] == "no_post_compact_registration"
+    # Gemini registers no post-compact hook, so BOTH reinjects are omitted there
+    # - one row each, never one row standing in for two hooks.
+    gemini_omitted = [
+        item
+        for item in by_harness["gemini"]["compiled"]["source_manifest"]
+        if item["error"] == "no_post_compact_registration"
+    ]
+    assert [item["source_id"] for item in gemini_omitted] == [
+        "target-postcompact-reinject",
+        "king-postcompact-reinject",
+    ]
 
 
 def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() -> None:
@@ -858,6 +870,12 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         "  sed -n \"s/^$1: *//p\" \"$2\" | head -1 | tr -d '\\\"'\n"
         "}\n",
         encoding="utf-8",
+    )
+    # The hook sources its carrier from the plugin's lib dir; a fake plugin that
+    # ships the guard but not the carrier would silence the hook (by design).
+    shutil.copy(
+        ROOT / "scripts" / "lib" / "postcompact-carrier.sh",
+        plugin / "scripts" / "lib" / "postcompact-carrier.sh",
     )
     state = tmp_path / ".fno" / "target-state.md"
     state.parent.mkdir()

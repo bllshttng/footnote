@@ -792,19 +792,23 @@ def _discover_cell_sources(
             )
             ordinal += 1
             if entry_state == "post_compact":
-                sources.append(
-                    _measure_hook(
-                        plugin_root / "hooks" / "target-postcompact-reinject.sh",
-                        repo_root=plugin_root,
-                        harness=harness,
-                        entry_state=entry_state,
-                        lifecycle="post_compact",
-                        ordinal=ordinal,
-                        status="omitted",
-                        error="no_post_compact_registration",
+                for _postcompact_hook in (
+                    "target-postcompact-reinject.sh",
+                    "king-postcompact-reinject.sh",
+                ):
+                    sources.append(
+                        _measure_hook(
+                            plugin_root / "hooks" / _postcompact_hook,
+                            repo_root=plugin_root,
+                            harness=harness,
+                            entry_state=entry_state,
+                            lifecycle="post_compact",
+                            ordinal=ordinal,
+                            status="omitted",
+                            error="no_post_compact_registration",
+                        )
                     )
-                )
-                ordinal += 1
+                    ordinal += 1
 
     if manifest_error:
         sources.append(
