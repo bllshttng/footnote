@@ -272,6 +272,14 @@ The fix is the `branch` field on `review_attestation` plus one predicate, `attes
 
 Out-of-scope lines are skipped entirely rather than marked stale: a stale verdict says "ask this reviewer to re-read", which is wrong advice about a reviewer on another branch. The verdict records which rule admitted it (`scope: attested_branch | legacy_head_match`), so a refusal under a moved head can name a pre-branch-field attestation.
 
+#### How the producer picks the branch name
+
+`emit-attestation.sh` must write the name GitHub reports as `headRefName`, and the local branch name is not always it. A spawned reviewer runs in its own worktree on a branch of its own, because git refuses two worktrees on one branch, so there the PR branch is the UPSTREAM. An author worktree is cut from a base branch and tracks it until `push -u` fires at PR create, so there the upstream names the base and the LOCAL name is the PR.
+
+The discriminator is commits, not names. A reviewer worktree sits at the tip of the branch it tracks, so `@{upstream}..HEAD` is empty. An author worktree is ahead by exactly the diff under review. The upstream wins only when that count is zero AND the upstream is not `refs/remotes/origin/HEAD`; the second conjunct keeps a commitless fresh worktree from recording its base. Two earlier spellings both mis-scoped: a literal `main` comparison wrote `branch=develop` on a develop-based repo, and the `origin/HEAD` comparison that replaced it did the same on any author worktree tracking a non-default branch. Either one loses the branch arm for the real PR and leaks the event into scope for any PR whose `headRefName` matches the base name.
+
+The derivation stays local. `gh pr view --json headRefName` would answer directly, and it is refused anyway: a network call on the emit path turns a review receipt into something that fails when GitHub is slow. A detached HEAD names no branch, so the emit refuses rather than write `""`, which is byte-identical to the pre-branch-field backlog and would mint a fresh legacy member no carry can scope.
+
 ### What the carry rule does not buy
 
 It does not deliver relief from the re-review treadmill, and the measurement says so plainly.
@@ -295,13 +303,7 @@ It is not "five re-reviews become one".
 That is code under any classifier that does not parse Python, and an AST dependency for one commit shape is not worth it.
 A documentation-only PR never carries an attestation either.
 With no code in the diff there is no identity to match, which is the fail-closed direction.
-
-**`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.**
-In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose.
-So a skill rewritten after a review carries the earlier verdict forward as fresh coverage.
-This is deliberate for now, because it matches the existing payload classifier.
-A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap.
-Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
+ **`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.** In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose. So a skill rewritten after a review carries the earlier verdict forward as fresh coverage. This is deliberate for now, because it matches the existing payload classifier. A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap. Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
 
 ### Named, not closed: the derivation-latency window
 
