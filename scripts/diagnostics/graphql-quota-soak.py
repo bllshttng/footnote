@@ -75,6 +75,10 @@ def validate_receipt(
     missing: list[str] = []
     if receipt.get("settled") is not True:
         missing.append("settled=true")
+    if not isinstance(receipt.get("pr"), int) or receipt["pr"] <= 0:
+        missing.append("pr>0")
+    if receipt.get("coverage_exit") != 0:
+        missing.append("coverage_exit=0")
     duration = receipt.get("duration_seconds")
     if not isinstance(duration, (int, float)) or duration < min_seconds:
         missing.append(f"duration_seconds>={min_seconds}")
@@ -104,14 +108,19 @@ def validate_receipt(
     if not receipt.get("head_sha") or receipt.get("coverage_head_sha") != receipt.get("head_sha"):
         missing.append("coverage_head_sha=head_sha")
     try:
+        started = datetime.strptime(
+            str(receipt.get("started_at")), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
         ended = datetime.strptime(str(receipt.get("ended_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc
         )
+        if ended < started:
+            missing.append("ended_at>=started_at")
         age = (datetime.now(timezone.utc) - ended).total_seconds()
         if age < 0 or age > max_age_hours * 3600:
             missing.append(f"receipt_age<={max_age_hours:g}h")
     except ValueError:
-        missing.append("ended_at=valid_utc")
+        missing.append("timestamps=valid_utc")
     return missing
 
 
@@ -165,7 +174,7 @@ def run_soak(args: argparse.Namespace) -> int:
     if info_code != 0 or not info.get("head_sha"):
         raise RuntimeError(f"REST PR info failed: {info_error or info}")
     head = info["head_sha"]
-    coverage_code, coverage, coverage_error = run_json(
+    coverage_code, coverage, _ = run_json(
         [agents_bin, "review-coverage", "--cwd", str(cwd), "--pr", str(args.pr), "--head", head],
         cwd=cwd,
     )
@@ -194,8 +203,6 @@ def run_soak(args: argparse.Namespace) -> int:
         max_age_hours=24,
         min_workers=args.min_workers,
     )
-    if coverage_code != 0:
-        missing.append(f"coverage_exit=0 ({coverage_error or coverage})")
     if missing:
         raise RuntimeError("positive markers failed: " + ", ".join(missing))
     atomic_json(Path(args.receipt), receipt)
