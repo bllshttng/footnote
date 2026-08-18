@@ -613,7 +613,7 @@ check_kill_criteria_file() {
         c==1 { print }
     ' "$file" | awk '
         /^kill_criteria:/ { in_block=1; next }
-        in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
+        in_block && /^[A-Za-z_][A-Za-z0-9_-]*:/ { in_block=0 }
         in_block { print }
     ')
 
@@ -685,7 +685,7 @@ check_consolidation_file() {
         c==1 { print }
     ' "$file" | awk '
         /^consolidation:/ { in_block=1; next }
-        in_block && /^[A-Za-z_][A-Za-z0-9_]*:/ { in_block=0 }
+        in_block && /^[A-Za-z_][A-Za-z0-9_-]*:/ { in_block=0 }
         in_block { print }
     ')
 

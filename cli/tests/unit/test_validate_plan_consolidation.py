@@ -176,6 +176,29 @@ def test_positive_marker_survives_an_unrelated_error(tmp_path):
     assert "consolidation outcome is proceed_alone" in out.stdout
 
 
+def test_a_hyphenated_next_key_ends_the_block(tmp_path):
+    # The block extractor stopped only at an underscore-or-alnum key, so a
+    # real `depends-on:` sitting after the block was swallowed INTO it and its
+    # list items were read as entries with no id. Twelve live plans carry a
+    # hyphenated key.
+    plan = tmp_path / "hyphen.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-20\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against:\n"
+        "    - id: x-aaaa\n"
+        "      reason: different subsystem\n"
+        "depends-on:\n"
+        "  - x-bbbb\n"
+        "  - x-cccc\n"
+    ))
+    out = _run(plan)
+    assert out.returncode == 0, out.stdout
+    assert "entry with no id" not in out.stdout
+    assert "consolidation outcome is proceed_alone" in out.stdout
+
+
 def test_blueprint_owns_the_consolidation_frontmatter_key():
     # The validator requires the block, so the ownership model must permit the
     # write that satisfies it, or blueprint raises OwnershipViolation instead.

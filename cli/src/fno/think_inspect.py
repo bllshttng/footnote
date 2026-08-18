@@ -419,7 +419,11 @@ def render_receipt(receipt: dict[str, Any]) -> str:
     lines = [
         f"think inspection: {'complete' if receipt['complete'] else 'incomplete'}",
         f"repository: {repo['status']} branch={repo.get('branch') or '-'} head={repo.get('head') or '-'} dirty={len(repo['dirty_paths'])}",
-        f"graph: {graph['status']} resolved={resolved.get('id', '-')} duplicates={len(graph['duplicates'])} epics={len(graph['epic_candidates'])}",
+        # "candidates", never "duplicates": the list is ranked at the reading
+        # floor, so a seed with no true duplicate still returns a full top-K.
+        # A bare `duplicates=5` reads as five duplicates found, which is the
+        # one thing this list cannot tell you.
+        f"graph: {graph['status']} resolved={resolved.get('id', '-')} candidates={len(graph['duplicates'])} (ranked, judge before trusting) epics={len(graph['epic_candidates'])}",
         f"pull requests: {prs['status']} matches={len(prs['matches'])}",
         f"database: detected={str(database['detected']).lower()} schema={database['schema_status']}",
         f"pitfalls: source={pitfalls['source']} entries={len(pitfalls['entries'])} syntheses={len(pitfalls['retro_syntheses'])} candidates={pitfalls['lesson_candidates']}",
