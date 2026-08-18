@@ -421,9 +421,8 @@ The producer is now reachable from every path that can reach the gate.
 | target stop hook `decide()` -> `run_done` | yes, unchanged | streak-gated |
 | `fno pr merge <n>` | yes | with no usable row it recomputes once, before the staleness comparison, pinned to the PR head |
 | `fno pr status <n>` | yes | reads through the same recompute-then-read helper |
-| `fno pr coverage-check <n>` without `--recompute` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno pr merge` |
+| `fno pr coverage-check <n>` without `--recompute` (and the git-protection hook through it) | no by default; `--recompute` yes | the hook path must not recompute: a PreToolUse hook has a 60s budget and the Rust producer takes minutes. `--recompute` shells the producer, same as `fno pr merge`. One-directional: on a missing or stale row this denies where `fno pr merge` may yet allow |
 | `finalize`'s auto-merge arm | not added, by decision | reached only from a terminal-allow, which implies `run_done` already ran this fire, and a failed arm leaves a green reviewed PR for a human |
-| `fno pr coverage-check <n>` (and the `git-protection` hook through it) | not added, by decision | a no-recompute read: the recompute shells the Rust producer at minutes while a PreToolUse hook has 60s, and a killed hook emits no verdict at all. One-directional - on a missing or stale row this denies where `fno pr merge` may yet allow |
 | a human running the verb by hand | yes | `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>]` |
 
 The table is asserted, not trusted. `crates/fno-agents/tests/review_coverage_paths.rs` runs the Rust-drivable rows. It holds the safe-direction row to its reason. When a new call site reads `review_coverage` without joining the table, it fails. The verb's payload is pinned equal to `run_done`'s by `review_coverage_verb.rs`, on the whole data object.
