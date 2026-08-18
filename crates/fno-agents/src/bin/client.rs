@@ -2183,9 +2183,9 @@ fn format_success(
         }
         "rm" => {
             let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
-            let pane_removed = result.get("pane_removed").and_then(Value::as_bool) == Some(true);
+            let mut removed = vec!["fno"];
+            let mut notes = Vec::new();
             if harness == "claude" {
-                let harness_removed = result.get("harness_removed");
                 let reason = result
                     .get("harness_reason")
                     .and_then(Value::as_str)
@@ -2194,33 +2194,66 @@ fn format_success(
                     .get("harness_row_id")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                return match harness_removed.and_then(Value::as_bool) {
-                    Some(true) if pane_removed => {
-                        Some(format!("removed: {name} (fno + claude + mux)"))
-                    }
-                    Some(true) => Some(format!("removed: {name} (fno + claude)")),
-                    Some(false) if reason.contains("already absent") && pane_removed => Some(
-                        format!("removed: {name} (fno + mux; claude row already absent)"),
-                    ),
+                match result.get("harness_removed").and_then(Value::as_bool) {
+                    Some(true) => removed.push("claude"),
                     Some(false) if reason.contains("already absent") => {
-                        Some(format!("removed: {name} (fno; claude row already absent)"))
+                        notes.push("claude row already absent".to_string())
                     }
-                    Some(false) => Some(format!(
-                        "removed: {name} (fno only; claude row {row_id} survives: {reason})"
-                    )),
-                    None if pane_removed => Some(format!(
-                        "removed: {name} (fno + mux; claude list unreadable, harness side unverified)"
-                    )),
-                    None => Some(format!(
-                        "removed: {name} (fno only; claude list unreadable, harness side unverified)"
-                    )),
-                };
+                    Some(false) => notes.push(format!("claude row {row_id} survives: {reason}")),
+                    None => {
+                        notes.push("claude list unreadable, harness side unverified".to_string())
+                    }
+                }
             }
-            if pane_removed {
-                Some(format!("removed: {name} (fno + mux)"))
+            let pane_reason = result
+                .get("pane_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            match result.get("pane_removed").and_then(Value::as_bool) {
+                Some(true) => removed.push("mux"),
+                Some(false) if pane_reason.contains("already absent") => {
+                    notes.push("mux pane already absent".to_string())
+                }
+                Some(false) => {
+                    let session = result
+                        .get("pane_session")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let pane_id = result
+                        .get("pane_id")
+                        .and_then(Value::as_u64)
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    notes.push(format!(
+                        "mux pane {session}:{pane_id} survives: {pane_reason}"
+                    ));
+                }
+                None => {}
+            }
+            if result.get("event_written").and_then(Value::as_bool) == Some(false) {
+                let reason = result
+                    .get("event_reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
+                notes.push(format!("event record not written: {reason}"));
+            }
+            if harness != "claude" && result.get("pane_removed").is_none_or(Value::is_null) {
+                return Some(format!("removed: {name}"));
+            }
+            let has_survivor = notes
+                .iter()
+                .any(|note| note.contains("survives") || note.contains("unverified"));
+            let surfaces = if removed.len() == 1 && has_survivor {
+                "fno only".to_string()
             } else {
-                Some(format!("removed: {name}"))
-            }
+                removed.join(" + ")
+            };
+            let detail = if notes.is_empty() {
+                surfaces
+            } else {
+                format!("{surfaces}; {}", notes.join("; "))
+            };
+            Some(format!("removed: {name} ({detail})"))
         }
         "list" => {
             let agents = &result["agents"];
@@ -3121,6 +3154,48 @@ mod tests {
             out,
             Some(
                 "removed: bar-agent (fno only; claude list unreadable, harness side unverified)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn format_success_rm_names_a_forced_mux_orphan() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true,
+            "pane_session": "main",
+            "pane_id": 24,
+            "pane_removed": false,
+            "pane_reason": "permission denied"
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false);
+        assert_eq!(
+            out,
+            Some(
+                "removed: bar-agent (fno + claude; mux pane main:24 survives: permission denied)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn format_success_rm_names_an_event_write_failure() {
+        let result = json!({
+            "removed": true,
+            "registry_removed": true,
+            "harness": "claude",
+            "harness_removed": true,
+            "event_written": false,
+            "event_reason": "disk full"
+        });
+        let out = format_success("rm", "bar-agent", &result, false, true, false);
+        assert_eq!(
+            out,
+            Some(
+                "removed: bar-agent (fno + claude; event record not written: disk full)"
                     .to_string()
             )
         );

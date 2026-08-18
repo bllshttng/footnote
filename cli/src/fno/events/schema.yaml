@@ -1562,6 +1562,10 @@ event_types:
           type: [boolean, "null"]
         harness_reason:
           type: [string, "null"]
+        pane_session:
+          type: [string, "null"]
+        pane_id:
+          type: [integer, "null"]
         pane_removed:
           type: [boolean, "null"]
         pane_reason:

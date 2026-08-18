@@ -2782,6 +2782,7 @@ def cmd_watchdog(
     wd.write_sweep_file(
         "manual", payload["counts"], now, signature,
         events_signature=signature_to_stamp,
+        terminal_harness_rows=payload.get("terminal_harness_rows", 0),
     )
 
     # Classification events ride every mode: a verdict emitted only under a

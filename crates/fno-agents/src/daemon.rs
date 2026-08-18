@@ -803,6 +803,10 @@ impl CascadeOutcome {
     fn failure(&self, row_id: &str) -> Option<(String, String)> {
         match self {
             Self::Failed(reason) => Some((row_id.to_string(), reason.clone())),
+            Self::Unverified(reason) => Some((
+                row_id.to_string(),
+                format!("harness teardown unverified: {reason}"),
+            )),
             _ => None,
         }
     }
@@ -821,6 +825,7 @@ fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
 fn cascade_harness_session_result_with(
     e: &state::RegistryEntry,
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
+    read_claude_agents: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
     claude_rm: &dyn Fn(&str) -> Result<(), String>,
 ) -> CascadeOutcome {
     let row_id = claude_row_id(e).unwrap_or_else(|| e.name.clone());
@@ -838,13 +843,23 @@ fn cascade_harness_session_result_with(
                     "claude row {short_id} already absent"
                 ));
             }
-            match claude_rm(&short_id) {
-                Ok(()) if list_known => CascadeOutcome::Removed,
-                Ok(()) => CascadeOutcome::Unverified(format!(
-                    "claude list unreadable: {}",
-                    snapshot.warning_text()
-                )),
-                Err(reason) => CascadeOutcome::Failed(reason),
+            if let Err(reason) = claude_rm(&short_id) {
+                return CascadeOutcome::Failed(reason);
+            }
+            let after = read_claude_agents();
+            if after.find(&short_id).is_some() {
+                return CascadeOutcome::Failed(format!(
+                    "claude row {short_id} survives successful claude rm"
+                ));
+            }
+            match &after {
+                crate::claude_roster::ClaudeAgentsSnapshot::Known { .. } => CascadeOutcome::Removed,
+                crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => {
+                    CascadeOutcome::Unverified(format!(
+                        "claude post-removal list unreadable: {}",
+                        after.warning_text()
+                    ))
+                }
             }
         }
         "codex" => {
@@ -874,7 +889,13 @@ fn cascade_harness_session_with(
     } else {
         None
     };
-    cascade_harness_session_result_with(e, snapshot.as_ref(), &run_claude_rm).failure(&row_id)
+    cascade_harness_session_result_with(
+        e,
+        snapshot.as_ref(),
+        &crate::claude_roster::read_all_agents,
+        &run_claude_rm,
+    )
+    .failure(&row_id)
 }
 
 fn run_claude_rm(short_id: &str) -> Result<(), String> {
@@ -889,7 +910,13 @@ fn run_claude_rm(short_id: &str) -> Result<(), String> {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                return Err(format!("claude rm exited {}", status.code().unwrap_or(-1)))
+                let code = status.code().unwrap_or(-1);
+                let output = child.wait_with_output().ok();
+                let detail = output
+                    .as_ref()
+                    .map(|output| String::from_utf8_lossy(&output.stderr))
+                    .unwrap_or_default();
+                return Err(format!("claude rm exited {code}: {}", detail.trim()));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -4806,7 +4833,9 @@ fn mux_pane_is_absent(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     detail.contains("no such pane")
         || detail.contains("no live pane owns")
-        || detail.contains("not found")
+        || (detail.contains("cannot reach session")
+            && (detail.contains("no such file or directory")
+                || detail.contains("connection refused")))
 }
 
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
@@ -4880,8 +4909,12 @@ async fn handle_rm_with(
         );
     }
     let harness_row_id = claude_row_id(&entry);
-    let harness_outcome =
-        cascade_harness_session_result_with(&entry, claude_agents.as_ref(), claude_rm);
+    let harness_outcome = cascade_harness_session_result_with(
+        &entry,
+        claude_agents.as_ref(),
+        read_claude_agents,
+        claude_rm,
+    );
     if let CascadeOutcome::Failed(reason) = &harness_outcome {
         if !force {
             return Response::err(
@@ -4902,10 +4935,23 @@ async fn handle_rm_with(
     };
     if let CascadeOutcome::Failed(reason) = &pane_outcome {
         if !force {
+            let harness_note = match &harness_outcome {
+                CascadeOutcome::Removed => format!(
+                    "{} harness row {} removed; ",
+                    entry.harness_name(),
+                    harness_row_id.as_deref().unwrap_or("unknown")
+                ),
+                CascadeOutcome::AlreadyAbsent(_) => "harness row already absent; ".into(),
+                _ => String::new(),
+            };
+            let mux = entry.mux.as_ref().expect("pane outcome requires a mux ref");
             return Response::err(
                 req.id,
                 ErrorCode::Internal,
-                format!("agent {name}: mux pane removal failed: {reason}"),
+                format!(
+                    "agent {name}: {harness_note}registry retained; mux pane {}:{} removal failed: {reason}",
+                    mux.session, mux.pane_id
+                ),
             );
         }
     }
@@ -4937,6 +4983,26 @@ async fn handle_rm_with(
             format!("agent {name}: removal did not persist: {e}"),
         );
     }
+    let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
+    let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
+    let event = json!({
+        "name": name,
+        "registry_removed": true,
+        "harness": entry.harness_name(),
+        "harness_row_id": harness_row_id,
+        "harness_removed": harness_outcome.removed_json(),
+        "harness_reason": harness_outcome.reason(),
+        "pane_session": pane_session,
+        "pane_id": pane_id,
+        "pane_removed": pane_outcome.removed_json(),
+        "pane_reason": pane_outcome.reason(),
+        "was_orphaned": was_orphaned,
+    });
+    let event_error = ctx
+        .emitter
+        .emit("agent_removed", &event)
+        .err()
+        .map(|error| error.to_string());
     let result = json!({
         "removed": true,
         "registry_removed": true,
@@ -4944,24 +5010,14 @@ async fn handle_rm_with(
         "harness_row_id": harness_row_id,
         "harness_removed": harness_outcome.removed_json(),
         "harness_reason": harness_outcome.reason(),
+        "pane_session": pane_session,
+        "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
         "pane_reason": pane_outcome.reason(),
+        "event_written": event_error.is_none(),
+        "event_reason": event_error,
         "was_orphaned": was_orphaned,
     });
-    let _ = ctx.emitter.emit(
-        "agent_removed",
-        &json!({
-            "name": name,
-            "registry_removed": true,
-            "harness": entry.harness_name(),
-            "harness_row_id": harness_row_id,
-            "harness_removed": harness_outcome.removed_json(),
-            "harness_reason": harness_outcome.reason(),
-            "pane_removed": pane_outcome.removed_json(),
-            "pane_reason": pane_outcome.reason(),
-            "was_orphaned": was_orphaned,
-        }),
-    );
     Response::ok(req.id, result)
 }
 
@@ -6365,6 +6421,22 @@ mod tests {
         row
     }
 
+    fn claude_row_then_absent(
+        short_id: &'static str,
+        state: &'static str,
+    ) -> impl Fn() -> crate::claude_roster::ClaudeAgentsSnapshot {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        move || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new(short_id, Some(state)),
+                ])
+            } else {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+            }
+        }
+    }
+
     #[tokio::test]
     async fn rm_cascades_claude_before_removing_the_registry_row() {
         let home = short_home("rmclaude");
@@ -6378,15 +6450,12 @@ mod tests {
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
         let called = std::sync::Mutex::new(Vec::new());
+        let snapshots = claude_row_then_absent("aaaa1111", "stopped");
 
         let response = handle_rm_with(
             &ctx,
             &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("aaaa1111", Some("stopped")),
-                ])
-            },
+            &snapshots,
             &|short_id| {
                 called.lock().unwrap().push(short_id.to_string());
                 Ok(())
@@ -6401,6 +6470,127 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_requires_the_post_list_to_prove_the_claude_row_is_gone() {
+        let home = short_home("rmpostlist");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "aaabbb11",
+            "aaabbb11-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("aaabbb11", Some("stopped")),
+                ])
+            },
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert!(response
+            .error()
+            .unwrap()
+            .message
+            .contains("survives successful claude rm"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_treats_a_positive_row_in_a_partial_post_list_as_surviving() {
+        let home = short_home("rmpartialpost");
+        let row = claude_rm_row(
+            "stopped-worker",
+            "aaabbb12",
+            "aaabbb12-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::Unknown {
+                rows: vec![crate::claude_roster::ClaudeAgentRow::new(
+                    "aaabbb12",
+                    Some("stopped"),
+                )],
+                warnings: vec!["one malformed row".into()],
+            },
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert!(response
+            .error()
+            .unwrap()
+            .message
+            .contains("survives successful claude rm"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_mux_failure_names_the_claude_side_already_removed() {
+        let home = short_home("rmpartial");
+        let mut row = claude_rm_row(
+            "pane-worker",
+            "aaaccc22",
+            "aaaccc22-1111-2222-3333-444444444444",
+        );
+        row.short_id.clear();
+        row.mux = Some(state::MuxRef {
+            session: "work".into(),
+            pane_id: 24,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "pane-worker"}));
+        let snapshots = claude_row_then_absent("aaaccc22", "stopped");
+
+        let response = handle_rm_with(&ctx, &request, &snapshots, &|_| Ok(()), &|_, _| {
+            Err("permission denied".into())
+        })
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("claude harness row aaaccc22 removed"));
+        assert!(message.contains("registry retained"));
+        assert!(message.contains("mux pane work:24"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -6481,15 +6671,12 @@ mod tests {
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
         let called = std::sync::Mutex::new(Vec::new());
+        let snapshots = claude_row_then_absent("cccc3333", "stopped");
 
         let response = handle_rm_with(
             &ctx,
             &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
-                    crate::claude_roster::ClaudeAgentRow::new("cccc3333", Some("stopped")),
-                ])
-            },
+            &snapshots,
             &|short_id| {
                 called.lock().unwrap().push(short_id.to_string());
                 Ok(())
@@ -6656,6 +6843,10 @@ mod tests {
     #[test]
     fn mux_missing_pane_receipt_is_idempotent_absence() {
         assert!(mux_pane_is_absent("fno mux: no such pane: 24"));
+        assert!(mux_pane_is_absent(
+            "cannot reach session main: No such file or directory (os error 2)"
+        ));
+        assert!(!mux_pane_is_absent("mux configuration not found"));
         assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 

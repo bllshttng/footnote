@@ -48,6 +48,7 @@ pub enum ClaudeAgentsSnapshot {
         warnings: Vec<String>,
     },
     Unknown {
+        rows: Vec<ClaudeAgentRow>,
         warnings: Vec<String>,
     },
 }
@@ -62,14 +63,16 @@ impl ClaudeAgentsSnapshot {
 
     pub fn unknown(reason: &str) -> Self {
         Self::Unknown {
+            rows: Vec::new(),
             warnings: vec![reason.to_string()],
         }
     }
 
     pub fn find(&self, short_id: &str) -> Option<&ClaudeAgentRow> {
         match self {
-            Self::Known { rows, .. } => rows.iter().find(|row| row.short_id == short_id),
-            Self::Unknown { .. } => None,
+            Self::Known { rows, .. } | Self::Unknown { rows, .. } => {
+                rows.iter().find(|row| row.short_id == short_id)
+            }
         }
     }
 
@@ -79,7 +82,7 @@ impl ClaudeAgentsSnapshot {
 
     pub fn warning_text(&self) -> String {
         let warnings = match self {
-            Self::Known { warnings, .. } | Self::Unknown { warnings } => warnings,
+            Self::Known { warnings, .. } | Self::Unknown { warnings, .. } => warnings,
         };
         warnings.join("; ")
     }
@@ -167,11 +170,16 @@ fn parse_all_agents(stdout: &[u8]) -> ClaudeAgentsSnapshot {
             .find_map(|key| object.get(key).and_then(|value| value.as_str()));
         parsed_rows.push(ClaudeAgentRow::new(short_id, state));
     }
-    if agent_rows > 0 && parsed_rows.is_empty() {
-        warnings.push(format!(
-            "0 of {agent_rows} Claude agent rows parsed; agent list is unverified"
-        ));
-        return ClaudeAgentsSnapshot::Unknown { warnings };
+    if !warnings.is_empty() {
+        if agent_rows > 0 && parsed_rows.is_empty() {
+            warnings.push(format!(
+                "0 of {agent_rows} Claude agent rows parsed; agent list is unverified"
+            ));
+        }
+        return ClaudeAgentsSnapshot::Unknown {
+            rows: parsed_rows,
+            warnings,
+        };
     }
     ClaudeAgentsSnapshot::Known {
         rows: parsed_rows,
@@ -703,9 +711,21 @@ mod tests {
     #[test]
     fn all_agents_timeout_is_unknown_not_successful_empty() {
         let snapshot = read_all_agents_with(|| Err("timed out after 15s".to_string()));
-        let ClaudeAgentsSnapshot::Unknown { warnings } = snapshot else {
+        let ClaudeAgentsSnapshot::Unknown { warnings, .. } = snapshot else {
             panic!("a timeout must not prove an empty agent list");
         };
         assert!(warnings.iter().any(|warning| warning.contains("timed out")));
+    }
+
+    #[test]
+    fn all_agents_partial_parse_cannot_prove_a_row_absent() {
+        let snapshot = parse_all_agents(
+            br#"[
+              {"kind":"background","id":"aaaa1111","state":"stopped"},
+              {"kind":"background","state":"stopped"}
+            ]"#,
+        );
+        assert!(matches!(snapshot, ClaudeAgentsSnapshot::Unknown { .. }));
+        assert!(snapshot.find("aaaa1111").is_some());
     }
 }
