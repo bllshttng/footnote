@@ -573,10 +573,12 @@ holder_pid_recycled() {
 }
 
 holder_is_orphaned() {
-    # A holder reparented to pid 1 has lost its launcher: the session that
-    # started it is gone, so no further waiting can produce a finish. An
-    # unreadable ppid reads as NOT orphaned, so an unmeasurable holder is
-    # waited on rather than stolen.
+    # A holder reparented to pid 1 has lost its launcher: in the incident
+    # shape the session that started it is gone and nothing will ever collect
+    # its result, so the 20m stall floor buys nothing for it. This alone never
+    # condemns: a detached holder that is computing still passes the CPU probe
+    # and keeps the lock. An unreadable ppid reads as NOT orphaned, so an
+    # unmeasurable holder is waited on rather than stolen.
     local ppid
     ppid="$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')"
     [[ "$ppid" == "1" ]]

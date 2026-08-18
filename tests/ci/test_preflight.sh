@@ -809,6 +809,28 @@ else
 fi
 unset -f holder_is_orphaned
 
+echo "== wait status line: cpu and parentage make a starved queue legible =="
+# The diagnostic the 2026-08-18 incident lacked: a waiting caller must see the
+# holder's CPU and whether its launcher is gone, and an unmeasurable holder
+# must print cpu=? rather than a measured-looking zero. Unit-level so no test
+# has to sit in a 60s wait for the line to print.
+eval "$(sed -n -e '/^holder_tree_pids() {/,/^}/p' -e '/^cputime_to_s() {/,/^}/p' \
+    -e '/^holder_tree_cpu() {/,/^}/p' -e '/^holder_is_orphaned() {/,/^}/p' \
+    -e '/^holder_status_line() {/,/^}/p' "$PREFLIGHT_SRC")"
+sleep 600 & status_sleeper=$!
+status_line="pid=$status_sleeper started=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=x sha=deadbee"
+out="$(holder_status_line "$status_line")"
+[[ "$out" =~ cpu=[0-9]+s ]] && ok "a readable holder prints a numeric cpu= ($out)" \
+    || fail "no numeric cpu= in: $out"
+[[ "$out" != *"orphaned=yes"* ]] && ok "a parented holder prints no orphaned flag" \
+    || fail "parented holder read as orphaned: $out"
+out="$(holder_status_line "pid= started=2026-08-18T00:00:00Z host=x sha=deadbee")"
+[[ "$out" == *"cpu=?"* ]] && ok "an unreadable pid prints cpu=? not cpu=0s" \
+    || fail "empty-pid line lost its ? marker: $out"
+kill "$status_sleeper" 2>/dev/null; wait "$status_sleeper" 2>/dev/null
+unset -f holder_tree_pids cputime_to_s holder_tree_cpu holder_is_orphaned holder_status_line
+unset -f holder_is_orphaned
+
 echo "== stale base: HEAD behind origin/main refuses (exit 6) before any lock work =="
 for _c in sb1 sb2 sb3; do ( cd "$FIX" && git commit -q --allow-empty -m "$_c" ); done
 git -C "$FIX" update-ref refs/remotes/origin/main "$(git -C "$FIX" rev-parse HEAD)"
