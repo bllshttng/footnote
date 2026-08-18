@@ -107,6 +107,20 @@ def record(
         raise typer.Exit(1)
 
     did = result["decision_id"]
+    if supersedes:
+        # A transposed digit is otherwise a silent no-op: the older ruling
+        # keeps reading as current, in a verb whose contract is that a reader
+        # of an overturned decision can tell it is not.
+        from fno.decide import list_decisions
+
+        _, everything, _ = list_decisions()
+        if supersedes not in {d.get("decision_id") for d in everything}:
+            typer.echo(
+                f"decide: warning - no decision {supersedes} is on record, so "
+                f"nothing was marked superseded. Check the id with "
+                f"`fno decide list --subject {subject}`.",
+                err=True,
+            )
     # The receipt names the recall command in BOTH branches. A subject that
     # names no node loses only the graph projection; it is indexed and
     # recoverable exactly like one that does.

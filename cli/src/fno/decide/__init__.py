@@ -150,11 +150,11 @@ def _project(event: dict[str, Any]) -> str | None:
         return None
 
     # Pre-check on the unlocked read so an unresolvable subject (a file, an
-    # area) does not pay for a full graph rewrite that changes nothing. The
-    # path is passed EXPLICITLY: read_graph's default arg froze at import, so
-    # a bare read_graph() can read a different graph than the one the locked
-    # mutate below writes (the hermetic-test HOME redirect trips exactly this).
-    if resolve_node(subject, graph_store.read_graph(graph_store.GRAPH_JSON)).kind != "exact":
+    # area) does not pay for a full graph rewrite that changes nothing. Read
+    # through _graph_entries, which is strict AND says so on failure: the soft
+    # reader answers [] for a corrupt graph, and the receipt would then tell
+    # the operator their real node "names no graph node" with no hint why.
+    if resolve_node(subject, _graph_entries()).kind != "exact":
         return None
 
     matched: list[str] = []
@@ -285,9 +285,27 @@ def _graph_entries(*, required: bool = False) -> "list[dict]":
         # cross-spelling recall to a literal match and report "no decisions" on
         # exit 0. The strict reader raises, so the degrade below is reachable
         # on the path a half-written graph actually takes.
-        return graph_store.entries_with_archive(
-            graph_store.read_graph_strict(graph_store.GRAPH_JSON)
-        )
+        entries = graph_store.read_graph_strict(graph_store.GRAPH_JSON)
+        if not required:
+            return graph_store.entries_with_archive(entries)
+        # entries_with_archive reads the ARCHIVE softly and degrades on any
+        # failure, so a torn graph-archive.json would drop every archived
+        # node's decisions from a backfill that still printed "+0" and exited
+        # 0. Both graph files, or neither: a guard on one is decorative.
+        from fno.paths import graph_archive_json
+
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return entries
+        live = {e.get("id") for e in entries if isinstance(e, dict)}
+        return [
+            *entries,
+            *(
+                a
+                for a in graph_store.read_graph_strict(archive_path)
+                if isinstance(a, dict) and a.get("id") not in live
+            ),
+        ]
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
         if required:
             raise
@@ -397,9 +415,18 @@ def list_decisions(
 
     matches = _subject_matcher(subject) if subject else None
     out: "list[dict]" = []
+    emitted: "set[str]" = set()
     for row in rows:
         if matches is not None and not matches(str(row.get("subject") or "")):
             continue
+        # One id, one row. reindex is read-then-write with no lock across the
+        # fold, so a `fno decide` landing mid-backfill can be appended twice;
+        # the index is append-only, so the reader is where that stops being
+        # visible as two rulings.
+        did = str(row.get("decision_id") or "")
+        if did in emitted:
+            continue
+        emitted.add(did)
         row = dict(row)
         winner = superseded_by.get(str(row.get("decision_id")))
         row["superseded_by"] = winner[1] if winner else None

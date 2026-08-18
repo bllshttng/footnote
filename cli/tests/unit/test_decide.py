@@ -906,6 +906,60 @@ def test_authority_source_is_stated_never_inferred(
     assert granted["decisions"][0]["authority_source"] == "beastmode"
 
 
+def test_a_torn_archive_also_stops_the_backfill(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """entries_with_archive reads the archive softly. A guard on the working
+    graph alone would drop every archived node's decisions from a backfill that
+    still printed "+0" and exited 0."""
+    (tmp_graph.parent / "graph-archive.json").write_text('{"entries": [{"id": "x-ar')
+
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 1, res.output
+    assert "decide reindex: failed" in res.output
+
+
+def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The write path's pre-check used the soft reader, so a real node read as
+    "names no graph node" with no hint that the graph was unreadable."""
+    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+
+    res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold"])
+    assert res.exit_code == 0, res.output
+    assert "the graph could not be read" in res.output
+
+
+def test_one_id_is_one_row_even_if_the_index_holds_it_twice(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """reindex is read-then-write with no lock across the fold, so a decide
+    landing mid-backfill can be appended twice under one id."""
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    duplicate = index.read_text(encoding="utf-8")
+    with index.open("a", encoding="utf-8") as fh:
+        fh.write(duplicate)
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert len(payload["decisions"]) == 1, payload
+
+
+def test_superseding_an_id_nobody_recorded_says_so(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A transposed digit is otherwise a silent no-op, and the overturned
+    ruling keeps reading as current."""
+    res = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "held", "--supersedes", "d-1234657"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "no decision d-1234657 is on record" in res.output
+
+
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
     """It behaved this way only because it named no retention and the default
     is durable. The record the recall promise rests on is then one schema edit
