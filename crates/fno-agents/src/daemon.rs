@@ -5089,7 +5089,7 @@ fn late_bind_codex_sessions(
     home: &AgentsHome,
     emitter: &EventEmitter,
     probe: &dyn Fn(u32) -> Option<String>,
-) {
+) -> Result<(), String> {
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
     let candidates: Vec<(String, u32)> = registry
         .entries
@@ -5104,7 +5104,7 @@ fn late_bind_codex_sessions(
         .collect();
     for (name, pid) in candidates {
         let Some(sid) = probe(pid) else { continue };
-        let bound = state::update_registry(&home.registry_json(), |r| {
+        let bound = match state::update_registry(&home.registry_json(), |r| {
             let Some(e) = r.find_mut(&name) else {
                 return false;
             };
@@ -5116,8 +5116,22 @@ fn late_bind_codex_sessions(
             }
             e.harness_session_id = Some(sid.clone());
             true
-        })
-        .unwrap_or(false);
+        }) {
+            Ok(bound) => bound,
+            Err(error) => {
+                let message = format!("late-bind registry write failed for {name}: {error}");
+                let _ = emitter.emit_fields(
+                    "agent_late_bind_failed",
+                    json_obj(&[
+                        ("name", Value::String(name)),
+                        ("pid", Value::Number(pid.into())),
+                        ("harness_session_id", Value::String(sid)),
+                        ("error", Value::String(error.to_string())),
+                    ]),
+                );
+                return Err(message);
+            }
+        };
         if bound {
             let _ = emitter.emit_fields(
                 "agent_late_bind",
@@ -5129,6 +5143,7 @@ fn late_bind_codex_sessions(
             );
         }
     }
+    Ok(())
 }
 
 /// Shell `fno agents codex-session-for-pid <pid>` -- the pane-tree rollout
@@ -5161,7 +5176,7 @@ fn run_reconcile_sweep(
     // Late bind (x-9de7 task 2), before the registry snapshot below is taken,
     // so a row bound this tick is already visible to the probe/reconcile pass
     // that follows.
-    late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout);
+    late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout)?;
 
     // x-4c87: a broken registry is a failed sweep, never a successful zero-row
     // scan. `unwrap_or_default()` here answered the client-facing reconcile
@@ -8568,7 +8583,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         late_bind_codex_sessions(&home, &emitter, &|pid| {
             (pid == me).then(|| "sess-a".to_string())
-        });
+        })
+        .unwrap();
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
@@ -8579,6 +8595,45 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert!(events
             .iter()
             .any(|e| e.get("type").and_then(Value::as_str) == Some("agent_late_bind")));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_surfaces_registry_write_failure() {
+        let home = tmp_home("late-bind-write-failure");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut existing = ask_row("existing", None);
+            existing.harness = Some("codex".into());
+            existing.harness_session_id = Some("duplicate-session".into());
+            r.entries.push(existing);
+
+            let mut candidate = codex_pane_row("pane-a");
+            candidate.pid = Some(me);
+            candidate.pid_start_time = Some(my_start);
+            r.entries.push(candidate);
+        })
+        .unwrap();
+
+        let error =
+            late_bind_codex_sessions(&home, &emitter, &|_| Some("duplicate-session".to_string()))
+                .expect_err("duplicate session identity must fail the late-bind write");
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.find("pane-a").unwrap().harness_session_id.is_none());
+        assert!(error.contains("late-bind registry write failed for pane-a"));
+        let events = read_events(&home);
+        assert!(events.iter().any(|e| {
+            e.get("type").and_then(Value::as_str) == Some("agent_late_bind_failed")
+                && e.get("data")
+                    .and_then(|data| data.get("name"))
+                    .and_then(Value::as_str)
+                    == Some("pane-a")
+        }));
         std::fs::remove_dir_all(home.root()).ok();
     }
 
@@ -8619,7 +8674,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             let mut n = calls.borrow_mut();
             *n += 1;
             Some(format!("sess-{n}"))
-        });
+        })
+        .unwrap();
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let sid_a = reg.find("pane-a").unwrap().harness_session_id.clone();
@@ -8644,7 +8700,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         late_bind_codex_sessions(&home, &emitter, &|_| {
             panic!("the probe must not run against a pid that already fails pid_is_ours")
-        });
+        })
+        .unwrap();
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.find("pane-gone").unwrap().harness_session_id.is_none());
@@ -8670,7 +8727,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         late_bind_codex_sessions(&home, &emitter, &|_| {
             panic!("an already-bound row must not be re-probed")
-        });
+        })
+        .unwrap();
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
