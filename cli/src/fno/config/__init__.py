@@ -2264,6 +2264,28 @@ class RecoveryBlock(BaseModel):
         emits ``recovery_capped`` (default 3) so a genuinely wedged session
         surfaces instead of looping forever. Close notifications are once-only,
         tracked separately.
+    watchdog:
+        The external fleet watchdog lane riding the same tick (x-55c3):
+        ``off`` (default) is a no-op, ``report`` classifies every fleet row
+        from transcript truth and emits one ``watchdog_verdict`` event per
+        non-leave row, ``wake`` additionally applies the wake lane (resume +
+        content-verified message). No tick value ever reaps or reroutes:
+        those stop a session and stay behind an operator running
+        ``fno agents watchdog --apply-all`` by hand.
+    watchdog_mail_to:
+        Mail handle the watchdog digest is pushed to (agent name, short id,
+        or ``project:<slug>``). Empty (default) mails nobody. A digest is
+        sent only when the non-leave verdict set changed since the previous
+        sweep, so a row stuck for a day reads once, not every tick.
+    watchdog_reap:
+        Whether ``--apply-all`` may execute the REAP lane (default ``false``).
+        Wake, reroute and ghost are recoverable; reap runs ``stop`` then
+        ``rm``, which deletes the session's WORKTREE, and work that lives
+        only on that machine is gone with it. Off by default is not a
+        statement about the classifier's accuracy: it is that a wrong reap
+        cannot be undone and a wrong wake can. Classification is unaffected -
+        reap verdicts are still computed, reported and mailed, they just do
+        not execute until an operator turns this on.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2271,6 +2293,9 @@ class RecoveryBlock(BaseModel):
     enabled: bool = True
     idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
+    watchdog: Literal["off", "report", "wake"] = "off"
+    watchdog_mail_to: str = ""
+    watchdog_reap: bool = False
 
 
 class HealthThresholdsBlock(BaseModel):

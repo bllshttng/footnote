@@ -33,6 +33,7 @@ One file per install. These belong at the root.
 | `health-throttle.json`, `health-history.jsonl` | `health_monitor.py` | append-only |
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
+| `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |
