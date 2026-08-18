@@ -49,6 +49,28 @@ falsified on the first and this one falsifies only on the second. Which is also
 why suppressing a falsifier is never the fix for a wrong falsifier: the answer
 is to consult the right authority, not to stop asking.
 
+Progress is a second axis, never a fourth reachability value
+-------------------------------------------------------------
+A worker taking its turn, a worker that parked after finishing, and a worker
+alive but unable to think (handed a model its endpoint cannot serve) all
+classify ``reachable`` here -- correctly, because all three ARE reachable.
+:func:`classify_progress` answers the orthogonal question "is it advancing,
+awaiting the operator, parked, or refused" in its own ``progress`` /
+``progress_basis`` fields, mirroring this module's own verdict-plus-basis
+shape rather than widening ``WIRE_STATUS`` to a fourth word.
+
+A reading about one artifact is not a verdict about the agent
+-----------------------------------------------------------------
+A missing transcript file proves that a file is missing at that path.
+Nothing else. Every probe in this module follows that rule for reachability
+(:func:`pid_falsifier`, :func:`pane_falsifier` each return ``None`` -- not a
+death verdict -- when their own evidence is absent or unreadable), and
+:func:`classify_progress` follows it for progress: an unresolved or missing
+transcript classifies ``unknown`` on both axes, never ``refused`` and never
+``parked``. Only the classifiers in this module may answer either axis; a
+reader that derives liveness from bare file existence elsewhere is rebuilding
+the same mistake one layer over.
+
 Why transcript age is necessary but never sufficient
 ----------------------------------------------------
 It is the only surface that never lied (argv, pid, the daemon record, and
@@ -154,6 +176,103 @@ def classify_reachability(
     # reachability. Silence and mission-complete are both UNKNOWN, never
     # unreachable -- the age is what makes that actionable for the reader.
     return Reachability(UNKNOWN, SILENT, age_s)
+
+
+#: Taking its own next turn (``truth_state in {working, watching}``).
+ADVANCING = "advancing"
+#: Will move once a human moves (``truth_state == "your-move"``).
+AWAITING_OPERATOR = "awaiting-operator"
+#: Alive, turn finished, owes nothing, still costs RSS.
+PARKED = "parked"
+#: Alive, reachable, and unable to think -- see :func:`classify_progress`.
+REFUSED = "refused"
+#: No evidence either way. Shares the spelling with ``UNKNOWN`` on the
+#: reachability axis on purpose: both answer "we don't know", just about
+#: different questions.
+PROGRESS_UNKNOWN = "unknown"
+
+TRANSCRIPT_TURN = "transcript-turn"
+OPERATOR_TURN = "operator-turn"
+PROMISE = "promise"
+MODEL_REFUSED = "model-refused"
+
+
+@dataclass(frozen=True)
+class Progress:
+    """A progress verdict beside :class:`Reachability`, never inside it.
+
+    Widening ``WIRE_STATUS`` to a fourth value would make one word answer two
+    questions at once -- the exact collapse specimen 4 rebuilt by accident.
+    ``reachability`` stays "can I reach this process"; ``progress`` answers
+    "is it taking its own next turn, waiting on a human, parked, or refused",
+    a question reachability was never asked and cannot answer: a refused
+    worker is fully reachable.
+    """
+
+    verdict: str
+    basis: str
+
+
+def classify_progress(
+    *,
+    truth_state: Optional[str],
+    reachability: str,
+    observed_model: Optional[dict],
+    harness: Optional[str],
+    route_settings_path: Optional[str],
+) -> Progress:
+    """Pure classifier for the progress axis. Never raises.
+
+    Precedence, in order: a falsified/unreachable row first (a gone process
+    has no progress state, and inventing one for it is the collapse again);
+    then the refusal predicate (Locked Decision 3 -- structural, never reads
+    the transcript's prose, so a reworded refusal message cannot break it);
+    then the truth-state arms. The refusal test MUST run before the
+    truth-state arms: a refused worker emits exactly one assistant message
+    and stops, so the transcript tail reads ``working`` for two hours and
+    ``stalled`` after that, and testing state first would report
+    ``advancing`` for the exact row this axis exists to catch.
+    """
+    if reachability == UNREACHABLE:
+        return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
+    if _is_refused(observed_model, harness, route_settings_path):
+        return Progress(REFUSED, MODEL_REFUSED)
+    if truth_state in ("working", "watching"):
+        return Progress(ADVANCING, TRANSCRIPT_TURN)
+    if truth_state == "your-move":
+        return Progress(AWAITING_OPERATOR, OPERATOR_TURN)
+    if truth_state == "done":
+        return Progress(PARKED, PROMISE)
+    if truth_state == "stalled":
+        return Progress(PROGRESS_UNKNOWN, SILENT)
+    return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
+
+
+def _is_refused(
+    observed_model: Optional[dict],
+    harness: Optional[str],
+    route_settings_path: Optional[str],
+) -> bool:
+    """Structural refusal predicate (Locked Decision 3). Never reads prose.
+
+    Fails OPEN by construction: a recorded ``route_settings_path`` records
+    the INTENDED route (registry.py), so a foreign-routed worker answering
+    as a foreign model is healthy, not refused. Missing a refusal is
+    recoverable; condemning a healthy foreign-routed worker is the reaping
+    hazard this module exists to prevent.
+    """
+    if harness != "claude":
+        return False
+    if route_settings_path is not None:
+        return False
+    if not observed_model or observed_model.get("kind") != "observed":
+        return False
+    model = observed_model.get("model")
+    if not isinstance(model, str):
+        return False
+    from fno.agents.model_routing import is_anthropic_model
+
+    return not is_anthropic_model(model)
 
 
 def pid_falsifier(pid: Optional[int], pid_start_time: Optional[int] = None) -> Optional[str]:
