@@ -1042,14 +1042,14 @@ echo "== tripwire: a stolen LOCK also VOIDs, and the stealer's lock survives =="
 # The tripwire's other arm. The worktree stays put here; only the holder changes,
 # so this pins the lock comparison rather than the sha one, and proves cleanup
 # does not delete a lock that now belongs to the stealer.
+( cd "$FIX" && git commit -q --allow-empty -m "lock-stealing smoke stub" )
+refresh_lockdir
 cat > "$BIN/uv" <<EOF
 #!/usr/bin/env bash
 printf 'pid=424242 started=NOW host=x sha=cafe123\n' > "$LOCKDIR/holder"
 echo "smoke: all green (stub, stole the lock)"; exit 0
 EOF
 chmod +x "$BIN/uv"
-( cd "$FIX" && git commit -q --allow-empty -m "lock-stealing smoke stub" )
-refresh_lockdir
 write_attest "$(git -C "$FIX" rev-parse HEAD)"   # AC2-ERR: a prior attestation for this SHA
 # --force bypasses reuse so the planted attestation does not short-circuit; the
 # run must actually execute to reach the VOID tripwire.
