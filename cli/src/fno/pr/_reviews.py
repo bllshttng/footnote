@@ -516,9 +516,6 @@ def _fetch_threads(
     owner, _, name = slug.partition("/")
     if not owner or not name:
         return None
-    remaining = _graphql_remaining(cwd, timeout, runner)
-    if remaining is not None and remaining < _GRAPHQL_FLOOR:
-        return None
     threads: list[tuple[str, bool]] = []
     cursor: Optional[str] = None
     for _ in range(50):  # bounded (50 * 100 = 5000 threads ceiling)
@@ -579,8 +576,17 @@ def read_optional_review_state(
     `optional_reviews_unresolved`: count of unresolved (`isResolved == false`)
     threads authored by an optional reviewer - the headline actionable field
     (`green && unresolved == 0` == ready) - OR `None` on a read failure.
+
+    Gated on the quota floor BEFORE the first read: `gh pr view` spends the
+    same shared per-user GraphQL quota as the reviewThreads query below it
+    (`_status.py`'s `_fetch` docstring documents this), so checking the floor
+    only inside `_fetch_threads` would still let every cache miss drain the
+    reserved points on this call alone.
     """
     names = optional_reviewer_names(cwd)
+    remaining = _graphql_remaining(cwd, timeout, runner)
+    if remaining is not None and remaining < _GRAPHQL_FLOOR:
+        return dict(_UNKNOWN)
     res = runner(["gh", "pr", "view", pr, "--json", "reviews,url"], cwd=cwd, timeout=timeout)
     if not res.ok or not res.stdout.strip():
         return dict(_UNKNOWN)
