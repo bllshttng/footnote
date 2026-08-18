@@ -28,6 +28,30 @@ PATTERNS = {
 }
 
 
+def _disposition(relative: str, source: str, offset: int) -> str:
+    line = source[source.rfind("\n", 0, offset) + 1 : source.find("\n", offset)]
+    stripped = line.lstrip()
+    suffix = Path(relative).suffix
+    if (suffix in {".py", ".sh", ".toml", ".yaml", ".yml"} and stripped.startswith("#")) or (
+        suffix == ".rs" and stripped.startswith("//")
+    ):
+        return "documentation"
+    if relative.startswith("cli/src/"):
+        return "fno-process-proxy"
+    if relative in {
+        "crates/fno-agents/src/loopcheck.rs",
+        "crates/fno-agents/src/finalize.rs",
+    }:
+        return "fixed-purpose-adapter"
+    if relative == "hooks/git-protection.py":
+        return "operator-guard-definition"
+    if relative == "scripts/diagnostics/graphql-quota-soak.py":
+        return "quota-soak-broker"
+    if relative.startswith("skills/"):
+        return "worker-proxy-or-hook"
+    return "unclassified"
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     rows: list[str] = []
@@ -53,7 +77,9 @@ def main() -> int:
         for kind, pattern in PATTERNS.items():
             for match in pattern.finditer(source):
                 normalized = " ".join(match.group(0).split())
-                rows.append(f"{kind}|{path.relative_to(root)}|{normalized}")
+                relative_path = str(path.relative_to(root))
+                disposition = _disposition(relative_path, source, match.start())
+                rows.append(f"{disposition}|{kind}|{relative_path}|{normalized}")
     print("\n".join(sorted(rows)))
     return 0
 

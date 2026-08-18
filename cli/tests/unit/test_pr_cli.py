@@ -26,6 +26,7 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
         lambda pr, cwd=None, repo=None: (
             {
                 "pr": 930,
+                "url": "https://github.com/Owner/Repo/pull/930",
                 "state": "OPEN",
                 "head_sha": "abc123",
                 "head_ref": "feature/x",
@@ -40,6 +41,7 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {
         "pr": 930,
+        "url": "https://github.com/Owner/Repo/pull/930",
         "state": "OPEN",
         "head_sha": "abc123",
         "head_ref": "feature/x",

@@ -1778,17 +1778,23 @@ fn valid_project_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
-/// Best-effort PR URL for the current HEAD/branch via `gh`.
-fn gh_pr_url(cwd: &Path) -> Option<String> {
-    let out = Command::new("gh")
-        .args(["pr", "view", "--json", "url", "-q", ".url"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+/// Best-effort PR metadata for the current HEAD/branch through the REST reader.
+fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
+    let mut command = Command::new("fno");
+    command.args(["pr", "info"]);
+    if let Some(number) = number {
+        command.arg(number.to_string());
+    }
+    let out = command.current_dir(cwd).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Best-effort PR URL for the current HEAD/branch through REST.
+fn gh_pr_url(cwd: &Path) -> Option<String> {
+    let url = pr_info(cwd, None)?.get("url")?.as_str()?.trim().to_string();
     if url.is_empty() {
         None
     } else {
@@ -1800,15 +1806,8 @@ fn gh_pr_url(cwd: &Path) -> Option<String> {
 /// stamp (x-280d). Returns None when gh fails/rate-limits, no PR exists, or the
 /// JSON is malformed - all of which the caller treats as "nothing to stamp".
 pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
-    let out = Command::new("gh")
-        .args(["pr", "view", "--json", "number,url"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_pr_ref(&out.stdout)
+    let payload = pr_info(cwd, None)?;
+    parse_pr_ref(&serde_json::to_vec(&payload).ok()?)
 }
 
 /// Pure parse of `gh pr view --json number,url` stdout. Split from the shell-out
@@ -1910,13 +1909,8 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     // not exist yet.
     let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
-    let output = match Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            "--json",
-            "reviews,comments,headRefOid,baseRefName",
-        ])
+    let output = match Command::new("fno-gh-coverage")
+        .args(["pr", "view", "--json", "reviews,comments"])
         .current_dir(cwd)
         .output()
     {
@@ -1947,15 +1941,40 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
         return Some("optional-review-read-failed".to_string());
     };
+    let identity_output = match Command::new("fno-gh-loopcheck")
+        .args(["pr", "view", "--json", "headRefOid,baseRefName"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            eprintln!(
+                "finalize: PR identity read failed (non-fatal): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return Some("optional-review-read-failed".to_string());
+        }
+        Err(error) => {
+            eprintln!("finalize: PR identity read failed (non-fatal): {error}");
+            return Some("optional-review-read-failed".to_string());
+        }
+    };
+    let identity: Value = match serde_json::from_slice(&identity_output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("finalize: PR identity parse failed (non-fatal): {error}");
+            return Some("optional-review-read-failed".to_string());
+        }
+    };
     // Freshness resolves against the PR head gh reports, the same pin the
     // coverage gate uses. An exact-head pin is Fresh with no git call; a moved
     // head needs the repo's git, and an unresolvable identity reads Stale -
     // fail closed, never an arming on unpinned evidence.
-    let head = payload
+    let head = identity
         .get("headRefOid")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let base = payload
+    let base = identity
         .get("baseRefName")
         .and_then(Value::as_str)
         .unwrap_or("");
@@ -2188,23 +2207,14 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
             // arm. That is success-shaped (the merge the arm existed to cause
             // has happened), so name it as such instead of logging a false
             // failure an operator would chase.
-            let state = Command::new("gh")
-                .args([
-                    "pr",
-                    "view",
-                    number.to_string().as_str(),
-                    "--json",
-                    "state",
-                    "-q",
-                    ".state",
-                ])
-                .current_dir(cwd)
-                .output();
-            let merged = state
-                .ok()
-                .filter(|s| s.status.success())
-                .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
-                .is_some_and(|s| s == "MERGED");
+            let merged = pr_info(cwd, Some(number))
+                .and_then(|payload| {
+                    payload
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|state| state == "MERGED");
             if merged {
                 eprintln!(
                     "finalize: PR {number} already merged (another path landed it); \

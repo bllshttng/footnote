@@ -8,6 +8,7 @@ from fno.pr._proc import Result
 
 PULL = {
     "number": 930,
+    "html_url": "https://github.com/o/r/pull/930",
     "state": "open",
     "merged": False,
     "mergeable": True,

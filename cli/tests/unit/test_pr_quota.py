@@ -70,7 +70,7 @@ def test_unreadable_instrument_fails_closed_only_for_discretionary(tmp_path):
     coverage_calls: list[list[str]] = []
     allowed = _quota.execute_graphql(
         "coverage",
-        ["api", "graphql", "-f", "query={viewer{login}}"],
+        ["pr", "view", "930", "--json", "commits"],
         runner=_runner(None, coverage_calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
@@ -108,7 +108,10 @@ def test_only_coverage_spelling_can_claim_the_reserve(tmp_path):
 
 def test_bare_gh_cannot_reenter_the_worker_proxy(tmp_path, monkeypatch):
     calls: list[list[str]] = []
-    monkeypatch.setenv("FNO_REAL_GH", "/real/gh")
+    real = tmp_path / "real-gh"
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    monkeypatch.setenv("FNO_REAL_GH", str(real))
     result = _quota.execute_graphql(
         "discretionary",
         ["pr", "view", "930", "--json", "reviews"],
@@ -118,8 +121,8 @@ def test_bare_gh_cannot_reenter_the_worker_proxy(tmp_path, monkeypatch):
     )
     assert result.returncode == 0
     assert calls == [
-        ["/real/gh", "api", "rate_limit"],
-        ["/real/gh", "pr", "view", "930", "--json", "reviews"],
+        [str(real), "api", "rate_limit"],
+        [str(real), "pr", "view", "930", "--json", "reviews"],
     ]
 
 
