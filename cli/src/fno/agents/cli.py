@@ -2683,6 +2683,11 @@ def cmd_watchdog(
         # fleet. Write no sweep file and advance no gate, so staleness reads
         # loud instead of certifying a healthy quiet fleet that was never read.
         print(f"fno agents watchdog: {payload['refused']}", file=sys.stderr)
+        # The refusal says the roster was unreadable; the warnings say WHY
+        # (timed out, binary missing, non-zero exit, budget headroom).
+        # Dropping them leaves the one actionable line on the floor.
+        for warning in payload.get("warnings") or []:
+            print(f"  {warning}", file=sys.stderr)
         raise typer.Exit(code=3)
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
@@ -2741,6 +2746,7 @@ def cmd_watchdog(
                 "watchdog_verdict",
                 {"row_id": v.row_id, "name": v.name,
                  "verdict": v.verdict, "basis": v.basis},
+                source="cli",
             )
 
     if not apply and not apply_all:
@@ -2777,17 +2783,21 @@ def cmd_watchdog(
         if outcome == "reported":
             # A verdict outside the lane (every leave row on a bare --apply)
             # is not news; printing one line per healthy row drowns the few
-            # that acted.
+            # that acted. "partial" is NOT this: the fleet already changed.
             continue
         line = f"{outcome:9} {v.name:34} {detail}"
-        if outcome == "refused":
+        if outcome in ("refused", "partial"):
             print(line, file=sys.stderr)
-        else:
+        elif not json_out:
+            # Human lines on stdout ahead of the JSON object make the whole
+            # document unparseable; the dry-run path already guards this.
             typer.echo(line)
-        if outcome in ("applied", "refused"):
+        if outcome in ("applied", "refused", "partial"):
             wd.emit_event(
                 "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                {"row_id": v.row_id, "verdict": v.verdict, "detail": detail},
+                {"row_id": v.row_id, "verdict": v.verdict, "detail": detail,
+                 "outcome": outcome},
+                source="cli",
             )
     if json_out:
         sys.stdout.write(json.dumps({"results": results}) + "\n")

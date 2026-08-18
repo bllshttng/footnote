@@ -224,7 +224,14 @@ def verdicts(
     a reader can falsify the call. ``claim_for(node)`` returns the
     ``node:<id>`` claim view (``{"state", "holder"}``); ``node_state_for``
     returns the graph entry (``{"status", ...}``) or None."""
-    occupants = Counter(row.cwd for row in rows if row.cwd)
+    # Only a NON-TERMINAL row occupies its worktree. Counting stopped and
+    # completed rows made every tree that ever hosted a respawn read as
+    # shared for good, which silently retired the reap lane instead of
+    # narrowing it.
+    occupants = Counter(
+        row.cwd for row in rows
+        if row.cwd and row.state not in _TERMINAL_STATES
+    )
     out: list[Verdict] = []
     for row in rows:
         out.append(
@@ -310,9 +317,17 @@ def _verdict_one(
                            f"worktree", "report")
         if reap_basis is not None:
             if facts is None:
-                # No transcript: no process to kill mid-task.
-                return Verdict(row.row_id, row.name, row.state, REAP,
-                               reap_basis, "stop+rm")
+                # An absence has two explanations and this one cannot tell
+                # them apart: tail_facts returns None for a session that
+                # never wrote a transcript AND for one whose transcript it
+                # could not read (a resolver miss, an OSError, a path that
+                # moved). Reaping on it deletes a clean worktree whenever the
+                # read fails, so the destructive lane requires a positive
+                # marker like every other lane here.
+                return Verdict(row.row_id, row.name, row.state, LEAVE,
+                               f"{reap_basis} but no transcript to read, and "
+                               f"an unreadable transcript is not evidence of "
+                               f"a finished session", "none")
             if facts.last_event_epoch is None:
                 return Verdict(row.row_id, row.name, row.state, LEAVE,
                                f"{reap_basis} but no parseable evidence, "
@@ -610,6 +625,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
     # multi-megabyte ledger once per manifest-less row.
     ledger_nodes: Optional[dict[str, str]] = None
     out: list[Row] = []
+    unmapped_states: set[str] = set()
     skipped_no_sid = 0
     for r in raw:
         sid = str(r.get("sessionId") or "")
@@ -628,6 +644,9 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         # graph_node_id, so a done node would make every quiet sibling reapable.
         # There the ledger's session-keyed join is the only honest answer, and
         # a miss leaves node None, which condemns nothing.
+        state, state_warning = _row_state(r)
+        if state_warning:
+            unmapped_states.add(state_warning)
         node = _node_id_from_worktree(cwd) if _is_linked_worktree(cwd) else None
         if node is None:
             if ledger_nodes is None:
@@ -636,7 +655,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         out.append(Row(
             row_id=sid,
             name=name,
-            state=_row_state(r),
+            state=state,
             node=node,
             cwd=cwd,
         ))
@@ -645,25 +664,49 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             *warnings,
             f"{skipped_no_sid} row(s) carried no session id, unmeasurable, skipped",
         ]
+    warnings = [*warnings, *sorted(unmapped_states)]
     return out, warnings
 
 
-def _row_state(r: dict) -> str:
-    """The row's state across its schema aliases, lowercased.
+#: claude's INPUT spellings folded onto this lane's vocabulary. Derived from
+#: the harness's own map rather than re-enumerated: ``busy`` was added here by
+#: hand once and its sibling ``needs input`` was missed, so a row wearing the
+#: second spelling of blocked could never ghost, reroute or wake. One source
+#: means the next spelling claude adds cannot be missed the same way.
+_CANONICAL_STATE = {"Working": "working", "Needs input": "blocked",
+                    "Idle": "idle", "Done": "done"}
 
-    The sibling parser on these same rows reads ``("state", "status")`` in
-    that order (``_STATUS_KEYS`` in harnesses/claude.py - preferring
-    ``status`` once resolved a working session to Idle). Today's binary
-    emits ``state`` on every row, so this is drift-hardening: under a
-    rename a raw ``r["state"]`` reads "" on every row, and "" is in no
-    lane set, so the whole fleet classifies ``leave`` behind a fresh sweep
-    file and a clean status line - the silent all-clear this lane exists
-    to refuse."""
+#: A row in a terminal state occupies no worktree. Non-terminal is the test,
+#: not an allowlist of live-looking words: an unknown state must read as
+#: possibly-live, and so protect a shared tree, rather than as gone.
+_TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"})
+
+
+def _row_state(r: dict) -> tuple[str, str]:
+    """This lane's canonical state for a row, and a warning when it is new.
+
+    Two failures live here. The sibling parser reads ``("state", "status")``
+    in that order (``_STATUS_KEYS`` in harnesses/claude.py - preferring
+    ``status`` once resolved a working session to Idle), so a raw
+    ``r["state"]`` reads "" on every row under a rename, and "" is in no lane
+    set: the whole fleet classifies ``leave`` behind a fresh sweep file and a
+    clean status line, the silent all-clear this lane exists to refuse. And
+    claude spells one state several ways, so the fold has to come from the
+    harness map. A spelling neither knows returns as-is WITH a warning,
+    because falling into no lane silently is that same all-clear."""
+    from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
+
     for key in ("state", "status"):
         value = r.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip().lower()
-    return ""
+            raw = value.strip().lower()
+            mapped = _LIVE_STATUS_INPUT.get(raw)
+            if mapped is None:
+                if raw in _TERMINAL_STATES:
+                    return raw, ""
+                return raw, f"unmapped row state {raw!r}, classified by name only"
+            return _CANONICAL_STATE.get(mapped, mapped.lower()), ""
+    return "", "row carried no state under either alias, unmeasurable"
 
 
 def _is_linked_worktree(cwd: str) -> bool:
@@ -787,16 +830,20 @@ def run_sweep(
     return payload, rows
 
 
-def emit_event(kind: str, data: dict) -> None:
+def emit_event(kind: str, data: dict, *, source: str = "daemon") -> None:
     """Best-effort schema-validated event on the global events.jsonl (the same
     path the pr_watch tick writes). A miss is swallowed: telemetry never breaks
-    a sweep."""
+    a sweep.
+
+    ``source`` names the cadence. The sweep FILE already distinguishes a tick
+    from a hand-run sweep, and staleness is read off that distinction, so an
+    event stream that calls both "daemon" cannot corroborate it."""
     try:
         from fno import paths
         from fno.events import _build, append_event
 
         append_event(
-            _build(kind, "daemon", data), paths.state_dir() / "events.jsonl"
+            _build(kind, source, data), paths.state_dir() / "events.jsonl"
         )
     except Exception:  # noqa: BLE001 - telemetry must never break the sweep
         pass
@@ -1132,7 +1179,10 @@ def apply_verdict(
     rotation: Optional[RotationBudget] = None,
 ) -> tuple[str, str]:
     """Execute one verdict inside ``lanes`` ("wake" | "all"). Returns
-    ``(outcome, detail)`` with outcome in applied | refused | reported.
+    ``(outcome, detail)`` with outcome in applied | partial | refused |
+    reported. ``partial`` means the action HALF landed (a stop with no rm, a
+    provider rotation with no replacement): the fleet changed, so a caller
+    must surface it. ``reported`` is the lane skip and carries no action.
     Mechanisms delegate: resume (which verifies the state move and holds its
     own single-writer claim), recovery._redispatch for reroute, stop + rm for
     reap - rm is never forced, ``claude rm``'s own refusal on a dirty worktree
@@ -1226,9 +1276,11 @@ def _apply_reroute(
         return "applied", f"failover swapped ({v.basis})"
     if outcome == "notified":
         # The revive path failed and only a human ping fired: nothing was
-        # delivered, so this is never an applied.
+        # delivered, so this is never an applied. It is not a "reported"
+        # either - that word is the lane skip, and callers drop it. The
+        # provider HAS rotated, which a reader must see.
         return (
-            "reported",
+            "partial",
             f"failover rotated, replacement not spawned, human notified ({v.basis})",
         )
     if outcome == "rotated-no-worker":
@@ -1279,7 +1331,7 @@ def _apply_reap(v: Verdict, *, cwd: str, runner: Callable) -> tuple[str, str]:
         # receipt that lies about a session which is now dead. Same partial
         # application the reroute lane reports honestly.
         return (
-            "reported",
+            "partial",
             f"stopped, but rm exited {removed.returncode} so the registry row "
             f"remains ({v.basis}). The session is already stopped - remove "
             f"the row by hand, never re-run this as a stop: "

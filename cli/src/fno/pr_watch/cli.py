@@ -210,6 +210,12 @@ _TICK_TIMEOUT_EXIT = 75
 
 _ENV_TICK_TIMEOUT = "FNO_PR_WATCH_TICK_TIMEOUT"
 
+#: A wake apply needs this much tick left before it may start: `fno
+#: agents resume` waits up to 180s and the landing confirmation polls
+#: after it. Starting one with less is how the watchdog leg eats the
+#: legs behind it.
+_WAKE_APPLY_FLOOR_S = 200
+
 
 class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
@@ -432,7 +438,9 @@ def tick() -> None:
                     # empty fleet. No sweep file, no mail, no gate advance - the
                     # missing write turns into loud staleness within two ticks.
                     log.warning(
-                        "pr-watch: watchdog sweep refused: %s", payload["refused"]
+                        "pr-watch: watchdog sweep refused: %s (%s)",
+                        payload["refused"],
+                        "; ".join(payload.get("warnings") or []) or "no cause given",
                     )
                 else:
                     # Mail before the sweep file write: the change gate compares
@@ -471,6 +479,18 @@ def tick() -> None:
                             },
                         )
                     if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
+                        # Budgeting only the PROBE left the expensive half
+                        # unbounded: one resume waits up to 180s and the
+                        # confirmation polls after it, so a few stuck rows
+                        # walk past the tick deadline and SIGALRM kills every
+                        # leg behind this one. A row skipped here is not
+                        # lost - the next tick re-classifies it.
+                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                            log.warning(
+                                "pr-watch: watchdog wake budget spent, "
+                                "%s left for the next tick", verdict.row_id,
+                            )
+                            continue
                         try:
                             outcome, detail = _wd.apply_verdict(
                                 verdict, lanes="wake", cwd=row.cwd

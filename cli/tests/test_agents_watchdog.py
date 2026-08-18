@@ -698,7 +698,9 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
     outcome, detail = apply_verdict(
         v, lanes="all", cwd="/tmp/r1", failover_fn=returning("notified")
     )
-    assert outcome == "reported"
+    # "partial" not "reported": the provider HAS rotated, and the lane-skip
+    # word is dropped by every caller.
+    assert outcome == "partial"
     assert "human notified" in detail
 
     outcome, detail = apply_verdict(
@@ -1181,7 +1183,8 @@ def test_manual_apply_survives_one_crashing_row_and_emits_verdicts(
     monkeypatch.setattr(watchdog, "apply_verdict", crashy)
     events = []
     monkeypatch.setattr(
-        watchdog, "emit_event", lambda kind, data: events.append(kind)
+        watchdog, "emit_event",
+        lambda kind, data, **kw: events.append(kind),
     )
 
     out = _io.StringIO()
@@ -1275,10 +1278,17 @@ def test_ledger_join_reads_the_singular_session_key_without_spreading_it(
 def test_row_state_survives_an_alias_rename_and_odd_casing():
     """A raw ``r["state"]`` read reads "" under a rename, and "" is in no lane
     set - the whole fleet would classify leave behind a fresh sweep file."""
-    assert watchdog._row_state({"status": "Working"}) == "working"
+    assert watchdog._row_state({"status": "Working"}) == ("working", "")
     # `state` wins when both are present, matching _STATUS_KEYS' order.
-    assert watchdog._row_state({"state": "blocked", "status": "idle"}) == "blocked"
-    assert watchdog._row_state({}) == ""
+    assert watchdog._row_state({"state": "blocked", "status": "idle"}) == ("blocked", "")
+    # Both spellings of blocked fold onto one word. Missing this is what let
+    # a `needs input` row fall through every lane to leave.
+    assert watchdog._row_state({"state": "needs input"}) == ("blocked", "")
+    assert watchdog._row_state({"state": "busy"}) == ("working", "")
+    # An unknown spelling is loud, never a silent no-lane row.
+    state, warning = watchdog._row_state({"state": "quiescing"})
+    assert state == "quiescing" and "unmapped" in warning
+    assert watchdog._row_state({})[1]
 
 
 def test_a_failed_rm_after_a_successful_stop_reports_rather_than_refuses(
@@ -1300,7 +1310,7 @@ def test_a_failed_rm_after_a_successful_stop_reports_rather_than_refuses(
     v = Verdict("aaaa1111-0000", "w1", "working", REAP, "node x-done done", "stop+rm")
     outcome, detail = watchdog._apply_reap(v, cwd="/wt/x", runner=runner)
     assert seen == ["stop", "rm"]
-    assert outcome == "reported"
+    assert outcome == "partial"
     assert "already stopped" in detail and "never re-run this as a stop" in detail
 
 
@@ -1376,3 +1386,84 @@ def test_a_bounded_caller_spends_its_own_budget_not_the_lanes(monkeypatch):
     # An exhausted tick still probes rather than passing a zero timeout.
     watchdog.fleet_rows(timeout=0.0)
     assert spent["timeout"] == 1.0
+
+
+def test_the_second_spelling_of_blocked_reaches_every_lane():
+    """claude spells one state two ways and the lane knew only one.
+
+    `busy` was folded onto working by hand; its sibling `needs input` was
+    missed, so a row wearing it could never ghost, reroute or wake - it fell
+    to leave while looking healthy. The fold now comes from the harness map,
+    so this pins the behaviour rather than the table.
+    """
+    from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
+
+    # Every input spelling claude maps onto "Needs input" must reach the
+    # reroute lane. Enumerating the map is the point: a new spelling added
+    # there fails this test instead of silently falling to leave.
+    blocked_spellings = [
+        raw for raw, out in _LIVE_STATUS_INPUT.items() if out == "Needs input"
+    ]
+    assert "needs input" in blocked_spellings
+    for raw in blocked_spellings:
+        state, warning = watchdog._row_state({"state": raw})
+        assert (state, warning) == ("blocked", ""), raw
+        row = Row("cccc3333-0000", "r1", state, None, "/tmp/r1")
+        [v] = _run(row and [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)})
+        assert v.verdict == REROUTE, f"{raw} never reached reroute"
+
+
+def test_reap_never_fires_on_an_unreadable_transcript():
+    """An absence has two explanations and this lane cannot tell them apart.
+
+    tail_facts returns None both for a session that never wrote a transcript
+    and for one it could not READ (resolver miss, OSError, moved path).
+    Reaping on that deletes a clean worktree every time the read fails.
+    """
+    rows = [Row("aaaa1111-0000", "w1", "idle", "x-done", "/wt/solo")]
+    [v] = _run(rows, {}, nodes={"x-done": {"status": "done"}})
+    assert v.verdict == LEAVE
+    assert "not evidence" in v.basis
+
+
+def test_a_terminal_row_occupies_no_worktree():
+    """Counting stopped rows as occupants retired the reap lane instead of
+    narrowing it: any tree that ever hosted a respawn read as shared for good."""
+    rows = [
+        Row("aaaa1111-0000", "live", "working", "x-done", "/wt/one"),
+        Row("bbbb2222-0000", "ghost-of-respawn", "stopped", "x-done", "/wt/one"),
+    ]
+    vs = _run(
+        rows,
+        {r.row_id: _facts("done", age_min=30) for r in rows},
+        nodes={"x-done": {"status": "done"}},
+    )
+    assert vs[0].verdict == REAP, vs[0].basis
+    # An unknown (non-terminal) state still protects the tree.
+    rows[1] = rows[1]._replace(state="quiescing")
+    vs = _run(
+        rows,
+        {r.row_id: _facts("done", age_min=30) for r in rows},
+        nodes={"x-done": {"status": "done"}},
+    )
+    assert vs[0].verdict == STALE
+
+
+def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
+    """The refusal says the roster was unreadable; the warnings say WHY.
+    Dropping them leaves the one actionable line on the floor."""
+    import contextlib
+    import io as _io
+
+    import pytest
+
+    from fno.agents import cli as agents_cli
+
+    payload = {"refused": "0 rows", "warnings": ["claude agents --json timed out after 30.0s"],
+               "verdicts": [], "counts": {}}
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, []))
+    err = _io.StringIO()
+    with contextlib.redirect_stderr(err), pytest.raises(typer.Exit):
+        agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
+                                only=None, mail_to=None)
+    assert "timed out after 30.0s" in err.getvalue()
