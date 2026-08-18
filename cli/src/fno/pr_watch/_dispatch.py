@@ -72,6 +72,18 @@ class TickResult:
     # A disabled tick takes no lock (mirrors an introspection read, never a
     # gate side-effect) and reports here rather than as open_prs=0.
     disabled: bool = False
+    # Repos whose REST listing failed this tick. A swallowed failure used to be
+    # indistinguishable from a clean sweep (every key UNKNOWN, receipt normal),
+    # so the count rides the result and the end record turns it into outcome
+    # `degraded` instead of `ok`.
+    sweep_failures: int = 0
+    # The GraphQL budget preflight skip: per-PR dispatch was not attempted.
+    quota_skip: bool = False
+    quota_remaining: Optional[int] = None
+    quota_reset: Optional[str] = None
+    # The preflight RAN but the budget was unreadable: the tick proceeded on
+    # an absent instrument rather than reading the absence as a low budget.
+    quota_unknown: bool = False
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -373,6 +385,22 @@ class _NullClaim:
 _MAX_RETRIES = 3
 _TICK_CLAIM_KEY = "pr-watch:tick"
 
+# The stage a live tick is in ("entry" -> "settings" -> "lock" -> "discover"
+# -> "sweep" -> "dispatch" -> "recovery" -> "catchup"). The CLI's deadline
+# record reads this so a hang names WHERE it hung - the difference between
+# "the tick hung" and "the tick hung waiting on the graph flock" - without
+# threading a callback through every injectable seam.
+_tick_phase = "entry"
+
+
+def set_tick_phase(phase: str) -> None:
+    global _tick_phase
+    _tick_phase = phase
+
+
+def current_tick_phase() -> str:
+    return _tick_phase
+
 
 def tick(
     *,
@@ -397,6 +425,10 @@ def tick(
     max_age_days: int = 14,
     # Retry cap (default matches _MAX_RETRIES; override with config.pr_watch.retries)
     max_retries: Optional[int] = None,
+    # GraphQL budget preflight (x-c12c): the dispatch pass spends gh pr view,
+    # which bills the shared per-user GraphQL pool by point cost.
+    graphql_remaining_fn: Optional[Callable] = None,
+    graphql_min_remaining: int = 200,
     # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
     # consulted here - the launchd activation coupling (x-e106: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
@@ -461,10 +493,14 @@ def tick(
     else:
         _read_tracked_states = _default_read_tracked_states
     _max_retries = max_retries if max_retries is not None else _MAX_RETRIES
+    _graphql_remaining = (
+        graphql_remaining_fn if graphql_remaining_fn is not None else _default_graphql_remaining
+    )
 
     holder = f"pr-watch:{os.getpid()}"
 
     # Step 1: tick-level mutex
+    set_tick_phase("lock")
     try:
         _claim.acquire_tick_lock(_TICK_CLAIM_KEY, holder)
     except Exception as exc:  # noqa: BLE001 - any acquire failure means no work ran
@@ -500,6 +536,8 @@ def tick(
             now_iso=now_iso,
             max_age_days=max_age_days,
             max_retries=_max_retries,
+            graphql_remaining_fn=_graphql_remaining,
+            graphql_min_remaining=graphql_min_remaining,
             holder=holder,
         )
     finally:
@@ -526,6 +564,8 @@ def _run_tick(
     now_iso,
     max_age_days,
     max_retries,
+    graphql_remaining_fn,
+    graphql_min_remaining,
     holder,
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
@@ -536,6 +576,7 @@ def _run_tick(
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
+    set_tick_phase("discover")
     entries = read_graph(gpath) if gpath.exists() else []
     candidates = discover_fn(entries)
 
@@ -584,16 +625,20 @@ def _run_tick(
     batch_terminal: set[str] = set()
     batch_baselined: set[str] = set()
     query_keys = batch_keys | candidate_keys
+    sweep_failures = 0
+    set_tick_phase("sweep")
     if query_keys:
         # The batch reader attempts every qualified key up front. Record that
         # positive fact even when a later per-PR lock prevents rich dispatch
         # observation for one candidate.
         swept.update(query_keys)
         try:
-            batch_states = read_tracked_states_fn(query_keys)
+            # The seam returns (states, sweep_failures): a swallowed repo
+            # failure used to be indistinguishable from a clean sweep.
+            batch_states, sweep_failures = read_tracked_states_fn(query_keys)
         except Exception as exc:  # noqa: BLE001 - receipt names the outage
             log.warning("pr-watch: tracked-state sweep failed: %s", exc)
-            batch_states = {}
+            batch_states, sweep_failures = {}, 1
         for key in sorted(batch_keys):
             current = batch_states.get(key, "UNKNOWN")
             entry = state[key]
@@ -624,6 +669,30 @@ def _run_tick(
     acted = 0
     skipped = 0
 
+    # GraphQL budget preflight. The dispatch pass below spends gh pr view,
+    # which bills the shared per-user GraphQL pool by point cost; with the
+    # bucket drained, those queries stall for their full timeout each. The
+    # rate_limit read costs nothing against any bucket. None (unreadable
+    # instrument) PROCEEDS: an absence is not evidence of a low budget.
+    # A skip persists nothing and emits no pr_watch_tick (AC9): this tick did
+    # not complete a sweep, so it must not mint liveness.
+    quota_remaining, quota_reset = graphql_remaining_fn()
+    quota_unknown = quota_remaining is None
+    if not quota_unknown and quota_remaining < graphql_min_remaining:
+        return TickResult(
+            open_prs=0,
+            acted=0,
+            skipped=0,
+            # The sweep already ran above the preflight; its failures ride the
+            # skip home, because the skip mints no pr_watch_tick receipt and
+            # this end record is then the only durable trace of the outage.
+            sweep_failures=sweep_failures,
+            quota_skip=True,
+            quota_remaining=quota_remaining,
+            quota_reset=quota_reset,
+        )
+
+    set_tick_phase("dispatch")
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
@@ -896,9 +965,17 @@ def _run_tick(
         "normalized": normalization.normalized,
         "failed_count": len(failed),
         "failed": sorted(failed),
+        "sweep_failures": sweep_failures,
+        "listing_api": "rest",
     }
     _emit_tick_receipt(emit, receipt)
-    return TickResult(open_prs=open_prs, acted=acted, skipped=skipped)
+    return TickResult(
+        open_prs=open_prs,
+        acted=acted,
+        skipped=skipped,
+        sweep_failures=sweep_failures,
+        quota_unknown=quota_unknown,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -928,13 +1005,19 @@ def _default_discover(
     return discover_open_prs(entries, now_iso=now_iso, max_age_days=max_age_days)
 
 
-def _default_read_tracked_states(keys: set[str]) -> dict[str, str]:  # pragma: no cover
+def _default_read_tracked_states(keys: set[str]):  # pragma: no cover
     from fno.pr_watch._discover import read_tracked_pr_states
 
     return read_tracked_pr_states(keys)
 
 
-def _tracked_states_from_reader(keys: set[str], reader: Callable) -> dict[str, str]:
+def _default_graphql_remaining() -> tuple[Optional[int], Optional[str]]:  # pragma: no cover
+    from fno.pr._rest import graphql_remaining
+
+    return graphql_remaining()
+
+
+def _tracked_states_from_reader(keys: set[str], reader: Callable) -> tuple[dict[str, str], int]:
     """Adapt an injected per-candidate reader into the batch seam for tests."""
     from fno.graph._reconcile import ReconcileError
     from fno.pr_watch._discover import PrCandidate
@@ -957,7 +1040,7 @@ def _tracked_states_from_reader(keys: set[str], reader: Callable) -> dict[str, s
             states[key] = reader(candidate, reviewers=[]).state
         except ReconcileError:
             states[key] = "UNKNOWN"
-    return states
+    return states, 0
 
 
 def _default_dispatch_ritual(cand: Any, obs: Any, fire_skill_fn: Callable) -> Any:

@@ -2155,6 +2155,14 @@ class PrWatchBlock(BaseModel):
     model:
         The claude model used for headless skill fires (default haiku-4-5;
         cheap mechanical task).
+    tick_timeout_seconds:
+        Wall-clock ceiling for one tick. Unset (None) derives at the tick
+        boundary as max(60, 0.8 * interval_seconds), so the deadline stays
+        under StartInterval and launchd never suppresses the next tick.
+    graphql_min_remaining:
+        Floor on the shared per-user GraphQL budget: below it the tick's
+        per-PR dispatch pass is skipped loudly rather than issuing queries
+        that stall (default 200).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2164,6 +2172,8 @@ class PrWatchBlock(BaseModel):
     retries: int = Field(default=3, ge=1)
     max_age_days: int = Field(default=14, ge=1)
     model: str = Field(default="claude-haiku-4-5", min_length=1)
+    tick_timeout_seconds: Optional[int] = Field(default=None, gt=0)
+    graphql_min_remaining: int = Field(default=200, ge=0)
 
 
 class GroomBlock(BaseModel):

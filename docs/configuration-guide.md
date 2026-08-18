@@ -142,6 +142,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
 | `pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
 | `pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
+| `pr_watch.tick_timeout_seconds` | int (optional) | _(none)_ | never | Wall-clock ceiling for one PR-watcher tick; unset derives 0.8x the poll interval so a stalled tick can never suppress its successor. |
+| `pr_watch.graphql_min_remaining` | int | `200` | never | Skip the PR-watcher's per-PR dispatch pass when the shared GraphQL budget falls below this floor. |
 | `groom.enabled` | bool | `true` | never | Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true. |
 | `restart.enabled` | bool | `true` | never | Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true. |
 | `evals.enabled` | bool | `true` | never | Enable the headless eval-suite grading-worker spawn. Defaults true. |
