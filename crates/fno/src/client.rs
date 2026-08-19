@@ -12831,16 +12831,21 @@ async fn selector_keys(
                 }
             }
             b'm' => {
-                // x-8ccf US2: `m` on an agent row - or (x-1d91) a Backlog card -
-                // opens its context menu (mouse-off parity), anchored at the row
-                // and sitting over the selector like peek; Esc drops back into
-                // the selector.
+                // x-8ccf US2: `m` on an agent row - or (x-1d91) a Backlog card,
+                // or (x-7683) a band header whose section menu the mouse path
+                // already opens - opens its context menu (mouse-off parity),
+                // anchored at the row and sitting over the selector like peek;
+                // Esc drops back into the selector. A header that refuses (a
+                // band with nothing to clear) already set its notice; the key
+                // is still swallowed.
                 if matches!(
                     view.display_rows().get(cur),
-                    Some(DisplayRow::Agent(_) | DisplayRow::Card(_))
+                    Some(DisplayRow::Agent(_) | DisplayRow::Card(_) | DisplayRow::Header { .. })
                 ) {
-                    let arow =
-                        (TAB_BAR_ROWS as usize + cur.saturating_sub(view.sideline_offset)) as u16;
+                    // Screen row = index - sideline_offset (x-cd67: the sideline
+                    // owns row 0; there is no TAB_BAR_ROWS offset on this side
+                    // of the divider).
+                    let arow = (cur.saturating_sub(view.sideline_offset)) as u16;
                     view.open_row_menu(cur, Anchor::At { row: arow, col: 1 });
                     continue;
                 }
@@ -19757,6 +19762,62 @@ mod tests {
             ClientMsg::Command(Command::SelectTab(_)) => {}
             other => panic!("expected SelectTab on a short press, got {other:?}"),
         }
+    }
+
+    // ---- (x-7683) wave 3: m-key parity + anchor ------------------------------
+
+    #[tokio::test]
+    async fn x7683_m_on_a_band_header_opens_the_section_menu() {
+        // `m` opened menus only on agent rows and cards; a band header
+        // (`~ elsewhere`) fell through to the tab-move notice. A header is a
+        // menu-bearing row for the mouse, so the keyboard path now matches. A
+        // band with a dead row is what makes the menu exist (an all-live band
+        // refuses with a notice, exactly like the right-press path).
+        let mut v = unified_rows_view();
+        v.layout
+            .agents
+            .iter_mut()
+            .find(|a| a.name == "bg-other")
+            .expect("the orphan fixture row")
+            .exited = true;
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Header { key: SectionKey::Elsewhere, .. }
+                )
+            })
+            .expect("an ~ elsewhere header");
+        v.selector = Some(hdr);
+        let mut buf: Vec<u8> = Vec::new();
+        super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Section { key: SectionKey::Elsewhere, .. })
+            ),
+            "m on the header opens its section menu"
+        );
+    }
+
+    #[tokio::test]
+    async fn x7683_m_anchor_lands_on_the_rows_screen_row() {
+        // The m-key anchor still added TAB_BAR_ROWS to a geometry that dropped
+        // that offset in x-cd67 (the sideline owns row 0), so the menu opened
+        // one row below its row. The anchor is the row's screen row
+        // (index - sideline_offset).
+        let mut v = unified_rows_view();
+        let w = agent_row_at(&v, |a| a.name == "worker");
+        v.selector = Some(w);
+        let mut buf: Vec<u8> = Vec::new();
+        super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        assert_eq!(
+            v.row_menu.as_ref().unwrap().popup.anchor,
+            crate::popup::Anchor::At { row: w as u16, col: 1 },
+            "the menu anchors on the row itself, not one below"
+        );
     }
 
     #[tokio::test]
