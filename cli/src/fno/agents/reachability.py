@@ -242,14 +242,11 @@ def classify_progress(
         return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
     if _is_refused(observed_model, harness, route_settings_path):
         return Progress(REFUSED, MODEL_REFUSED)
-    if truth_state in ("working", "watching") and last_activity_age_s is None:
-        return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
-    if (
-        truth_state in ("working", "watching")
-        and last_activity_age_s >= STALE_ATTENTION_S
-    ):
-        return Progress(PROGRESS_UNKNOWN, SILENT)
     if truth_state in ("working", "watching"):
+        if last_activity_age_s is None:
+            return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
+        if last_activity_age_s >= STALE_ATTENTION_S:
+            return Progress(PROGRESS_UNKNOWN, SILENT)
         return Progress(ADVANCING, TRANSCRIPT_TURN)
     if truth_state == "your-move":
         return Progress(AWAITING_OPERATOR, OPERATOR_TURN)
