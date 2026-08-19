@@ -2491,6 +2491,14 @@ where
     let id = req.id;
     match tokio::task::spawn_blocking(move || f(&ctx, &req)).await {
         Ok(resp) => resp,
+        // Same teardown casualty as load_registry_offloaded below: a
+        // queued-but-not-started handler dropped by shutdown, not a fault
+        // in the handler itself.
+        Err(e) if e.is_cancelled() => Response::err(
+            id,
+            ErrorCode::ShuttingDown,
+            format!("handler task cancelled during shutdown: {e}"),
+        ),
         Err(_) => Response::err(id, ErrorCode::Internal, "handler task panicked"),
     }
 }
@@ -2536,16 +2544,25 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
     }
 }
 
+/// A `StateError::Cancelled` is a teardown casualty, not a fault in the read
+/// or write itself; every other variant stays the catch-all internal fault.
+/// The one classification choke point both `registry_read_failed` and every
+/// `update_registry_offloaded` call site route through, so a shutdown-time
+/// cancellation gets `ShuttingDown` regardless of which verb hit it.
+fn state_error_code(e: &state::StateError) -> ErrorCode {
+    match e {
+        state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
+        _ => ErrorCode::Internal,
+    }
+}
+
 /// The x-4c87 RPC face of a registry-read failure: every handler that consults
 /// the registered roster reports `registry read failed` carrying the state
 /// error (which names the registry path, both row counts, and the comparison
 /// to run) instead of answering from a silently emptied roster. `AgentNotFound`
 /// stays reserved for a successful read with no matching row.
 fn registry_read_failed(id: u64, e: state::StateError) -> Response {
-    let code = match e {
-        state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
-        _ => ErrorCode::Internal,
-    };
+    let code = state_error_code(&e);
     Response::err(id, code, format!("registry read failed: {e}"))
 }
 
@@ -2560,6 +2577,11 @@ where
 {
     match tokio::task::spawn_blocking(move || state::update_registry(&path, f)).await {
         Ok(result) => result,
+        // Same teardown casualty as load_registry_offloaded: a queued write
+        // dropped by shutdown before it ran, never a panic in the write.
+        Err(e) if e.is_cancelled() => Err(state::StateError::Cancelled(format!(
+            "update_registry task cancelled: {e}"
+        ))),
         Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
             "update_registry task panicked: {e}"
         )))),
@@ -3214,7 +3236,7 @@ async fn spawn_claude_stream_lane(
                 "agent_spawn_failed",
                 &json!({"name": name, "short_id": short_id, "reason": "registry_write_failed"}),
             );
-            return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
+            return Response::err(req.id, state_error_code(&e), format!("registry write: {e}"));
         }
     }
     // Registered live: the worker now owns the claim (its own SessionClaimGuard
@@ -4844,7 +4866,7 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         );
         return Response::err(
             req.id,
-            ErrorCode::Internal,
+            state_error_code(&e),
             format!("agent {name}: worker stopped but registry write failed: {e}"),
         );
     }
@@ -5072,7 +5094,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 {
                     return Response::err(
                         req.id,
-                        ErrorCode::Internal,
+                        state_error_code(&e),
                         format!("claude {name} stopped but registry write failed: {e}"),
                     );
                 }
@@ -5114,7 +5136,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             {
                 return Response::err(
                     req.id,
-                    ErrorCode::Internal,
+                    state_error_code(&e),
                     format!("claude {name} stopped but registry write failed: {e}"),
                 );
             }
@@ -5334,7 +5356,7 @@ async fn handle_rm_with(
     {
         return Response::err(
             req.id,
-            ErrorCode::Internal,
+            state_error_code(&e),
             format!("agent {name}: removal did not persist: {e}"),
         );
     }
