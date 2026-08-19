@@ -2009,6 +2009,11 @@ mod tests {
         o.pid = Some(corpse);
         let _ = acquire("node:x-noanchor", "target-session:me", o);
         let before = read_claim(&td, "node:x-noanchor");
+        // now_ms() has millisecond resolution, so without this the acquire and
+        // the renew can land in the SAME millisecond and the strict deadline
+        // comparison below flakes. The sibling deadline tests sleep for the
+        // same reason.
+        std::thread::sleep(Duration::from_millis(2));
 
         let stub = stub_session_pid(td.path(), "");
         std::env::set_var("FNO_BIN", &stub);
