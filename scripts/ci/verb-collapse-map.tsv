@@ -63,6 +63,7 @@ backlog batch prepare	T1	backlog batch prepare	1
 backlog batch ship	T1	backlog batch ship	3
 backlog batch ship-closeable	T1	backlog batch ship-closeable	1
 backlog batch status	T1	backlog batch status	1
+backlog board	T1	backlog board	0
 backlog capture add	T1	backlog capture add	6
 backlog capture archive	T1	backlog capture archive	1
 backlog capture capture-pass	T1	backlog capture capture-pass	1
