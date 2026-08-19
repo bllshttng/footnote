@@ -1545,6 +1545,19 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
+    let out = Command::new(git_bin)
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
 /// `gh pr view` exits 1 both when no PR exists and when gh itself fails.
 /// "No PR" is real world-state - the fingerprint should record it and the
 /// NoProgress backstop should keep ticking - while an outage must freeze the
@@ -1572,6 +1585,53 @@ fn stderr_tail(bytes: &[u8]) -> String {
         }
         s[start..].to_string()
     }
+}
+
+const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName";
+
+fn pr_head_oid(pr_json: &Value) -> Option<String> {
+    pr_json
+        .get("headRefOid")
+        .and_then(|v| v.as_str())
+        .filter(|oid| !oid.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve a numeric PR selector without consulting the checkout branch.
+/// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
+/// response and must not fall back to local HEAD.
+fn read_pr_head_oid(
+    gh_bin: &str,
+    cwd: &Path,
+    selector: &str,
+) -> Result<Option<String>, (String, String)> {
+    let rest_adapter = internal_gh_adapter(gh_bin);
+    let metadata_read = if rest_adapter {
+        "pr_info_rest"
+    } else {
+        "pr_view"
+    };
+    let metadata_parse = if rest_adapter {
+        "pr_info_rest_parse"
+    } else {
+        "pr_view_parse"
+    };
+    let out = Command::new(gh_bin)
+        .args(["pr", "view", selector, "--json", PR_VIEW_FIELDS])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
+    if !out.status.success() {
+        if is_no_pr_stderr(&out.stderr) {
+            return Ok(None);
+        }
+        return Err((metadata_read.to_string(), stderr_tail(&out.stderr)));
+    }
+    let pr_json: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| (metadata_parse.to_string(), String::new()))?;
+    pr_head_oid(&pr_json)
+        .map(Some)
+        .ok_or_else(|| (metadata_parse.to_string(), "missing headRefOid".to_string()))
 }
 
 /// The GraphQL bucket's state, from `gh api rate_limit`.
@@ -2138,7 +2198,7 @@ fn read_pr_info(
             "--json",
             // baseRefName rides along for the freshness predicate's merge-base
             // (x-5b99). Same call, same round trip, no new API cost.
-            "state,number,headRefName,headRefOid,mergeable,baseRefName",
+            PR_VIEW_FIELDS,
         ])
         .current_dir(cwd)
         .output()
@@ -2185,11 +2245,7 @@ fn read_pr_info(
             .unwrap_or("none"),
     );
     let number = pr_json.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
-    let head_oid = pr_json
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let head_oid = pr_head_oid(&pr_json).unwrap_or_default();
     // The PR's head branch, same `gh pr view` round trip as headRefOid. The
     // scope predicate needs it: attestations are keyed to the branch they
     // reviewed, and an empty read must pass "" so the predicate fails closed
@@ -9617,16 +9673,70 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_harness_override.as_deref(),
     );
 
-    // head_sha pins the emitted event to what would actually merge. Default
-    // local HEAD; --head overrides with a caller that knows the PR head. A
-    // --head sha the local repository does not contain leaves freshness
-    // unresolvable, which resolves stale and refuses - the safe direction.
-    // Whether the caller supplied it decides the exit-4 publish below: a
-    // caller that knows the PR head gets the visible failure status; a
-    // derived-from-local-HEAD sha does not (it may be the canonical
-    // checkout's default-branch tip, a commit this row never described).
-    let head_explicit = head.is_some();
-    let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
+    // Authorship: --session-id, else the manifest's harness_session_id when one
+    // exists, else None. Resolve it before the PR-head read so even an unknown
+    // row from that read failure keeps the established event shape.
+    let author_session = session_id.or_else(|| {
+        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
+            .ok()
+            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
+            .filter(|s| s != "null")
+    });
+
+    // Head precedence is explicit --head, then the named PR's head, then the
+    // local checkout for the branch-inference path. A failed named-PR read
+    // must never fall through to local HEAD: that is how a canonical checkout
+    // used to publish a row describing main against a different PR.
+    let branch = git_head_branch(&git_bin, &cwd);
+    let no_pr_payload = || {
+        serde_json::json!({
+            "coverage": "none",
+            "emitted": false,
+            "reason": "no PR for the selector",
+            "selector": pr,
+            "branch": branch,
+        })
+        .to_string()
+    };
+    let (head_sha, head_explicit) = match (head, pr.as_deref()) {
+        (Some(explicit), _) => (explicit, true),
+        (None, Some(selector)) => match read_pr_head_oid(&gh_bin, &cwd, selector) {
+            Ok(Some(resolved)) => (resolved, true),
+            Ok(None) => return (3, no_pr_payload()),
+            Err((read, tail)) => {
+                let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
+                let data = coverage_event_data(
+                    pr_num,
+                    &CoverageReport {
+                        coverage: Coverage::Unknown,
+                        verdicts: Vec::new(),
+                    },
+                    "",
+                    &inputs.repo_slug,
+                    author_session.as_deref(),
+                );
+                emit_to_both(
+                    &inputs.project_events,
+                    &inputs.global_events,
+                    "review_coverage",
+                    data.clone(),
+                );
+                let secondary = is_secondary_limit_stderr(&tail);
+                let quota = if secondary || !is_graphql_read(&read) {
+                    None
+                } else {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                };
+                let mut out = data;
+                insert_quota_diagnostic(&mut out, &quota);
+                if secondary {
+                    out["reason"] = serde_json::json!(secondary_limit_reason());
+                }
+                return (4, out.to_string());
+            }
+        },
+        (None, None) => (git_head_sha(&git_bin, &cwd), false),
+    };
 
     // The self-review floor, exactly as decide() applies it for the stop
     // hook: a code payload on a lane-less stock install owes a local
@@ -9647,20 +9757,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             required_reviewers.push(floored);
         }
     }
-
-    // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. None leaves every local verdict's attestation_origin
-    // Unknown (the documented fail-open-on-authorship behavior) and the payload
-    // OMITS self_attested_count rather than reporting an unmeasured 0. The
-    // "null" filter is parse_manifest's own (init writes ${_HARNESS_SESSION:-null}):
-    // Some("null") would mislabel every origin other_session and emit the
-    // unmeasured-0 self_attested_count the omission exists to prevent.
-    let author_session = session_id.or_else(|| {
-        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
-            .ok()
-            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-            .filter(|s| s != "null")
-    });
 
     match read_pr_info(
         &gh_bin,
@@ -9686,15 +9782,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             if pr_info.number == 0 {
                 // PrState::None: no PR for the selector (or the branch). There
                 // is nothing to cover and nothing was emitted.
-                return (
-                    3,
-                    serde_json::json!({
-                        "coverage": "none",
-                        "emitted": false,
-                        "reason": "no PR for the selector",
-                    })
-                    .to_string(),
-                );
+                return (3, no_pr_payload());
             }
             // read_pr_info already emitted this exact payload to both logs;
             // print the same object so stdout and the logs agree. And publish
