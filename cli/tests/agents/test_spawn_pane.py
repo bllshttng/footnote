@@ -1982,14 +1982,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     from fno.cli import app
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
-    class Gate:
-        def consume_provider(self, provider: str, name: str, substrate: str) -> bool:
-            return provider == "zai" and substrate == "pane"
-
-        def release(self) -> None:
-            pass
-
     use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    monkeypatch.setattr(spawn_gate, "_maybe_emit_spawn_cap_escape", lambda: None)
     fake_runner = FakeRunner()
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
@@ -1997,8 +1992,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
         return real_dispatch(**kwargs, runner=fake_runner)
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
-    monkeypatch.setattr(mux_spawn.shutil, "which", lambda binary: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn.shutil, "which", lambda binary, **_kwargs: "/usr/local/bin/happy"
+    )
     monkeypatch.setattr(
         mux_spawn,
         "happy_routed_panes_enabled",

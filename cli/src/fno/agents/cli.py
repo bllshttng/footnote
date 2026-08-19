@@ -875,7 +875,7 @@ def cmd_spawn(
     # decides whether the route is materialized at all: without this a routed
     # `--once` reaches dispatch as claude+once+not-headless and dies on the
     # "claude peers are persistent bg threads" refusal.
-    if once and route is not None and substrate == "pane":
+    if once and substrate == "pane":
         substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
         print(

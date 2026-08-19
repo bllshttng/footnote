@@ -2383,14 +2383,14 @@ def dispatch_spawn(
             "its provider cap cannot be evaluated; no worker launched",
             exit_code=2,
         )
-    spawn_substrate = "headless" if headless else "bg"
+    spawn_substrate = "headless" if (once or headless) else "bg"
+    from fno.agents.spawn_gate import consume_provider_admission
+
     if route_provider is not None and not (
         provider_gate is not None
-        and getattr(
-            provider_gate,
-            "consume_provider",
-            lambda _provider, _name, _substrate: False,
-        )(route_provider, name, spawn_substrate)
+        and consume_provider_admission(
+            provider_gate, route_provider, name, spawn_substrate
+        )
     ):
         raise DispatchAskError(
             f"provider {route_provider!r} has no matching admission token; "
@@ -6279,6 +6279,22 @@ def wake_and_deliver(
                                 stop_code, stop_detail = claude_stop(short)
                             except Exception as stop_error:
                                 if gate is not None:
+                                    from fno.agents.harnesses._claude_session_registry import (
+                                        roster_sessions,
+                                    )
+
+                                    worker_pid = next(
+                                        (
+                                            int(row.get("pid") or 0)
+                                            for row in roster_sessions()
+                                            if row.get("short_id") == short
+                                            and int(row.get("pid") or 0) > 0
+                                        ),
+                                        None,
+                                    )
+                                    gate.retain_revived_worker(
+                                        short, worker_pid=worker_pid
+                                    )
                                     gate.release_gate_mutex()
                                     gate = None
                                 raise RuntimeError(
@@ -6290,6 +6306,20 @@ def wake_and_deliver(
                                 # stopped. Release only the serialization mutex;
                                 # retaining its provider reservation makes later
                                 # matching counts refuse instead of failing open.
+                                from fno.agents.harnesses._claude_session_registry import (
+                                    roster_sessions,
+                                )
+
+                                worker_pid = next(
+                                    (
+                                        int(row.get("pid") or 0)
+                                        for row in roster_sessions()
+                                        if row.get("short_id") == short
+                                        and int(row.get("pid") or 0) > 0
+                                    ),
+                                    None,
+                                )
+                                gate.retain_revived_worker(short, worker_pid=worker_pid)
                                 gate.release_gate_mutex()
                                 gate = None
                                 raise RuntimeError(

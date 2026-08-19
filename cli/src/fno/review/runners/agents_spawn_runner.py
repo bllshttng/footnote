@@ -126,7 +126,7 @@ def run_via_agents_spawn(
 
                 gate = run_gate(
                     name,
-                    "headless" if headless else "bg",
+                    "headless",
                     route_provider=route_provider,
                 )
             result_holder["value"] = dispatch(

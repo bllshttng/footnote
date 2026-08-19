@@ -593,7 +593,7 @@ class GateGuard:
     _consumed: bool = False
     _released: bool = False
 
-    def consume_provider(self, provider: str, name: str, substrate: str) -> bool:
+    def _consume_provider(self, provider: str, name: str, substrate: str) -> bool:
         authorized = (
             self._admission_token is _PROVIDER_ADMISSION_TOKEN
             and self._route_provider == provider
@@ -605,6 +605,26 @@ class GateGuard:
         if authorized:
             self._consumed = True
         return authorized
+
+    def retain_revived_worker(
+        self, short_id: str, *, worker_pid: Optional[int] = None
+    ) -> None:
+        """Convert a BG admission into durable fail-closed worker evidence."""
+        if self._route_provider is None or self._spawn_name is None:
+            raise ProviderCountUnavailable("provider admission identity unavailable")
+        holder = self._gate_holder or f"spawn-gate:{os.getpid()}:{self._spawn_name}"
+        _acquire_worker_slot(
+            self,
+            self._spawn_name,
+            holder,
+            self._route_provider,
+            fail_closed=True,
+            worker_pid=worker_pid,
+            metadata={
+                "session_short_id": short_id,
+                "positive_marker": "claude-respawn-ok",
+            },
+        )
 
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
@@ -624,6 +644,15 @@ class GateGuard:
             return
         self._worker_key = None
         self._worker_holder = None
+
+
+def consume_provider_admission(
+    guard: object, provider: str, name: str, substrate: str
+) -> bool:
+    """Consume one genuine opaque admission; duck-typed substitutes never pass."""
+    return isinstance(guard, GateGuard) and guard._consume_provider(
+        provider, name, substrate
+    )
 
 
 def _release_claim_bounded(key: str, holder: str) -> bool:
@@ -712,18 +741,24 @@ def _acquire_worker_slot(
     route_provider: Optional[str] = None,
     *,
     fail_closed: bool = False,
+    worker_pid: Optional[int] = None,
+    metadata: Optional[dict[str, object]] = None,
 ) -> None:
     key = f"worker:{name}"
     try:
         from fno.claims.core import acquire_claim
 
+        claim_metadata = {
+            "model_provider": route_provider or _KNOWN_UNROUTED_PROVIDER
+        }
+        if metadata:
+            claim_metadata.update(metadata)
         acquire_claim(
             key,
             holder,
             ttl_ms=WORKER_CLAIM_TTL_MS,
-            metadata={
-                "model_provider": route_provider or _KNOWN_UNROUTED_PROVIDER
-            },
+            metadata=claim_metadata,
+            pid=worker_pid,
             root=_gate_claims_root(),
         )
         guard._worker_key = key

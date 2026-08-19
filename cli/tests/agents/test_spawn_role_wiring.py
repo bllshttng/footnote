@@ -313,6 +313,30 @@ def test_provider_admission_is_single_use_and_name_bound(
         )
 
 
+def test_forged_admission_object_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.model_routing import bind_route_provider
+
+    class _ForgedGate:
+        def consume_provider(self, *_args):
+            return True
+
+    harness = "claude"
+    with pytest.raises(DispatchAskError, match="no matching admission token"):
+        dispatch_spawn(
+            name="forged-gate",
+            message="work",
+            provider=harness,
+            cwd=tmp_path,
+            route_env=bind_route_provider(_route_unit(), "zai"),
+            route_provider="zai",
+            provider_gate=_ForgedGate(),
+        )
+
+
 @pytest.mark.parametrize("substrate", ["worker", "pane"])
 def test_raw_route_env_cannot_borrow_another_provider_admission(
     tmp_path: Path,

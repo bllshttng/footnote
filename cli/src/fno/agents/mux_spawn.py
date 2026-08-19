@@ -2054,13 +2054,11 @@ def dispatch_spawn_pane(
             "its provider cap cannot be evaluated; no worker launched",
             exit_code=2,
         )
+    from fno.agents.spawn_gate import consume_provider_admission
+
     if route_provider is not None and not (
         provider_gate is not None
-        and getattr(
-            provider_gate,
-            "consume_provider",
-            lambda _provider, _name, _substrate: False,
-        )(route_provider, name, "pane")
+        and consume_provider_admission(provider_gate, route_provider, name, "pane")
     ):
         raise DispatchAskError(
             f"provider {route_provider!r} has no matching admission token; "

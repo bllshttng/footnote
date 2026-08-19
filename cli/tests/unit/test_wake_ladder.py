@@ -183,6 +183,9 @@ def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypat
     events = []
 
     class _Gate:
+        def retain_revived_worker(self, short, *, worker_pid=None):
+            events.append(("retain", short, worker_pid))
+
         def release_gate_mutex(self):
             events.append("release-mutex")
 
@@ -228,6 +231,9 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
     events = []
 
     class _Gate:
+        def retain_revived_worker(self, short, *, worker_pid=None):
+            events.append(("retain", short, worker_pid))
+
         def release_gate_mutex(self):
             events.append("release-mutex")
 
@@ -247,11 +253,15 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
         "fno.agents.harnesses.claude.claude_stop",
         lambda short: (_ for _ in ()).throw(OSError("stop unavailable")),
     )
+    monkeypatch.setattr(
+        "fno.agents.harnesses._claude_session_registry.roster_sessions",
+        lambda: [{"short_id": "abc12345", "pid": 4242}],
+    )
 
     ok, detail = wake_and_deliver("uuid-full", "wake")
 
     assert ok is False and detail == "spawn-error-RuntimeError"
-    assert events == ["release-mutex"]
+    assert events == [("retain", "abc12345", 4242), "release-mutex"]
 
 
 def test_live_roster_skips_rung2_and_forks(monkeypatch):
