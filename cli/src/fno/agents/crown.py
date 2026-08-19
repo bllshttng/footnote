@@ -458,6 +458,19 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 f"  end the holder        fno agents stop {holder.name}, then retry"
             )
 
+        # A re-scope can strand subordinates: a crown granted out of the OLD
+        # territory keeps reigning after its grantor moves, holding authority
+        # the new scope no longer contains. Containment is enforced at grant
+        # time only (grant_error), so name the stranded rows in the receipt
+        # rather than letting the move pass silently.
+        stranded_subordinates = [
+            row.name
+            for row in rows
+            if row.name != target.name
+            and row.status not in TERMINAL_STATUSES
+            and scope_contains(vacated_scope, row.crown_scope)
+        ]
+
         for index, row in enumerate(rows):
             if row.name == target.name:
                 rows[index] = replace(
@@ -474,6 +487,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             grantor="human",
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
+            stranded_subordinates=stranded_subordinates,
         )
         return rows
 
