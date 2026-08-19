@@ -8100,6 +8100,76 @@ def cmd_reconcile(
     entries = read_graph(_graph_path())
     records = scan_merge_drift(entries, node_id=node)
 
+    # Auto-bind closure claims for every OTHER merged PR this sweep just
+    # discovered on its own (x-59a6). --pr-number above covers the two paths
+    # that already KNOW the PR number (the post-merge ritual, `fno pr
+    # merge`); a THIRD path merges with no caller ever naming a number at
+    # all - an operator merging in the GitHub UI, or a king's automation -
+    # and is caught only later by this bare sweep's own forward/reverse scan.
+    # A guard placed on only the two number-aware paths is decorative for
+    # that third one: without this, a UI-merged PR naming several nodes would
+    # still close just the one node this scan happens to find first. Bind
+    # every closeable record's PR (skipping the one --pr-number already
+    # bound, to avoid a redundant gh call), then re-scan ONCE so newly-bound
+    # siblings are picked up in this same invocation. Skipped entirely on
+    # --dry-run (must mutate nothing) - --pr-number's own bind above is
+    # already skipped there for the same reason.
+    if not dry_run:
+        from fno.pr.closure import (
+            ClosureQueryError,
+            bind_closure_claims,
+            fetch_pr_closure_context,
+            parse_closure_trailer,
+        )
+        from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
+
+        # One record per discovered PR (not just the number): each record
+        # already carries the pr_url/cwd this scan resolved it through, and
+        # the graph is CROSS-PROJECT, so a single global `--repo` would
+        # mis-scope a record belonging to a different project's repo.
+        discovered: dict = {}
+        for r in records:
+            if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
+                discovered[r.pr_number] = r
+        auto_bound_any = False
+        for _pr_num, _rec in discovered.items():
+            _repo_for_pr = (
+                repo
+                or repo_slug_from_url(_rec.pr_url)
+                or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
+            )
+            try:
+                _ctx = fetch_pr_closure_context(_pr_num, repo=_repo_for_pr, cwd=_rec.cwd)
+            except ClosureQueryError:
+                continue  # best-effort discovery: the forward scan already has this PR's state
+            _claims = parse_closure_trailer(_ctx.body)
+            if not _claims:
+                continue
+            closure_claims = sorted(set(closure_claims) | set(_claims))
+
+            def _auto_closure_mutator(
+                entries2, _pr_num=_pr_num, _ctx=_ctx, _claims=_claims, _repo_for_pr=_repo_for_pr,
+            ):
+                result = bind_closure_claims(
+                    entries2, _claims, pr_number=_pr_num, pr_url=_ctx.url, repo=_repo_for_pr,
+                )
+                if result.outcome == "bound" and result.bound_ids:
+                    closure_bound.extend(result.bound_ids)
+                    nonlocal auto_bound_any
+                    auto_bound_any = True
+                elif result.outcome == "refused" and not json_out:
+                    typer.echo(
+                        f"warning: reconcile: auto-discovered PR #{_pr_num} refused "
+                        f"binding: {result.refusal}",
+                        err=True,
+                    )
+                return entries2
+
+            locked_mutate_graph(_graph_path(), _auto_closure_mutator)
+        if auto_bound_any:
+            entries = read_graph(_graph_path())
+            records = scan_merge_drift(entries, node_id=node)
+
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
 

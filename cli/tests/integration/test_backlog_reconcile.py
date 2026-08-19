@@ -63,6 +63,23 @@ def _no_revert_fetch(monkeypatch):
     monkeypatch.setattr(rec, "list_merged_pr_branches", lambda **kw: [])
 
 
+@pytest.fixture(autouse=True)
+def _no_closure_fetch(monkeypatch):
+    """Keep reconcile hermetic: never shell `gh pr view` for closure-trailer
+    auto-discovery (x-59a6) from a test that does not explicitly stub it. A
+    test exercising the auto-bind path overrides this via its own
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", ...), which
+    wins because it runs later against the same monkeypatch instance."""
+    import fno.pr.closure as closure_mod
+
+    def _no_trailer(pr_number, **kw):
+        return closure_mod.PrClosureContext(
+            number=pr_number, body="", url=None, state="MERGED", merged_at=None,
+        )
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _no_trailer)
+
+
 def _stub_query(state_by_number: dict[int, str]):
     """Return a query stub mapping pr_number -> state string."""
 
@@ -1160,6 +1177,52 @@ def test_reconcile_pr_number_refuses_unknown_claim_mutates_nothing(cli_env, monk
     n = next(e for e in _read_entries(graph_path) if e["id"] == "ab-100005")
     assert n["pr_number"] is None
     assert n["completed_at"] is None
+
+
+def test_reconcile_auto_binds_closure_claims_for_a_ui_merge(cli_env, monkeypatch):
+    """The third close path (x-59a6): an operator merging directly in the
+    GitHub UI never tells any of our verbs a PR number. The bare sweep (no
+    --pr-number, no --node - exactly what SessionStart auto-fires) must still
+    discover the merged PR through its normal forward scan and bind the
+    OTHER node its trailer names, not just the one already stamped."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-100010", pr_number=905,
+              pr_url="https://github.com/test-owner/test-repo/pull/905"),  # stamped at creation
+        _node("ab-100011"),  # named only in the trailer; never individually stamped
+    ])
+
+    def _query_905(number, repo=None, cwd=None):
+        # A real gh query's returned url is the PR's actual canonical url, so
+        # it agrees with whatever the node already has stamped - a real url
+        # never disagrees with itself the way a careless stub could.
+        return PrMergeState(
+            number=number, state="MERGED",
+            url="https://github.com/test-owner/test-repo/pull/905",
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query_905)
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100010 ab-100011\n", number=905,
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100010", "ab-100011"}
+
+    entries = _read_entries(graph_path)
+    for nid in ("ab-100010", "ab-100011"):
+        n = next(e for e in entries if e["id"] == nid)
+        assert n["completed_at"] is not None
+        assert (sentinel_dir / f"{nid}.json").exists()
 
 
 def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch):
