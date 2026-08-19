@@ -72,6 +72,26 @@ def read_row(key: str) -> Optional[dict]:
         return None
 
 
+def newest_row_offline(slug_key: str, pr: str) -> Optional[dict]:
+    """The newest cached row for this PR, by mtime. No network, ever.
+
+    Deliberately head-agnostic: the caller has no head and must not fetch
+    one. The row may describe a head the PR has since moved past, so every
+    caller must render it as "as of <ts>", never as the current verdict.
+    """
+    candidates = []
+    for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
+        try:
+            candidates.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            continue  # a racing prune won; fewer candidates, not a crash
+    for _, candidate in sorted(candidates, reverse=True):
+        row = read_row(candidate.stem)
+        if row is not None:
+            return row
+    return None
+
+
 def _write_row_locked(p: Path, row: dict) -> None:
     # Caller holds the per-key flock around read + write (flock is per-fd, so
     # re-acquiring through a helper here would self-deadlock - write inline).
