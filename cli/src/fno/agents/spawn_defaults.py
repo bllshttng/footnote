@@ -246,7 +246,9 @@ def _head_flag_value(head: Sequence[str], flags: Tuple[str, ...]) -> Optional[st
             break
         key, eq, val = a.partition("=")
         if key in flags:
-            return val if eq else next(it, None) or None
+            # ``or None`` here would coerce an explicit empty value to absent,
+            # minting a graph-slug name the operator explicitly declined.
+            return val if eq else next(it, None)
         # Short attached form: -m<value> (no long-flag starts with a single dash).
         if (
             not eq
@@ -306,7 +308,9 @@ def _mint_node_name(
         node_id, slug = _node_slug_from_graph(node)
     except Exception:
         return None
-    if slug_flag:
+    if slug_flag is not None:
+        # Explicit empty string is an HONORED decline (no slug in the name),
+        # not a fallback to the graph slug.
         slug = slug_flag
     try:
         name = agent_name(

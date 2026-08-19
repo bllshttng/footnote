@@ -416,7 +416,8 @@ def cmd_spawn(
         "",
         "--name",
         help=(
-            "Agent name (optional; an adjective-noun slug is minted when omitted). "
+            "Agent name (optional; with --node a t-<node>-<slug>-<model> name "
+            "is minted when omitted, else an adjective-noun slug). "
             "A name is a handle you rarely care about, so it moved off the "
             "positional: the one positional is the prompt."
         ),

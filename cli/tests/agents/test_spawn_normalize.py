@@ -435,6 +435,13 @@ def test_node_spawn_without_model_omits_the_tag():
     assert out[2] == "t-x919-arms"
 
 
+def test_node_spawn_explicit_empty_slug_is_honored():
+    # --slug "" is a DECLINE of the slug, not an absent flag: the name must
+    # carry no slug, not fall back to the node's graph slug.
+    out = _norm(["spawn", "--node", "x919", "--slug", "", "--model", "glm-5.2", "go"])
+    assert out[2] == "t-x919-glm52"
+
+
 def test_explicit_name_still_wins_over_the_node_mint():
     argv = ["spawn", "--node", "x919", "--name", "mine", "go"]
     assert _norm(argv) == argv  # untouched; the mint never fires

@@ -2272,6 +2272,11 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             if fzf && !positionals.is_empty() {
                 return Err("--fzf takes no pane id or selector".into());
             }
+            // One target: a silently-dropped second token (two names pasted)
+            // would focus the first and report success; `view` already refuses.
+            if positionals.len() > 1 {
+                return Err("pane focus takes one pane id or selector".into());
+            }
             PaneCmd::Focus {
                 target: if fzf {
                     FocusTarget::Pick
@@ -3195,16 +3200,26 @@ impl FilterPicker {
 }
 
 /// Render the filter picker (x-b80d). Pure; the IO loop only writes this.
+/// Rendered-row window: a frame taller than the terminal scrolls on first
+/// paint and smears on every redraw (the cursor-up clear clamps at screen
+/// top), so the picker shows a window around the cursor and says how much is
+/// hidden. The cursor can still travel the whole filtered list.
+const FILTER_WINDOW: usize = 15;
+
 fn render_filter_picker(p: &FilterPicker) -> String {
     let mut out = String::new();
     out.push_str("fno panes - type to filter, \u{2191}\u{2193} move, enter focus, esc quit\r\n");
     out.push_str(&format!("filter: {}\r\n", p.filter));
-    for (i, row) in p.visible().iter().enumerate() {
-        let marker = if i == p.cursor { '>' } else { ' ' };
+    let visible = p.visible();
+    let start = p.cursor.saturating_sub(FILTER_WINDOW / 2);
+    let end = (start + FILTER_WINDOW).min(visible.len());
+    for (i, row) in visible[start..end].iter().enumerate() {
+        let sel = start + i == p.cursor;
+        let marker = if sel { '>' } else { ' ' };
         let age = row
             .age_s
             .map_or_else(|| "-".to_string(), |a| format!("{a}s"));
-        let (pre, post) = if i == p.cursor {
+        let (pre, post) = if sel {
             ("\x1b[7m", "\x1b[0m")
         } else {
             ("", "")
@@ -3212,6 +3227,14 @@ fn render_filter_picker(p: &FilterPicker) -> String {
         out.push_str(&format!(
             "{marker} {pre}{}  {}/{}  updated {age} ago{post}\r\n",
             row.name, row.session, row.pane
+        ));
+    }
+    if visible.len() > FILTER_WINDOW {
+        out.push_str(&format!(
+            "  window {}-{} of {} - type to filter\r\n",
+            start + 1,
+            end,
+            visible.len()
         ));
     }
     out
@@ -3363,10 +3386,22 @@ fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
     } else {
         bind
     };
-    // Probe liveness for ANY spelling the operator may have bound. A bare
-    // SocketAddr parse only accepts IPs, so `localhost` and `::1` would skip
-    // the probe and trust a corpse file (codex P2); the tuple form resolves
-    // hostnames and needs no IPv6 brackets.
+    // The bridge's own pid is the ownership check: the writer records it at
+    // bind, so a corpse file whose bridge is gone (kill(pid,0) -> ESRCH) reads
+    // as "no bridge" even when the OS has already reused the port for another
+    // listener - a TCP accept alone would then vouch for a dead token.
+    if state.get("pid").and_then(|v| v.as_u64()).is_some_and(|pid| {
+        crate::agents_view::pid_confirmed_dead(pid)
+    }) {
+        eprintln!("{verb}: {hint}");
+        return EXIT_ERROR;
+    }
+    // Probe liveness for ANY spelling the operator may have bound, failing
+    // CLOSED: a bind that no longer resolves is as dead as one that refuses
+    // the connection, so the probe - not the file's existence - decides. A
+    // bare SocketAddr parse only accepts IPs, so `localhost` and `::1` would
+    // skip the probe and trust a corpse file (codex P2); the tuple form
+    // resolves hostnames and needs no IPv6 brackets.
     let probe_addr = {
         use std::net::ToSocketAddrs;
         (host, port as u16)
@@ -3374,12 +3409,13 @@ fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
             .ok()
             .and_then(|mut it| it.next())
     };
-    if let Some(addr) = probe_addr {
+    let reachable = probe_addr.is_some_and(|addr| {
         let timeout = std::time::Duration::from_millis(300);
-        if std::net::TcpStream::connect_timeout(&addr, timeout).is_err() {
-            eprintln!("{verb}: {hint}");
-            return EXIT_ERROR;
-        }
+        std::net::TcpStream::connect_timeout(&addr, timeout).is_ok()
+    });
+    if !reachable {
+        eprintln!("{verb}: {hint}");
+        return EXIT_ERROR;
     }
     // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
     let url_host = if host.contains(':') {
@@ -4750,6 +4786,10 @@ mod tests {
         assert!(parse_pane_args(&os(&["focus", "--fzf", "31"])).is_err());
         assert!(parse_pane_args(&os(&["focus", "--fzf", "x919"])).is_err());
         assert!(parse_pane_args(&os(&["focus"])).is_err());
+        // A second positional is refused, not silently dropped (two names
+        // pasted would focus the first and report success).
+        assert!(parse_pane_args(&os(&["focus", "x919", "glm52"])).is_err());
+        assert!(parse_pane_args(&os(&["focus", "31", "32"])).is_err());
         // --fzf pairs with focus only.
         assert!(parse_pane_args(&os(&["ls", "--fzf"])).is_err());
     }
@@ -4799,6 +4839,29 @@ mod tests {
         q.step(PickKey::Backspace);
         assert_eq!(q.visible().len(), 2);
         assert_eq!(q.step(PickKey::Esc), FocusAction::Quit);
+    }
+
+    #[test]
+    fn filter_picker_render_windows_a_tall_roster() {
+        // A frame taller than the terminal scrolls on first paint and smears
+        // on every redraw, so the render caps the rows and says how much is
+        // hidden; the window follows the cursor so Enter never picks an
+        // unrendered row.
+        let rows: Vec<PaneRow> = (0..20)
+            .map(|i| pane_row(&format!("w{i}"), "work", i as u64 + 1))
+            .collect();
+        let mut p = FilterPicker::new(rows);
+        let head = render_filter_picker(&p);
+        assert!(head.contains("window 1-15 of 20"));
+        assert!(head.contains("w0"));
+        assert_eq!(head.matches("\r\n").count(), 2 + FILTER_WINDOW + 1);
+        for _ in 0..19 {
+            p.step(PickKey::Down);
+        }
+        let tail = render_filter_picker(&p);
+        assert!(tail.contains("window 13-20 of 20"));
+        // The highlighted (reverse-video) row is the cursor's, still rendered.
+        assert!(tail.contains("> \x1b[7mw19"));
     }
 
     #[test]

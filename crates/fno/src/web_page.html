@@ -153,6 +153,7 @@
   function renderPicker() {
     // One button per pane we have a frame for, labelled by its agent row when
     // one exists, else "pane N". Selection is local (never sent upstream).
+    expireWanted(); // Layout can claim the paint with no frame in sight
     const byPane = new Map();
     for (const a of agents) if (a.pane_id != null) byPane.set(a.pane_id, a);
     const ids = [...new Set([...frames.keys(), ...byPane.keys()])].sort((x, y) => x - y);
@@ -210,7 +211,7 @@
         dirtyPicker = true;
       }
       if (upstreamUp) setBar("live", "live");
-      if (wanted != null && wantedSince > 0 && Date.now() - wantedSince > 3000) wanted = null;
+      expireWanted();
       if (current == null) {
         // A pasted pane link pins the first paint. Keep waiting for THAT
         // pane's frame - a different pane landing first must not steal the
@@ -251,10 +252,13 @@
   // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
   // instead of whichever frame lands first, then clear the want so the operator
   // can still switch panes by hand afterwards. A want that never paints
-  // (renumbered or dead pane) is dropped after 3s so the page still opens.
+  // (renumbered or dead pane) is dropped after 3s so the page still opens -
+  // on BOTH paths that could claim the paint (Frame and Layout), not just
+  // frames: a frame-quiet bridge would otherwise hold the want forever.
   let wanted = new URLSearchParams(location.search).get("pane");
   let wantedSince = 0;
   if (wanted != null) { wanted = parseInt(wanted, 10); if (Number.isNaN(wanted)) wanted = null; if (wanted != null) wantedSince = Date.now(); }
+  function expireWanted() { if (wanted != null && wantedSince > 0 && Date.now() - wantedSince > 3000) wanted = null; }
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);

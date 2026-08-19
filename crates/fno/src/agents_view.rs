@@ -108,7 +108,7 @@ pub enum Liveness {
 /// pid 0/1 are never a worker's pid, so a stored 0/1 (corrupt row) also reads
 /// as unconfirmed rather than as license to signal the caller's own group or
 /// init.
-fn pid_confirmed_dead(pid: u64) -> bool {
+pub(crate) fn pid_confirmed_dead(pid: u64) -> bool {
     if pid <= 1 || pid > i32::MAX as u64 {
         return false;
     }

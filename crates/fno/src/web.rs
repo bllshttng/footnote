@@ -264,20 +264,29 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            // Ctrl-C is the NORMAL way a bridge ends. Without this hook the
-            // process dies straight to the signal, no Drop runs, and the
-            // state file outlives its bridge (x-b80d). Firing the watch makes
-            // every ws loop close its tab first, so graceful shutdown can
-            // actually complete instead of waiting out an open connection.
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = shutdown_tx.send(true);
-        })
-        .await
-    {
-        eprintln!("fno mux serve --web: server error: {e}");
-        return 1;
+    // The graceful window is BOUNDED: a ws task can sit in a socket.send on a
+    // full TCP window (preamble, relay, even its own Close frame) where the
+    // shutdown watch never reaches it, and axum's serve future resolves only
+    // once every connection future completes - so an unbounded wait would hang
+    // the bridge past Ctrl-C with tokio's SIGINT handler installed, the exact
+    // death this hook exists to prevent. Elapsed = drop everything, run the
+    // state-file Drop, exit; a tab that missed the Close frame sees a reset.
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // Ctrl-C is the NORMAL way a bridge ends. Without this hook the
+        // process dies straight to the signal, no Drop runs, and the
+        // state file outlives its bridge (x-b80d). Firing the watch makes
+        // every ws loop close its tab first, so graceful shutdown can
+        // actually complete instead of waiting out an open connection.
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(true);
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(2), serve).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("fno mux serve --web: server error: {e}");
+            return 1;
+        }
+        Err(_) => eprintln!("fno mux serve --web: graceful window elapsed; closing"),
     }
     0
 }
