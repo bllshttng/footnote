@@ -836,7 +836,8 @@ fn claude_row_provably_absent(
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
     row_id: Option<&str>,
 ) -> bool {
-    claude_agents.is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
+    claude_agents
+        .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
 }
 
 fn cascade_harness_session_result_with(
@@ -5580,19 +5581,29 @@ async fn handle_rm_with(
     // under the same name between resolution and this write is a different
     // row. Matching name alone would silently drop the NEW (possibly live)
     // row instead of the one this request actually resolved and tore down --
-    // the same race `dispatch.py`'s `_recipient_identity_key` guards against.
+    // the same race `dispatch.py`'s `_recipient_identity_key` guards against,
+    // and `switchboard_identity_matches` (this file) guards for mail delivery.
+    // `created_at` is load-bearing, not decorative: a codex row's
+    // `harness_session_id` sits at `None` until `late_bind_codex_sessions`
+    // binds it, and `short_id` is deterministically derived from `name`, so a
+    // respawn under a just-freed name can otherwise reproduce every other
+    // field on the stale row while it waits on its own late-bind.
     let rm_short_id = entry.short_id.clone();
     let rm_session_id = entry.harness_session_id.clone();
+    let rm_created_at = entry.created_at.clone();
     // retain() cannot fail and cannot report what it dropped, so count across
     // it via the closure's return value: a resolved name that no row in the
     // file actually carries must not report removed:true (the silent no-op
-    // mode).
+    // mode). Nor can it report WHICH rows it dropped, so the identity match
+    // above is also the only defense against dropping more than the one row
+    // this request resolved -- checked below.
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| {
             !(e.name == rm_name
                 && e.short_id == rm_short_id
-                && e.harness_session_id == rm_session_id)
+                && e.harness_session_id == rm_session_id
+                && e.created_at == rm_created_at)
         });
         before - r.entries.len()
     })
@@ -5614,6 +5625,19 @@ async fn handle_rm_with(
             format!(
                 "agent {name}: resolved to a row the registry does not hold; nothing was removed. \
                  Re-read it with `fno agents list --json` and rm by the exact `name` field."
+            ),
+        );
+    }
+    if dropped > 1 {
+        // The identity match above should select at most one row; more than
+        // one is an invariant violation, not a normal outcome, and must be
+        // loud rather than reported as a clean single-row removal.
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!(
+                "agent {name}: identity match dropped {dropped} rows, expected at most 1; \
+                 registry may need manual repair"
             ),
         );
     }
