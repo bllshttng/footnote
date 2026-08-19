@@ -515,14 +515,45 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 /// one-silent-retry-on-crash the single probe documents. The retry now re-costs
 /// one cold start for the whole batch rather than one per row. An EMPTY slice
 /// returns an empty map without spawning anything.
+///
+/// A batch that FAILS after its retry falls back to one probe per handle. That
+/// costs exactly what this function exists to delete, and it is still right,
+/// because the alternative is a total outage of the truth column. The trigger
+/// is not hypothetical: an `fno` on PATH that predates `--handles` exits 2 on
+/// the unknown option, and every worktree carries its own binary, so a
+/// half-deployed tree is the ORDINARY state right after this lands. Without the
+/// fallback every list row renders null reachability and `no-transcript`, the
+/// dormant gate can never reach the positive `done` reading an eviction needs,
+/// and `fno agents needs` reports no refused workers - all three at once, until
+/// someone runs `fno update`.
+///
+/// The fallback is keyed on a FAILURE, never on an empty answer. A batch that
+/// ran and legitimately resolved nothing returns an empty map and spends no
+/// second round; only a batch that never answered escalates. Reading "no
+/// answers" as "the batch broke" would re-spawn N processes every sweep over a
+/// roster where nothing resolves.
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
-    family1_truth_batch_retrying(
+    match family1_truth_batch_retrying(
         handles,
         family1_truth_batch_command,
         family1_truth_batch_timeout(handles.len()),
-    )
+    ) {
+        Some(probes) => probes,
+        None => {
+            eprintln!(
+                "WARN: family-1 truth batch of {} handles failed twice; \
+                 falling back to one probe per handle (is `fno` older than \
+                 `--handles`? try `fno update`)",
+                handles.len()
+            );
+            handles
+                .iter()
+                .filter_map(|handle| Some((handle.clone(), family1_truth_probe(handle)?)))
+                .collect()
+        }
+    }
 }
 
 /// The batch's wall-clock bound, scaled to the work asked for.
@@ -552,21 +583,28 @@ fn family1_truth_batch_timeout(handles: usize) -> Duration {
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
 /// can count the spawns a given failure shape actually costs - and assert that
 /// an empty slice costs none. Mirrors [`family1_truth_probe_retrying`].
+/// `None` means the batch never answered, even after its retry - the signal
+/// [`family1_truth_probe_many`] falls back on. `Some(map)` is a real answer,
+/// including `Some(empty)` for a batch that ran and resolved nothing.
 fn family1_truth_batch_retrying(
     handles: &[String],
     mut command_for_attempt: impl FnMut(&[String]) -> std::process::Command,
     timeout: Duration,
-) -> std::collections::HashMap<String, TruthProbe> {
+) -> Option<std::collections::HashMap<String, TruthProbe>> {
     if handles.is_empty() {
-        return std::collections::HashMap::new();
+        return Some(std::collections::HashMap::new());
     }
     // Warnings name the batch, not a row: no single handle owns the failure.
     let label = format!("a batch of {} handles", handles.len());
     let first = family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, false);
     if !first.crashed {
-        return first.probes;
+        return Some(first.probes);
     }
-    family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, true).probes
+    let second = family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, true);
+    if second.crashed {
+        return None;
+    }
+    Some(second.probes)
 }
 
 /// One batch run's outcome. `crashed` carries exactly the meaning
@@ -4846,7 +4884,8 @@ mod tests {
                 )
             },
             Duration::from_secs(5),
-        );
+        )
+        .expect("the batch answered");
         assert_eq!(spawns.get(), 1, "one batch, one process");
         assert_eq!(probes.len(), 2);
         let h1 = &probes["h1"];
@@ -4867,7 +4906,8 @@ mod tests {
             &[],
             |_| panic!("an empty batch must never spawn"),
             Duration::from_secs(5),
-        );
+        )
+        .expect("an empty batch is an answer, not a failure");
         assert!(probes.is_empty());
     }
 
@@ -4887,7 +4927,8 @@ mod tests {
                 }
             },
             Duration::from_secs(5),
-        );
+        )
+        .expect("the retry answered");
         assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
         assert_eq!(probes["h1"].state, "working");
 
@@ -4902,7 +4943,10 @@ mod tests {
             Duration::from_secs(5),
         );
         assert_eq!(attempts.get(), 2);
-        assert!(probes.is_empty());
+        assert!(
+            probes.is_none(),
+            "two crashes is a FAILURE, distinguishable from an empty answer"
+        );
     }
 
     #[test]
@@ -4914,7 +4958,8 @@ mod tests {
             &["h1".to_string(), "gone".to_string()],
             |_| sh("printf '{\"h1\":{\"state\":\"working\"},\"gone\":{\"state\":\"nonsense\"}}'"),
             Duration::from_secs(5),
-        );
+        )
+        .expect("the batch answered");
         assert_eq!(probes.len(), 1);
         assert!(!probes.contains_key("gone"));
     }
@@ -4965,6 +5010,35 @@ mod tests {
             family1_truth_batch_timeout(usize::MAX),
             Duration::from_secs(60),
             "an absurd handle count saturates at the ceiling"
+        );
+    }
+
+    #[test]
+    fn family1_truth_batch_distinguishes_a_failure_from_an_empty_answer() {
+        // The discriminator the per-handle fallback hangs off. An `fno` older
+        // than `--handles` exits 2 on the unknown option with empty stdout -
+        // the ordinary state right after this lands, since every worktree
+        // carries its own binary. That must read as a FAILURE.
+        let old_fno = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| sh("echo 'Error: No such option: --handles' >&2; exit 2"),
+            Duration::from_secs(5),
+        );
+        assert!(old_fno.is_none(), "an fno too old to batch is a failure");
+
+        // A batch that RAN and resolved nothing is an answer. Reading this as a
+        // failure would re-spawn one process per handle every sweep over a
+        // roster where nothing resolves - the exact cost this PR removes.
+        let answered_nothing = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| sh("printf '{}'"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            answered_nothing
+                .expect("an empty object is an answer")
+                .len(),
+            0
         );
     }
 
