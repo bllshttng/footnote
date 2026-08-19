@@ -23,12 +23,12 @@ Narration: "The demo has its own repository and Footnote state. These commands p
 ## 2. State the feature in one sentence
 
 ```run
-fno target start "Add a troubleshooting note for expired tokens"
+/fno:target "Add a troubleshooting note for expired tokens"
 ```
 
 [capture-at-record]
 
-Narration: "That sentence is the brief. Target creates an isolated worktree, binds the run, and carries the work through planning, implementation, review, and pull request creation."
+Narration: "That sentence starts the delivery workflow. Target creates an isolated worktree, then carries the work through planning, implementation, review, and pull request creation."
 
 ## 3. Leave while the run works
 

@@ -27,7 +27,7 @@ Narration: "Both review modes read the current checkout. We show the exact diff 
 
 [capture-at-record]
 
-Narration: "Sigma sends the diff to six specialist roles and aggregates their findings. It earns its cost on large, security-sensitive, or hard-to-reason-about changes."
+Narration: "Sigma selects a tiered specialist panel for this diff. Small changes use the base reviewers, while higher-risk surfaces add the relevant specialists."
 
 ## 3. Ask one other model
 
@@ -39,23 +39,24 @@ Narration: "Sigma sends the diff to six specialist roles and aggregates their fi
 
 Narration: "Peer asks one different model for a second opinion. It is cheaper and advisory by default, which fits a smaller or routine diff."
 
-## 4. Read the head the panel reviewed
+## 4. Inspect the available specialist routing
 
 ```run
-fno review --sigma-last-head
-git rev-parse HEAD
+fno review --print-providers | jq -c '{has_specialists:(length > 0)}'
 ```
 
-[capture-at-record]
+```expected
+{"has_specialists":true}
+```
 
-Narration: "A review only covers the commit it inspected. If the two heads differ after a fix, the earlier verdict is stale and the final head needs review again."
+Narration: "The mechanical review surface exposes the available specialist routing without running the panel. The selected sigma tier decides which roles inspect this diff."
 
 ## Cut list
 
 - Keep the diff summary and both review commands uncut.
 - Compress reviewer execution, but keep each reviewer name and every surviving finding visible.
 - Keep the aggregate sigma verdict and peer verdict at normal speed.
-- Keep both head values uncut so head-pinning is visible rather than asserted.
+- Keep the routing proof uncut so the available panel is visible rather than asserted.
 
 ## Publish
 

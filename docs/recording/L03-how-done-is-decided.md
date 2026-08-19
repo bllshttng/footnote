@@ -6,7 +6,7 @@
 
 ## Setup state
 
-Run the shared setup in [README.md](README.md), then enter the target worktree created in L02. Keep public merged PR 825 available as the settled comparison and set `PR_NUMBER` to the current demo PR before beat 3.
+Continue from the L02 target worktree without rerunning the shared setup. Keep public merged PR 825 available as the settled comparison and set `PR_NUMBER` to the current demo PR before beat 3. Beat 4 records from Codex and requires the ambient `CODEX_THREAD_ID`.
 
 ## 1. Read the immutable inputs
 
@@ -50,6 +50,8 @@ Narration: "The live verdict names pending checks, failures, or review blockers.
 ## 4. Watch the decision verb
 
 ```run
+TRANSCRIPT_PATH="$(find "${CODEX_HOME:-$HOME/.codex}/sessions" -type f -name "*-${CODEX_THREAD_ID}.jsonl" -print -quit)"
+test -f "$TRANSCRIPT_PATH"
 fno-agents loop-check --state .fno/target-state.md --transcript "$TRANSCRIPT_PATH" --cwd "$PWD"
 ```
 

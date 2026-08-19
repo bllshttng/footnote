@@ -27,6 +27,7 @@ Run this block before every recording except L01. L01 records installation itsel
 
 ```run
 export DEMO_ROOT=/Users/Shared/footnote-recording-demo
+if [ -e "$DEMO_ROOT" ]; then mv "$DEMO_ROOT" "${DEMO_ROOT}.previous.$(date +%Y%m%d%H%M%S)-$$"; fi
 mkdir -p "$DEMO_ROOT/state" "$DEMO_ROOT/plans"
 touch "$DEMO_ROOT/state/.path-migration-done"
 cat > "$DEMO_ROOT/config.toml" <<'TOML'
@@ -54,7 +55,7 @@ fno config doctor | sed '/post-merge:/d'
 [doctor] OK; no suspicious paths detected.
 ```
 
-The `state_dir` line is the go-ahead. If it is under `$HOME`, stop. If `pwd` is not `/Users/Shared/footnote-recording-demo/repo`, stop. An incorrect config or working directory can put real node IDs, account names, and maintainer vault paths on camera.
+The setup moves any prior demo root to a timestamped sibling before creating the new one. The `state_dir` line is the go-ahead. If it is under `$HOME`, stop. If `pwd` is not `/Users/Shared/footnote-recording-demo/repo`, stop. An incorrect config or working directory can put real node IDs, account names, and maintainer vault paths on camera.
 
 ## Terminal and capture
 

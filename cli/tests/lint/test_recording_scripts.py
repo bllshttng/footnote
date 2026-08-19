@@ -116,6 +116,31 @@ def _slash_resolution_errors(paths: list[Path], root: Path = REPO_ROOT) -> list[
                         errors.append(
                             f"{path}:{line_number}: unresolved slash command /fno:{verb}"
                         )
+                        continue
+                    try:
+                        words = shlex.split(command)
+                    except ValueError:
+                        continue
+                    if not words or words[0] != f"/fno:{verb}" or len(words) < 2:
+                        continue
+                    mode = words[1]
+                    if not re.fullmatch(r"[a-z][a-z0-9-]*", mode):
+                        continue
+                    source = skill if skill.is_file() else command_file
+                    hint = next(
+                        (
+                            line.split(":", 1)[1]
+                            for line in source.read_text().splitlines()[:20]
+                            if line.startswith("argument-hint:")
+                        ),
+                        "",
+                    )
+                    if not re.search(
+                        rf"(?<![a-z0-9-]){re.escape(mode)}(?![a-z0-9-])", hint
+                    ):
+                        errors.append(
+                            f"{path}:{line_number}: unresolved /fno:{verb} mode {mode!r}"
+                        )
     return errors
 
 
@@ -128,6 +153,24 @@ def _output_contract_errors(paths: list[Path]) -> list[str]:
                     f"{path}:{start}: run fence has no expected output or "
                     f"[capture-at-record] at line {next_line_number}"
                 )
+                continue
+            if next_line == "```expected":
+                lines = path.read_text().splitlines()
+                opening = next_line_number - 1
+                closing = next(
+                    (
+                        index
+                        for index in range(opening + 1, len(lines))
+                        if lines[index] == "```"
+                    ),
+                    None,
+                )
+                if closing is None:
+                    errors.append(
+                        f"{path}:{next_line_number}: expected fence is unclosed"
+                    )
+                elif not any(line.strip() for line in lines[opening + 1 : closing]):
+                    errors.append(f"{path}:{next_line_number}: expected fence is empty")
     return errors
 
 
@@ -173,6 +216,12 @@ def test_slash_commands_resolve_to_shipped_surface(tmp_path):
     bad.write_text("```run\n/fno:no-such-skill\n```\n\n[capture-at-record]\n")
     errors = _slash_resolution_errors([bad])
     assert errors == [f"{bad}:2: unresolved slash command /fno:no-such-skill"]
+    bad_mode = tmp_path / "bad-mode.md"
+    bad_mode.write_text("```run\n/fno:review no-such-mode\n```\n\n[capture-at-record]\n")
+    errors = _slash_resolution_errors([bad_mode])
+    assert errors == [
+        f"{bad_mode}:2: unresolved /fno:review mode 'no-such-mode'"
+    ]
 
 
 def test_run_fences_have_captured_or_deferred_output(tmp_path):
@@ -182,6 +231,16 @@ def test_run_fences_have_captured_or_deferred_output(tmp_path):
     errors = _output_contract_errors([bad])
     assert errors == [
         f"{bad}:1: run fence has no expected output or [capture-at-record] at line 5"
+    ]
+    empty = tmp_path / "empty.md"
+    empty.write_text("```run\nfno status\n```\n\n```expected\n```\n")
+    assert _output_contract_errors([empty]) == [
+        f"{empty}:5: expected fence is empty"
+    ]
+    unclosed = tmp_path / "unclosed.md"
+    unclosed.write_text("```run\nfno status\n```\n\n```expected\nstatus\n")
+    assert _output_contract_errors([unclosed]) == [
+        f"{unclosed}:5: expected fence is unclosed"
     ]
 
 
