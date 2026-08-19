@@ -1235,10 +1235,24 @@ PYEOF
       # omit --pid and degrade to TTL-only liveness, byte-for-byte as before.
       _SESSION_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
       _PID_FLAGS=""; [[ "$_SESSION_PID" =~ ^[0-9]+$ ]] && _PID_FLAGS="--pid $_SESSION_PID"
+      # Inherit the claim `fno agents spawn --node` took for this worker, rather
+      # than colliding with it. The spawner claims the node before the worker
+      # exists so the node never reads free mid-launch; without this the
+      # worker's own acquire would hit that claim, see a different holder, and
+      # turn a closed visibility hole into a dead launch.
+      #
+      # The holder arrives in the environment, so only the process spawned for
+      # this node can name it, and naming it exactly is the proof the handover
+      # requires. Unset (every hand-started or non-spawn run) => zero args and
+      # an ordinary acquire, byte-for-byte as before.
+      _HANDOVER_FLAGS=""
+      [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+        _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
+            $_HANDOVER_FLAGS \
             $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment

@@ -185,6 +185,17 @@ def acquire(
             "the precedence winner."
         ),
     ),
+    handover_from: Optional[str] = typer.Option(
+        None,
+        "--handover-from",
+        help=(
+            "Take over a claim currently held by this EXACT prior holder, "
+            "instead of failing as held-by-other. For the dispatch handover: "
+            "`fno agents spawn --node` claims the node before its worker "
+            "exists, and the worker names that holder here to inherit it. "
+            "Falls through to a normal acquire when no such claim is on disk."
+        ),
+    ),
 ) -> None:
     """Acquire a claim on KEY for HOLDER. Idempotent re-acquire if HOLDER matches.
 
@@ -232,6 +243,33 @@ def acquire(
             pid = resolve_session_pid()
         except Exception:
             pid = None  # degrade to acquire_claim's os.getpid() default
+    # The handover runs FIRST and is strictly additive: it either moves a claim
+    # whose prior holder the caller named exactly, or it declines and the
+    # ordinary acquire below runs unchanged. Declining covers every case that is
+    # not this handover - no claim on disk, a free key, a different holder - and
+    # acquire then applies its own rules, including refusing a live foreign
+    # claim. So a wrong or stale --handover-from never widens what can be taken.
+    if handover_from and key:
+        from .core import RebindRefused, compare_and_rebind
+
+        try:
+            claim, _mode = compare_and_rebind(
+                key,
+                handover_from,
+                new_holder=holder,
+                new_pid=pid,
+                ttl_ms=_parse_ttl(ttl),
+                root=_node_aware_root(key),
+            )
+        except RebindRefused:
+            pass
+        else:
+            typer.echo(
+                json.dumps(claim.model_dump(mode="json"))
+                if json_output
+                else f"acquired {key} (handover from {handover_from})"
+            )
+            return
     try:
         claim = acquire_claim(
             key=key,
@@ -937,6 +975,13 @@ def list_cmd(
         )
 
 
+#: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
+#: a worker that does not exist yet. Worker-specific (it carries the worker's
+#: name), so naming it back is evidence of being the intended successor rather
+#: than a bystander who guessed the key.
+HANDOVER_HOLDER_PREFIX = "spawn-handover:"
+
+
 def _abandonment_probe(reading: Optional[RosterReading] = None):
     """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
 
@@ -956,6 +1001,20 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     cache: dict = {}
 
     def _probe(claim) -> Optional[bool]:
+        if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
+            # A launch window, not an abandoned session. The probe's whole
+            # premise is that a node claim has a roster-visible counterpart, and
+            # between spawn and `target init` that is false BY CONSTRUCTION: the
+            # worker's node identity comes from a worktree manifest or a ledger
+            # row, and neither exists yet. Answering from the roster here would
+            # read every in-flight launch as abandoned and clear the claim out
+            # from under the worker it was taken for.
+            #
+            # Nothing is stranded by declining. The handover claim is TTL-bound
+            # to the launch gap, so a spawn that dies leaves a claim that EXPIRES
+            # and an expired claim is provably dead on its own, host and roster
+            # irrelevant.
+            return None
         if "reading" not in cache:
             cache["reading"] = (
                 reading

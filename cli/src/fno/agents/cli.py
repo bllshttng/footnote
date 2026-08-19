@@ -136,8 +136,16 @@ def _spawn_guard_decision(
     ttl: str = "3m",
     no_reserve: bool = False,
     cwd: str | None = None,
+    handover_holder: str | None = None,
 ) -> tuple[dict[str, str], int]:
-    """Return the shared family-2 pre-birth verdict without rendering it."""
+    """Return the shared family-2 pre-birth verdict without rendering it.
+
+    ``handover_holder``, when given, also takes the ``node:<id>`` claim under
+    that holder for the launch window, so the node reads as worked from the
+    moment it is dispatched rather than from whenever the worker reaches its
+    own ``fno target init``. Probes omit it: `--no-reserve` returns before this
+    and takes nothing.
+    """
     from fno.claims.cli import _parse_ttl
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, claim_status
     from fno.claims.io import claims_root_for
@@ -281,11 +289,70 @@ def _spawn_guard_decision(
             "reason": "duplicate-claim",
             "holder": post.get("holder") or "unknown",
         }, 0
-    return {
+    out = {
         "verdict": "dispatchable",
         "reservation_key": res_key,
         "reservation_holder": holder,
-    }, 0
+    }
+    if handover_holder:
+        # THE node claim, not another reservation. dispatch:<id> is a launch-
+        # window mutex on a key nobody reads: five workers were spawned with an
+        # explicit --node tonight and not one of them was visible to `fno claim
+        # status node:<id>`, so four kings read those nodes as free (x-cd1e).
+        #
+        # --node is the only dispatch path holding the node id as a TYPED
+        # argument rather than as prose to be re-derived, which is why the claim
+        # belongs here and why there are exactly two producers of this key, not
+        # more. The other is `fno target init`, and the worker inherits this
+        # claim from it rather than taking a second one.
+        #
+        # A failure to claim is NOT a refusal to launch. The reservation above
+        # already prevents the double dispatch this would also prevent, so
+        # turning a claim hiccup into a dead launch would trade a visibility bug
+        # for an availability one.
+        try:
+            acquire_claim(
+                node_key,
+                handover_holder,
+                reason=f"spawn handover window for {node_id}",
+                ttl_ms=_parse_ttl(HANDOVER_TTL),
+                root=claims_root_for(node_key),
+            )
+        except Exception as exc:  # noqa: BLE001 - visibility is best-effort here
+            out["node_claim_error"] = str(exc)
+        else:
+            out["node_claim_key"] = node_key
+            out["node_claim_holder"] = handover_holder
+    return out, 0
+
+
+#: Lease on the spawn-side node claim. It has to outlive the launch-to-init gap
+#: or the node reads free again mid-launch, which is the exact hole this closes;
+#: the reservation's 3m is the window for ONE process to fork, not for a harness
+#: to boot and reach its first `fno target init`. It stays short because a spawn
+#: that dies inside it strands the node until expiry, and an expired claim is
+#: provably dead on its own so the wedge self-clears.
+HANDOVER_TTL = "15m"
+
+
+def _release_dispatch_claims(*claims) -> None:
+    """Release every claim a failed dispatch took, best-effort.
+
+    One helper for both failure paths. They used to release only the
+    reservation, in two copies, and adding the node claim to one of them is how
+    a guard ends up on one of N paths.
+    """
+    from fno.claims.core import release_claim
+    from fno.claims.io import claims_root_for
+
+    for pair in claims:
+        if pair is None:
+            continue
+        key, holder = pair
+        try:
+            release_claim(key, holder, root=claims_root_for(key))
+        except Exception:  # noqa: BLE001 - a stuck release must not mask the real error
+            pass
 
 
 def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -> None:
@@ -1427,6 +1494,7 @@ def cmd_spawn(
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
     node_reservation: tuple[str, str] | None = None
+    node_claim: tuple[str, str] | None = None
     if node is not None:
         guarded_node = prov_env.get("FNO_NODE")
         if not guarded_node:
@@ -1437,10 +1505,14 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
         guard_holder = f"spawn-cli:{os.getpid()}"
+        from fno.claims.cli import HANDOVER_HOLDER_PREFIX
+
+        handover_holder = f"{HANDOVER_HOLDER_PREFIX}{name}"
         guard, guard_exit = _spawn_guard_decision(
             guarded_node,
             guard_holder,
             cwd=str(workdir),
+            handover_holder=handover_holder,
         )
         if guard.get("verdict") != "dispatchable":
             guard_reason = (
@@ -1458,6 +1530,22 @@ def cmd_spawn(
             guard["reservation_key"],
             guard["reservation_holder"],
         )
+        if guard.get("node_claim_key"):
+            # Released on the SAME two failure paths as the reservation. A
+            # launch that dies after the claim must not strand the node for the
+            # whole handover window; that is the wedge this PR exists to delete,
+            # reintroduced by its own fix.
+            node_claim = (guard["node_claim_key"], guard["node_claim_holder"])
+            # The worker proves it is the intended successor by naming this
+            # holder back. It travels in the environment, never on the command
+            # line, so it reaches exactly the process spawned for this node.
+            prov_env["FNO_NODE_CLAIM_HOLDER"] = guard["node_claim_holder"]
+        elif guard.get("node_claim_error"):
+            print(
+                f"note: node:{guarded_node} claim not taken at dispatch "
+                f"({guard['node_claim_error']}); the worker claims it at init",
+                file=sys.stderr,
+            )
 
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
@@ -1521,12 +1609,7 @@ def cmd_spawn(
             route_provider=route_provider,
         )
     except BaseException:
-        if node_reservation is not None:
-            from fno.claims.core import release_claim
-            from fno.claims.io import claims_root_for
-
-            key, holder = node_reservation
-            release_claim(key, holder, root=claims_root_for(key))
+        _release_dispatch_claims(node_reservation, node_claim)
         raise
 
     # Prior values of the provenance keys the bg/headless arm exports below, so
@@ -1761,12 +1844,8 @@ def cmd_spawn(
         # Release the gate's claims once the dispatch result exists (or the
         # spawn failed): registry/roster rows carry the count from here.
         gate.release()
-        if node_reservation is not None and not spawn_succeeded:
-            from fno.claims.core import release_claim
-            from fno.claims.io import claims_root_for
-
-            key, holder = node_reservation
-            release_claim(key, holder, root=claims_root_for(key))
+        if not spawn_succeeded:
+            _release_dispatch_claims(node_reservation, node_claim)
         for _k, _v in prov_prev.items():
             if _v is None:
                 os.environ.pop(_k, None)

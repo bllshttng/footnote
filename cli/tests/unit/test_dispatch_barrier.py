@@ -281,3 +281,133 @@ def test_a_blind_roster_never_clears_a_node_claim(monkeypatch, tmp_path):
     _fake_roster(monkeypatch, rows=[], warnings=["registry unreadable"])
     _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
+
+
+# ---------------------------------------------------------------------------
+# spawn --node takes THE node claim, and the worker inherits it (x-cd1e)
+# ---------------------------------------------------------------------------
+
+
+def test_the_guard_claims_the_node_key_not_just_the_reservation(monkeypatch, tmp_path):
+    """The measured defect: five workers spawned with an explicit --node and
+    `fno claim status node:<id>` read free for every one of them."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import claim_status
+
+    verdict, _exit = _spawn_guard_decision(
+        "N", "spawn-cli:1", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
+    assert verdict["verdict"] == "dispatchable"
+    info = claim_status("node:N", root=tmp_path)
+    assert info["state"] in ("live", "suspect"), info
+    assert info["holder"] == "spawn-handover:t-N"
+
+
+def test_a_probe_takes_no_claim(monkeypatch, tmp_path):
+    """spawn.sh probes with --no-reserve before the real spawn. A probe that
+    claimed would hand the node to a dispatcher that never launched."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import claim_status
+
+    _spawn_guard_decision("N", "spawn-cli:1", no_reserve=True)
+    assert claim_status("node:N", root=tmp_path)["state"] == "free"
+
+
+def test_the_worker_inherits_the_claim_without_a_refusal(monkeypatch, tmp_path):
+    """x-cd1e case 6. The handover must not abort the worker, and the key must
+    never read free in between - the gap is the whole point of claiming early."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.cli import cli as claims_cli
+    from fno.claims.core import claim_status
+
+    _spawn_guard_decision(
+        "N", "spawn-cli:1", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
+    r = runner.invoke(
+        claims_cli,
+        [
+            "acquire", "node:N",
+            "--holder", "target-session:sid-1",
+            "--ttl", "2h",
+            "--pid", str(os.getpid()),
+            "--handover-from", "spawn-handover:t-N",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    info = claim_status("node:N", root=tmp_path)
+    assert info["holder"] == "target-session:sid-1"
+    assert info["state"] == "live"
+
+
+def test_a_wrong_handover_holder_cannot_take_a_live_claim(monkeypatch, tmp_path):
+    """Naming the prior holder is the proof. Guessing wrong falls through to an
+    ordinary acquire, which refuses a live foreign claim exactly as today."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.cli import cli as claims_cli
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:incumbent", ttl_ms=3_600_000,
+        pid=os.getpid(), root=tmp_path,
+    )
+    r = runner.invoke(
+        claims_cli,
+        [
+            "acquire", "node:N",
+            "--holder", "target-session:intruder",
+            "--ttl", "2h",
+            "--handover-from", "spawn-handover:t-guessed",
+        ],
+    )
+    assert r.exit_code == 1, r.output
+    assert claim_status("node:N", root=tmp_path)["holder"] == "target-session:incumbent"
+
+
+def test_handover_from_with_no_claim_on_disk_acquires_normally(monkeypatch, tmp_path):
+    """Every hand-started run and every spawn whose claim failed lands here."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.cli import cli as claims_cli
+    from fno.claims.core import claim_status
+
+    r = runner.invoke(
+        claims_cli,
+        [
+            "acquire", "node:N",
+            "--holder", "target-session:sid-2",
+            "--ttl", "2h",
+            "--handover-from", "spawn-handover:t-never-was",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert claim_status("node:N", root=tmp_path)["holder"] == "target-session:sid-2"
+
+
+def test_a_launch_window_claim_is_never_probed_as_abandoned(monkeypatch, tmp_path):
+    """The collision between claiming early and reaping the abandoned: between
+    spawn and target init the worker has no manifest and no ledger row, so the
+    roster CANNOT see it. Probing anyway would clear the claim out from under
+    the worker it was taken for."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.cli import _abandonment_probe
+    from fno.claims.core import claim_status
+    from fno.claims.io import claim_path, read_claim_file
+
+    _spawn_guard_decision(
+        "N", "spawn-cli:1", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("roster consulted for a launch-window claim")
+
+    monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
+    claim = read_claim_file(claim_path("node:N", root=tmp_path))
+    assert _abandonment_probe()(claim) is None
+
+    # And the guard therefore refuses to clear it.
+    verdict, _exit = _spawn_guard_decision("N", "spawn-cli:2", ttl="3m")
+    assert verdict["verdict"] == "already-running"
+    assert claim_status("node:N", root=tmp_path)["holder"] == "spawn-handover:t-N"

@@ -467,7 +467,13 @@ def acquire_claim(
     )
 
 
-def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Claim:
+def _rebound_claim(
+    existing: Claim,
+    new_pid: int,
+    ttl_ms: Optional[int],
+    *,
+    new_holder: Optional[str] = None,
+) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
     The native-resume rebind keeps ``key``/``holder``/``reason``/``metadata``/
@@ -476,6 +482,11 @@ def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Clai
     PID-liveness claim stays PID-liveness (``ttl_ms`` None and no prior
     ``expires_at``); a TTL claim refreshes to ``now + prior_window`` so the
     deadline never compounds across rebinds (the renew() lesson).
+
+    ``new_holder`` is the one exception to "identity preserved", and only the
+    dispatch handover passes it: the spawn side and the worker side of one
+    launch are genuinely different names for one piece of work. Its caller
+    proved the prior holder first; see :func:`compare_and_rebind`.
     """
     acquired = now_ms()
     if ttl_ms is not None:
@@ -487,7 +498,7 @@ def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Clai
     return Claim(
         schema_version=existing.schema_version,
         key=existing.key,
-        holder=existing.holder,
+        holder=new_holder or existing.holder,
         acquired_at=acquired,
         expires_at=expires_at,
         pid=new_pid,
@@ -503,6 +514,7 @@ def compare_and_rebind(
     key: str,
     expected_holder: str,
     *,
+    new_holder: Optional[str] = None,
     new_pid: Optional[int] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
@@ -532,6 +544,25 @@ def compare_and_rebind(
     Never creates a missing/free claim and never archives another holder (that
     is the explicit ``fno target start`` successor path). Emits ``claim_rebound``;
     raises ``RebindRefused`` on any refusal.
+
+    ``new_holder`` moves the claim to a DIFFERENT holder on proof of the prior
+    one (x-cd1e). The dispatch handover needs it: ``fno agents spawn --node``
+    takes the node claim before the worker exists, and the worker's own
+    ``fno target init`` must then take it over rather than find it held and
+    abort. ``acquire_claim`` cannot do this - it raises ``ClaimHeldByOther`` for
+    a different holder on a live claim - and the same-holder rebind above cannot
+    either, because the two ends genuinely have different names.
+
+    Proof is what makes the move safe, and it is the SAME proof the same-holder
+    path already demands: the caller must name the exact prior holder, and this
+    re-reads under the mutex and refuses on any mismatch. The spawn-side holder
+    is worker-specific and reaches only that worker (exported into its
+    environment), so naming it is evidence of being the intended successor
+    rather than a bystander who guessed a key. A live prior PID that is not this
+    one still refuses as a concurrent writer, so the move never yanks a running
+    owner.
+
+    Omitting it preserves the holder, which is every pre-existing caller.
 
     Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
     rebound) or ``"idempotent"`` (a live same-PID lease refresh).
@@ -591,7 +622,7 @@ def compare_and_rebind(
         if state == ClaimState.LIVE:
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
-                rebound = _rebound_claim(existing, npid, ttl_ms)
+                rebound = _rebound_claim(existing, npid, ttl_ms, new_holder=new_holder)
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
                     emit_claim_rebound(
@@ -625,7 +656,7 @@ def compare_and_rebind(
             )
 
         # Local same-holder, prior PID dead: the resume rebind.
-        rebound = _rebound_claim(existing, npid, ttl_ms)
+        rebound = _rebound_claim(existing, npid, ttl_ms, new_holder=new_holder)
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
             emit_claim_rebound(
