@@ -23,7 +23,7 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str):
     }]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr(
-        "fno.pr._proc.run",
+        "fno.pr._merge.run",
         lambda *a, **k: Result(0, "https://github.com/o/r/pull/42\n", ""),
     )
     return graph

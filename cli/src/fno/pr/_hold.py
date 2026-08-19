@@ -11,12 +11,13 @@ class HoldLookupError(RuntimeError):
 
 
 def _pr_url(pr_number: int, cwd: str) -> str:
-    from fno.pr._proc import ToolMissing, run
+    from fno.pr import _merge
+    from fno.pr._proc import ToolMissing
 
     try:
-        result = run(
-            ["gh", "pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
-            cwd=cwd,
+        result = _merge._gh(
+            ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
+            cwd,
         )
     except ToolMissing as exc:
         raise HoldLookupError("gh CLI is unavailable") from exc
@@ -35,6 +36,15 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         entries = read_graph(graph_json())
     except Exception as exc:  # noqa: BLE001 - hold reads fail closed
         raise HoldLookupError(f"backlog graph is unreadable: {exc}") from exc
+    from fno.graph._reconcile import node_pr_refs
+
+    if not any(
+        number == pr_number
+        for entry in entries
+        if isinstance(entry, dict)
+        for number, _url in node_pr_refs(entry)
+    ):
+        return None
     url = _pr_url(pr_number, cwd)
     node_id = _find_pr_node_id(entries, pr_number, url)
     if node_id is None:

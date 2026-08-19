@@ -678,6 +678,8 @@ def test_merge_lock_released_after_merge(enabled, monkeypatch, tmp_path, capsys)
 def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_path):
     import fno.paths as paths
 
+    monkeypatch.setattr("fno.pr._hold.merge_hold_reason", lambda pr, cwd: None)
+
     def _boom():
         raise RuntimeError("no canonical root")
 
