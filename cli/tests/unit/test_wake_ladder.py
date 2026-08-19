@@ -169,6 +169,91 @@ def test_respawn_ok_inject_miss_does_not_create_second_worker(monkeypatch):
     assert spawned == []
 
 
+def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypatch):
+    from fno.agents.registry import RegistryVersionError
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry(
+            "exited", provider="zai", route_settings_path="/route.json"
+        ),
+    )
+    events = []
+
+    class _Gate:
+        def release_gate_mutex(self):
+            events.append("release-mutex")
+
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate", lambda *args, **kwargs: _Gate()
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(
+        dispatch,
+        "_stamp_revived_live",
+        lambda entry: (_ for _ in ()).throw(RegistryVersionError("changed")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.claude_stop",
+        lambda short: events.append(("stop", short)) or (0, ""),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("forked")),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is False and detail == "spawn-error-RuntimeError"
+    assert events == [("stop", "abc12345"), "release"]
+
+
+def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
+    from fno.agents.registry import RegistryVersionError
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry(
+            "exited", provider="zai", route_settings_path="/route.json"
+        ),
+    )
+    events = []
+
+    class _Gate:
+        def release_gate_mutex(self):
+            events.append("release-mutex")
+
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate", lambda *args, **kwargs: _Gate()
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(
+        dispatch,
+        "_stamp_revived_live",
+        lambda entry: (_ for _ in ()).throw(RegistryVersionError("changed")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.claude_stop",
+        lambda short: (_ for _ in ()).throw(OSError("stop unavailable")),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is False and detail == "spawn-error-RuntimeError"
+    assert events == ["release-mutex"]
+
+
 def test_live_roster_skips_rung2_and_forks(monkeypatch):
     # A LIVE row is not exited -> rung 2 does not apply (a live session is the
     # caller's rung-1 job; reaching here means inject failed, so fork is honest).

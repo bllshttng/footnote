@@ -161,6 +161,21 @@ class BusinessRoleRoutingProjectionError(RouteCompositionError):
     """A resolved business role lacks a deterministic provider/model route."""
 
 
+class BoundRouteEnv(dict[str, str]):
+    """A validated route environment carrying its model-provider identity."""
+
+    def __init__(self, route: Mapping[str, str], provider: str) -> None:
+        super().__init__(route)
+        self.provider = provider
+
+
+def bind_route_provider(
+    route: Mapping[str, str], provider: str
+) -> BoundRouteEnv:
+    """Bind a trusted provider resolution to the environment it produced."""
+    return BoundRouteEnv(route, provider)
+
+
 def resolve_spawn_route(
     role: Optional[str],
     route_env: Optional[Mapping[str, str]] = None,
@@ -202,16 +217,27 @@ def resolve_spawn_route(
     the old trigger read the CALLING process's credential slot, naming an
     account the spawn never used.
     """
-    route = (
-        dict(route_env)
-        if route_env
-        else resolve_route(
+    provider_names: list[str] = []
+    if route_env:
+        route_provider = getattr(route_env, "provider", None)
+        route = (
+            BoundRouteEnv(route_env, route_provider)
+            if isinstance(route_provider, str) and route_provider
+            else dict(route_env)
+        )
+        if isinstance(route_provider, str) and route_provider:
+            provider_names.append(route_provider)
+    else:
+        route = resolve_route(
             role,
             notice=notice,
             business_lookup=business_lookup,
-            resolved_provider=resolved_provider,
+            resolved_provider=provider_names.append,
         )
-    )
+        if route and provider_names:
+            route = BoundRouteEnv(route, provider_names[-1])
+    if provider_names and resolved_provider is not None:
+        resolved_provider(provider_names[-1])
     if route:
         route_intent = intent or (
             f"routed role {role!r}" if role is not None else "pre-resolved route"

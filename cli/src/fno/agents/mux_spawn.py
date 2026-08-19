@@ -2016,13 +2016,13 @@ def dispatch_spawn_pane(
         model=model,
     )
     launch_role = role
+    resolved_providers: list[str] = []
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
             resolve_spawn_route,
         )
 
-        resolved_providers: list[str] = []
         try:
             route_env = resolve_spawn_route(
                 role,
@@ -2042,6 +2042,12 @@ def dispatch_spawn_pane(
             route_provider = resolved_provider
         launch_role = None
 
+    if provider == "claude" and route_env and not resolved_providers:
+        raise DispatchAskError(
+            "pre-resolved route has no bound model-provider identity; refusing "
+            "because its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
     if provider == "claude" and route_env and route_provider is None:
         raise DispatchAskError(
             "resolved route has no model-provider axis; refusing to launch because "
@@ -2050,9 +2056,11 @@ def dispatch_spawn_pane(
         )
     if route_provider is not None and not (
         provider_gate is not None
-        and getattr(provider_gate, "authorizes_provider", lambda _p: False)(
-            route_provider
-        )
+        and getattr(
+            provider_gate,
+            "consume_provider",
+            lambda _provider, _name, _substrate: False,
+        )(route_provider, name, "pane")
     ):
         raise DispatchAskError(
             f"provider {route_provider!r} has no matching admission token; "

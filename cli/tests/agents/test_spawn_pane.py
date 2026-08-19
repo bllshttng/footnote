@@ -114,20 +114,26 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
 
     runner = kwargs.pop("runner", FakeRunner())
     provider = kwargs.pop("provider", "claude")
+    name = kwargs.pop("name", "peer")
     # Routed Claude fixtures in this module are z.ai routes. Supply the vendor
     # axis explicitly so the production seam never has to infer it from env.
     if provider == "claude" and kwargs.get("route_env") is not None:
         kwargs.setdefault("route_provider", "zai")
     if kwargs.get("route_provider") is not None:
+        from fno.agents.model_routing import bind_route_provider
         from fno.agents.spawn_gate import run_gate
 
         monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        if kwargs.get("route_env") is not None:
+            kwargs["route_env"] = bind_route_provider(
+                kwargs["route_env"], kwargs["route_provider"]
+            )
         kwargs.setdefault(
             "provider_gate",
-            run_gate("test-spawn-pane", "pane", route_provider=kwargs["route_provider"]),
+            run_gate(name, "pane", route_provider=kwargs["route_provider"]),
         )
     result = dispatch_spawn_pane(
-        name=kwargs.pop("name", "peer"),
+        name=name,
         message=kwargs.pop("message", "hello"),
         provider=provider,
         cwd=kwargs.pop("cwd", tmp_path),
@@ -1977,8 +1983,8 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
     class Gate:
-        def authorizes_provider(self, provider: str) -> bool:
-            return provider == "zai"
+        def consume_provider(self, provider: str, name: str, substrate: str) -> bool:
+            return provider == "zai" and substrate == "pane"
 
         def release(self) -> None:
             pass

@@ -57,11 +57,11 @@ class _FakeRunner:
         raise AssertionError(f"unexpected invocation: {argv}")
 
 
-def _admitted_zai(monkeypatch):
+def _admitted_zai(monkeypatch, name: str = "router"):
     from fno.agents.spawn_gate import run_gate
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
-    return run_gate("test-route-survival", "bg", route_provider="zai")
+    return run_gate(name, "bg", route_provider="zai")
 
 
 def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
@@ -71,12 +71,17 @@ def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     if kwargs.get("route_provider") is not None:
+        from fno.agents.model_routing import bind_route_provider
         from fno.agents.spawn_gate import run_gate
 
         monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        if kwargs.get("route_env") is not None:
+            kwargs["route_env"] = bind_route_provider(
+                kwargs["route_env"], kwargs["route_provider"]
+            )
         kwargs.setdefault(
             "provider_gate",
-            run_gate("test-route-survival", "pane", route_provider=kwargs["route_provider"]),
+            run_gate("router", "pane", route_provider=kwargs["route_provider"]),
         )
 
     return dispatch_spawn_pane(

@@ -587,15 +587,24 @@ class GateGuard:
     _worker_key: Optional[str] = None
     _worker_holder: Optional[str] = None
     _route_provider: Optional[str] = None
+    _spawn_name: Optional[str] = None
+    _substrate: Optional[str] = None
     _admission_token: object | None = None
+    _consumed: bool = False
     _released: bool = False
 
-    def authorizes_provider(self, provider: str) -> bool:
-        return (
+    def consume_provider(self, provider: str, name: str, substrate: str) -> bool:
+        authorized = (
             self._admission_token is _PROVIDER_ADMISSION_TOKEN
             and self._route_provider == provider
+            and self._spawn_name == name
+            and self._substrate == substrate
+            and not self._consumed
             and not self._released
         )
+        if authorized:
+            self._consumed = True
+        return authorized
 
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
@@ -746,6 +755,8 @@ def run_gate(
         _maybe_emit_spawn_cap_escape()
         return GateGuard(
             _route_provider=route_provider,
+            _spawn_name=name,
+            _substrate=substrate,
             _admission_token=_PROVIDER_ADMISSION_TOKEN,
         )
     try:
@@ -764,6 +775,8 @@ def run_gate(
     holder = f"spawn-gate:{os.getpid()}:{name}"
     guard = GateGuard(
         _route_provider=route_provider,
+        _spawn_name=name,
+        _substrate=substrate,
         _admission_token=_PROVIDER_ADMISSION_TOKEN,
     )
 

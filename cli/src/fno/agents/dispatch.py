@@ -2344,13 +2344,13 @@ def dispatch_spawn(
         account_env = _pick_account_env(role=role, route_env=route_env)
 
     launch_role = role
+    resolved_providers: list[str] = []
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
             resolve_spawn_route,
         )
 
-        resolved_providers: list[str] = []
         try:
             route_env = resolve_spawn_route(
                 role,
@@ -2371,17 +2371,26 @@ def dispatch_spawn(
             route_provider = resolved_provider
         launch_role = None
 
+    if provider == "claude" and route_env and not resolved_providers:
+        raise DispatchAskError(
+            "pre-resolved route has no bound model-provider identity; refusing "
+            "because its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
     if provider == "claude" and route_env and route_provider is None:
         raise DispatchAskError(
             "resolved route has no model-provider axis; refusing to launch because "
             "its provider cap cannot be evaluated; no worker launched",
             exit_code=2,
         )
+    spawn_substrate = "headless" if headless else "bg"
     if route_provider is not None and not (
         provider_gate is not None
-        and getattr(provider_gate, "authorizes_provider", lambda _p: False)(
-            route_provider
-        )
+        and getattr(
+            provider_gate,
+            "consume_provider",
+            lambda _provider, _name, _substrate: False,
+        )(route_provider, name, spawn_substrate)
     ):
         raise DispatchAskError(
             f"provider {route_provider!r} has no matching admission token; "
@@ -2587,12 +2596,15 @@ def dispatch_spawn(
                     # route that skipped it would be the one route in the system
                     # exempt from the check - a guard every other route pays and
                     # this one does not.
-                    from fno.agents.model_routing import resolve_spawn_route
+                    from fno.agents.model_routing import (
+                        bind_route_provider,
+                        resolve_spawn_route,
+                    )
 
                     try:
                         route_env = resolve_spawn_route(
                             None,
-                            restored_route,
+                            bind_route_provider(restored_route, restored_provider),
                             intent=f"route recorded for {source_row.name!r}",
                             notice=lambda note: print(note, file=sys.stderr),
                         )
@@ -6258,7 +6270,37 @@ def wake_and_deliver(
             if guard is not None:
                 try:
                     if _respawn_claude_session(short) == 0:
-                        _stamp_revived_live(entry)
+                        try:
+                            _stamp_revived_live(entry)
+                        except Exception as stamp_error:
+                            from fno.agents.harnesses.claude import claude_stop
+
+                            try:
+                                stop_code, stop_detail = claude_stop(short)
+                            except Exception as stop_error:
+                                if gate is not None:
+                                    gate.release_gate_mutex()
+                                    gate = None
+                                raise RuntimeError(
+                                    f"revived worker {short} could not be recorded "
+                                    "or stopped; provider reservation retained"
+                                ) from stop_error
+                            if stop_code != 0 and gate is not None:
+                                # The live worker could not be made countable or
+                                # stopped. Release only the serialization mutex;
+                                # retaining its provider reservation makes later
+                                # matching counts refuse instead of failing open.
+                                gate.release_gate_mutex()
+                                gate = None
+                                raise RuntimeError(
+                                    f"revived worker {short} could not be recorded "
+                                    f"or stopped ({stop_detail}); provider reservation "
+                                    "retained"
+                                ) from stamp_error
+                            raise RuntimeError(
+                                f"revived worker {short} was stopped because its live "
+                                "registry stamp failed"
+                            ) from stamp_error
                         for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
                             if _mail_inject_claude(session_uuid, wrapped):
                                 return True, short

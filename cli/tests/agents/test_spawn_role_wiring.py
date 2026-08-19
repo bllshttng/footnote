@@ -48,11 +48,11 @@ def _resolved_zai(route: dict[str, str]):
     return resolve
 
 
-def _zai_admission(monkeypatch):
+def _zai_admission(monkeypatch, name: str, substrate: str = "bg"):
     from fno.agents.spawn_gate import run_gate
 
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
-    return run_gate("test-routed-spawn", "bg", route_provider="zai")
+    return run_gate(name, substrate, route_provider="zai")
 
 
 def test_dispatch_spawn_threads_captured_role_route_to_create_path(
@@ -79,7 +79,7 @@ def test_dispatch_spawn_threads_captured_role_route_to_create_path(
         provider="claude",
         cwd=tmp_path,
         role="consolidate",
-        provider_gate=_zai_admission(monkeypatch),
+        provider_gate=_zai_admission(monkeypatch, "dreamer"),
     )
     assert result.kind == "created"
     assert captured["role"] is None
@@ -145,7 +145,7 @@ def test_direct_dispatch_spawn_composes_managed_role_route(
         provider="claude",
         cwd=tmp_path,
         role="tidy",
-        provider_gate=_zai_admission(monkeypatch),
+        provider_gate=_zai_admission(monkeypatch, "direct-route"),
     )
     assert result.kind == "created"
     assert captured["route_env"] == route
@@ -157,6 +157,7 @@ def test_direct_pane_spawn_composes_managed_route_before_mux(
     """The direct pane API composes the same route the bg lane does."""
     _setup_tmp_home(tmp_path, monkeypatch)
 
+    from fno.agents.model_routing import bind_route_provider
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
@@ -178,9 +179,9 @@ def test_direct_pane_spawn_composes_managed_route_before_mux(
         provider="claude",
         cwd=tmp_path,
         role="tidy",
-        route_env=_route_unit(),
+        route_env=bind_route_provider(_route_unit(), "zai"),
         route_provider="zai",
-        provider_gate=_zai_admission(monkeypatch),
+        provider_gate=_zai_admission(monkeypatch, "direct-pane-route", "pane"),
         runner=runner,
     )
     run_argv = next(a for a in launched if a[1:4] == ["mux", "pane", "run"])
@@ -199,7 +200,9 @@ def test_pre_resolved_route_without_provider_axis_refuses_before_launch(
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     harness = "claude"
-    with pytest.raises(DispatchAskError, match="no model-provider axis") as exc_info:
+    with pytest.raises(
+        DispatchAskError, match="no bound model-provider identity"
+    ) as exc_info:
         if substrate == "worker":
             dispatch_spawn(
                 name="missing-provider-worker",
@@ -265,6 +268,89 @@ def test_resolved_provider_must_match_admitted_provider(
                 provider=harness,
                 cwd=tmp_path,
                 role="tidy",
+                route_provider="openai",
+                provider_gate=gate,
+                runner=lambda *_args, **_kwargs: pytest.fail(
+                    "refusal must precede pane launch"
+                ),
+            )
+
+
+def test_provider_admission_is_single_use_and_name_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents import dispatch as dispatch_mod, model_routing
+    from fno.agents.dispatch import DispatchAskError, DispatchAskResult, dispatch_spawn
+
+    monkeypatch.setattr(
+        model_routing, "resolve_route", _resolved_zai(_route_unit())
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_claude_create_path",
+        lambda **_kwargs: DispatchAskResult(kind="create", short_id="abc12345"),
+    )
+    gate = _zai_admission(monkeypatch, "single-use")
+    harness = "claude"
+
+    dispatch_spawn(
+        name="single-use",
+        message="first",
+        provider=harness,
+        cwd=tmp_path,
+        role="tidy",
+        provider_gate=gate,
+    )
+    with pytest.raises(DispatchAskError, match="no matching admission token"):
+        dispatch_spawn(
+            name="single-use",
+            message="second",
+            provider=harness,
+            cwd=tmp_path,
+            role="tidy",
+            provider_gate=gate,
+        )
+
+
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_raw_route_env_cannot_borrow_another_provider_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+    from fno.agents.spawn_gate import run_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    name = f"raw-route-{substrate}"
+    gate = run_gate(
+        name,
+        "pane" if substrate == "pane" else "bg",
+        route_provider="openai",
+    )
+    harness = "claude"
+
+    with pytest.raises(DispatchAskError, match="no bound model-provider identity"):
+        if substrate == "worker":
+            dispatch_spawn(
+                name=name,
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                route_env=_route_unit(),
+                route_provider="openai",
+                provider_gate=gate,
+            )
+        else:
+            dispatch_spawn_pane(
+                name=name,
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                route_env=_route_unit(),
                 route_provider="openai",
                 provider_gate=gate,
                 runner=lambda *_args, **_kwargs: pytest.fail(
@@ -434,7 +520,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
             cwd=tmp_path,
             role="publisher",
             model="opus",
-            provider_gate=_zai_admission(monkeypatch),
+            provider_gate=_zai_admission(monkeypatch, "snapshot-worker"),
         )
         assert captured["route_env"] == route
         assert captured["role"] is None
@@ -456,7 +542,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
             cwd=tmp_path,
             role="publisher",
             model="opus",
-            provider_gate=_zai_admission(monkeypatch),
+            provider_gate=_zai_admission(monkeypatch, "snapshot-pane", "pane"),
             runner=runner,
         )
         launched = next(call for call in calls if call[1:4] == ["mux", "pane", "run"])

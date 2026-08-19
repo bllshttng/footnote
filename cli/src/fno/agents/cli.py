@@ -1108,7 +1108,11 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.agents.model_routing import _parse_target, resolve_explicit_route
+        from fno.agents.model_routing import (
+            _parse_target,
+            bind_route_provider,
+            resolve_explicit_route,
+        )
 
         parsed = _parse_target(route)
         if parsed is None:
@@ -1142,6 +1146,7 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        route_env = bind_route_provider(route_env, route_provider)
 
     if monitor == "happy" and route_provider != "zai":
         print(
