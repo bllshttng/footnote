@@ -286,7 +286,7 @@ Use `fno plan path` for the canonical filename.
 
 One session takes up to **three** blueprints in sequence. A fourth blueprint starts a second dispatch. The number is the rule: a rule with no number is advice nobody applies.
 
-Group the wave by shape before you count dispatches. When one plan can name the same files or fix the same defect from two sides, the two nodes are the same shape. Title words do not decide this. The file and the defect decide it, the same identity test step 2d uses.
+Group the wave by shape before you count dispatches. When one plan can name the same files or fix the same defect from two sides, the two nodes are the same shape. Title words do not decide this. The file and the defect decide it, the same identity test the Consolidation Gate uses (`skills/blueprint/SKILL.md` step 2d).
 
 A shape group becomes ONE node before it becomes one plan. Run `fno backlog supersede <keeper> --replaces <other> --reason "<why>"`, then dispatch the keeper. `plan == PR == node` stays untouched. The waves live in the plan's `## Execution Strategy` block. Reverse with `fno backlog unsupersede <other>`.
 
