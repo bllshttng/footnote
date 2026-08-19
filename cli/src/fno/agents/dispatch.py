@@ -2294,6 +2294,7 @@ def dispatch_spawn(
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     route_provider: Optional[str] = None,
+    provider_gate: object | None = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -2367,6 +2368,17 @@ def dispatch_spawn(
         raise DispatchAskError(
             "resolved route has no model-provider axis; refusing to launch because "
             "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    if route_provider is not None and not (
+        provider_gate is not None
+        and getattr(provider_gate, "authorizes_provider", lambda _p: False)(
+            route_provider
+        )
+    ):
+        raise DispatchAskError(
+            f"provider {route_provider!r} has no matching admission token; "
+            "refusing before dispatch; no worker launched",
             exit_code=2,
         )
 
@@ -2491,6 +2503,12 @@ def dispatch_spawn(
                 entries = load_registry()
             except (OSError, ValueError, RegistryVersionError) as exc:
                 raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
+            if resume_session_id and getattr(entries, "complete", True) is not True:
+                raise DispatchAskError(
+                    "registry forward read is incomplete; refusing resume because a "
+                    "recorded provider route may be invisible; no worker launched",
+                    exit_code=12,
+                )
 
             # Revive-in-place (x-9844 Fix 3): a --resume spawn whose target uuid
             # matches an EXITED same-name claude row is a revival, not a
@@ -6041,10 +6059,15 @@ def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
     cleanly to the fork rung rather than blocking mail on registry state.
     """
     try:
-        for entry in load_registry():
+        loaded = load_registry()
+        if getattr(loaded, "complete", True) is not True:
+            raise RegistryVersionError(
+                "registry forward read is incomplete; routed wake cannot be classified"
+            )
+        for entry in loaded:
             if getattr(entry, "harness_session_id", None) == session_uuid:
                 return entry
-    except (OSError, RegistryVersionError):
+    except OSError:
         return None
     return None
 
@@ -6181,7 +6204,26 @@ def wake_and_deliver(
     # A respawn miss (claude absent, non-zero) or an inject that still does not
     # land in the probe budget falls through to the fork rung (rung 3) so the
     # mail is never dropped. The x-7fef single-writer claim still guards rung 3.
-    entry = _roster_entry_for_session(session_uuid)
+    try:
+        entry = _roster_entry_for_session(session_uuid)
+    except (RegistryVersionError, ValueError):
+        return False, "registry-incomplete"
+
+    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    route_provider = (
+        getattr(entry, "provider", None)
+        if entry is not None and getattr(entry, "route_settings_path", None)
+        else None
+    )
+    from fno.agents.spawn_gate import GateRefused, run_gate
+
+    gate = None
+    if route_provider is not None:
+        try:
+            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
+        except GateRefused as exc:
+            return False, f"spawn-exit-{exc.code}"
+
     if entry is not None and getattr(entry, "status", None) == "exited":
         short = (
             getattr(entry, "short_id", None)
@@ -6198,6 +6240,9 @@ def wake_and_deliver(
                 if _respawn_claude_session(short) == 0:
                     for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
                         if _mail_inject_claude(session_uuid, wrapped):
+                            if gate is not None:
+                                gate.release()
+                                gate = None
                             return True, short  # revived in place: no new uuid, no new row
                         time.sleep(_RESPAWN_REINJECT_DELAY_S)
             finally:
@@ -6205,18 +6250,7 @@ def wake_and_deliver(
             # respawn failed or the revived session did not accept the inject within
             # the probe budget -> fall through to the fork rung.
 
-    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
-    route_provider = (
-        getattr(entry, "provider", None)
-        if entry is not None and getattr(entry, "route_settings_path", None)
-        else None
-    )
-    from fno.agents.spawn_gate import GateRefused, run_gate
-
-    gate = None
     try:
-        if route_provider is not None:
-            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
         result = dispatch_spawn(
             name=spawn_name,
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
@@ -6224,6 +6258,7 @@ def wake_and_deliver(
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
             route_provider=route_provider,
+            provider_gate=gate,
         )
     except GateRefused as exc:
         return False, f"spawn-exit-{exc.code}"

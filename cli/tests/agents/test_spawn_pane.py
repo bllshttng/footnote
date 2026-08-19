@@ -118,6 +118,14 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     # axis explicitly so the production seam never has to infer it from env.
     if provider == "claude" and kwargs.get("route_env") is not None:
         kwargs.setdefault("route_provider", "zai")
+    if kwargs.get("route_provider") is not None:
+        from fno.agents.spawn_gate import run_gate
+
+        monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        kwargs.setdefault(
+            "provider_gate",
+            run_gate("test-spawn-pane", "pane", route_provider=kwargs["route_provider"]),
+        )
     result = dispatch_spawn_pane(
         name=kwargs.pop("name", "peer"),
         message=kwargs.pop("message", "hello"),
@@ -1969,6 +1977,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
     class Gate:
+        def authorizes_provider(self, provider: str) -> bool:
+            return provider == "zai"
+
         def release(self) -> None:
             pass
 

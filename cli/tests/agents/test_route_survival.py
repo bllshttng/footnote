@@ -57,11 +57,27 @@ class _FakeRunner:
         raise AssertionError(f"unexpected invocation: {argv}")
 
 
+def _admitted_zai(monkeypatch):
+    from fno.agents.spawn_gate import run_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    return run_gate("test-route-survival", "bg", route_provider="zai")
+
+
 def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
     use_tmpdir(monkeypatch, tmp_path)
     for var in ("FNO_SESSION", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    if kwargs.get("route_provider") is not None:
+        from fno.agents.spawn_gate import run_gate
+
+        monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        kwargs.setdefault(
+            "provider_gate",
+            run_gate("test-route-survival", "pane", route_provider=kwargs["route_provider"]),
+        )
 
     return dispatch_spawn_pane(
         name="router",
@@ -344,6 +360,7 @@ def test_an_explicit_account_composes_with_a_restored_route(
             resume_session_id="sess-1",
             account_env={"CLAUDE_CONFIG_DIR": "/cfg"},
             route_provider="zai",
+            provider_gate=_admitted_zai(monkeypatch),
         )
     assert exc.value.exit_code == 99, "the pair must reach the launch, not be refused"
     assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/cfg"}, "account survives"
@@ -387,6 +404,27 @@ def test_a_restored_route_without_prior_provider_admission_refuses(
         )
     assert exc.value.exit_code == 2
     assert "provider admission was not evaluated" in str(exc.value)
+
+
+def test_direct_resume_refuses_an_incomplete_forward_registry(
+    tmp_path, monkeypatch
+) -> None:
+    import fno.agents.dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.registry import LoadedRegistry, load_registry
+
+    _routed_claude_row(tmp_path, monkeypatch)
+    partial = LoadedRegistry(load_registry(), complete=False)
+    monkeypatch.setattr(dispatch_mod, "load_registry", lambda: partial)
+    harness = "claude"
+    with pytest.raises(DispatchAskError, match="registry forward read is incomplete"):
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider=harness,
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
 
 
 def test_cli_resume_gates_the_recorded_provider_before_dispatch(
@@ -579,6 +617,7 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
             cwd=tmp_path,
             resume_session_id="sess-1",
             route_provider="zai",
+            provider_gate=_admitted_zai(monkeypatch),
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"
     assert seen["route_provider"] == "zai", "the recorded provider rides with it"
@@ -614,5 +653,6 @@ def test_a_restored_route_composes_under_managed_marker(
             cwd=tmp_path,
             resume_session_id="sess-1",
             route_provider="zai",
+            provider_gate=_admitted_zai(monkeypatch),
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"

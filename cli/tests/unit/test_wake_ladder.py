@@ -56,6 +56,63 @@ def test_roster_exited_revives_in_place(monkeypatch):
     assert spawned == []  # never forked - one roster row, same uuid
 
 
+def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry(
+            "exited", provider="zai", route_settings_path="/route.json"
+        ),
+    )
+    events = []
+
+    class _Gate:
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: events.append("gate") or _Gate(),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "_respawn_claude_session",
+        lambda short: events.append("respawn") or 0,
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "_mail_inject_claude",
+        lambda uuid, text, **kwargs: events.append("inject") or True,
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("forked after revive")),
+    )
+
+    assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
+    assert events == ["gate", "respawn", "inject", "release"]
+
+
+def test_incomplete_forward_registry_refuses_wake(monkeypatch):
+    from fno.agents.registry import LoadedRegistry
+
+    monkeypatch.setattr(
+        dispatch, "load_registry", lambda: LoadedRegistry([], complete=False)
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("spawned from partial read")),
+    )
+
+    assert wake_and_deliver("uuid-full", "wake") == (
+        False,
+        "registry-incomplete",
+    )
+
+
 def test_unrostered_falls_through_to_fork(monkeypatch):
     # No roster row -> rung 3 fork (the existing identity-breaking path).
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)

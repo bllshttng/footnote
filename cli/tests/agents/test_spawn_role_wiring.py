@@ -48,6 +48,13 @@ def _resolved_zai(route: dict[str, str]):
     return resolve
 
 
+def _zai_admission(monkeypatch):
+    from fno.agents.spawn_gate import run_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    return run_gate("test-routed-spawn", "bg", route_provider="zai")
+
+
 def test_dispatch_spawn_threads_captured_role_route_to_create_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -72,6 +79,7 @@ def test_dispatch_spawn_threads_captured_role_route_to_create_path(
         provider="claude",
         cwd=tmp_path,
         role="consolidate",
+        provider_gate=_zai_admission(monkeypatch),
     )
     assert result.kind == "created"
     assert captured["role"] is None
@@ -137,6 +145,7 @@ def test_direct_dispatch_spawn_composes_managed_role_route(
         provider="claude",
         cwd=tmp_path,
         role="tidy",
+        provider_gate=_zai_admission(monkeypatch),
     )
     assert result.kind == "created"
     assert captured["route_env"] == route
@@ -171,6 +180,7 @@ def test_direct_pane_spawn_composes_managed_route_before_mux(
         role="tidy",
         route_env=_route_unit(),
         route_provider="zai",
+        provider_gate=_zai_admission(monkeypatch),
         runner=runner,
     )
     run_argv = next(a for a in launched if a[1:4] == ["mux", "pane", "run"])
@@ -212,6 +222,43 @@ def test_pre_resolved_route_without_provider_axis_refuses_before_launch(
 
     assert exc_info.value.exit_code == 2
     assert "cap cannot be evaluated" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_routed_direct_spawn_without_admission_token_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setattr(
+        model_routing, "resolve_route", _resolved_zai(_route_unit())
+    )
+    harness = "claude"
+    with pytest.raises(DispatchAskError, match="no matching admission token"):
+        if substrate == "worker":
+            dispatch_spawn(
+                name="ungated-worker",
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                role="tidy",
+            )
+        else:
+            dispatch_spawn_pane(
+                name="ungated-pane",
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                role="tidy",
+                runner=lambda *_args, **_kwargs: pytest.fail(
+                    "refusal must precede pane launch"
+                ),
+            )
 
 
 @pytest.mark.parametrize("substrate", ["worker", "pane"])
@@ -338,6 +385,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
             cwd=tmp_path,
             role="publisher",
             model="opus",
+            provider_gate=_zai_admission(monkeypatch),
         )
         assert captured["route_env"] == route
         assert captured["role"] is None
@@ -359,6 +407,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
             cwd=tmp_path,
             role="publisher",
             model="opus",
+            provider_gate=_zai_admission(monkeypatch),
             runner=runner,
         )
         launched = next(call for call in calls if call[1:4] == ["mux", "pane", "run"])

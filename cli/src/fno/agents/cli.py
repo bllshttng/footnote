@@ -1445,6 +1445,7 @@ def cmd_spawn(
                     route_env=route_env,
                     monitor=monitor,
                     route_provider=route_provider,
+                    provider_gate=gate,
                     passthrough=passthrough,
                 )
             except DispatchAskError as exc:
@@ -1578,6 +1579,7 @@ def cmd_spawn(
                 crown_level=crown_level,
                 crown_scope=crown_scope,
                 route_provider=route_provider,
+                provider_gate=gate,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

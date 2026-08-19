@@ -1958,6 +1958,7 @@ def dispatch_spawn_pane(
     route_env: Optional[dict[str, str]] = None,
     monitor: Optional[str] = None,
     route_provider: Optional[str] = None,
+    provider_gate: object | None = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
@@ -2038,6 +2039,17 @@ def dispatch_spawn_pane(
         raise DispatchAskError(
             "resolved route has no model-provider axis; refusing to launch because "
             "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    if route_provider is not None and not (
+        provider_gate is not None
+        and getattr(provider_gate, "authorizes_provider", lambda _p: False)(
+            route_provider
+        )
+    ):
+        raise DispatchAskError(
+            f"provider {route_provider!r} has no matching admission token; "
+            "refusing before dispatch; no worker launched",
             exit_code=2,
         )
 

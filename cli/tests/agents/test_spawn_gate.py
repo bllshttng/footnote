@@ -568,6 +568,19 @@ class TestRunGate:
         replacement.release()
         second.release()
 
+    def test_known_unrouted_headless_claim_does_not_block_capped_provider(
+        self, monkeypatch
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+
+        unrelated = spawn_gate.run_gate("codex-peer", "headless")
+        assert spawn_gate.provider_live_count("zai") == 0
+        unrelated.release()
+
     def test_capped_headless_refuses_when_lane_reservation_is_unwritable(
         self, monkeypatch, capsys
     ):

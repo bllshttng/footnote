@@ -360,6 +360,10 @@ class ProviderCountUnavailable(RuntimeError):
     """A provider count cannot be proved from registry/liveness evidence."""
 
 
+_KNOWN_UNROUTED_PROVIDER = "__uncapped__"
+_PROVIDER_ADMISSION_TOKEN = object()
+
+
 def _provider_roster_live_short_ids(short_ids: set[str]) -> set[str]:
     """Return requested bg ids with a positive live roster marker."""
     try:
@@ -525,6 +529,8 @@ def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
             raise ProviderCountUnavailable(
                 f"live worker reservation {key} has no model_provider"
             )
+        if model_provider == _KNOWN_UNROUTED_PROVIDER:
+            continue
         if state == "suspect":
             raise ProviderCountUnavailable(
                 f"worker reservation {key} liveness is suspect"
@@ -577,6 +583,16 @@ class GateGuard:
     _gate_holder: Optional[str] = None
     _worker_key: Optional[str] = None
     _worker_holder: Optional[str] = None
+    _route_provider: Optional[str] = None
+    _admission_token: object | None = None
+    _released: bool = False
+
+    def authorizes_provider(self, provider: str) -> bool:
+        return (
+            self._admission_token is _PROVIDER_ADMISSION_TOKEN
+            and self._route_provider == provider
+            and not self._released
+        )
 
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
@@ -592,6 +608,7 @@ class GateGuard:
         self._gate_holder = None
 
     def release(self) -> None:
+        self._released = True
         self.release_gate_mutex()
         if self._worker_key is None:
             return
@@ -684,11 +701,9 @@ def _acquire_worker_slot(
             key,
             holder,
             ttl_ms=WORKER_CLAIM_TTL_MS,
-            metadata=(
-                {"model_provider": route_provider}
-                if route_provider is not None
-                else None
-            ),
+            metadata={
+                "model_provider": route_provider or _KNOWN_UNROUTED_PROVIDER
+            },
             root=_gate_claims_root(),
         )
         guard._worker_key = key
@@ -718,7 +733,10 @@ def run_gate(
     # the REAL machine's live workers, and it doubles as an operator escape.
     if os.environ.get("FNO_SPAWN_GATE") == "0":
         _maybe_emit_spawn_cap_escape()
-        return GateGuard()
+        return GateGuard(
+            _route_provider=route_provider,
+            _admission_token=_PROVIDER_ADMISSION_TOKEN,
+        )
     try:
         from fno.config import load_settings
 
@@ -733,7 +751,10 @@ def run_gate(
     provider_cap = max_lanes.get(route_provider) if route_provider is not None else None
 
     holder = f"spawn-gate:{os.getpid()}:{name}"
-    guard = GateGuard()
+    guard = GateGuard(
+        _route_provider=route_provider,
+        _admission_token=_PROVIDER_ADMISSION_TOKEN,
+    )
 
     if force and provider_cap is None:
         _warn("spawn-gate: forced past cap and RAM floor (--force)")
