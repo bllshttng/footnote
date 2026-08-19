@@ -313,7 +313,10 @@ exit 1"#,
     let data: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(data["coverage"], serde_json::json!("unknown"));
     assert_eq!(data["pr"], serde_json::json!(842));
-    assert_eq!(data["head_sha"], "", "failed PR read must not use local HEAD");
+    assert_eq!(
+        data["head_sha"], "",
+        "failed PR read must not use local HEAD"
+    );
     assert_ne!(data["head_sha"], HEAD);
     // Exit-4 stdout additionally carries the stdout-only quota diagnostic
     // (null here: the stub cannot answer `api rate_limit` either); the
