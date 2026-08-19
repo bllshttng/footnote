@@ -124,6 +124,22 @@ def test_archive_accepts_an_external_worktree_path(repo: Path, tmp_path: Path):
     assert "feature/archive-me" in _git(repo, "branch", "--list").stdout
 
 
+def test_archive_refuses_a_detached_worktree_with_a_unique_commit(
+    repo: Path, tmp_path: Path
+):
+    wt = tmp_path / "external-base" / "repo" / "detached"
+    _git(repo, "worktree", "add", "--detach", str(wt), "main")
+    _commit(wt, "unique.txt")
+    unique_head = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    result = _archive(repo, wt)
+
+    assert result.returncode != 0
+    assert "detached" in (result.stdout + result.stderr).lower()
+    assert wt.exists()
+    assert _git(wt, "rev-parse", "HEAD").stdout.strip() == unique_head
+
+
 # ── AC1-UI: dry-run is the default and mutates nothing ──────────────────────
 def test_dry_run_default_mutates_nothing(repo: Path):
     wt = _add_merged(repo, "reapme")

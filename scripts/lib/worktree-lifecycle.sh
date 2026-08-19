@@ -605,6 +605,10 @@ case "${1:-status}" in
         fi
         if [[ -n "$WT" && -d "$WT" ]]; then
             BRANCH=$(cd "$WT" && git branch --show-current)
+            if [[ -z "$BRANCH" ]]; then
+                echo "Archive refused: detached worktree has no branch to preserve: $WT"
+                exit 1
+            fi
             if git worktree remove --force "$WT" 2>/dev/null; then
                 echo "Archived: directory removed, branch $BRANCH preserved in git"
             else
