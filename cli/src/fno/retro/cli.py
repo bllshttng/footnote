@@ -738,6 +738,11 @@ def run(
             err=True,
         )
         raise typer.Exit(1)
+    except Exception:  # noqa: BLE001 - an unreadable local graph must not
+        # crash the run; the per-sentinel dedup reads below already degrade
+        # to existing_nodes=[] on the same failure, so this precheck simply
+        # does not preempt them with a refusal it cannot justify.
+        pass
 
     repo_root = resolve_repo_root()
     # Filed nodes are scoped to the CANONICAL root, never the worktree: a node
