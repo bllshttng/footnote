@@ -568,6 +568,30 @@ class TestRunGate:
         replacement.release()
         second.release()
 
+    def test_capped_headless_refuses_when_lane_reservation_is_unwritable(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(
+            "fno.claims.core.acquire_claim",
+            lambda *args, **kwargs: (
+                True
+                if args[0] == "spawn-gate"
+                else (_ for _ in ()).throw(OSError("claim store denied"))
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count unavailable" in refused
+
     def test_pidless_bg_requires_a_readable_positive_roster_marker(
         self, tmp_path, monkeypatch
     ):

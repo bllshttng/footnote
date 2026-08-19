@@ -668,6 +668,8 @@ def _acquire_worker_slot(
     name: str,
     holder: str,
     route_provider: Optional[str] = None,
+    *,
+    fail_closed: bool = False,
 ) -> None:
     key = f"worker:{name}"
     try:
@@ -686,7 +688,11 @@ def _acquire_worker_slot(
         )
         guard._worker_key = key
         guard._worker_holder = holder
-    except Exception:
+    except Exception as exc:
+        if fail_closed:
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} unavailable: {exc}"
+            ) from exc
         # Fail open: a slot claim is count VISIBILITY, not a correctness gate.
         _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
 
@@ -802,7 +808,19 @@ def run_gate(
                     "provider cap remains enforced"
                 )
                 if substrate == "headless":
-                    _acquire_worker_slot(guard, name, holder, route_provider)
+                    try:
+                        _acquire_worker_slot(
+                            guard,
+                            name,
+                            holder,
+                            route_provider,
+                            fail_closed=provider_cap is not None,
+                        )
+                    except ProviderCountUnavailable as exc:
+                        guard.release()
+                        _refuse_provider_cap(
+                            route_provider or "unknown", provider_cap or 0, error=exc
+                        )
                     guard.release_gate_mutex()
                 return guard
             c = census()
@@ -816,7 +834,19 @@ def run_gate(
                     guard.release()
                     raise
                 if substrate == "headless":
-                    _acquire_worker_slot(guard, name, holder, route_provider)
+                    try:
+                        _acquire_worker_slot(
+                            guard,
+                            name,
+                            holder,
+                            route_provider,
+                            fail_closed=provider_cap is not None,
+                        )
+                    except ProviderCountUnavailable as exc:
+                        guard.release()
+                        _refuse_provider_cap(
+                            route_provider or "unknown", provider_cap or 0, error=exc
+                        )
                     guard.release_gate_mutex()
                 # pane/bg: keep the mutex until dispatch returns (the row
                 # exists by then); the caller releases via guard.release().
