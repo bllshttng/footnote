@@ -1164,6 +1164,48 @@ def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monk
     assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
 
 
+def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypatch, tmp_path):
+    """x-2f24: ``~/.fno/graph.json`` is a single store shared across every
+    project on the machine. A --pr-number call must not reverse-map another
+    project's ref-less nodes into a gh fan-out that has nothing to do with
+    the PR being closed - only this repo's own project."""
+    import fno.pr.closure as closure_mod
+    import fno.worktree_paths as wtp
+
+    graph_path, _ = cli_env
+    mine_cwd = tmp_path / "mine"
+    other_cwd = tmp_path / "other"
+    mine_cwd.mkdir()
+    other_cwd.mkdir()
+    _make_graph(graph_path, [
+        _node("ab-mine", cwd=str(mine_cwd), project="fno"),
+        _node("ab-other", cwd=str(other_cwd), project="other-project"),
+    ])
+    monkeypatch.setattr(wtp, "resolve_project_id", lambda *a, **kw: "fno")
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=810),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    queried_cwds: list[str] = []
+
+    def _spy_list_merged(**kw):
+        queried_cwds.append(kw.get("cwd"))
+        return []
+
+    monkeypatch.setattr(rec, "list_merged_pr_branches", _spy_list_merged)
+
+    result = runner.invoke(app, [
+        "backlog", "reconcile", "--pr-number", "810",
+        "--repo", "test-owner/test-repo", "--json",
+    ])
+    assert result.exit_code == 0, result.output
+
+    assert str(mine_cwd) in queried_cwds
+    assert str(other_cwd) not in queried_cwds
+
+
 def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
     """AC3-HP + AC4-HP: one merged PR's trailer names two open nodes -> both
     refs bind and both nodes close in one invocation, even though only one
@@ -1311,13 +1353,18 @@ def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_pat
     """Round-7 review fix: a --pr-number call must still reach a node with NO
     PR ref at all (session died before the pr_number stamp landed) via the
     reverse branch-name map, exactly as _reconcile_merged_pr_node's own
-    docstring claims - not just the trailer-claimed node this PR names."""
+    docstring claims - not just the trailer-claimed node this PR names.
+    Its project must match this repo's own (x-2f24 scopes the reverse-map
+    sweep to resolve_project_id(), so an unscoped node would go dark)."""
     import fno.pr.closure as closure_mod
+    import fno.worktree_paths as wtp
+
+    monkeypatch.setattr(wtp, "resolve_project_id", lambda *a, **kw: "fno")
 
     graph_path, _ = cli_env
     _make_graph(graph_path, [
         _node("ab-100050"),  # claimed by PR 269's trailer
-        _node("ab-rmap2", cwd=str(tmp_path)),  # ref-less; only its branch name ties it to PR 268
+        _node("ab-rmap2", cwd=str(tmp_path), project="fno"),  # ref-less; only its branch name ties it to PR 268
     ])
     monkeypatch.setattr(
         closure_mod, "fetch_pr_closure_context",

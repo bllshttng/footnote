@@ -8684,9 +8684,8 @@ def cmd_reconcile(
     ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
         own claims, any node already carrying ``_pr_number`` as a ref
-        (stamped at creation, before this feature existed), plus every OPEN
-        node with NO PR ref at all. Pure in-memory walk - no I/O - so scoping
-        the scan to this set costs nothing extra.
+        (stamped at creation, before this feature existed), plus every OPEN,
+        ref-less node in THIS REPO's own project.
 
         The last group exists because ``scan_merge_drift`` passes this exact
         scope straight through to ``reverse_map_unstamped`` (its reverse
@@ -8694,9 +8693,16 @@ def cmd_reconcile(
         died before the pr_number stamp landed. Omitting ref-less nodes here
         would silently zero out that entire pass on every ``--pr-number``
         call - the node's own branch names it, but a scope with nothing in
-        it matches nothing. Including them costs nothing extra either: that
-        pass makes its own gh call per node's cwd regardless of scope size,
-        and is already repo-scoped by construction (one cwd's repo per call).
+        it matches nothing. It is NOT free to include every such node
+        graph-wide, though: the graph is a single store shared across every
+        project on the machine, and ``reverse_map_unstamped`` fires one gh
+        call per DISTINCT node cwd in its scope (bounded by
+        ``REVERSE_MAP_BUDGET_S``) - an unscoped sweep pays a gh call for
+        every other project's ref-less nodes too, on every ordinary merge in
+        this repo. Scoped to ``resolve_project_id()`` (this checkout's own
+        project id, cheap and local - no gh call) below; an unresolvable
+        project id falls back to the old permissive whole-graph behavior
+        rather than a new refusal.
 
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
@@ -8709,12 +8715,21 @@ def cmd_reconcile(
         pass for every candidate).
         """
         from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+        from fno.worktree_paths import resolve_project_id
+
+        try:
+            _our_project = resolve_project_id()
+        except ValueError:
+            _our_project = None
 
         ids = set(_claims)
         for _e in _entries:
             _rid = _e.get("id")
-            if isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e):
-                ids.add(_rid)
+            if not (isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e)):
+                continue
+            if _our_project is not None and _e.get("project") != _our_project:
+                continue
+            ids.add(_rid)
         if _our_repo is None:
             return ids
         for _e in _entries:
