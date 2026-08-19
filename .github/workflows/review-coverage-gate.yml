@@ -6,16 +6,22 @@ name: review-coverage-gate
 # The green marker can only come from a machine that actually ran the review:
 # the enforced predicate is a head-pinned LOCAL attestation in events.jsonl,
 # which this workflow cannot see. So this job INVALIDATES, never certifies -
-# it never posts success on its own judgment, with one deliberate exception:
-# the `coverage-override` label, the 3am release valve, where the label event
-# itself is the human decision and the actor is recorded in the description.
+# it never posts success on its own judgment, with two deliberate exceptions.
+# The first is the `coverage-override` label, the 3am release valve, where
+# the label event itself is the human decision and the actor is recorded in
+# the description. The second, narrower than the first, is the patch-id
+# carry on synchronize: it re-posts a verdict a publisher already wrote onto
+# a head whose code is PROVABLY IDENTICAL (git patch-id over the compare
+# API), and it invents nothing - see scripts/ci/coverage-carry.sh.
 #
 # What fires when:
 #   synchronize - the head is new, so no local attestation can exist for it
 #     yet. Post failure "head moved; re-run the review verb at HEAD" so a
 #     previously-green status can never survive onto a commit nobody reviewed
-#     - UNLESS the coverage-override label is applied: the override is durable
-#     shared state that a push does not revoke, so it is re-read first.
+#     - UNLESS the coverage-override label is applied (durable shared state a
+#     push does not revoke, re-read first), OR the previous head already
+#     carried a publisher verdict whose code is provably identical to the new
+#     head (scripts/ci/coverage-carry.sh, checked after the override).
 #   labeled/unlabeled (ANY label) - the override arm. It re-reads the LIVE
 #     label rather than trusting the label this event carries: held posts
 #     success (naming the actor when they are the one who applied the
@@ -70,6 +76,7 @@ concurrency:
 permissions:
   statuses: write
   pull-requests: read
+  contents: read
 
 jobs:
   refresh:
@@ -83,6 +90,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Only the synchronize arm needs the carry script on disk; every other
+      # arm posts from API reads alone. Guarded so no other arm pays for a
+      # checkout it does not use. The BASE version, not the PR's - a PR
+      # cannot edit its own gate script and self-green - at sparse depth 1
+      # to keep the job inside its five-minute budget.
+      - name: Checkout the carry script (base ref, synchronize only)
+        if: github.event.action == 'synchronize'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
       - name: Invalidate or re-evaluate the coverage status
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,6 +115,8 @@ jobs:
           # red-marks a commit on main that no review verb can ever answer for.
           # The dispatch arm resolves the head from its `pr` input instead.
           HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           ctx=fno/review-coverage
@@ -217,8 +238,20 @@ jobs:
                     echo "synchronize: head ${HEAD_SHA:0:8} already carries a publisher verdict - no change"
                     ;;
                   *)
-                    post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
-                    echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+                    decision="$(bash scripts/ci/coverage-carry.sh \
+                      --repo "$GITHUB_REPOSITORY" --context "$ctx" \
+                      --before "$BEFORE_SHA" --head "$HEAD_SHA" --base "$BASE_REF")"
+                    case "$decision" in
+                      carry\ *)
+                        read -r _ origin pid desc <<<"$decision"
+                        post success "$desc"
+                        echo "synchronize: carried the verdict from ${origin:0:8} (patch-id ${pid}) onto ${HEAD_SHA:0:8}"
+                        ;;
+                      *)
+                        post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+                        echo "synchronize: invalidated at ${HEAD_SHA:0:8} (${decision})"
+                        ;;
+                    esac
                     ;;
                 esac
               fi
