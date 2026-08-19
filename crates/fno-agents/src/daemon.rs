@@ -20,6 +20,7 @@ use crate::protocol::{
 use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt; // process_group on std::process::Command
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -726,6 +727,9 @@ fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
 /// of idle live rows cannot turn one sweep into an unbounded subprocess farm;
 /// the remainder is candidates on the next tick.
 const DORMANT_PROBE_CAP: usize = 8;
+/// One wall-clock budget shared by every transcript-truth subprocess in a
+/// daemon pass. The final subprocess receives only the remaining duration.
+const PROBE_PASS_BUDGET: Duration = Duration::from_secs(30);
 /// Harness-session cascades per sweep, same rationale as DORMANT_PROBE_CAP.
 const CASCADE_CAP: usize = 10;
 /// Wall-clock bound for one harness removal subprocess. A hung removal must
@@ -1206,15 +1210,40 @@ pub fn gc_sweep(
 ) -> GcSummary {
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    gc_sweep_impl(
+    let started = Instant::now();
+    let overrun = std::cell::Cell::new(false);
+    let summary = gc_sweep_impl(
         home,
         emitter,
         grace_for_harness,
         false,
-        &live_truth_tail_state,
+        &|handle| {
+            let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                overrun.set(true);
+                return None;
+            }
+            let result = crate::claude_ask::family1_truth_probe_with_timeout(
+                handle,
+                remaining.min(Duration::from_secs(5)),
+            )
+            .map(|probe| probe.state);
+            if started.elapsed() >= PROBE_PASS_BUDGET {
+                overrun.set(true);
+            }
+            result
+        },
         &|e| store.borrow_mut().matches(e),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
-    )
+        &|| overrun.get(),
+    );
+    if overrun.get() {
+        let _ = emitter.emit(
+            "gc_sweep_overrun",
+            &json!({"budget_ms": PROBE_PASS_BUDGET.as_millis()}),
+        );
+    }
+    summary
 }
 
 /// `fno agents reap --dry-run` (x-9de7 task 5): classify the registry exactly
@@ -1233,23 +1262,33 @@ pub fn gc_sweep_dry_run(
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
+    let started = Instant::now();
+    let overrun = std::cell::Cell::new(false);
     gc_sweep_impl(
         home,
         &emitter,
         grace_for_harness,
         true,
-        &live_truth_tail_state,
+        &|handle| {
+            let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                overrun.set(true);
+                return None;
+            }
+            let result = crate::claude_ask::family1_truth_probe_with_timeout(
+                handle,
+                remaining.min(Duration::from_secs(5)),
+            )
+            .map(|probe| probe.state);
+            if started.elapsed() >= PROBE_PASS_BUDGET {
+                overrun.set(true);
+            }
+            result
+        },
         &|e| store.borrow_mut().matches(e),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
+        &|| overrun.get(),
     )
-}
-
-/// The dormant gate's transcript-tail read, as production runs it: the shared
-/// truth probe (`fno agents truth <handle> --json`, bounded at 5s), lowered to
-/// the state string alone. Injected into [`gc_sweep_impl`] so the decision
-/// path is unit-testable without shelling out to a real `fno`.
-fn live_truth_tail_state(handle: &str) -> Option<String> {
-    crate::claude_ask::family1_truth_probe(handle).map(|p| p.state)
 }
 
 fn gc_sweep_impl(
@@ -1265,6 +1304,7 @@ fn gc_sweep_impl(
     // The post-reap harness-store cascade, injected for the same reason: a
     // test must be able to stage a refusal without mutating PATH/HOME.
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
+    pass_overrun: &dyn Fn() -> bool,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
@@ -1298,6 +1338,9 @@ fn gc_sweep_impl(
         std::collections::BTreeMap::new();
 
     for e in &registry.entries {
+        if pass_overrun() {
+            return GcSummary::default();
+        }
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         let is_live = live_workers.contains(&e.short_id)
             || e.pid
@@ -1469,6 +1512,12 @@ fn gc_sweep_impl(
                 }
             }
         }
+    }
+
+    // An overrun discards the pass before any registry write. Partial truth is
+    // not a coherent sweep result; the next tick retries from stored status.
+    if pass_overrun() {
+        return GcSummary::default();
     }
 
     // Cap the whole reap batch at CASCADE_CAP, not just the cascade calls
@@ -1839,32 +1888,41 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 // Socket bind + perms + lazy-start race.
 // ---------------------------------------------------------------------------
 
-/// Bind the supervisor socket, resolving the lazy-start race and stale sockets.
+/// Bind the supervisor socket while holding the process-lifetime singleton lock.
 ///
-/// - If a live daemon answers a connect to the existing socket, we are the race
-///   loser: return [`DaemonError::AlreadyRunning`] so the caller exits cleanly.
-/// - If the socket file exists but nothing answers (stale, from a crash), remove
-///   and bind.
+/// The lock is acquired before the socket is touched. A busy incumbent therefore
+/// remains authoritative even when it cannot answer a connect probe. Once this
+/// process holds the lock, any existing socket path is stale and safe to replace.
 /// - Enforce dir 0700 / socket 0600 regardless of umask, fstat-verifying after
 ///   (finding #6 Critical).
-pub async fn bind_supervisor_socket(home: &AgentsHome) -> Result<UnixListener, DaemonError> {
+pub async fn bind_supervisor_socket(
+    home: &AgentsHome,
+) -> Result<(UnixListener, std::fs::File), DaemonError> {
     home.ensure_root()?;
     flock_self_test(home)?;
 
-    let sock = home.supervisor_sock();
-    if sock.exists() {
-        // Probe for a live daemon.
-        if UnixStream::connect(&sock).await.is_ok() {
-            return Err(DaemonError::AlreadyRunning(sock));
+    let lock_path = home.supervisor_lock();
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    if let Err(error) = lock_file.try_lock() {
+        let io_error: std::io::Error = error.into();
+        if io_error.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
         }
-        // Stale: remove and continue to bind.
-        let _ = std::fs::remove_file(&sock);
+        return Err(io_error.into());
     }
+
+    let sock = home.supervisor_sock();
+    let _ = std::fs::remove_file(&sock);
 
     let listener = match UnixListener::bind(&sock) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            // A racing daemon bound between our probe and bind; it won.
+            // Defensive: another bind should be impossible while we hold the lock.
             return Err(DaemonError::AlreadyRunning(sock));
         }
         Err(e) => return Err(e.into()),
@@ -1889,7 +1947,13 @@ pub async fn bind_supervisor_socket(home: &AgentsHome) -> Result<UnixListener, D
         }
     }
 
-    Ok(listener)
+    Ok((listener, lock_file))
+}
+
+fn socket_inode_matches(sock: &Path, bound_inode: u64) -> bool {
+    std::fs::metadata(sock)
+        .map(|metadata| metadata.ino() == bound_inode)
+        .unwrap_or(false)
 }
 
 /// Prove the filesystem under `home` supports advisory locking before relying
@@ -1935,65 +1999,72 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     load_registry_asserted(&home.registry_json())?;
 
     // State: cold_start.
-    let listener = match bind_supervisor_socket(&home).await {
-        Ok(l) => l,
+    // The named file binding holds the singleton lock for this function's
+    // lifetime. Process exit releases it even when socket cleanup cannot run.
+    let (listener, _supervisor_lock) = match bind_supervisor_socket(&home).await {
+        Ok(pair) => pair,
         Err(DaemonError::AlreadyRunning(_)) => {
             // Race loser: nothing to do; the winner serves.
             return Ok(());
         }
         Err(e) => return Err(e),
     };
+    let socket_path = home.supervisor_sock();
+    let bound_inode = std::fs::metadata(&socket_path)
+        .ok()
+        .map(|metadata| metadata.ino());
 
     // State: recovering. Recovery must complete before we accept a request.
     emit_state(&emitter, DaemonState::Recovering);
     let report = recover(&home, &emitter)?;
 
-    // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
-    // as part of recovery and BEFORE the accept loop serves any client, so the
-    // first `list` reads truthful process-liveness status instead of stale
-    // creation-time values. Reuses the same bounded machinery as the `reconcile`
-    // RPC (fairness order + 250ms/probe + 5s budget). Strictly non-fatal: a sweep
-    // that returns an error (registry write failed -> registry unchanged) or even
-    // panics degrades to serving last-recorded status -- we emit and continue,
-    // never abort the daemon (AC1-FR). Completing before `accept` upholds the
-    // Concurrency invariant that no client observes a half-applied sweep. Opt out
-    // via FNO_AGENTS_NO_STARTUP_RECONCILE for the fastest cold start (discretion #5).
+    // A probe sweep can shell out once per registry row, so it must never run on
+    // this async runtime or delay the accept loop. Serving last-recorded status
+    // until the background sweep commits is the same non-fatal degradation used
+    // when a sweep fails. One shared gate also keeps the first idle GC tick from
+    // starting a second probe pass while startup reconciliation is still active.
+    let probe_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     if opts.reconcile_on_start {
-        // Collapse a panic into an Err so the degradation has a single shape. The
-        // FNO_AGENTS_FAIL_STARTUP_RECONCILE env is a test seam that forces the
-        // failure path (proving the daemon keeps serving last-recorded status
-        // instead of aborting -- AC1-FR); it is never set in production.
-        let swept: Result<ReconcileSweepResult, String> =
-            if std::env::var("FNO_AGENTS_FAIL_STARTUP_RECONCILE").is_ok() {
-                Err(
-                    "forced startup-reconcile failure (FNO_AGENTS_FAIL_STARTUP_RECONCILE)"
-                        .to_string(),
-                )
-            } else {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_reconcile_sweep(&home, &emitter)
-                }))
-                .unwrap_or_else(|_| {
+        probe_sweep_in_flight.store(true, std::sync::atomic::Ordering::SeqCst);
+        let flag = Arc::clone(&probe_sweep_in_flight);
+        let sweep_home = home.clone();
+        let sweep_emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        std::thread::spawn(move || {
+            // Collapse a panic into an Err so the degradation has a single
+            // shape. The env var is a test seam for that failure path.
+            let swept: Result<ReconcileSweepResult, String> =
+                if std::env::var("FNO_AGENTS_FAIL_STARTUP_RECONCILE").is_ok() {
                     Err(
-                        "startup reconcile sweep panicked; serving last-recorded status"
+                        "forced startup-reconcile failure (FNO_AGENTS_FAIL_STARTUP_RECONCILE)"
                             .to_string(),
                     )
-                })
-            };
-        match swept {
-            Ok(result) => {
-                let _ = emitter.emit(
-                    "startup_reconcile_done",
-                    &json!({
-                        "updated": result.outcome.updated.len(),
-                        "deferred": result.outcome.deferred,
-                    }),
-                );
+                } else {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_reconcile_sweep(&sweep_home, &sweep_emitter)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(
+                            "startup reconcile sweep panicked; serving last-recorded status"
+                                .to_string(),
+                        )
+                    })
+                };
+            match swept {
+                Ok(result) => {
+                    let _ = sweep_emitter.emit(
+                        "startup_reconcile_done",
+                        &json!({
+                            "updated": result.outcome.updated.len(),
+                            "deferred": result.outcome.deferred,
+                        }),
+                    );
+                }
+                Err(msg) => {
+                    let _ = sweep_emitter.emit("startup_reconcile_failed", &json!({"error": msg}));
+                }
             }
-            Err(msg) => {
-                let _ = emitter.emit("startup_reconcile_failed", &json!({"error": msg}));
-            }
-        }
+            flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
     }
 
     // State: serving. daemon_started is emitted AFTER recovery (step 7 ordering:
@@ -2085,6 +2156,20 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 break;
             }
             _ = idle_check.tick() => {
+                if let Some(inode) = bound_inode {
+                    if !socket_inode_matches(&socket_path, inode) {
+                        let _ = ctx.emitter.emit(
+                            "daemon_socket_lost",
+                            &json!({"reason": "socket path no longer names the bound inode"}),
+                        );
+                        emit_state(&ctx.emitter, DaemonState::ShuttingDown);
+                        let _ = ctx.emitter.emit(
+                            "daemon_shutting_down",
+                            &json!({"reason": "socket-lost"}),
+                        );
+                        break;
+                    }
+                }
                 // Reap any worker that exited since the last tick so it never
                 // lingers as a zombie under the long-lived daemon.
                 reap_zombies();
@@ -2101,18 +2186,25 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
-                // Dead-row GC (x-b1aa): remove terminal, past-grace, clean
-                // agent-view rows so finished rows self-clean without the merge
-                // ritual. Cheap in steady state (no candidates -> no git, no
-                // registry write); the grace window makes exact cadence
-                // non-critical, so running it on the idle tick is fine.
-                let grace_cwd = &ctx.opts.dead_row_grace_cwd;
-                let grace_for_harness = |harness: &str| {
-                    Duration::from_secs(crate::agents_config::dead_row_grace_secs(
-                        grace_cwd, harness,
-                    ))
-                };
-                let _ = gc_sweep(&ctx.home, &ctx.emitter, &grace_for_harness);
+                // Dead-row GC includes transcript truth subprocesses. Run one
+                // pass at a time on a detached OS thread so it cannot starve
+                // accept or SIGTERM, and so shutdown never waits for a wedged
+                // child-process probe.
+                if !probe_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&probe_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    let grace_cwd = ctx.opts.dead_row_grace_cwd.clone();
+                    std::thread::spawn(move || {
+                        let grace_for_harness = |harness: &str| {
+                            Duration::from_secs(crate::agents_config::dead_row_grace_secs(
+                                &grace_cwd, harness,
+                            ))
+                        };
+                        let _ = gc_sweep(&home, &emitter, &grace_for_harness);
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 // Worktree report sweep: the backstop for what the merge ritual
                 // missed. Its own 24h stamp makes it a near-no-op on this tick,
                 // but the verb shells git across every worktree when it does
@@ -2181,7 +2273,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     ab_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
     ab_handle.abort();
 
-    let _ = std::fs::remove_file(ctx.home.supervisor_sock());
+    let still_ours = bound_inode
+        .map(|inode| socket_inode_matches(&socket_path, inode))
+        .unwrap_or(true);
+    if still_ours {
+        let _ = std::fs::remove_file(&socket_path);
+    }
     emit_state(&ctx.emitter, DaemonState::Exited);
     let _ = ctx.emitter.emit("daemon_exited", &json!({"clean": true}));
     Ok(())
@@ -3919,7 +4016,30 @@ fn registry_truth_handle(entry: &RegistryEntry) -> String {
 }
 
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe)
+    let started = Instant::now();
+    let overrun = std::cell::Cell::new(false);
+    let response = handle_list_with_truth(ctx, req, |handle| {
+        let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            overrun.set(true);
+            return None;
+        }
+        let result = crate::claude_ask::family1_truth_probe_with_timeout(
+            handle,
+            remaining.min(Duration::from_secs(5)),
+        );
+        if started.elapsed() >= PROBE_PASS_BUDGET {
+            overrun.set(true);
+        }
+        result
+    });
+    if overrun.get() {
+        let _ = ctx.emitter.emit(
+            "list_truth_overrun",
+            &json!({"budget_ms": PROBE_PASS_BUDGET.as_millis()}),
+        );
+    }
+    response
 }
 
 /// The attention window this surface orders by. Session-truth's stall window
@@ -7198,6 +7318,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
+            &|| false,
         );
 
         assert!(
@@ -7317,6 +7438,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             // Session gone from its own store: the empty hit vector.
             &|e| (e.name == "gone-session").then(Vec::new),
             &|_| None, // cascade: store holds nothing to remove
+            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["gonesess".to_string()]);
@@ -7366,6 +7488,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
+            &|| false,
         );
         assert!(first.reaped.is_empty(), "first sight stamps, never reaps");
         let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -7398,6 +7521,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|e| (e.name == "orph").then(Vec::new),
             &|_| None,
+            &|| false,
         );
         assert_eq!(second.reaped, vec!["orph".to_string()]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -7446,6 +7570,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             },
             &|_| None,
             &|_| None,
+            &|| false,
         );
 
         assert_eq!(summary.reaped_dormant, vec!["bgdone".to_string()]);
@@ -7506,6 +7631,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                     )
                 })
             },
+            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["piddead".to_string()]);
@@ -7601,6 +7727,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
+            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
@@ -7679,6 +7806,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
+            &|| false,
         );
         assert_eq!(
             summary_old.reaped,
@@ -7697,6 +7825,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &|_| None,
             &|_| None,
             &|_| None,
+            &|| false,
         );
         assert!(
             summary_new.reaped.is_empty(),
@@ -9713,6 +9842,47 @@ done
         let home = AgentsHome::at(&p);
         home.ensure_root().unwrap();
         home
+    }
+
+    #[tokio::test]
+    async fn concurrent_supervisor_binds_have_one_lock_winner() {
+        let home = short_home("bindrace");
+        let mut attempts = Vec::new();
+        for _ in 0..8 {
+            let candidate = home.clone();
+            attempts.push(tokio::spawn(async move {
+                bind_supervisor_socket(&candidate).await
+            }));
+        }
+        let mut results = Vec::new();
+        for attempt in attempts {
+            results.push(attempt.await.unwrap());
+        }
+        let mut winners = 0;
+        let mut losers = 0;
+        for result in &results {
+            match result {
+                Ok(_) => winners += 1,
+                Err(DaemonError::AlreadyRunning(_)) => losers += 1,
+                Err(error) => panic!("unexpected bind error: {error}"),
+            }
+        }
+        assert_eq!(winners, 1);
+        assert_eq!(losers, 7);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn socket_inode_check_detects_unlink_and_rebind() {
+        let home = short_home("inode");
+        let socket = home.supervisor_sock();
+        std::fs::write(&socket, b"first").unwrap();
+        let inode = std::fs::metadata(&socket).unwrap().ino();
+        assert!(socket_inode_matches(&socket, inode));
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::write(&socket, b"second").unwrap();
+        assert!(!socket_inode_matches(&socket, inode));
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     /// Seed a held-stream-thread registry row (claude + full UUID + Live).

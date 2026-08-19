@@ -70,6 +70,356 @@ fn wait_for(path: &Path, budget: Duration) {
     assert!(path.exists(), "path never appeared: {}", path.display());
 }
 
+fn line_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|body| body.lines().count())
+        .unwrap_or(0)
+}
+
+fn wait_for_lines(path: &Path, minimum: usize, budget: Duration) -> usize {
+    let start = Instant::now();
+    loop {
+        let count = line_count(path);
+        if count >= minimum || start.elapsed() >= budget {
+            return count;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn seed_live_probe_rows(home: &AgentsHome, count: usize) {
+    state::update_registry(&home.registry_json(), |registry| {
+        for i in 0..count {
+            let short_id = format!("{i:08x}");
+            registry.entries.push(state::RegistryEntry {
+                name: format!("slow-probe-{i:02}"),
+                short_id: short_id.clone(),
+                legacy_provider: "claude".into(),
+                harness: Some("claude".into()),
+                harness_session_id: Some(short_id.clone()),
+                cwd: "/tmp".into(),
+                project_root: String::new(),
+                session_id: None,
+                legacy_claude_short_id: Some(short_id),
+                claude_session_uuid: None,
+                messaging_socket_path: None,
+                codex_session_id: None,
+                gemini_session_id: None,
+                mcp_channel_id: None,
+                host_mode: None,
+                cc_session_id: None,
+                status: fno_agents::AgentStatus::Live,
+                last_message_at: Some("2020-01-01T00:00:00Z".into()),
+                created_at: "2020-01-01T00:00:00Z".into(),
+                pid: Some(std::process::id()),
+                pid_start_time: None,
+                log_path: None,
+                last_reconciled_at: None,
+                inside_leg: None,
+                exited_at: None,
+                mux: None,
+                screen_state: None,
+                crown_level: None,
+                crown_scope: None,
+                crown_grantor: None,
+                route_settings_path: None,
+                fno_id: None,
+                delivery_policy: None,
+            });
+        }
+    })
+    .unwrap();
+}
+
+struct SlowTruthShim {
+    path: String,
+    starts: PathBuf,
+    finishes: PathBuf,
+}
+
+fn install_slow_truth_shim(home: &AgentsHome) -> SlowTruthShim {
+    let shim_dir = home.root().join("bin");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let starts = home.root().join("probe-starts");
+    let finishes = home.root().join("probe-finishes");
+    write_executable(
+        &shim_dir.join("fno"),
+        r#"#!/bin/sh
+if [ "$1" != "agents" ] || [ "$2" != "truth" ]; then
+  exit 0
+fi
+printf 'start\n' >> "$FNO_PROBE_STARTS"
+sleep 1
+case "$3" in
+  *[13579bdf]) printf '{"state":"unknown"}\n'; status=13 ;;
+  *) printf '{"state":"working"}\n'; status=0 ;;
+esac
+printf 'finish\n' >> "$FNO_PROBE_FINISHES"
+exit "$status"
+"#,
+    );
+    SlowTruthShim {
+        path: format!(
+            "{}:{}",
+            shim_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+        starts,
+        finishes,
+    }
+}
+
+#[tokio::test]
+async fn daemon_answers_before_probing_finishes() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_live_probe_rows(&home, 40);
+    let shim = install_slow_truth_shim(&home);
+    let starts_env = shim.starts.to_string_lossy().into_owned();
+    let finishes_env = shim.finishes.to_string_lossy().into_owned();
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("PATH", shim.path.as_str()),
+            ("FNO_PROBE_STARTS", starts_env.as_str()),
+            ("FNO_PROBE_FINISHES", finishes_env.as_str()),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+            ("FNO_AGENTS_DEAD_ROW_GRACE_SECS", "0"),
+        ],
+    );
+
+    assert!(
+        wait_for_lines(&shim.starts, 1, Duration::from_secs(3)) >= 1,
+        "the slow probe pass must have started before the request",
+    );
+    let request_started = Instant::now();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(1),
+        call(
+            &home,
+            &PathBuf::from(DAEMON_BIN),
+            &Request::new(1, "agent.status", json!({})),
+        ),
+    )
+    .await;
+    let answer_elapsed = request_started.elapsed();
+    let finishes_at_answer = line_count(&shim.finishes);
+    let completed = wait_for_lines(&shim.finishes, 8, Duration::from_secs(12));
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+
+    let response = answer
+        .expect("daemon must answer within one second while probes are in flight")
+        .expect("status request succeeds");
+    assert!(!response.is_err(), "status failed: {:?}", response.error());
+    assert!(answer_elapsed < Duration::from_secs(1));
+    assert!(
+        finishes_at_answer < 8,
+        "the request answered only after the probe pass finished"
+    );
+    assert_eq!(completed, 8, "the bounded probe pass must later finish");
+}
+
+#[test]
+fn sigterm_stops_daemon_during_slow_sweep() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_live_probe_rows(&home, 40);
+    let shim = install_slow_truth_shim(&home);
+    let starts_env = shim.starts.to_string_lossy().into_owned();
+    let finishes_env = shim.finishes.to_string_lossy().into_owned();
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("PATH", shim.path.as_str()),
+            ("FNO_PROBE_STARTS", starts_env.as_str()),
+            ("FNO_PROBE_FINISHES", finishes_env.as_str()),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+            ("FNO_AGENTS_DEAD_ROW_GRACE_SECS", "0"),
+        ],
+    );
+    assert!(
+        wait_for_lines(&shim.starts, 1, Duration::from_secs(3)) >= 1,
+        "the slow probe pass must be in flight before SIGTERM",
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        match daemon.try_wait().expect("daemon remains waitable") {
+            Some(status) => break status.success(),
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            None => {
+                unsafe {
+                    libc::kill(daemon.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = daemon.wait();
+                break false;
+            }
+        }
+    };
+    let finishes_at_exit = line_count(&shim.finishes);
+    std::fs::remove_dir_all(home.root()).ok();
+
+    assert!(
+        exited,
+        "SIGTERM alone must stop the daemon within five seconds"
+    );
+    assert!(
+        finishes_at_exit < 8,
+        "shutdown waited for the entire blocking probe pass"
+    );
+}
+
+#[test]
+fn wedged_daemon_clients_fail_fast_no_orphans() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let fake_daemon = home.root().join("wedged-daemon");
+    write_executable(
+        &fake_daemon,
+        r#"#!/usr/bin/env python3
+import os
+import socket
+import time
+
+home = os.environ["FNO_AGENTS_HOME"]
+with open(os.path.join(home, "spawn-count"), "a", encoding="utf-8") as stream:
+    stream.write("spawned\n")
+with open(os.path.join(home, "daemon.pid"), "w", encoding="utf-8") as stream:
+    stream.write(str(os.getpid()))
+sock_path = os.path.join(home, "supervisor.sock")
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sock_path)
+listener.listen(128)
+while True:
+    time.sleep(1)
+"#,
+    );
+
+    let started = Instant::now();
+    let spawn_client = || {
+        Command::new(CLIENT_BIN)
+            .args(["rm", "no-such-worker-xyz"])
+            .env("FNO_AGENTS_HOME", home.root())
+            .env("FNO_AGENTS_DAEMON_BIN", &fake_daemon)
+            .env("FNO_AGENTS_START_TIMEOUT_MS", "500")
+            .env("FNO_AGENTS_REQUEST_TIMEOUT_MS", "200")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("client spawns")
+    };
+    let mut clients = vec![spawn_client()];
+    wait_for(&home.supervisor_sock(), Duration::from_secs(1));
+    for _ in 1..20 {
+        clients.push(spawn_client());
+    }
+    let statuses: Vec<_> = clients
+        .iter_mut()
+        .map(|client| client.wait().expect("client exits"))
+        .collect();
+    let elapsed = started.elapsed();
+
+    assert!(
+        statuses.iter().all(|status| !status.success()),
+        "every client must fail against a listener that never answers"
+    );
+    assert!(
+        statuses.iter().any(|status| status.code() == Some(124)),
+        "a bounded request timeout must use the dedicated CLI exit code"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "twenty clients took {elapsed:?} instead of failing within their bounds"
+    );
+    assert_eq!(
+        line_count(&home.root().join("spawn-count")),
+        1,
+        "the client startup lock must elect exactly one daemon child"
+    );
+    let pid: u32 = std::fs::read_to_string(home.root().join("daemon.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        !pid_alive(pid),
+        "the elected daemon child must be reaped after it fails to answer"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn final_answer_check_keeps_a_daemon_that_binds_at_the_deadline() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let delayed_daemon = home.root().join("delayed-daemon");
+    write_executable(
+        &delayed_daemon,
+        &format!(
+            "#!/bin/sh\nsleep 0.15\nexec \"{}\"\n",
+            DAEMON_BIN.replace('"', "\\\"")
+        ),
+    );
+
+    let started = Instant::now();
+    let first_status = Command::new(CLIENT_BIN)
+        .args(["rm", "no-such-worker-xyz"])
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_DAEMON_BIN", &delayed_daemon)
+        .env("FNO_AGENTS_START_TIMEOUT_MS", "100")
+        .env("FNO_AGENTS_REQUEST_TIMEOUT_MS", "500")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("client runs");
+    assert!(
+        !first_status.success(),
+        "the missing worker should still be reported as absent"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the deadline-race request exceeded its configured bounds"
+    );
+
+    let status = Command::new(CLIENT_BIN)
+        .arg("status")
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_REQUEST_TIMEOUT_MS", "500")
+        .output()
+        .expect("status client runs");
+    assert!(
+        status.status.success(),
+        "the late-binding daemon was killed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let pid = body["daemon"]["pid"].as_u64().unwrap() as u32;
+    assert!(pid_alive(pid));
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while home.supervisor_sock().exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        !home.supervisor_sock().exists(),
+        "SIGTERM must remove the late-binding daemon's socket"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// AC1-HP (Architecture B, plan ab-70faa65b): a cold daemon start runs ONE
 /// bounded reconcile sweep BEFORE serving, so the first `list` reads truthful
 /// liveness. A stale `ask` row recorded `live` at creation (its one-shot process

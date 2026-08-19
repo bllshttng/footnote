@@ -654,9 +654,12 @@ async fn run(args: Vec<String>) -> i32 {
                 0
             }
         },
-        Err(e) => {
-            eprintln!("fno-agents: {e}");
-            1
+        Err(error) => {
+            eprintln!("fno-agents: {error}");
+            match error {
+                ClientError::RequestTimeout(_) => 124,
+                _ => 1,
+            }
         }
     }
 }

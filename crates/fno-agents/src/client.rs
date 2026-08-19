@@ -20,6 +20,8 @@ pub enum ClientError {
     DaemonStartTimeout(Duration),
     #[error("daemon exited during startup with status {0}")]
     DaemonExitedEarly(std::process::ExitStatus),
+    #[error("daemon request timed out after {0:?}")]
+    RequestTimeout(Duration),
     #[error(
         "daemon binary not found: {0} - the fno-agents triad (client/daemon/worker) \
          is split here. Run `fno update` to redeploy the pair, or set \
@@ -28,6 +30,31 @@ pub enum ClientError {
     DaemonBinMissing(PathBuf),
     #[error("daemon is not running")]
     DaemonNotRunning,
+}
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_ANSWER_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn duration_from_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .filter(|duration| !duration.is_zero())
+        .unwrap_or(default)
+}
+
+fn request_timeout() -> Duration {
+    duration_from_env("FNO_AGENTS_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT)
+}
+
+fn daemon_start_timeout() -> Duration {
+    duration_from_env("FNO_AGENTS_START_TIMEOUT_MS", DAEMON_START_TIMEOUT)
+}
+
+fn daemon_answer_timeout() -> Duration {
+    request_timeout().min(DAEMON_ANSWER_TIMEOUT)
 }
 
 /// Resolve the daemon binary: `FNO_AGENTS_DAEMON_BIN` or a sibling of the
@@ -42,19 +69,68 @@ pub fn resolve_daemon_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("fno-agents-daemon"))
 }
 
-/// Ensure a daemon is serving on `home`'s socket, lazy-starting one if not.
-/// Returns once a connect succeeds. The lazy-start race is resolved daemon-side
-/// (socket-bind exclusivity); a redundant fork simply loses and exits.
+/// Ensure a daemon answers on `home`'s socket, lazy-starting one if not.
 pub async fn ensure_daemon(
     home: &AgentsHome,
     daemon_bin: &std::path::Path,
 ) -> Result<(), ClientError> {
+    ensure_daemon_with_budgets(
+        home,
+        daemon_bin,
+        daemon_start_timeout(),
+        daemon_answer_timeout(),
+    )
+    .await
+}
+
+async fn ensure_daemon_with_budgets(
+    home: &AgentsHome,
+    daemon_bin: &std::path::Path,
+    start_budget: Duration,
+    answer_budget: Duration,
+) -> Result<(), ClientError> {
+    home.ensure_root()?;
     let sock = home.supervisor_sock();
     if UnixStream::connect(&sock).await.is_ok() {
-        return Ok(());
+        return if wait_for_daemon_answer(home, answer_budget).await {
+            Ok(())
+        } else {
+            Err(ClientError::RequestTimeout(answer_budget))
+        };
     }
     if !daemon_bin.exists() {
         return Err(ClientError::DaemonBinMissing(daemon_bin.to_path_buf()));
+    }
+
+    let start_lock_path = home.supervisor_start_lock();
+    let start_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&start_lock_path)?;
+    let elected = match start_lock.try_lock() {
+        Ok(()) => true,
+        Err(error) => {
+            let io_error: std::io::Error = error.into();
+            if io_error.kind() == std::io::ErrorKind::WouldBlock {
+                false
+            } else {
+                return Err(io_error.into());
+            }
+        }
+    };
+    if !elected {
+        return if wait_for_daemon_answer(home, start_budget).await {
+            Ok(())
+        } else {
+            Err(ClientError::DaemonStartTimeout(start_budget))
+        };
+    }
+
+    // Another leader may have completed between our first probe and lock win.
+    if wait_for_daemon_answer(home, Duration::from_millis(50)).await {
+        return Ok(());
     }
 
     eprintln!("(lazy-starting daemon)");
@@ -69,9 +145,9 @@ pub async fn ensure_daemon(
     let mut child = cmd.spawn()?;
 
     let start = Instant::now();
-    let budget = Duration::from_secs(10);
-    while start.elapsed() < budget {
-        if UnixStream::connect(&sock).await.is_ok() {
+    while start.elapsed() < start_budget {
+        let remaining = start_budget.saturating_sub(start.elapsed());
+        if wait_for_daemon_answer(home, remaining.min(Duration::from_millis(200))).await {
             return Ok(());
         }
         // A daemon that REFUSED startup (x-4c87: a divergent registry exits
@@ -80,16 +156,32 @@ pub async fn ensure_daemon(
         // cause, not burn the full socket budget on a socket that will never
         // appear (code-review on PR 924).
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(ClientError::DaemonExitedEarly(status));
+            if !status.success() {
+                return Err(ClientError::DaemonExitedEarly(status));
+            }
+            return if wait_for_daemon_answer(home, remaining).await {
+                Ok(())
+            } else {
+                Err(ClientError::DaemonStartTimeout(start_budget))
+            };
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    // Budget spent and the child still lives: it is genuinely slow to boot.
-    // Drop the handle WITHOUT killing (tokio does not kill on drop; the child
-    // is in its own process group) so it can finish booting and serve a later
-    // verb, matching the old detach behavior.
-    drop(child);
-    Err(ClientError::DaemonStartTimeout(budget))
+
+    // Close the last-poll race before killing: a daemon that became responsive
+    // at the deadline is the successful leader and must stay resident.
+    if wait_for_daemon_answer(home, answer_budget).await {
+        return Ok(());
+    }
+    if let Some(status) = child.try_wait()? {
+        if !status.success() {
+            return Err(ClientError::DaemonExitedEarly(status));
+        }
+    } else {
+        child.kill().await?;
+        let _ = child.wait().await?;
+    }
+    Err(ClientError::DaemonStartTimeout(start_budget))
 }
 
 /// Send one request to the daemon (lazy-starting it first) and return the
@@ -100,32 +192,58 @@ pub async fn call(
     req: &Request,
 ) -> Result<Response, ClientError> {
     ensure_daemon(home, daemon_bin).await?;
-    let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
-    write_request(&mut conn, req).await?;
-    Ok(read_response(&mut conn).await?)
+    request_if_running(home, req, request_timeout()).await
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
 /// `status` uses this so it reports a down daemon (exit 13) rather than booting
 /// one just to describe it as up (AC10-ERR).
 pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Response, ClientError> {
-    let mut conn = match UnixStream::connect(home.supervisor_sock()).await {
-        Ok(c) => c,
-        // Only "nothing is listening" means the daemon is down. A permission
-        // error or a non-socket at the path is a real fault that must surface
-        // rather than masquerade as exit-13 "daemon down" (Codex P2).
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Err(ClientError::DaemonNotRunning)
-        }
-        Err(e) => return Err(ClientError::Io(e)),
+    request_if_running(home, req, request_timeout()).await
+}
+
+async fn request_if_running(
+    home: &AgentsHome,
+    req: &Request,
+    timeout: Duration,
+) -> Result<Response, ClientError> {
+    let request = async {
+        let mut conn = match UnixStream::connect(home.supervisor_sock()).await {
+            Ok(connection) => connection,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Err(ClientError::DaemonNotRunning)
+            }
+            Err(error) => return Err(ClientError::Io(error)),
+        };
+        write_request(&mut conn, req).await?;
+        Ok(read_response(&mut conn).await?)
     };
-    write_request(&mut conn, req).await?;
-    Ok(read_response(&mut conn).await?)
+    tokio::time::timeout(timeout, request)
+        .await
+        .map_err(|_| ClientError::RequestTimeout(timeout))?
+}
+
+async fn wait_for_daemon_answer(home: &AgentsHome, budget: Duration) -> bool {
+    let started = Instant::now();
+    let request = Request::new(0, "agent.status", json!({}));
+    while started.elapsed() < budget {
+        let remaining = budget.saturating_sub(started.elapsed());
+        match request_if_running(home, &request, remaining.min(Duration::from_millis(200))).await {
+            // A well-formed JSON-RPC error still proves the daemon accepted,
+            // processed, and answered the request. Liveness must not depend on
+            // application state being healthy enough for agent.status to be Ok.
+            Ok(_) => return true,
+            Err(ClientError::DaemonNotRunning | ClientError::RequestTimeout(_)) => {}
+            Err(_) => return false,
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +470,77 @@ pub async fn restart_daemon(
 #[cfg(test)]
 mod drift_restart_tests {
     use super::*;
+
+    fn short_home(tag: &str) -> AgentsHome {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        AgentsHome::at(PathBuf::from(format!(
+            "/tmp/fnct{}{}-{n}",
+            std::process::id(),
+            tag
+        )))
+    }
+
+    #[tokio::test]
+    async fn request_timeout_bounds_a_listener_that_never_answers() {
+        let home = short_home("timeout");
+        home.ensure_root().unwrap();
+        let listener = tokio::net::UnixListener::bind(home.supervisor_sock()).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let err = request_if_running(
+            &home,
+            &Request::new(1, "agent.status", json!({})),
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("a silent listener must time out");
+        assert!(matches!(
+            err,
+            ClientError::RequestTimeout(duration) if duration == Duration::from_millis(50)
+        ));
+        server.abort();
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn startup_timeout_kills_and_reaps_the_unbound_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = short_home("reap");
+        home.ensure_root().unwrap();
+        let daemon = home.root().join("never-binds");
+        std::fs::write(
+            &daemon,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$FNO_AGENTS_HOME/child.pid\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&daemon).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).unwrap();
+
+        let err = ensure_daemon_with_budgets(
+            &home,
+            &daemon,
+            Duration::from_millis(150),
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("an unbound child must time out");
+        assert!(matches!(err, ClientError::DaemonStartTimeout(_)));
+        let pid: u32 = std::fs::read_to_string(home.root().join("child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            unsafe { libc::kill(pid as libc::pid_t, 0) } != 0,
+            "timed-out child must be dead after ensure_daemon returns"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
 
     #[test]
     fn drift_from_status_unknown_when_no_fingerprint() {

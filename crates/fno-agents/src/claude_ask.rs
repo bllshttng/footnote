@@ -166,11 +166,20 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // rather than settling. The cost is bounded and visible: one extra
     // fast-failing spawn per affected row, and the second attempt always keeps
     // its WARN, so a stuck probe is loud rather than silent.
-    family1_truth_probe_retrying(
-        || family1_truth_command(handle),
-        Duration::from_secs(5),
-        handle,
-    )
+    family1_truth_probe_with_timeout(handle, Duration::from_secs(5))
+}
+
+/// Run the shared truth probe within a caller-owned pass budget. Sweep callers
+/// use this to shorten the final row's subprocess timeout to the time remaining
+/// for the whole pass instead of multiplying a per-row timeout by roster size.
+pub(crate) fn family1_truth_probe_with_timeout(
+    handle: &str,
+    timeout: Duration,
+) -> Option<TruthProbe> {
+    if timeout.is_zero() {
+        return None;
+    }
+    family1_truth_probe_retrying(|| family1_truth_command(handle), timeout, handle)
 }
 
 /// [`family1_truth_probe`] with the command built per attempt, so a test can

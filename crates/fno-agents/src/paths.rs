@@ -112,6 +112,19 @@ impl AgentsHome {
         self.root.join("supervisor.sock")
     }
 
+    /// Short-lived client election lock for lazy daemon startup. The elected
+    /// client holds it until the spawned daemon answers or is reaped; followers
+    /// wait for that answer and never fork competitors.
+    pub fn supervisor_start_lock(&self) -> PathBuf {
+        self.root.join("supervisor.start.lock")
+    }
+
+    /// Process-lifetime daemon singleton lock. A holder owns the right to bind
+    /// and retain `supervisor.sock`, independent of whether it is responsive.
+    pub fn supervisor_lock(&self) -> PathBuf {
+        self.root.join("supervisor.sock.lock")
+    }
+
     /// Per-agent directory.
     pub fn agent_dir(&self, short_id: &str) -> PathBuf {
         self.root.join(short_id)
