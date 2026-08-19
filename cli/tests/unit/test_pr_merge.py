@@ -261,11 +261,6 @@ def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys, tmp_p
     # x-04ab removed --invoker; a lingering legacy flag is silently accepted
     # (never an error). The merge proceeds and is gated only by `enabled`, so
     # with auto-merge off it skips (exit 2) exactly as a no-flag call would.
-    # The dispatch-hold read is isolated because this test drives the REAL
-    # runner (no FakeRun) from the checkout cwd, where a live graph makes the
-    # hold guard query a PR that does not exist and answer 'held' - a fact
-    # about the environment, not about argv acceptance.
-    monkeypatch.setattr("fno.pr._hold.merge_hold_reason", lambda pr, cwd: None)
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
     # Same hermeticity as the `enabled` fixture: without the pin a populated
     # per-worker sandbox graph turns this into `held` before `enabled` runs.
@@ -317,10 +312,6 @@ def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
     # `auto_merge_approved` from the caller's repo state, so a suite run inside
     # an active /target worktree (whose manifest carries a per-run no-merge)
     # bails on that field before the gh check. A fresh tmp cwd has no state.
-    # The dispatch-hold read is isolated for the same reason: on a runner with
-    # a readable graph and no gh, the hold guard converts the missing tool
-    # into a 'held' exit 2 - an environment fact, not this test's subject.
-    monkeypatch.setattr("fno.pr._hold.merge_hold_reason", lambda pr, cwd: None)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "failed"
@@ -1940,10 +1931,6 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     # before any merge command is recorded.
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
-    # Same isolation as the gh-missing test: the hold guard runs before the
-    # coverage gate and answers 'held' when its own gh read cannot parse,
-    # which says nothing about the head pin under test here.
-    monkeypatch.setattr("fno.pr._hold.merge_hold_reason", lambda pr, cwd: None)
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
