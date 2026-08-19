@@ -79,6 +79,7 @@ run 1 'string-indirected rm (eval / -c) fails' "$TMP/evalrm.sh"
 cat > "$TMP/echorm.sh" <<'EOF'
 echo "rm -rf failed for lockdir: $X" >&2
 echo 'rm -rf already attempted, see log' >&2
+echo "fix: bash -c 'rm -rf' leaves trash"
 EOF
 run 0 'quote-initial rm inside printed messages passes' "$TMP/echorm.sh"
 

@@ -89,7 +89,7 @@ check_file() {
       nl -ba "$path" \
         | sed -E 's/\\./BS/g; s/#.*$//;
                   s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
-        | grep -E "${CMDPOS}[\"']rm[\"']([[:space:]]|$)|${EVALINTRO}[\"']rm([[:space:]]|-)" | cut -f1
+        | grep -E "${CMDPOS}[\"']rm[\"']([[:space:]]|$)|${CMDPOS}${EVALINTRO}[\"']rm([[:space:]]|-)" | cut -f1
       nl -ba "$path" \
         | sed -E 's/\\./BS/g; s/"[^"]*"//g; s/'"'"'[^'"'"']*'"'"'//g; s/#.*$//;
                   s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
