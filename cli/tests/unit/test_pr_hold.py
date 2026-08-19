@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 from fno.cli import app
 from fno.graph.ladder import DispatchHoldState
 from fno.pr import _hold
-from fno.pr.closure import PrClosureContext
+from fno.pr.closure import ClosureQueryError, PrClosureContext
 
 
 def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=None):
@@ -108,6 +108,31 @@ def test_hold_for_pr_trailer_only_claim_with_no_ref_stamp_is_still_checked(tmp_p
         entries=[{"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)}],
     )
     assert _hold.hold_for_pr(42, str(tmp_path)) is None
+
+
+def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
+    tmp_path, monkeypatch
+):
+    """Round-11 review fix: a transient gh failure fetching the trailer must
+    never read as "nothing to check" - an earlier version returned None here
+    when nothing was ref-stamped, silently skipping the hold check for
+    exactly the trailer-only case round-10 added this lookup to catch, just
+    reachable via gh flakiness instead of a design gap."""
+    plan = tmp_path / "unused.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+
+    def _boom(pr_number, **k):
+        raise ClosureQueryError("gh pr view timed out")
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _boom)
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold-invalid:" in reason
+    assert "PR body is unreadable" in reason
 
 
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):

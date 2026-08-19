@@ -22,13 +22,29 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     """
     from fno.graph.store import read_graph
     from fno.paths import graph_json
+    from fno.pr import _merge
     from fno.pr._merge import _find_pr_node_id
+    from fno.pr._proc import ToolMissing
     from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
 
     try:
         entries = read_graph(graph_json())
     except Exception as exc:  # noqa: BLE001 - hold reads fail closed
         raise HoldLookupError(f"backlog graph is unreadable: {exc}") from exc
+
+    by_id = {
+        entry.get("id"): entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("id")
+    }
+    if not by_id:
+        # Nothing in the graph could possibly be held - a ref match or a
+        # trailer claim can only ever name an id this graph carries, and
+        # by_id is what candidate_ids gets checked against below. Skip the PR
+        # fetch entirely rather than paying a gh call (and a fail-closed trip
+        # on its failure) for a lookup whose answer is always None.
+        return None
+
     from fno.graph._reconcile import node_pr_refs
 
     stamped = any(
@@ -38,13 +54,33 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         for number, _url in node_pr_refs(entry)
     )
 
+    def _gh_runner(cmd, *, cwd=None, timeout=None, **_ignored):
+        # Route through fno.pr._merge.run - the SAME swappable seam every
+        # other gh call in the merge path uses - rather than
+        # fetch_pr_closure_context's own default subprocess.run. That default
+        # bypasses every test fixture's FakeGH mock (which only ever
+        # monkeypatches `_merge.run`), so it shelled to the REAL gh binary in
+        # dozens of unrelated tests; round-10's fail-open-when-unstamped path
+        # masked that by silently swallowing the resulting failure, and
+        # round-11's fail-closed fix turned that masked bug into a hard
+        # failure across the suite (round-11 review fix, self-caught).
+        try:
+            result = _merge.run(cmd, cwd=cwd, timeout=timeout)
+        except ToolMissing as exc:
+            raise FileNotFoundError(str(exc)) from exc
+        return result
+
     try:
-        pr_ctx = fetch_pr_closure_context(pr_number, cwd=cwd)
+        pr_ctx = fetch_pr_closure_context(pr_number, cwd=cwd, runner=_gh_runner)
     except ClosureQueryError as exc:
-        if not stamped:
-            # Nothing ref-stamped and the trailer is unreadable: there is no
-            # claim of either kind to hold-check.
-            return None
+        # Fail closed unconditionally, matching the graph-read handler above
+        # and this module's own stated policy ("hold reads fail closed") - a
+        # transient gh blip must never read as "nothing to check" for a
+        # trailer-only claimed node (round-11 review fix: an earlier version
+        # returned None here when nothing was ref-stamped, silently skipping
+        # the hold check for exactly the trailer-only case round-10 added
+        # this lookup to catch, just reachable via gh flakiness instead of a
+        # design gap).
         raise HoldLookupError(f"PR body is unreadable; cannot scope the hold lookup: {exc}") from exc
 
     ref_node_id: Optional[str] = None
@@ -64,11 +100,6 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # deliberately not a match.
         return None
 
-    by_id = {
-        entry.get("id"): entry
-        for entry in entries
-        if isinstance(entry, dict) and entry.get("id")
-    }
     for node_id in candidate_ids:
         node = by_id.get(node_id)
         if not isinstance(node, dict):
