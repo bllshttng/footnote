@@ -1089,6 +1089,46 @@ def _stub_closure_ctx(body: str, *, number: int = 900, url: str | None = None,
     )
 
 
+def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monkeypatch):
+    """Review fix (x-59a6): a --pr-number call must scan only what THAT PR
+    could touch, never the whole graph. An unrelated node with its own
+    already-merged PR (no trailer claim, no shared pr_number) must stay
+    untouched by a --pr-number call, even though a bare sweep right after
+    would close it - proving the call is genuinely scoped, not just capped."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-500001"),  # claimed by this PR's trailer
+        _node("ab-500002", pr_number=811,
+              pr_url="https://github.com/test-owner/test-repo/pull/811"),  # unrelated, already merged
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-500001\n", number=810,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED", 811: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-500001"}  # the claimed node only
+
+    entries = _read_entries(graph_path)
+    unrelated = next(e for e in entries if e["id"] == "ab-500002")
+    assert unrelated["completed_at"] is None  # untouched by the scoped call
+
+    # A bare sweep right after DOES catch it - proving the PR-scoped call was
+    # scoped, not simply broken.
+    result2 = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result2.exit_code == 0, result2.output
+    payload2 = json.loads(result2.output)
+    assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
+
+
 def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
     """AC3-HP + AC4-HP: one merged PR's trailer names two open nodes -> both
     refs bind and both nodes close in one invocation, even though only one
@@ -1259,10 +1299,11 @@ def test_reconcile_auto_binds_closure_claims_for_a_ui_merge(cli_env, monkeypatch
 def test_reconcile_auto_discovery_scopes_repo_to_the_discovered_record_not_the_flag(
     cli_env, monkeypatch,
 ):
-    """Review fix (x-59a6): a global --repo (the EXPLICIT --pr-number leg's own
-    repo) must never scope an auto-discovered PR belonging to a different
-    project's repo - the graph is cross-project, and the discovery loop's own
-    comment says so; the code must actually do it."""
+    """Review fix (x-59a6): auto-discovery (bare-sweep only - a --pr-number
+    call is scoped to its own PR and never runs this leg) must scope each
+    discovered PR's query to THAT record's own repo, never one borrowed from
+    another discovered record - the graph is cross-project, and the
+    discovery loop's own comment says so; the code must actually do it."""
     import fno.pr.closure as closure_mod
 
     graph_path, _ = cli_env
@@ -1297,13 +1338,11 @@ def test_reconcile_auto_discovery_scopes_repo_to_the_discovered_record_not_the_f
 
     monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
 
-    result = runner.invoke(
-        app, ["backlog", "reconcile", "--pr-number", "910", "--repo", "test-owner/test-repo", "--json"],
-    )
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
     assert result.exit_code == 0, result.output
 
-    discovered_calls = [c for c in fetch_calls if c[0] == 911]
-    assert discovered_calls == [(911, "other-owner/other-repo")]
+    assert (910, "test-owner/test-repo") in fetch_calls
+    assert (911, "other-owner/other-repo") in fetch_calls
 
 
 def test_reconcile_auto_discovery_skips_when_repo_unresolvable(cli_env, monkeypatch):
@@ -1344,7 +1383,9 @@ def test_reconcile_auto_discovery_skips_when_repo_unresolvable(cli_env, monkeypa
 
     monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
 
-    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "910", "--json"])
+    # Bare sweep: auto-discovery (where this skip logic lives) only runs on
+    # a full, unscoped sweep - a --pr-number call is scoped to its own PR.
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
     assert result.exit_code == 0, result.output
     assert 925 not in fetch_calls  # unresolvable repo -> skipped, never queried
 

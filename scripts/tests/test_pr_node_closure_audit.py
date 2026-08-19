@@ -48,6 +48,13 @@ def test_classify_other_with_no_signal():
     assert audit.classify_mention("x-9999 is mentioned here.") == "other"
 
 
+def test_classify_close_claim_bare_fix_and_fixed():
+    # Review fix (x-59a6): the old regex `fixe?s` required a trailing 's',
+    # missing the bare "fix"/"fixed" forms of the standard close-verb set.
+    assert audit.classify_mention("This will fix x-5b99 as well.") == "close_claim"
+    assert audit.classify_mention("Fixed x-5b99 in this pass.") == "close_claim"
+
+
 # ---------------------------------------------------------------------------
 # scan_pr
 # ---------------------------------------------------------------------------

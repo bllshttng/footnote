@@ -42,7 +42,7 @@ _DEPENDENCY_RE = re.compile(
 )
 _FOLLOWUP_RE = re.compile(r"\b(follow[- ]?ups?|filed|filing)\b", re.IGNORECASE)
 _COLLISION_RE = re.compile(r"\b(collisions?|untouched|unmerged)\b", re.IGNORECASE)
-_CLOSE_VERB_RE = re.compile(r"\b(closes?|fixe?s|resolves?)\b", re.IGNORECASE)
+_CLOSE_VERB_RE = re.compile(r"\b(close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b", re.IGNORECASE)
 _TRAILER_RE = re.compile(r"^Backlog-Closure:[ \t]*(.*)$", re.IGNORECASE | re.MULTILINE)
 
 CLASSIFICATIONS = ("close_claim", "dependency", "follow_up", "collision", "other")
@@ -204,7 +204,7 @@ def run_audit(prs: list[dict], node_ids: set[str]) -> AuditResult:
 
 
 def _fetch_corpus(limit: int) -> list[dict]:
-    from fno.graph._reconcile import ReconcileError, fetch_recent_merged_prs
+    from fno.graph._reconcile import fetch_recent_merged_prs
 
     return fetch_recent_merged_prs(limit=limit)
 

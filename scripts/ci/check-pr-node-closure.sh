@@ -26,13 +26,21 @@ if [[ -z "$PR_HEAD_REF" ]]; then
   exit 0
 fi
 
-# Liberal FORMAT match - mirrors NODE_ID_BODY in cli/src/fno/graph/_constants.py
-# (letter-led alnum prefix, hyphen, 4-8 hex chars). This is a format check, not
-# an identity check: no graph is available in CI to confirm the id is real, so
-# a branch segment that merely LOOKS like a node id (e.g. a coincidental
-# "db-2026") is treated the same as a real one - the documented liberal-
-# extraction tradeoff, not a bug.
-node_id_re='[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}'
+# Liberal FORMAT match, sourced from the one shell copy of the node-id shape
+# (kept aligned with the Python source of truth by its own pinning test,
+# test_node_id_sh.py) rather than a second hardcoded copy here that could
+# silently drift. This is a format check, not an identity check: no graph is
+# available in CI to confirm the id is real, so a branch segment that merely
+# LOOKS like a node id (e.g. a coincidental "db-2026") is treated the same as
+# a real one - the documented liberal-extraction tradeoff, not a bug.
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/node-id.sh
+source "${_script_dir}/../lib/node-id.sh"
+# _NODE_ID_FNO_RE is anchored (^...$); strip both anchors so this script's own
+# `^${node_id_re}$` wrapping at the match site below stays the single place
+# anchoring happens.
+node_id_re="${_NODE_ID_FNO_RE#^}"
+node_id_re="${node_id_re%\$}"
 
 # Extract every delimiter-bounded candidate segment from the head ref. IFS
 # splits on '/' and '-' so each candidate is compared whole, not as a

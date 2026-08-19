@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional, Union
 
 # `gh pr view` default timeout; covers network hangs and stuck auth prompts.
 GH_QUERY_TIMEOUT_S = 30.0
@@ -933,10 +933,25 @@ def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
     return cwd
 
 
+def _node_id_scope(node_id: Optional[Union[str, Iterable[str]]]) -> Optional[set[str]]:
+    """Normalize a scan's ``node_id`` filter to a set, or None for unscoped.
+
+    Accepts a single id (the common case) or an iterable of ids (x-59a6: a
+    ``--pr-number`` call scopes the scan to every node this one PR actually
+    touches - its own stamped ref plus every exact trailer claim - rather
+    than either a single node or the whole graph.
+    """
+    if node_id is None:
+        return None
+    if isinstance(node_id, str):
+        return {node_id}
+    return set(node_id)
+
+
 def reverse_map_unstamped(
     entries: list[dict],
     *,
-    node_id: Optional[str] = None,
+    node_id: Optional[Union[str, Iterable[str]]] = None,
     list_merged: Optional[Callable[..., list[dict]]] = None,
 ) -> list[MergeDriftRecord]:
     """Close open nodes with NO PR refs by matching the id in a merged branch.
@@ -954,6 +969,7 @@ def reverse_map_unstamped(
     """
     if list_merged is None:
         list_merged = list_merged_pr_branches
+    _scope = _node_id_scope(node_id)
 
     # Open, ref-less, cwd-resolvable candidates grouped by repo dir so we make
     # ONE gh call per repo, not per node.
@@ -965,7 +981,7 @@ def reverse_map_unstamped(
         nid = node.get("id")
         if not isinstance(nid, str):
             continue
-        if node_id is not None and nid != node_id:
+        if _scope is not None and nid not in _scope:
             continue
         if not node_is_open(node):
             continue
@@ -1112,7 +1128,7 @@ def scan_merge_drift(
     entries: list[dict],
     *,
     query: Optional[Callable[..., PrMergeState]] = None,
-    node_id: Optional[str] = None,
+    node_id: Optional[Union[str, Iterable[str]]] = None,
     list_merged: Optional[Callable[..., list[dict]]] = None,
 ) -> list[MergeDriftRecord]:
     """Find open nodes whose PR has merged outside the ship gate.
@@ -1121,7 +1137,10 @@ def scan_merge_drift(
     records flagged with ``error`` for nodes whose PR state could not be
     resolved. Nodes whose PRs are all still OPEN (or closed-unmerged) yield no
     record - they are not drift. ``node_id`` restricts the scan to a single
-    node. Tests inject a ``query`` stub to avoid shelling out to gh.
+    node (a str) or a set of nodes (an iterable of str) - e.g. every node one
+    specific PR's exact trailer names, so a ``--pr-number`` call scans only
+    what that PR could possibly touch instead of the whole graph (x-59a6).
+    Tests inject a ``query`` stub to avoid shelling out to gh.
 
     A second pass (``reverse_map_unstamped``) covers open nodes with NO PR ref
     at all - a session that died before the node<->PR stamp - by matching the
@@ -1129,6 +1148,7 @@ def scan_merge_drift(
     """
     if query is None:
         query = query_pr_merge_state
+    _scope = _node_id_scope(node_id)
 
     records: list[MergeDriftRecord] = []
 
@@ -1136,7 +1156,7 @@ def scan_merge_drift(
         nid = node.get("id")
         if not isinstance(nid, str):
             continue
-        if node_id is not None and nid != node_id:
+        if _scope is not None and nid not in _scope:
             continue
         if not node_is_open(node):
             continue
