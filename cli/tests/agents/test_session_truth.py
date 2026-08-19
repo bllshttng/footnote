@@ -889,6 +889,54 @@ def test_truth_batch_keys_every_handle_and_exits_zero_with_a_miss(
     assert payload["c"]["reason"]  # the miss explains itself in its own entry
 
 
+def test_truth_batch_and_single_read_the_same_handle_identically(tmp_path, monkeypatch):
+    """ONE reader, asserted on the whole payload rather than on one field.
+
+    This is the constraint the batch exists to preserve. `state` and
+    `observed_model` must come from the same reader, so the Rust list emitter
+    reports the identical reading the Python one does -- see `TruthProbe` in
+    `crates/fno-agents/src/claude_ask.rs`. A batch that answered even slightly
+    differently from the single form would be the second reader a Rust port was
+    rejected for growing.
+
+    Compared as full dicts, not as a state string: a check that pins one field
+    passes while every other field drifts.
+    """
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-4444-0000-0000-000000000001"
+    _write_claude_transcript_with_model(tmp_path, cwd, sid, "glm-5.3", turns=3)
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+
+    real = session_truth.resolve_session_truth
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **kw: real(
+            handle, resolve=_resolver(session), projects_root=tmp_path
+        ),
+    )
+
+    runner = CliRunner()
+    single = json.loads(
+        runner.invoke(app, ["agents", "truth", "w1", "--json"]).stdout
+    )
+    batch = json.loads(
+        runner.invoke(app, ["agents", "truth", "--handles", "w1", "--json"]).stdout
+    )["w1"]
+
+    # The age advances between two reads by construction; it is the one field a
+    # parity check must exclude rather than the one field it should check.
+    drifts = {"last_activity_age_s"}
+    assert {k: v for k, v in batch.items() if k not in drifts} == {
+        k: v for k, v in single.items() if k not in drifts
+    }
+
+
 def test_truth_batch_refuses_both_a_positional_handle_and_handles():
     """Two spellings of one question. Exit 2 (usage), nothing on stdout."""
     from typer.testing import CliRunner
