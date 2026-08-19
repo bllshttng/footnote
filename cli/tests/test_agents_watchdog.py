@@ -1243,7 +1243,7 @@ id = "broken"
 name = "Broken"
 harness = "claude"
 auth = "api_key"
-model_provider = "zai"
+route_provider_id = "zai"
 model_name = "glm-5.3"
 env = { ANTHROPIC_API_KEY = "test" }
 
@@ -1252,7 +1252,7 @@ id = "codex-backup"
 name = "Codex backup"
 harness = "codex"
 auth = "api_key"
-model_provider = "openai"
+route_provider_id = "openai"
 model_name = "gpt-5.6-sol"
 env = { OPENAI_API_KEY = "test" }
 

@@ -1258,6 +1258,7 @@ def production_handoff_candidate(
     pane_occupancy_fn: Optional[Callable[[str], int]] = None,
     canary_fn: Optional[Callable[[Any, Row, float], Any]] = None,
     open_breakers_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
+    configured_routes_provider: Optional[Callable[[str, list[str]], list[Any]]] = None,
 ):
     """Walk configured route policy and return the first proved destination."""
     from fno.agents.provider_outage import (
@@ -1298,6 +1299,15 @@ def production_handoff_candidate(
         broken_account = str(breaker.get("account") or "")
         if any(str(value) in {broken_provider, broken_account} for value in pins.values()):
             return None
+        if configured_routes_provider is None:
+            from fno.agents.autonomous_route import configured_outage_routes
+
+            def configured_routes_provider(cwd: str, ordered: list[str]) -> list[Any]:
+                return configured_outage_routes(cwd, ordered_record_ids=ordered)
+        configured_by_account = {
+            route.record_id: route
+            for route in configured_routes_provider(row.cwd, ordered_accounts)
+        }
         entries_by_account: dict[str, list[Any]] = {}
         for registered in entries_provider():
             account = str(getattr(registered, "account_record_id", "") or "")
@@ -1310,28 +1320,35 @@ def production_handoff_candidate(
         }
 
         for account in ordered_accounts:
-            observations = entries_by_account.get(account, [])
-            identities = {
-                (
-                    str(getattr(item, "harness", "") or ""),
-                    str(getattr(item, "route_provider_id", "") or ""),
-                    str(getattr(item, "model_name", "") or ""),
-                )
-                for item in observations
-            }
-            if len(identities) != 1:
-                continue
-            harness, provider, model = next(iter(identities))
-            if not all((harness, provider, model)):
-                continue
-            entry = observations[0]
-            if not all((
-                entry.harness,
-                entry.route_provider_id,
-                entry.model_name,
-                entry.account_record_id,
-            )):
-                continue
+            configured = configured_by_account.get(account)
+            if configured is not None:
+                harness = str(configured.harness)
+                provider = str(configured.provider)
+                model = str(configured.model)
+                account_env = dict(configured.account_env)
+                route_env = dict(configured.route_env)
+            else:
+                # A live row may supplement a legacy configured record that
+                # predates explicit model axes, but it is never the candidate
+                # denominator: only ids from ordered_accounts reach this loop.
+                observations = entries_by_account.get(account, [])
+                identities = {
+                    (
+                        str(getattr(item, "harness", "") or ""),
+                        str(getattr(item, "route_provider_id", "") or ""),
+                        str(getattr(item, "model_name", "") or ""),
+                    )
+                    for item in observations
+                }
+                if len(identities) != 1:
+                    continue
+                harness, provider, model = next(iter(identities))
+                if not all((harness, provider, model)):
+                    continue
+                entry = observations[0]
+                root = Path(row.cwd)
+                account_env = account_env_for(account, root)
+                route_env = route_env_for(entry)
             pin_provider = str(pins.get("provider") or "")
             if pin_provider and pin_provider not in {account, harness, provider}:
                 continue
@@ -1346,8 +1363,8 @@ def production_handoff_candidate(
                 provider=provider,
                 model=model,
                 account=account,
-                account_env=account_env_for(account, root),
-                route_env=route_env_for(entry),
+                account_env=account_env,
+                route_env=route_env,
                 canary=None,
                 breaker_open=(provider, account) in open_routes,
                 runtime_exhausted=runtime_exhausted_fn(account, root),

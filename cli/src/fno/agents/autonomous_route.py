@@ -23,7 +23,13 @@ import dataclasses
 from pathlib import Path
 from typing import Optional
 
-__all__ = ["AutonomousRoute", "launch_is_pinned", "select_autonomous_route"]
+__all__ = [
+    "AutonomousRoute",
+    "ConfiguredOutageRoute",
+    "configured_outage_routes",
+    "launch_is_pinned",
+    "select_autonomous_route",
+]
 
 
 def launch_is_pinned(
@@ -97,6 +103,63 @@ class AutonomousRoute:
     retry_at: Optional[float] = None
     window: Optional[str] = None
     defer_fallback: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfiguredOutageRoute:
+    """One fully explicit account/model route in configured policy order."""
+
+    record_id: str
+    harness: str
+    provider: str
+    model: str
+    account_env: dict[str, str]
+    route_env: dict[str, str]
+
+
+def configured_outage_routes(
+    node_cwd: str,
+    *,
+    ordered_record_ids: list[str] | None = None,
+) -> list[ConfiguredOutageRoute]:
+    """Return configured combo records with every launch axis explicit."""
+    from fno.adapters.providers.dispatch import dispatch_env
+    from fno.adapters.providers.loader import load_combos, load_providers
+    from fno.agents.dispatch_target import resolve_dispatch_target
+
+    root = Path(node_cwd)
+    config = load_providers(repo_root=root)
+    if ordered_record_ids is None:
+        target = resolve_dispatch_target(
+            "provider-outage-handoff", repo_root=root, env={}
+        )
+        if target.provider_id:
+            ordered_record_ids = [target.provider_id]
+        elif target.combo_name:
+            combo = load_combos(repo_root=root).get(target.combo_name)
+            ordered_record_ids = list(combo.providers) if combo is not None else []
+        else:
+            ordered_record_ids = [config.active] if config.active else []
+
+    routes: list[ConfiguredOutageRoute] = []
+    for record_id in ordered_record_ids:
+        record = config.by_id.get(record_id)
+        if record is None or not all((
+            record.id,
+            record.harness,
+            record.route_provider_id,
+            record.model_name,
+        )):
+            continue
+        routes.append(ConfiguredOutageRoute(
+            record_id=record.id,
+            harness=record.harness,
+            provider=str(record.route_provider_id),
+            model=str(record.model_name),
+            account_env=dispatch_env(record.id, repo_root=root),
+            route_env={},
+        ))
+    return routes
 
 
 def _cutover_low_after_minutes(node_cwd: Optional[str]) -> int:

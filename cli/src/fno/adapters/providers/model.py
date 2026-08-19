@@ -103,6 +103,11 @@ class ProviderRecord(BaseModel):
     )
     auth: _AUTH_LITERAL
     priority: int = Field(default=100, ge=0)
+    # Optional explicit model route for unattended outage handoff. These axes
+    # are independent of the account id and harness; callers must never infer
+    # a vendor or model from either of those fields.
+    route_provider_id: str | None = Field(default=None, pattern=_ID_PATTERN)
+    model_name: str | None = Field(default=None, min_length=1)
 
     # Conditional fields (auth-strategy-dependent)
     credentials_source: Path | None = None
