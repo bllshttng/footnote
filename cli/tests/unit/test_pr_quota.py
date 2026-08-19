@@ -43,7 +43,10 @@ def test_coverage_can_consume_reserved_points(tmp_path):
     calls: list[list[str]] = []
     result = _quota.execute_graphql(
         "coverage",
-        ["pr", "view", "930", "--json", "reviews,comments"],
+        [
+            "pr", "view", "930", "--json",
+            "reviews,comments,headRefOid,baseRefName",
+        ],
         runner=_runner(_quota.GRAPHQL_RESERVE, calls),
         real_gh="/real/gh",
         lock_path=tmp_path / "quota.lock",
@@ -51,7 +54,10 @@ def test_coverage_can_consume_reserved_points(tmp_path):
     assert result.returncode == 0
     assert calls == [
         ["/real/gh", "api", "rate_limit"],
-        ["/real/gh", "pr", "view", "930", "--json", "reviews,comments"],
+        [
+            "/real/gh", "pr", "view", "930", "--json",
+            "reviews,comments,headRefOid,baseRefName",
+        ],
     ]
 
 

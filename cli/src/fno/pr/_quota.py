@@ -83,6 +83,7 @@ def _coverage_read(args: Sequence[str]) -> bool:
     fields = frozenset(part for part in fields_arg.split(",") if part)
     return fields in {
         frozenset({"reviews", "comments"}),
+        frozenset({"reviews", "comments", "headRefOid", "baseRefName"}),
         frozenset({"commits"}),
         frozenset({"labels"}),
     }

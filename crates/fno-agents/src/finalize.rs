@@ -1910,7 +1910,12 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
     let output = match Command::new("fno-gh-coverage")
-        .args(["pr", "view", "--json", "reviews,comments"])
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "reviews,comments,headRefOid,baseRefName",
+        ])
         .current_dir(cwd)
         .output()
     {
@@ -1941,40 +1946,15 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
         return Some("optional-review-read-failed".to_string());
     };
-    let identity_output = match Command::new("fno-gh-loopcheck")
-        .args(["pr", "view", "--json", "headRefOid,baseRefName"])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            eprintln!(
-                "finalize: PR identity read failed (non-fatal): {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Some("optional-review-read-failed".to_string());
-        }
-        Err(error) => {
-            eprintln!("finalize: PR identity read failed (non-fatal): {error}");
-            return Some("optional-review-read-failed".to_string());
-        }
-    };
-    let identity: Value = match serde_json::from_slice(&identity_output.stdout) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("finalize: PR identity parse failed (non-fatal): {error}");
-            return Some("optional-review-read-failed".to_string());
-        }
-    };
     // Freshness resolves against the PR head gh reports, the same pin the
     // coverage gate uses. An exact-head pin is Fresh with no git call; a moved
     // head needs the repo's git, and an unresolvable identity reads Stale -
     // fail closed, never an arming on unpinned evidence.
-    let head = identity
+    let head = payload
         .get("headRefOid")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let base = identity
+    let base = payload
         .get("baseRefName")
         .and_then(Value::as_str)
         .unwrap_or("");
