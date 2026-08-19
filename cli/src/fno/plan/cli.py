@@ -591,9 +591,9 @@ def sync(
     ),
 ) -> None:
     """Idempotent whole-vault mirror-field sweep (x-5d84)."""
-    from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.plan._project import project_graph_nodes
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     gpath = graph_json()
     watermark = _plan_sync_watermark()
@@ -614,7 +614,13 @@ def sync(
     # A transient graph read failure degrades to a 0-doc no-op and does NOT
     # advance the watermark, so the next sweep re-converges (AC1-FR).
     try:
-        entries = read_graph(gpath)
+        entries = read_entries("plan.sync")
+    except ExternalMetadataUnavailable:
+        # The vault mirror is default-backend machinery (its watermark is the
+        # local store's mtime); an external selection must not repaint docs
+        # from stale local rows.
+        typer.echo("plan sync: external tracker backend selected; 0 docs repainted", err=True)
+        return
     except Exception as e:  # noqa: BLE001
         typer.echo(f"plan sync: graph unreadable ({e}); 0 docs repainted", err=True)
         return

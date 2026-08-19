@@ -16,7 +16,7 @@ from fno.graph.store import locked_mutate_graph, read_graph
 from fno.graph.types import _derive_status
 from fno.paths import graph_json
 
-from .types import NodeNotFound, TrackerNode, TrackerState
+from .types import NodeNotFound, TrackerCandidate, TrackerNode, TrackerState
 
 
 def _ts_now() -> str:
@@ -44,13 +44,16 @@ class GraphTracker:
                 return self._project(entry)
         raise NodeNotFound(id)
 
-    def list_open(self) -> list[TrackerNode]:
+    def list_open(self) -> list[TrackerCandidate]:
         # Open == not yet terminal. Project once (which derives the rung) and
         # filter on the projected state, so each entry pays one derivation.
-        # The backend returns the set in storage order; footnote's caller ranks it.
+        # The backend returns the set in storage order; footnote's caller ranks
+        # it. Candidates carry the selection-only ordering inputs (priority,
+        # rank, created_at) that keep the graph winner order reproducible from
+        # list_open alone.
         return [
             node
-            for node in (self._project(e) for e in read_graph(self._path))
+            for node in (self._project_candidate(e) for e in read_graph(self._path))
             if node.state is TrackerState.open
         ]
 
@@ -83,4 +86,17 @@ class GraphTracker:
             ),
             parent=entry.get("parent"),
             blocked_by=list(entry.get("blocked_by") or []),
+        )
+
+    @classmethod
+    def _project_candidate(cls, entry: dict) -> TrackerCandidate:
+        # The five-field projection plus exactly the ordering inputs the
+        # selection sort consumes; see TrackerCandidate for why nothing else
+        # widens here.
+        node = cls._project(entry)
+        return TrackerCandidate(
+            **node.model_dump(),
+            priority=entry.get("priority") or "p2",
+            rank=entry.get("rank"),
+            created_at=entry.get("created_at"),
         )

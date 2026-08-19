@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 import typer
 
@@ -181,6 +181,27 @@ def _graph_path() -> Path:
     return GRAPH_JSON
 
 
+def _display_entries(reader: str) -> list[dict]:
+    """Entries for read-only display/search surfaces (view, find, roadmap,
+    relatedness, provenance walks, the status summary).
+
+    These renders visualize the LOCAL store's full records - status, tags,
+    details, slug - which the five-field read contract does not carry, so they
+    read through the guarded metadata reader: byte-identical on the default
+    backend, an honest named refusal under an external selection (an external
+    tracker has its own UI; a stale local render is the leak the seam closes).
+    Mutation paths keep ``read_graph`` and get the shared external refusal
+    from task 4.2 instead.
+    """
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        return read_entries(reader)
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(f"fno backlog: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _safe_stderr_warn(msg: str) -> None:
     """Write ``msg`` to stderr, swallowing a closed/broken stream.
 
@@ -254,10 +275,9 @@ def cmd_relatedness_build(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the built map as JSON."),
 ) -> None:
     """Build the relatedness sidecar from graph signals (read-only on the graph)."""
-    from fno.graph.store import read_graph
     from fno.graph import relatedness as _r
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("relatedness.build")
     if project is not None:
         entries = [e for e in entries if e.get("project") == project]
     mapping = _r.build_map(entries, k=top_k)
@@ -477,7 +497,6 @@ def cmd_epic_status(
     """One table over an epic's children: status, worker, PR, and an inline
     dispatch receipt (or breaker streak) so an idle/deferred child is never a
     silent blank. Refuses a non-container node by name."""
-    from fno.graph.store import read_graph
     from fno.graph.fuzzy import resolve_node
     from fno.handoff.output import merge_json_flag, json_mode
 
@@ -485,7 +504,7 @@ def cmd_epic_status(
     # parent callbacks merge theirs into ctx.obj; merge this leaf's too.
     merge_json_flag(ctx, json_output)
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("epic.status")
     match = resolve_node(epic, entries)
     if match.kind != "exact" or not match.id:
         typer.echo(f"epic status: no node matches '{epic}'", err=True)
@@ -2472,6 +2491,10 @@ def _intake_impl(
         [d.strip() for d in deps.split(",") if d.strip()] if deps else []
     )
 
+    # Creation path: the same external-backend refusal every birth path
+    # carries (an intake mints new nodes).
+    _refuse_create_on_external_backend()
+
     entries = read_graph(_graph_path())
 
     if roadmap_id and not force_new_roadmap:
@@ -3817,6 +3840,92 @@ def _starvation_receipts(
     return out
 
 
+def _external_open_status(*, pr_number: Optional[int], plan_path: Optional[str]) -> str:
+    """Read-time status for an OPEN external item: in_review > ready > idea.
+
+    A plan-less, PR-less open node is dispatch work nobody has started
+    planning yet, not ready work - the same three-way split selection
+    filters on. Every external-backend status render (selection, the mux
+    snapshot, `backlog get`) must derive from this one function so a node
+    dispatch skips never reads as ready anywhere else.
+    """
+    if pr_number:
+        return "in_review"
+    return "ready" if plan_path else "idea"
+
+
+class _ExternalSelectionError(RuntimeError):
+    """A tracker or required sidecar read failed during joined selection.
+
+    AC6-ERR: selection fails CLOSED. The message names the failing backend or
+    id; the caller exits nonzero and never falls back to the local graph file
+    or silently selects a different node.
+    """
+
+
+def _joined_open_candidates(tracker=None) -> list[dict]:
+    """The transient joined selection model: ``list_open()`` exactly once, one
+    sidecar load per OPEN id, never the closed history (AC4's bound: 48 live
+    rows, not the ~2,000 inactive archive).
+
+    A transient render for selection filters and ranking only - never
+    persisted, never a shared convenience record (locked decision 3). The
+    rung is DERIVED at read time from seam-carried evidence (open + PR = in
+    review; open + linked plan = ready; plan-less = idea, the cold-dispatch
+    admission): no stored status flag crosses the seam, and footnote's
+    mutation-stamped rungs (deferred/superseded) cannot exist on an
+    externally-owned item. Footnote-minted scoping pins (project, roadmap_id,
+    mission_*) carry no external equivalent and stay absent: a scoped request
+    over them is honestly empty, and `--project`/-A detection degrades to
+    "all open candidates" exactly as a join with no project column must.
+    Priority/rank/created_at ride the selection projection, so footnote's
+    ranking (applied by _pick_ready AFTER this join) is tracker-owned on both
+    backends - the same sort key picks the same winner (AC5).
+    """
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+
+    tracker = tracker or get_tracker()
+    try:
+        candidates = tracker.list_open()
+    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
+        raise _ExternalSelectionError(
+            f"tracker {tracker.name!r} list_open failed: {exc}"
+        ) from exc
+    joined: list[dict] = []
+    for c in candidates:
+        try:
+            sc = sidecar_store.load(c.id)
+        except Exception as exc:  # noqa: BLE001 - name the id, fail closed
+            raise _ExternalSelectionError(
+                f"sidecar read failed for {c.id}: {exc}"
+            ) from exc
+        row = {
+            "id": c.id,
+            "title": c.title,
+            "state": str(c.state.value),
+            "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
+            "parent": c.parent,
+            "blocked_by": list(c.blocked_by),
+            "priority": c.priority,
+            "rank": c.rank,
+            "created_at": c.created_at,
+            # Footnote-owned selection facts joined before the filters run.
+            "cwd": sc.cwd,
+            "plan_path": sc.plan_path,
+            "pr_number": sc.pr_number,
+            "pr_url": sc.pr_url,
+            "additional_prs": sc.additional_prs,
+            "batch": sc.batch,
+            "contained_in": sc.contained_in,
+            "sessions": sc.sessions,
+            "claimed_at": sc.claimed_at,
+            "cost_usd": sc.cost_usd,
+        }
+        joined.append(row)
+    return joined
+
+
 @cli.command("next")
 def cmd_next(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -3855,14 +3964,25 @@ def cmd_next(
         descendants_of, _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
+    from fno.tracker import active_backend_name
 
     result: list = [None]
     project_filter = project
-    # Read the graph at most once for project detection AND parent
-    # resolution (both need the full entry list).
-    pre_entries = None
-    if (not project_filter and not all_) or parent:
-        pre_entries = read_graph(_graph_path())
+    _external = active_backend_name() != "graph"
+    # One read for the prelude AND selection: under an external backend the
+    # transient joined model (list_open + sidecar join, fail-closed); under
+    # the default backend the working graph, read at most once for project
+    # detection AND parent resolution (both need the full entry list).
+    try:
+        if _external:
+            pre_entries = _joined_open_candidates()
+        else:
+            pre_entries = None
+            if (not project_filter and not all_) or parent:
+                pre_entries = read_graph(_graph_path())
+    except _ExternalSelectionError as exc:
+        typer.echo(f"Error: {exc}; selection refused", err=True)
+        raise typer.Exit(code=1)
     if not project_filter and not all_:
         assert pre_entries is not None  # set under the same condition above
         project_filter = detect_project(pre_entries)
@@ -4003,17 +4123,34 @@ def cmd_next(
         }
 
     if claim:
-        def mutator(entries):
-            candidates = _pick_ready(entries)
-            if candidates:
-                winner = candidates[0]
-                winner["locked_by"] = claim
-                winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
+        if _external:
+            # External claims use the claims subsystem only: no graph
+            # mutation, and no claim pointer written into tracker or sidecar
+            # (the live holder lives in the claims dir). Contention falls
+            # through to the next ranked candidate rather than failing the
+            # whole selection.
+            from fno.claims.core import ClaimHeldByOther, acquire_claim
+
+            candidates = _pick_ready(pre_entries)
+            for winner in candidates:
+                try:
+                    acquire_claim(f"node:{winner['id']}", claim)
+                except ClaimHeldByOther:
+                    continue
                 result[0] = _node_summary(winner)
-            return entries
-        locked_mutate_graph(_graph_path(), mutator)
+                break
+        else:
+            def mutator(entries):
+                candidates = _pick_ready(entries)
+                if candidates:
+                    winner = candidates[0]
+                    winner["locked_by"] = claim
+                    winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
+                    result[0] = _node_summary(winner)
+                return entries
+            locked_mutate_graph(_graph_path(), mutator)
     else:
-        entries = read_graph(_graph_path())
+        entries = pre_entries if _external else read_graph(_graph_path())
         candidates = _pick_ready(entries)
         if candidates:
             result[0] = _node_summary(candidates[0])
@@ -4022,11 +4159,15 @@ def cmd_next(
         # Zero-silent-starvation receipts (x-3236 G1): explain to stderr why
         # nothing was picked. Advisory - stdout stays exactly the node-or-"null"
         # contract `_next_node` parses, so a receipt failure never breaks
-        # dispatch.
+        # dispatch. Under an external backend the receipts explain the ACTUAL
+        # joined denominator, never the local graph.
         try:
             from fno.backlog.advance import _guard_staleness_days
 
-            recv_entries = read_graph(_graph_path()) if claim else entries
+            recv_entries = (
+                pre_entries if _external
+                else (read_graph(_graph_path()) if claim else entries)
+            ) or []
             scope_ids = (
                 descendants_of(recv_entries, parent_target_id)
                 if parent_target_id is not None else None
@@ -4087,8 +4228,19 @@ def cmd_ready(
         filter_by_project, make_selection_sort_key, descendants_of, _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
+    from fno.tracker import active_backend_name
 
-    entries = read_graph(_graph_path())
+    # Joined selection under an external backend: the same filters and ranking
+    # run over the transient list_open + sidecar join (fail-closed, never the
+    # local graph), so `ready` and `next` cannot drift between backends.
+    if active_backend_name() != "graph":
+        try:
+            entries = _joined_open_candidates()
+        except _ExternalSelectionError as exc:
+            typer.echo(f"Error: {exc}; selection refused", err=True)
+            raise typer.Exit(code=1)
+    else:
+        entries = read_graph(_graph_path())
     allowed = {"ready"}
     if include_ideas:
         allowed.add("idea")
@@ -4490,6 +4642,23 @@ def cmd_board(
     """
     from fno.graph.board import compute_board
     from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.tracker import active_backend_name
+
+    # The board spans done + in-progress + ready sections, which needs
+    # lookback past list_open()'s open-only contract (the same done-at-
+    # PR-green grace window pr_watch's discovery needs and cannot get from
+    # the tracker seam without storage-engine work, out of scope here). An
+    # external backend degrades the same way an unreadable graph already
+    # does, rather than reading the wrong store.
+    if active_backend_name() != "graph":
+        payload = _board_unreadable_graph_payload(
+            f"board is unavailable under the {active_backend_name()} tracker backend"
+        )
+        if json_output:
+            typer.echo(json.dumps(payload))
+        else:
+            _print_board(payload)
+        raise typer.Exit(code=1)
 
     try:
         entries = read_graph_strict(_graph_path())
@@ -4516,6 +4685,59 @@ def cmd_board(
 
 # -- get --
 
+def _read_time_status_external(
+    state: str, pr_number: Optional[int], plan_path: Optional[str]
+) -> str:
+    """Read-time rung for the external get render - never stored, derived on
+    every read from tracker state plus sidecar evidence."""
+    if state == "closed":
+        return "done"
+    return _external_open_status(pr_number=pr_number, plan_path=plan_path)
+
+
+def _render_external_get(id: str, field: Optional[str]) -> None:
+    """`backlog get` under an external backend: exact-id tracker read plus the
+    sidecar, joined FOR DISPLAY ONLY (a render, not a stored convenience
+    record). Byte-compatibility binds the graph mode above, not this branch."""
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    try:
+        node = get_tracker().read(id)
+    except NodeNotFound:
+        typer.echo(
+            f"fno backlog get: no node matches '{id}' "
+            "(an external backend resolves exact ids; slug/bare-hex are "
+            "footnote-minted)",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    sc = sidecar_store.load(id)
+    state = str(node.state.value)
+    joined: dict = {
+        "id": node.id,
+        "title": node.title,
+        "state": state,
+        "status": _read_time_status_external(state, sc.pr_number, sc.plan_path),
+        "parent": node.parent,
+        "blocked_by": list(node.blocked_by),
+    }
+    joined.update(sc.model_dump(exclude_unset=True, exclude={"id"}))
+    joined["_resolved_cwd"] = sc.cwd
+
+    if field:
+        value = joined.get(field)
+        if value is None:
+            typer.echo("null")
+        elif isinstance(value, (list, dict)):
+            typer.echo(json.dumps(value))
+        else:
+            typer.echo(value)
+        return
+    typer.echo(json.dumps(joined, indent=2))
+
+
 @cli.command("get")
 def cmd_get(
     id: str = typer.Argument(
@@ -4532,10 +4754,19 @@ def cmd_get(
     ),
 ) -> None:
     from fno.graph.fuzzy import resolve_node
+    from fno.tracker import active_backend_name
 
     # Pre-rename spelling; shell consumers outside this repo still pass it.
     if field == "_status":
         field = "status"
+
+    # Backend-neutral read: an external tracker resolves the OPAQUE id exactly
+    # (never through the local <prefix>-<hex> grammar) and displays the five
+    # tracker fields plus the sidecar. Slug/bare-hex tiers are footnote-minted
+    # metadata and refuse with the backend named rather than reporting absent.
+    if active_backend_name() != "graph":
+        _render_external_get(id, field)
+        return
 
     # Strict read: exit 1 stays "read cleanly, node absent"; an unreadable graph
     # gets GRAPH_UNREADABLE_EXIT so a caller cannot mistake it for an absent node.
@@ -4794,6 +5025,108 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     return lines, summary
 
 
+def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
+    """`backlog provenance` under an external backend: exact-id tracker read
+    plus the sidecar provenance edges (the AC2 provenance path). Footnote-minted
+    extras the sidecar does not carry (``related``) render empty rather than
+    from stale local rows."""
+    import dataclasses
+
+    from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    try:
+        node = get_tracker().read(id)
+    except NodeNotFound:
+        typer.echo(f"No node matching '{id}' (external backend; exact ids)", err=True)
+        raise typer.Exit(code=1)
+    sc = sidecar_store.load(id)
+
+    def _title_of(nid: Optional[str]) -> Optional[str]:
+        if not nid:
+            return None
+        try:
+            return get_tracker().read(nid).title
+        except Exception:  # noqa: BLE001 - advisory title; absent is honest
+            return None
+
+    birth_result = (
+        resolve_transcript(sc.source_harness, sc.source_session_id,
+                           sc.source_cwd or sc.cwd,
+                           projects_root=_DEFAULT_PROJECTS_ROOT)
+        if sc.source_session_id else None
+    )
+    spawn_result = (
+        resolve_transcript(sc.spawned_by_harness, sc.spawned_by_session,
+                           sc.spawned_by_cwd,
+                           projects_root=_DEFAULT_PROJECTS_ROOT)
+        if sc.spawned_by_session else None
+    )
+
+    # Spawned walk over the sidecar origin index (source_node_id edges),
+    # titles joined from the tracker.
+    walk_rows: list = []
+    if spawned:
+        by_source: dict = {}
+        for nid, other in sidecar_store.load_all().items():
+            if other.source_node_id:
+                by_source.setdefault(other.source_node_id, []).append(nid)
+        seen = {node.id}
+        frontier = [node.id]
+        depth = 0
+        while frontier and depth < _SPAWNED_MAX_DEPTH:
+            depth += 1
+            nxt = []
+            for parent_id in frontier:
+                for child_id in sorted(by_source.get(parent_id, [])):
+                    if child_id in seen:
+                        continue
+                    seen.add(child_id)
+                    walk_rows.append((depth, child_id))
+                    nxt.append(child_id)
+            frontier = nxt
+
+    def _edge(label: str, result) -> dict:
+        if result is None:
+            return {"edge": label, "session_id": None, "resolved": False}
+        d = dataclasses.asdict(result)
+        d["edge"] = label
+        return d
+
+    if json_out:
+        output: dict[str, Any] = {
+            "node_id": node.id,
+            "title": node.title,
+            "edges": [_edge("node_birth", birth_result), _edge("spawn", spawn_result)],
+            "sessions": sc.sessions,
+            "lifecycle": None,  # roster derives from sc.sessions; kept for shape parity
+            "source_node_id": sc.source_node_id,
+            "source_node_title": _title_of(sc.source_node_id),
+            "source_plan_path": sc.source_plan_path,
+            "related": [],  # footnote-minted; unavailable under an external backend
+        }
+        if spawned:
+            output["spawned"] = {
+                "nodes": [
+                    {"depth": d, "id": nid, "title": _title_of(nid)}
+                    for d, nid in walk_rows
+                ],
+                "cycle_detected": False,
+                "truncated_at_depth": None,
+            }
+        typer.echo(json.dumps(output, indent=2))
+        return
+    typer.echo(f"provenance for {node.id}: {node.title or ''}")
+    typer.echo(f"  node_birth: {sc.source_session_id or '(none)'}")
+    typer.echo(f"  spawn: {sc.spawned_by_session or '(none)'}")
+    typer.echo(f"  sessions: {len(sc.sessions)} row(s)")
+    if spawned:
+        for d, nid in walk_rows:
+            typer.echo(f"  spawned d{d}: {nid} ({_title_of(nid) or ''})")
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
@@ -4821,6 +5154,11 @@ def cmd_provenance(
     """
     from fno.graph.fuzzy import resolve_node
     from fno.provenance.resolver import resolve_transcript, _DEFAULT_PROJECTS_ROOT
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        _render_external_provenance(id, spawned, json_out)
+        return
 
     # Strict read for the same reason cmd_get uses it: a wedged graph must not
     # read as "No node matching", which asserts the node is absent.
@@ -5211,6 +5549,9 @@ def cmd_session_add(
                 return
             added = status == "added"
         else:
+            # session add is a mutation verb: local-store resolution, guarded
+            # against external backends by the shared refusal (task 4.2), not
+            # the display-reader seam.
             match = resolve_node(node, read_graph(_graph_path()))
             if match.kind != "exact":
                 typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
@@ -5287,10 +5628,8 @@ def cmd_view() -> None:
 
     from fno.graph._constants import GRAPH_HTML
     from fno.graph.render_html import render_graph_html
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
-    render_graph_html(entries, GRAPH_HTML)
+    render_graph_html(_display_entries("view"), GRAPH_HTML)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":
@@ -5370,7 +5709,6 @@ def cmd_roadmap(
         render_public_roadmap_html,
         render_public_roadmap_md,
     )
-    from fno.graph.store import read_graph
 
     resolved_project = project or detect_project_from_settings(repo_root())
     if not resolved_project:
@@ -5380,7 +5718,7 @@ def cmd_roadmap(
         )
         raise typer.Exit(code=1)
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("roadmap")
     md = render_public_roadmap_md(entries, resolved_project)
 
     if out:
@@ -5399,16 +5737,115 @@ def cmd_roadmap(
 
 # -- status --
 
+
+# The stamp a closed-blocker tombstone carries in the live snapshot. Any
+# non-empty string satisfies the consumer's has_stamp checks; a constant (not
+# the real close time) keeps the tombstone honest about being a projection of
+# "this dependency is satisfied", which is the only fact the consumer derives
+# from it.
+_SNAPSHOT_CLOSED_STAMP = "closed"
+
+
+def _build_live_snapshot(tracker=None) -> dict:
+    """The backend-neutral joined live view for non-Python consumers (the mux).
+
+    Enumerates through ``list_open`` (bounded to the open set: a backend with
+    thousands of historical rows is never materialized merely to render a
+    queue), joins each id's sidecar, and emits exactly the live fields the
+    Rust reader derives from. Readiness stays a derivation on the consumer
+    side: open items carry their ``blocked_by`` ids, and a dependency that is
+    already closed rides as a minimal tombstone row so the consumer's
+    read-time blocked/ready logic (which fails closed on an unknown blocker)
+    resolves it without footnote persisting any derived flag.
+    """
+    from fno.graph.slug import derive_base_slug
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+
+    tracker = tracker or get_tracker()
+    try:
+        candidates = tracker.list_open()
+    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed like selection
+        raise _ExternalSelectionError(
+            f"tracker {tracker.name!r} list_open failed: {exc}"
+        ) from exc
+    open_ids = {c.id for c in candidates}
+
+    # Tombstones for closed dependencies referenced by open items. An
+    # unresolvable blocker id is skipped: the consumer's own fail-closed rule
+    # (unknown dep == blocked) is the correct outcome there, and this loop must
+    # not invent an opinion about a backend read that errored.
+    blocker_ids = {b for c in candidates for b in c.blocked_by} - open_ids
+    tombstones: dict[str, dict] = {}
+    for bid in sorted(blocker_ids):
+        try:
+            node = tracker.read(bid)
+        except Exception:  # noqa: BLE001 - advisory resolution; consumer fails closed
+            continue
+        if str(node.state.value) == "closed":
+            tombstones[bid] = {
+                "id": bid,
+                "status": "done",
+                "completed_at": _SNAPSHOT_CLOSED_STAMP,
+            }
+
+    entries = []
+    for c in candidates:
+        sc = sidecar_store.load(c.id)
+        entries.append(
+            {
+                "id": c.id,
+                # Display handle; transient (graph mode's persistent slugs are
+                # assigned by the store at write time, which a read-only
+                # snapshot must not do).
+                "slug": derive_base_slug(c.title) if c.title else "",
+                "title": c.title,
+                # Same three-way split _joined_open_candidates selects on:
+                # a PR means in_review, else a plan means ready, else idea.
+                # Computed here from evidence at read time, never stored.
+                "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
+                "priority": c.priority,
+                "rank": c.rank,
+                "created_at": c.created_at,
+                "parent": c.parent,
+                "blocked_by": list(c.blocked_by),
+                "plan_path": sc.plan_path,
+                "pr_number": sc.pr_number,
+                "pr_url": sc.pr_url,
+                "cwd": sc.cwd,
+            }
+        )
+    entries.extend(tombstones.values())
+    return {"backend": tracker.name, "entries": entries}
+
+
 @cli.command("status", hidden=True)
 def cmd_status(
     project: Optional[str] = typer.Option(None, help="Filter by project"),
     all_: bool = typer.Option(False, "--all", "-A", help="Show all projects"),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
+    snapshot: bool = typer.Option(
+        False,
+        "--snapshot",
+        help=(
+            "Internal: emit the backend-neutral joined live view as one JSON "
+            "document. Consumed by the fno-agents mux reader when an external "
+            "tracker backend is selected; the summary render below is the "
+            "human surface."
+        ),
+    ),
 ) -> None:
-    from fno.graph.store import read_graph
     from fno.graph._intake import detect_project
 
-    entries = read_graph(_graph_path())
+    if snapshot:
+        try:
+            typer.echo(json.dumps(_build_live_snapshot(), indent=2))
+        except _ExternalSelectionError as exc:
+            typer.echo(f"backlog status --snapshot: {exc}", err=True)
+            raise typer.Exit(code=1)
+        return
+
+    entries = _display_entries("status.summary")
 
     if not entries:
         typer.echo("No graph entries found. Run /megawalk vision.md to generate a roadmap.")
@@ -5779,6 +6216,14 @@ def cmd_queued(
     """List nodes the user has queued for action. JSON output, sorted by priority."""
     from fno.graph.store import read_graph
     from fno.graph._intake import filter_by_project, _graph_sort_key_fn
+    from fno.tracker import active_backend_name
+
+    # Queue state is footnote-minted (the queue verb is tracker-owned), so no
+    # external item can be queued: answer the empty list rather than consult
+    # local rows behind an external selection.
+    if active_backend_name() != "graph":
+        typer.echo("[]")
+        return
 
     entries = read_graph(_graph_path())
     queued = [e for e in entries
@@ -6415,10 +6860,13 @@ def _project_plans_from_graph(
     if not ids:
         return
     try:
-        from fno.graph.store import read_graph
+        # Vault mirror projection is default-backend machinery (same class as
+        # plan sync): guarded metadata read, degrades to a no-op under an
+        # external selection rather than painting stale local rows.
         from fno.plan._project import project_graph_nodes
+        from fno.tracker.metadata import read_entries
 
-        entries = read_graph(_graph_path())
+        entries = read_entries("plan.project")
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
@@ -7045,75 +7493,28 @@ def _done_gh_query(pr_number, **kwargs):
     return query_pr_merge_state(pr_number, **kwargs)
 
 
-@cli.command(
-    "done",
-    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
-    "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
-    "whose PR merged outside the gate (hidden).",
-)
-def cmd_done(
-    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    skip_stamp: bool = typer.Option(
-        False,
-        "--skip-stamp",
-        help="Skip plan stamp even if plan_path is set",
-    ),
-    force: bool = typer.Option(
-        False,
-        "--force",
-        "-F",
-        help="Bypass gh cross-check. Requires --reason.",
-    ),
-    reason: Optional[str] = typer.Option(
-        None,
-        "--reason",
-        "-R",
-        help="Required when --force is used. Explains why the cross-check is bypassed.",
-    ),
-) -> None:
-    """Mark a node complete.
-
-    Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
-    ``status: done`` from that field and unblocks any dependents.
-
-    Before mutation, a gh cross-check verifies that at least one referenced PR
-    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
-    closing evidence - the node is awaiting merge and closes on the actual
-    merge via reconcile / merge-triggered advance. CI state is irrelevant to
-    the close decision.
-
-    Exit codes:
-        0  success (node closed)
-        1  validation error (bad id, node not found)
-        2  usage error (--force without --reason)
-        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
-           (retryable when the PR merges; walker treats this as Parked)
-        4  gh outage: subprocess failure / timeout / parse error; retryable
-        5  awaiting merge: PR OPEN, not merged; node stays in_review
-           (success-shaped; close lands via reconcile/advance at merge)
-        6  promise unmet: plan promised work that has not all shipped
-           (multi-wave with no assertion, a failed close_probe, or fewer
-           merged ships than expected_url_count). Use --force --reason to
-           record a deliberate half-ship.
+def _done_gate_pipeline(
+    task_id: str,
+    node: dict,
+    refs: list,
+    *,
+    force: bool,
+    reason: Optional[str],
+) -> Optional[str]:
+    """The shared rich-completion gates (task 4.1): gh merge evidence,
+    the forced-close journal, and the promise gate, with today's exit-code
+    contract (3 refused / 4 outage / 5 awaiting merge / 6 promise unmet).
+    Both completion front doors (``backlog done`` on either backend,
+    ``fno done``) run this BEFORE any close so neither can bypass the
+    gates. Returns the evidencing PR url (None when no evidence).
     """
-    from fno.graph._constants import has_node_id_prefix
-    from fno.graph.store import locked_mutate_graph, read_graph
-    from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
-        node_pr_refs,
-        repo_slug_from_url,
-        resolve_merge_evidence,
-        resolve_promise_evidence,
+        repo_slug_from_url, resolve_merge_evidence, resolve_promise_evidence,
     )
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(
-            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Usage guard: --force requires --reason
+    # Usage guard lives in the shared terminal so every front door and every
+    # backend gets it: the external dispatch reaches this pipeline before any
+    # caller-side guard can fire.
     if force and not reason:
         typer.echo(
             "Error: --force requires --reason TEXT (explain why the cross-check is bypassed)",
@@ -7121,27 +7522,7 @@ def cmd_done(
         )
         raise typer.Exit(code=2)
 
-    # -- Step 1: Idempotency + node-lookup read (outside the lock) --
-    # We must discover idempotency and PR refs before acquiring the lock, so
-    # that gh I/O (which can be slow) never blocks other graph mutations.
-    entries = read_graph(_graph_path())
-    node = _find_node(entries, task_id)
-    if not node:
-        typer.echo(f"Error: feature {task_id} not found", err=True)
-        raise typer.Exit(code=1)
-
-    # Idempotency first: already done -> short-circuit with NO gh read (AC4-EDGE)
-    if node.get("completed_at"):
-        typer.echo(f"{task_id} is already done", err=True)
-        return
-
-    # -- Step 2: gh cross-check (outside the lock) --
-    refs = node_pr_refs(node)
-
-    # The PR url that evidences the close, captured so the plan stamp records
-    # the actual ship (ab-bd9f476c). None when there is no PR ref / no evidence.
     evidence_pr_url: Optional[str] = None
-
     if refs and not force:
         # There are PR references; require evidence before closing.
         first_pr_number, _ = refs[0]
@@ -7245,6 +7626,233 @@ def cmd_done(
             raise typer.Exit(code=promise.exit_code)
         if promise.warning:
             typer.echo(f"warning: {promise.warning}", err=True)
+    return evidence_pr_url
+
+
+def _cascade_close_external_parents(tracker, child_id: str) -> list[str]:
+    """Close ancestor containers whose children are now ALL closed - the
+    external twin of ``_cascade_close_parents``: sibling state from ONE
+    list_open, the chain from tracker reads, each close best-effort."""
+    closed: list[str] = []
+    try:
+        open_children: dict[str, list[str]] = {}
+        for cand in tracker.list_open():
+            if cand.parent:
+                open_children.setdefault(cand.parent, []).append(cand.id)
+        cur = tracker.read(child_id).parent
+        seen: set[str] = set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            if open_children.get(cur):
+                break  # still has open children
+            try:
+                parent_node = tracker.read(cur)
+            except Exception:  # noqa: BLE001 - unknown ancestor ends the walk
+                break
+            if str(parent_node.state.value) == "closed":
+                cur = parent_node.parent
+                continue
+            try:
+                tracker.close(cur)
+                closed.append(cur)
+            except Exception as exc:  # noqa: BLE001 - cascade is best-effort
+                typer.echo(f"warning: cascade close failed for {cur}: {exc}", err=True)
+                break
+            cur = parent_node.parent
+    except Exception as exc:  # noqa: BLE001 - cascade never fails the close
+        typer.echo(f"warning: cascade evaluation failed: {exc}", err=True)
+    return closed
+
+
+def _done_via_seam(
+    task_id: str, *, skip_stamp: bool, force: bool, reason: Optional[str]
+) -> None:
+    """Rich completion under an external backend (task 4.1, AC7/AC8).
+
+    The same shared gate pipeline runs first; footnote-owned rollups persist
+    to the sidecar BEFORE the irreversible close; then
+    ``get_tracker().close(task_id)`` runs exactly once and success prints only
+    after it returns. A failed external close is loud and retryable - the
+    item stays open. Plan stamping and the ancestor cascade ride the same
+    seam (tracker parent edges, sidecar plan_path)."""
+    from fno.graph._reconcile import node_pr_refs
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.types import NodeNotFound
+
+    tracker = get_tracker()
+    try:
+        tnode = tracker.read(task_id)
+    except NodeNotFound:
+        typer.echo(f"Error: feature {task_id} not found", err=True)
+        raise typer.Exit(code=1)
+    if str(tnode.state.value) == "closed":
+        typer.echo(f"{task_id} is already done", err=True)
+        return
+
+    sc = sidecar_store.load(task_id)
+    row = {
+        "id": task_id, "title": tnode.title, "cwd": sc.cwd,
+        "plan_path": sc.plan_path, "pr_number": sc.pr_number,
+        "pr_url": sc.pr_url, "additional_prs": sc.additional_prs,
+        "sessions": sc.sessions,
+        # The rollup reads containment off the node (a contained child claims
+        # no cost); dropping it here would double-count the delivery unit.
+        "contained_in": sc.contained_in,
+    }
+    refs = node_pr_refs(row)
+    evidence_pr_url = _done_gate_pipeline(
+        task_id, row, refs, force=force, reason=reason
+    )
+
+    # Footnote-owned rollups BEFORE the close (one physical owner: the sidecar).
+    try:
+        from fno.done.cli import _rollup_from_ledger
+
+        rollup = _rollup_from_ledger(row)
+    except Exception:  # noqa: BLE001 - rollup is fill-only, never blocks
+        rollup = {}
+    if rollup.get("cost_usd") is not None and sc.cost_usd is None:
+        sc.cost_usd = rollup["cost_usd"]
+    if rollup.get("cost_sessions") and not sc.cost_sessions:
+        sc.cost_sessions = list(rollup["cost_sessions"])
+    if evidence_pr_url and sc.pr_url is None:
+        sc.pr_url = evidence_pr_url
+    sidecar_store.save(sc)
+
+    # The one close. Failure keeps the item open and retryable (AC8-ERR).
+    try:
+        tracker.close(task_id)
+    except Exception as exc:  # noqa: BLE001 - name backend + id, fail loud
+        typer.echo(
+            f"Error: external close failed for {task_id} on backend "
+            f"{tracker.name!r}: {exc}\n"
+            "The item stays open; retry once the backend is available.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    _cascade_close_external_parents(tracker, task_id)
+    typer.echo(f"Marked {task_id} done")
+
+    if sc.plan_path and not skip_stamp:
+        _stamp_and_graduate_plan(sc.plan_path, url=evidence_pr_url, session_id=None)
+
+    # Retro-at-done lifecycle trigger (x-122a): same non-fatal posture as the
+    # graph path; the seam row carries what the resolver needs.
+    try:
+        from fno.provenance.spawn_think import on_node_retro
+
+        on_node_retro(row)
+    except Exception:  # noqa: BLE001 - additive; never wedge the close
+        pass
+
+
+@cli.command(
+    "done",
+    epilog="Paired verb: `fno backlog reopen <id> --reason ...` reverses this "
+    "(hidden; run its own --help). Related: `fno backlog reconcile` closes nodes "
+    "whose PR merged outside the gate (hidden).",
+)
+def cmd_done(
+    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    skip_stamp: bool = typer.Option(
+        False,
+        "--skip-stamp",
+        help="Skip plan stamp even if plan_path is set",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help="Bypass gh cross-check. Requires --reason.",
+    ),
+    reason: Optional[str] = typer.Option(
+        None,
+        "--reason",
+        "-R",
+        help="Required when --force is used. Explains why the cross-check is bypassed.",
+    ),
+) -> None:
+    """Mark a node complete.
+
+    Sets ``completed_at`` to an ISO timestamp; ``recompute_statuses`` derives
+    ``status: done`` from that field and unblocks any dependents.
+
+    Before mutation, a gh cross-check verifies that at least one referenced PR
+    is MERGED (x-aba7: graph done = merged, uniformly). An OPEN PR is NOT
+    closing evidence - the node is awaiting merge and closes on the actual
+    merge via reconcile / merge-triggered advance. CI state is irrelevant to
+    the close decision.
+
+    Exit codes:
+        0  success (node closed)
+        1  validation error (bad id, node not found)
+        2  usage error (--force without --reason)
+        3  gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence
+           (retryable when the PR merges; walker treats this as Parked)
+        4  gh outage: subprocess failure / timeout / parse error; retryable
+        5  awaiting merge: PR OPEN, not merged; node stays in_review
+           (success-shaped; close lands via reconcile/advance at merge)
+        6  promise unmet: plan promised work that has not all shipped
+           (multi-wave with no assertion, a failed close_probe, or fewer
+           merged ships than expected_url_count). Use --force --reason to
+           record a deliberate half-ship.
+    """
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph._intake import _find_node
+    from fno.graph._reconcile import node_pr_refs
+
+    # External backend (task 4.1): the shared gates then exactly one
+    # tracker.close. The local <prefix>-<hex> grammar guard does not apply to
+    # an opaque external id - resolution is the tracker's exact read.
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        _done_via_seam(task_id, skip_stamp=skip_stamp, force=force, reason=reason)
+        return
+
+    if not has_node_id_prefix(task_id):
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # Usage guard: --force requires --reason
+    if force and not reason:
+        typer.echo(
+            "Error: --force requires --reason TEXT (explain why the cross-check is bypassed)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # -- Step 1: Idempotency + node-lookup read (outside the lock) --
+    # We must discover idempotency and PR refs before acquiring the lock, so
+    # that gh I/O (which can be slow) never blocks other graph mutations.
+    entries = read_graph(_graph_path())
+    node = _find_node(entries, task_id)
+    if not node:
+        typer.echo(f"Error: feature {task_id} not found", err=True)
+        raise typer.Exit(code=1)
+
+    # Idempotency first: already done -> short-circuit with NO gh read (AC4-EDGE)
+    if node.get("completed_at"):
+        typer.echo(f"{task_id} is already done", err=True)
+        return
+
+    # -- Step 2: gh cross-check (outside the lock) --
+    refs = node_pr_refs(node)
+
+    # Shared rich-completion gates (task 4.1): both front doors and both
+    # backends run the identical evidence/promise pipeline before any close.
+    # The return is the PR url that evidences the close, captured so the plan
+    # stamp records the actual ship; None when there is no PR ref / no evidence.
+    evidence_pr_url = _done_gate_pipeline(
+        task_id, node, refs, force=force, reason=reason
+    )
+
 
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]
@@ -7433,6 +8041,13 @@ def _archived_entry(node_id: str) -> Optional[dict]:
     from fno.graph.store import read_graph
 
     try:
+        # The archive is default-backend storage: never consulted behind an
+        # external selection (the caller's refusal already fired; this guard
+        # keeps the helper honest for any future caller).
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            return None
         # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
         # already route through it, and a helper that resolves the archive its
         # own way is a second path that drifts on the first config change.
@@ -10078,6 +10693,14 @@ def cmd_album(
     214 in the archive against 1741 done) are not ships. Card fields: title,
     id, completed_at, and pr_url present only when one was recorded.
     """
+    from fno.tracker import active_backend_name
+
+    # The album renders the local archive's shipped work: guarded local-store
+    # display, refused (named) under an external selection.
+    if active_backend_name() != "graph":
+        typer.echo("fno backlog album: the album renders the local archive; unavailable under an external tracker backend", err=True)
+        raise typer.Exit(code=2)
+
     from fno.graph.store import read_graph
 
     archive_path = _archive_path()
@@ -10355,6 +10978,7 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
     cli_deps: list[str] = (
         [d.strip() for d in args.deps.split(",") if d.strip()] if args.deps else []
     )
+    _refuse_create_on_external_backend()
     _validate_cli_deps(cli_deps, read_graph(_graph_path()))
 
     resolved: list[dict] = []
@@ -10482,7 +11106,7 @@ def cmd_find(
     from fno.graph.slug import format_handle
     from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    entries = _display_entries("find")
     q = (query or "").strip()
 
     def _resolve_against(pool: list[dict]) -> list[dict]:
@@ -10524,9 +11148,16 @@ def cmd_find(
     # never a crash (design "Errors").
     if not matched:
         from fno.paths import graph_archive_json
+        from fno.tracker import active_backend_name
 
-        archive_path = graph_archive_json()
-        if archive_path.exists():
+        # The archive is default-backend storage; no read-through behind an
+        # external selection (stale local rows are the leak the seam closes).
+        archive_path = (
+            graph_archive_json()
+            if active_backend_name() == "graph"
+            else None
+        )
+        if archive_path is not None and archive_path.exists():
             # Guard the whole read + resolve + filter: a corrupt archive OR a
             # malformed archived entry must degrade to a miss, never propagate a
             # crash to the caller (design "Errors").
@@ -10819,9 +11450,10 @@ def cmd_collisions_check(
     from dataclasses import asdict
 
     from fno.graph.collision import find_collisions, has_file_surface
-    from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    # A plan-vs-graph collision check is local-store machinery: guarded read,
+    # refused (named) under an external selection.
+    entries = _display_entries("collisions.check")
     evaluated = has_file_surface(plan_path)
     collisions = find_collisions(plan_path, entries, self_id=self_id) if evaluated else []
 
@@ -11184,3 +11816,139 @@ def _exec_liveness(state: str) -> str:
     """Map a claim_status state to the ExecNode liveness enum."""
     return {"live": "live", "suspect": "unknown", "stale": "unknown",
             "corrupted": "unknown", "free": ""}.get(state, "")
+
+
+# -- task 4.2: the external-backend verb classification -----------------------
+#
+# Every registered backlog verb is classified exactly ONCE, here, against the
+# LIVE registry (never a frozen count): tracker-owned verbs wrap their
+# registered callback with the shared external refusal BEFORE any graph
+# read/write, and footnote-owned verbs carry the read-side marker the
+# consumer census pins (scripts/diagnostics/tracker-consumers.py --verbs).
+# A verb missing from both lists fails the import, and a listed verb the
+# registry no longer carries fails it too (no tombstones, no renames smuggled
+# past the classification). Misclassifying a read as tracker-owned only
+# refuses it externally; misclassifying a mutation as footnote-owned is the
+# dangerous direction, so unsure verbs sit tracker-owned.
+
+_TRACKER_OWNED_VERBS = frozenset({
+    # node lifecycle + creation
+    "add", "idea", "new", "intake", "decompose", "update", "note", "remove",
+    "reopen", "supersede", "unsupersede",
+    # board/rank/queue state
+    "rank", "reprioritize", "defer", "undefer", "queue", "unqueue", "pick",
+    "unclaim",
+    # storage + sweep machinery
+    "archive", "unarchive", "archive-dedupe-ids", "rehash", "maintain",
+    "groom",
+    # orchestration that stamps nodes
+    "advance", "reconcile", "reconcile-findings", "lanes", "lane-fill",
+    "dispatch-lanes",
+    # footnote-owned DATA with a graph-resident write path (refused until the
+    # write moves to the sidecar seam)
+    "cost", "session add",
+    # sub-app mutations
+    "triage apply", "capture promote",
+    "batch join", "batch prepare", "batch ship", "batch ship-closeable",
+})
+
+_FOOTNOTE_OWNED_VERBS = frozenset({
+    # seam reads / renders
+    "get", "status", "view", "find", "next", "ready", "queued", "provenance",
+    "roadmap", "bases", "album", "project-root", "board",
+    # completion works on any backend by design (task 4.1)
+    "done",
+    # footnote-owned sidecar files, no graph write
+    "relatedness build", "relatedness get", "epic status",
+    # capture-pile file machinery (no graph writes; promote is tracker-owned)
+    "capture add", "capture archive", "capture capture-pass", "capture dismiss",
+    "capture empty-pass", "capture list", "capture scan", "capture tidy",
+    # triage read/propose surfaces (apply is tracker-owned)
+    "triage consistency", "triage context", "triage health", "triage projects",
+    "triage propose", "triage rank", "triage trend", "triage validate",
+    # batch read surfaces
+    "batch open", "batch status", "batch metrics",
+    # graph-store integrity check (read-only)
+    "collisions check",
+})
+
+
+def _refuse_tracker_owned_on_external_backend(label: str) -> None:
+    """The shared external-backend refusal for a tracker-owned backlog verb.
+
+    One guard at every reachable tracker-owned entry point (the wrapper below
+    installs it on the registered callback), firing before any graph read or
+    write. The message names the verb and the backend."""
+    from fno.tracker import active_backend_name
+
+    backend = active_backend_name()
+    if backend != "graph":
+        typer.echo(
+            f"fno backlog {label}: this verb owns graph state; under the "
+            f"{backend} tracker backend it is refused. Track the item in the "
+            f"tracker by its id.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+def iter_backlog_registry():
+    """The (group-label, typer-app) pairs carrying every backlog verb.
+
+    The ONE structural list: the verb classifier below, the consumer census
+    (scripts/diagnostics/tracker-consumers.py), and the classification tests
+    all walk it, so a new sub-app is registered exactly here, beside its
+    add_typer call - never re-copied into an instrument that would then
+    certify a registry it never saw.
+    """
+    return [
+        (None, cli),
+        ("triage", _triage_cli),
+        ("capture", _capture_cli),
+        ("batch", _batch_cli),
+        ("relatedness", _relatedness_cli),
+        ("epic", _epic_cli),
+        ("session", session_app),
+        ("collisions", collisions_app),
+    ]
+
+
+def _classify_backlog_verbs() -> None:
+    import functools
+
+    apps = iter_backlog_registry()
+    seen: set[str] = set()
+    for group, app in apps:
+        for info in app.registered_commands:
+            name = info.name or ""
+            label = f"{group} {name}" if group else name
+            seen.add(label)
+            callback = info.callback
+            if callback is None:
+                raise RuntimeError(f"backlog verb {label!r} has no callback")
+            if label in _TRACKER_OWNED_VERBS:
+
+                @functools.wraps(callback)
+                def _guarded(*args, _orig=callback, _label=label, **kwargs):
+                    _refuse_tracker_owned_on_external_backend(_label)
+                    return _orig(*args, **kwargs)
+
+                setattr(_guarded, "_fno_tracker_owned", True)
+                info.callback = _guarded
+            elif label in _FOOTNOTE_OWNED_VERBS:
+                setattr(callback, "_fno_footnote_owned", True)
+            else:
+                raise RuntimeError(
+                    f"unclassified backlog verb {label!r}: classify it in "
+                    "_TRACKER_OWNED_VERBS or _FOOTNOTE_OWNED_VERBS "
+                    "(graph/cli.py) so the external-backend census holds"
+                )
+    unknown = (_TRACKER_OWNED_VERBS | _FOOTNOTE_OWNED_VERBS) - seen
+    if unknown:
+        raise RuntimeError(
+            f"classified verbs missing from the live registry (renamed or "
+            f"removed?): {sorted(unknown)}"
+        )
+
+
+_classify_backlog_verbs()

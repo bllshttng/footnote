@@ -147,6 +147,9 @@ def _wire_paths(tmp_path, monkeypatch, entries):
     graph.write_text(_json.dumps({"entries": entries}))
     sidecar = tmp_path / "relatedness.json"
     monkeypatch.setattr(_cli, "_graph_path", lambda: graph)
+    # relatedness build reads through the guarded display seam, which
+    # resolves fno.paths.graph_json at call time; pin it to the same file.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr(_cli, "_relatedness_path", lambda: sidecar)
     return sidecar
 

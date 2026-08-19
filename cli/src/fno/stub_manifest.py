@@ -158,14 +158,21 @@ def _node_pr_numbers(node: dict) -> set[int]:
 
 
 def _node_for_pr(pr_number: int, graph_path: Optional[Path]) -> Optional[dict]:
-    """The graph node carrying this pr_number, or None. Read-only; degrades to
-    None on ANY graph trouble (the read AND the iteration are guarded, so a
-    non-iterable / mid-iteration error never escapes to the merge path; gemini)."""
+    """The node carrying this pr_number, or None. Read-only; degrades to
+    None on ANY store trouble (the read AND the iteration are guarded, so a
+    non-iterable / mid-iteration error never escapes to the merge path; gemini).
+    Reads the guarded metadata store: the ``dep=contract`` hold this feeds can
+    only exist on nodes footnote's own (refusing) creation verbs minted, so an
+    external backend selection degrades to None = the default hard merge path."""
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        if graph_path is not None:
+            from fno.graph.store import read_graph
 
-        entries = read_graph(graph_path or graph_json())
+            entries = read_graph(graph_path)
+        else:
+            from fno.tracker.metadata import read_entries
+
+            entries = read_entries("stub_manifest")
         for e in entries:
             if pr_number in _node_pr_numbers(e):
                 return e

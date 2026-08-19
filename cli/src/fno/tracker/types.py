@@ -44,6 +44,25 @@ class TrackerNode(BaseModel):
     blocked_by: list[str] = Field(default_factory=list)
 
 
+class TrackerCandidate(TrackerNode):
+    """Selection-only projection of an open item, returned by ``list_open``.
+
+    Ordinary reads stay five-field (Locked Decision 3); ``fno backlog next``
+    additionally needs the stable ordering inputs footnote's board ranking
+    consumes, so ``list_open`` widens each open item with exactly ``priority``
+    (flat priority), ``rank`` (curated board rank), and ``created_at`` (the
+    tiebreaker). Nothing else crosses here: these are the only sort inputs
+    ``_intake.make_selection_sort_key`` reads off the candidate itself, so the
+    graph backend's winner order is preserved without recreating the full
+    graph entry. The partition gate inspects this projection like any other:
+    none of these three names may appear on :class:`fno.tracker.sidecar.Sidecar`.
+    """
+
+    priority: str = "p2"
+    rank: Optional[float] = None
+    created_at: Optional[str] = None
+
+
 class TrackerError(Exception):
     """Base for failures talking to a work-item backend."""
 
@@ -73,13 +92,16 @@ class NodeTracker(Protocol):
         """
         ...
 
-    def list_open(self) -> list[TrackerNode]:
-        """Return every open item, as ``read`` would project each.
+    def list_open(self) -> list[TrackerCandidate]:
+        """Return every open item, as ``read`` would project each, plus the
+        selection-only ordering inputs (:class:`TrackerCandidate`).
 
         ``fno backlog next`` enumerates these and applies footnote's own
         ranking to them (the board-as-work-order contract ``advance``
         depends on), so a backend must NOT pre-rank: it returns the open
-        set in any order and footnote orders it.
+        set in any order and footnote orders it. Enumeration must stay
+        bounded to the open set: a backend with historical rows must not
+        materialize them merely to choose the next candidate.
         """
         ...
 

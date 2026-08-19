@@ -57,6 +57,9 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # The guarded metadata reader (decide's read side) resolves through
+    # paths.graph_json at call time; pin it to the same hermetic file.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     # entries_with_archive resolves the archive through fno.paths, which is
     # graph_json().parent / "graph-archive.json"; pin both so the read-through
     # test stays hermetic.

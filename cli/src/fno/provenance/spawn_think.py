@@ -1054,15 +1054,24 @@ def on_node_born(
         if persisted:
             durable = node
         else:
-            from fno.graph.cli import _graph_path
-            from fno.graph.store import read_graph
+            # Guarded metadata read: the think-spawn dispatch reads the born
+            # node's footnote-minted fields (title/project/cwd pins), which no
+            # external backend carries; an external selection skips the spawn
+            # through the existing additive except below.
+            from fno.tracker.metadata import read_entries
 
-            gp = graph_path if graph_path is not None else _graph_path()
-            # ponytail: linear scan of the graph per born node. Bounded by the
+            if graph_path is not None:
+                from fno.graph.store import read_graph
+
+                gp_entries: list[dict] = read_graph(graph_path)
+            else:
+                gp_entries = read_entries("provenance.spawn_think")
+            # ponytail: linear scan per born node. Bounded by the
             # blast cap (default 5) and gated OFF by default; callers holding the
             # durable node already pass persisted=True to skip this.
             durable = next(
-                (e for e in read_graph(gp) if e.get("id") == node_id), node
+                (e for e in gp_entries if e.get("id") == node_id),
+                node,
             )
         return maybe_spawn_think(
             durable, project_root=project_root, run_state=run_state, quiet=quiet

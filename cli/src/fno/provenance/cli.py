@@ -99,10 +99,10 @@ def dispatch(
         reject_empty_model,
         resolve_dispatch_provider,
     )
-    from fno.graph.cli import _graph_path, _session_provenance
+    from fno.graph.cli import _session_provenance
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import read_graph
     from fno.provenance.spawn_think import dispatch_conversational
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     # Validate the dispatch flags up front (empty --model/--provider is a usage
     # error, not a silently-forwarded empty argv token). Provider is resolved only
@@ -153,7 +153,14 @@ def dispatch(
 
     # Deterministic resolution tiers 1-3 (exact id / slug / bare-hex) - the same
     # resolver `fno backlog get` uses, so every exact entry form resolves.
-    match = resolve_node(node, read_graph(_graph_path()))
+    # Footnote-minted metadata (slug, project pins) backs the fuzzy tiers, so
+    # an external selection cannot resolve them; refuse with the reason rather
+    # than pretend no node exists.
+    try:
+        match = resolve_node(node, read_entries("provenance.think_dispatch"))
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(f"fno think dispatch: {exc}", err=True)
+        raise typer.Exit(code=2)
     if match.kind != "exact":
         typer.echo(
             f"fno think dispatch: no node matches {node!r} (id/slug/bare-hex).",

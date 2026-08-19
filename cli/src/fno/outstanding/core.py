@@ -233,17 +233,13 @@ def _capture_project_roots(root: Path) -> "list[Path]":
     """
     roots = {Path(root).resolve()}
     try:
-        # The path is passed EXPLICITLY (module attr, not the def-time default
-        # arg) so a redirected graph - hermetic tests, a configured override -
-        # is the one enumerated here.
-        from fno.graph import store as graph_store
-        from fno.graph.store import read_graph
+        # cwd and source_cwd are footnote-owned sidecar fields; the scan runs
+        # over the sidecar projection so capture collection works on any
+        # tracker backend.
+        from fno.tracker import sidecar as sidecar_store
 
-        for e in read_graph(graph_store.GRAPH_JSON):
-            if not isinstance(e, dict):
-                continue
-            for key in ("cwd", "source_cwd"):
-                raw = e.get(key)
+        for sc in sidecar_store.load_all().values():
+            for raw in (sc.cwd, sc.source_cwd):
                 if isinstance(raw, str) and raw:
                     p = Path(raw)
                     if p.is_dir():

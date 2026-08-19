@@ -17,7 +17,14 @@ import os
 
 from .graph_backend import GraphTracker
 from .github_backend import GitHubIssuesTracker
-from .types import NodeNotFound, NodeTracker, TrackerError, TrackerNode, TrackerState
+from .types import (
+    NodeNotFound,
+    NodeTracker,
+    TrackerCandidate,
+    TrackerError,
+    TrackerNode,
+    TrackerState,
+)
 
 
 def active_backend_name(name: str | None = None) -> str:
@@ -51,6 +58,7 @@ __all__ = [
     "GraphTracker",
     "NodeNotFound",
     "NodeTracker",
+    "TrackerCandidate",
     "TrackerError",
     "TrackerNode",
     "TrackerState",

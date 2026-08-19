@@ -9479,9 +9479,20 @@ async fn serve(
     // bumps on every backlog mutation (claim/close), so a card flips to
     // in-flight on the next tick with no separate subscribe stream. The 4M read
     // is skipped whenever the stamp is unchanged.
+    //
+    // External tracker backend: the graph FILE is not the store anymore, so
+    // there is no mtime to gate on. The reader instead executes the
+    // backend-neutral snapshot verb (`fno backlog status --snapshot`) on a
+    // bounded refresh clock and caches its payload; both modes feed the SAME
+    // ReaderState, so the last-good retention, the stale-after-3-failures
+    // marker, and the pure derivations (cards, lanes, prs, missions) are
+    // unchanged. A snapshot exec failure is a read failure like any other -
+    // never a fallback to graph.json (which would resurrect stale graph-only
+    // rows the external backend no longer owns).
     {
         let core_tx = core_tx.clone();
         let path = backlog_view::graph_path();
+        let external = backlog_view::external_backend_selected();
         let mut count_rx = client_count_rx.clone();
         tokio::spawn(async move {
             let mut state = backlog_view::ReaderState::default();
@@ -9490,6 +9501,15 @@ async fn serve(
             // fresher success — a sweep failure keeps this tick's overlay.
             let mut last_live: Option<HashMap<String, String>> = None;
             let mut sweep_failing = false;
+            // Snapshot-mode pacing: the current minted stamp and when the next
+            // refresh is due. A fresh stamp is minted only when the window
+            // opens, and the exec is attempted at most once per window (a
+            // failed read never commits its stamp to ReaderState, so without
+            // the attempted flag every 1s tick would re-exec during an
+            // outage - the hot loop SNAPSHOT_REFRESH_SECS exists to bound).
+            let mut snapshot_stamp: Option<(std::time::SystemTime, u64)> = None;
+            let mut next_refresh = tokio::time::Instant::now();
+            let mut snapshot_attempted = false;
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -9529,24 +9549,57 @@ async fn serve(
                         }
                     }
                 }
-                let stat_path = path.clone();
-                let stamp = tokio::task::spawn_blocking(move || {
-                    std::fs::metadata(&stat_path)
-                        .ok()
-                        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
-                })
-                .await
-                .ok()
-                .flatten();
-                let read_path = path.clone();
-                let changed = stamp != state.cached_stamp();
-                let raw = if changed {
-                    tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
+                // Mode split. Graph mode: stat + conditional file read (the
+                // historical mtime+len gate). Snapshot mode: mint a fresh
+                // stamp on the refresh clock, exec the snapshot verb when the
+                // stamp differs from the cached one. `stamp != cached` is the
+                // single changed-signal both modes share.
+                let (stamp, raw) = if external {
+                    let now = tokio::time::Instant::now();
+                    if now >= next_refresh {
+                        next_refresh =
+                            now + Duration::from_secs(backlog_view::SNAPSHOT_REFRESH_SECS);
+                        // A clock-derived stamp: SystemTime::now() advances
+                        // past every previously minted (and cached) stamp, so
+                        // each refresh window reads as changed exactly once.
+                        snapshot_stamp = Some((std::time::SystemTime::now(), 0));
+                        snapshot_attempted = false;
+                    }
+                    let stamp = snapshot_stamp;
+                    let changed = stamp != state.cached_stamp();
+                    let raw = if changed && !snapshot_attempted {
+                        snapshot_attempted = true;
+                        tokio::task::spawn_blocking(backlog_view::read_snapshot)
+                            .await
+                            .ok()
+                            .flatten()
+                    } else {
+                        None
+                    };
+                    (stamp, raw)
+                } else {
+                    let stat_path = path.clone();
+                    let stamp = tokio::task::spawn_blocking(move || {
+                        std::fs::metadata(&stat_path)
+                            .ok()
+                            .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let read_path = path.clone();
+                    let changed = stamp != state.cached_stamp();
+                    let raw = if changed {
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::read_to_string(&read_path).ok()
+                        })
                         .await
                         .ok()
                         .flatten()
-                } else {
-                    None
+                    } else {
+                        None
+                    };
+                    (stamp, raw)
                 };
                 if let Some((queue, prs, missions)) =
                     state.tick(stamp, move || raw, last_live.as_ref())

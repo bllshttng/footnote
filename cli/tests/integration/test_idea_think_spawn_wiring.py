@@ -28,6 +28,9 @@ def graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     g.write_text(json.dumps({"entries": []}) + "\n")
     monkeypatch.setattr(gc, "_graph_path", lambda: g)
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # Seam readers resolve fno.paths.graph_json at call time; pin the
+    # resolver to the same hermetic file (module-attr pins do not reach it).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     monkeypatch.setattr(gs, "GRAPH_MD", tmp_path / "graph.md")
     for marker in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
         monkeypatch.delenv(marker, raising=False)

@@ -47,6 +47,9 @@ def _patch_graph_path(monkeypatch, graph_path: Path) -> None:
     monkeypatch.setattr(gc, "GRAPH_MD", graph_path.parent / "graph.md")
     monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", graph_path.parent / "graph-archive.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", graph_path)
+    # Seam readers resolve fno.paths.graph_json at call time; pin the
+    # resolver to the same hermetic file (module-attr pins do not reach it).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
 
 
 def _make_graph(path: Path, entries: list[dict]) -> None:
