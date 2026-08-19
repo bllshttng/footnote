@@ -365,6 +365,8 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "level": 1,
         "scope": "alpha",
         "grantor": "human",
+        "vacated_scope": None,
+        "vacated_level": None,
     }
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
@@ -464,7 +466,7 @@ def test_in_place_crown_refuses_an_unknown_target_without_mutation(
     assert [asdict(row) for row in load_registry()] == before
 
 
-def test_in_place_crown_refuses_an_already_crowned_target(
+def test_in_place_crown_rescopes_an_already_crowned_target(
     tmp_path: Path, monkeypatch
 ) -> None:
     from fno.agents.registry import load_registry
@@ -483,13 +485,196 @@ def test_in_place_crown_refuses_an_already_crowned_target(
             )
         ],
     )
-    before = [asdict(row) for row in load_registry()]
 
     result = _invoke_crown("worker", "--scope", "alpha")
 
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["vacated_scope"] == "beta"
+    assert json.loads(result.stdout)["vacated_level"] == 1
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        1,
+        "alpha",
+        "human",
+    )
+
+
+def test_in_place_crown_rescopes_a_live_row_from_project_to_epic(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno import paths
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="busy",
+                crown_level=1,
+                crown_scope="alpha",
+                crown_grantor="human",
+            )
+        ],
+    )
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}),
+        encoding="utf-8",
+    )
+
+    result = _invoke_crown("worker", "--scope", "e-1")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert receipt["vacated_scope"] == "alpha"
+    assert receipt["vacated_level"] == 1
+    rows = load_registry()
+    row = rows[0]
+    # The level was DERIVED from the epic, not carried over from the old crown.
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        2,
+        "e-1",
+        "human",
+    )
+    assert not any(r.crown_scope == "alpha" for r in rows)
+
+
+def test_rescope_into_a_scope_another_live_row_holds_is_still_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    incumbent = _entry(
+        "incumbent",
+        harness_session_id="incumbent-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "beta")
+
     assert result.exit_code == 2
-    assert "already holds" in result.output.lower()
+    assert "already held" in result.output.lower()
     assert [asdict(row) for row in load_registry()] == before
+
+
+def test_rescope_refusal_names_the_ways_out_and_never_force(
+    tmp_path: Path, monkeypatch
+) -> None:
+    incumbent = _entry(
+        "incumbent",
+        harness_session_id="incumbent-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [incumbent, target])
+
+    result = _invoke_crown("worker", "--scope", "beta")
+
+    assert result.exit_code == 2
+    assert "incumbent" in result.output
+    assert "fno agents crown incumbent --scope" in result.output
+    assert "reconcile" in result.output
+    assert "stop" in result.output
+    assert "--force" not in result.output
+    assert "-F" not in result.output
+
+
+def test_rescope_onto_the_scope_already_held_is_an_idempotent_no_op(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="busy",
+                crown_level=1,
+                crown_scope="alpha",
+                crown_grantor="human",
+            )
+        ],
+    )
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    row = load_registry()[0]
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        1,
+        "alpha",
+        "human",
+    )
+
+
+def test_rescope_emits_the_vacated_pair_on_the_event(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import events
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="busy",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            )
+        ],
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(events, "emit", lambda kind, **data: emitted.append((kind, data)))
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert emitted == [
+        (
+            "agent_crowned",
+            {
+                "name": "worker",
+                "level": 1,
+                "scope": "alpha",
+                "grantor": "human",
+                "vacated_scope": "beta",
+                "vacated_level": 1,
+            },
+        )
+    ]
 
 
 def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
@@ -551,6 +736,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert "attended shell" in result.output.lower()
     assert "fno agents register" in result.output
     assert "another terminal" in result.output.lower()
+    assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output
 
@@ -563,7 +749,17 @@ def test_in_place_crown_emits_one_success_event_only_after_commit(
     _prepare_crown_cli(
         monkeypatch,
         tmp_path,
-        [_entry("worker", harness_session_id="worker-session", status="idle")],
+        [
+            _entry("worker", harness_session_id="worker-session", status="idle"),
+            _entry(
+                "incumbent",
+                harness_session_id="incumbent-session",
+                status="busy",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            ),
+        ],
     )
     emitted: list[tuple[str, dict]] = []
     monkeypatch.setattr(events, "emit", lambda kind, **data: emitted.append((kind, data)))
@@ -581,6 +777,8 @@ def test_in_place_crown_emits_one_success_event_only_after_commit(
                 "level": 1,
                 "scope": "alpha",
                 "grantor": "human",
+                "vacated_scope": None,
+                "vacated_level": None,
             },
         )
     ]
