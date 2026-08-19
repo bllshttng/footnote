@@ -37,7 +37,7 @@ When you just want one answer from another model and no lingering peer, spawn an
 fno agents spawn "summarize the failing tests" --name q -H codex --once
 ```
 
-`--once` creates a headless worker, exchanges one round, and tears it down. The model's reply is stdout (the deliverable); the teardown receipt rides stderr; no registry row survives. For Claude this launches `claude -p`; a persistent Claude peer still uses plain `spawn` or the `bg` substrate.
+`--once` creates a headless worker, exchanges one round, and tears it down. The model's reply is stdout (the deliverable). The teardown receipt rides stderr, and no registry row survives. For Claude this launches `claude -p`. A persistent Claude peer still uses plain `spawn` or the `bg` substrate.
 
 ## Observe and tear down
 

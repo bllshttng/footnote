@@ -151,7 +151,7 @@ own variant toggle behavior.
 fno agents spawn "summarize the failing tests" --name tmp1 -H codex --once
 ```
 
-Create, exchange, tear down: stdout is the model's reply verbatim (the deliverable); the teardown receipt rides stderr (`once: tmp1 (codex/<session-id>) torn down`); no registry row survives. This is the explicit home of what `ask`-on-a-new-name used to do implicitly. For Claude, `--once` selects the `headless` substrate and launches `claude -p`.
+Create, exchange, tear down: stdout is the model's reply verbatim (the deliverable). The teardown receipt rides stderr (`once: tmp1 (codex/<session-id>) torn down`), and no registry row survives. This is the explicit home of what `ask`-on-a-new-name used to do implicitly. For Claude, `--once` selects the `headless` substrate and launches `claude -p`.
 
 - If teardown fails after a successful exchange, the peer is NOT silently leaked: a loud stderr warning names it and points at `fno agents rm <name>`, and the exit stays 0 (the exchange succeeded).
 - An empty initial message defaults to a `"hello"` probe on the once paths.
