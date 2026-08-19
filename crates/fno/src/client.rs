@@ -10151,14 +10151,28 @@ async fn handle_stdin(
                                         && Instant::now().duration_since(start) >= MENU_LONG_PRESS
                                 });
                             if long_press {
-                                view.open_tab_menu(
-                                    rep.row,
-                                    rep.col,
-                                    Anchor::At {
-                                        row: rep.row,
-                                        col: rep.col,
-                                    },
-                                );
+                                // Open the CAPTURED tab's menu, not whatever
+                                // cell the release reports: a motionless hold
+                                // means no drag report ever arrived, so the
+                                // release coords are the only unchecked signal
+                                // left - a terminal that drops drag reports
+                                // must not turn a hold on tab A into a menu
+                                // for tab B (codex peer review on #975).
+                                if let Some((tid, _, _)) = held {
+                                    if let Some((_, idx, tab)) = view.find_tab(tid) {
+                                        let menu = build_tab_menu(
+                                            idx,
+                                            tab,
+                                            Anchor::At {
+                                                row: rep.row,
+                                                col: rep.col,
+                                            },
+                                        );
+                                        view.clear_peek();
+                                        view.row_menu = Some(menu);
+                                        view.row_menu_esc.clear();
+                                    }
+                                }
                                 view.refresh_hover_affordances(rep.row, rep.col);
                                 continue;
                             }
