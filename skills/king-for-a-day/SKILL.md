@@ -82,6 +82,12 @@ Crown a bg king for a pass, which abdicates before layout matters; crown a pane 
 
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
+**Anoint with the skill invocation as the prompt, never prose wrapping it.**
+
+A wrapped prompt ("run $fno:target ... and here is why") does not reliably load this file. One night's codex spawns, audited by `scripts/diagnostics/codex-skill-load-audit.py`, tell the shape. The harness injected the skill in 4 of 15 wrapped prompts. The worker's own first read carried 9 more. Three sessions never loaded it at all.
+
+The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a crown is the defect this rule exists to prevent.
+
 **In-place coronation is human-attended.** `fno agents crown <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run the command from a normal terminal with no ambient agent identity. A session cannot use the verb to crown itself or another session. When creating a king, placing a court, granting to a subordinate, or transferring your scope, use spawn-time `--crown`.
 
 **Succession happens at spawn too.** An abdicating king that spawns a successor over its OWN scope hands the crown over rather than being refused as a duplicate: the vacate and the stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. This is the only handoff there is, and it has to happen while you still reign - a session that has already exited spawns nothing.

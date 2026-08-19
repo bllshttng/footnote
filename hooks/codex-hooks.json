@@ -165,6 +165,15 @@
             "command": "${PLUGIN_ROOT}/hooks/codex-app-server-nudge-session-start.sh"
           }
         ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id inject-fno-agent-whoami --expected inject-fno-agent-whoami -- ${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh"
+          }
+        ]
       }
     ]
   }

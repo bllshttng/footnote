@@ -4815,6 +4815,28 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
             json!({"already_exited": true, "short_id": entry.short_id}),
         );
     }
+    // A pane-hosted row's ONE live ref is the mux pane (state.rs invariant:
+    // mux XOR worker-socket identity XOR bg thread), and `stop` reaches no pane.
+    // Answering it with a success would report work this verb did not perform
+    // over a live pane - the zombie shape. Refuse and name the working verb with
+    // the row's own ref, in handle_rm's refusal voice. Keys on `entry.mux`,
+    // never the harness, so it covers claude, codex, opencode, and agy pane
+    // rows in one branch. Above the claude branch on purpose: stop_claude's
+    // no-transport-id fallback signals the recorded pid instead, which kills
+    // the process inside the pane and leaves the pane itself.
+    if let Some(mux) = entry.mux.as_ref() {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            format!(
+                "agent {name} is a pane worker; `stop` reaches no pane and would report a \
+                 stop it did not perform. Kill the pane: \
+                 `fno mux pane kill {}:{}`. The registry row survives that; \
+                 clear it with `fno agents rm {name}`.",
+                mux.session, mux.pane_id
+            ),
+        );
+    }
     // Claude agents are not PTY-managed (LD8): there is no worker to shut down.
     // Shell out to the claude supervisor and propagate its outcome.
     if entry.harness_name() == "claude" {

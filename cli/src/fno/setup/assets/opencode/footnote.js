@@ -78,6 +78,40 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
 
   return {
     event: async ({ event }) => {
+      // Crown-awareness injection on session creation. OpenCode has no footnote
+      // slash surface, so a dispatched king cannot load
+      // skills/king-for-a-day/SKILL.md by invocation; the injected line NAMES
+      // the reference file to Read instead - the same teaching a claude king
+      // reaches by loading the skill. noReply is the SDK's context-only
+      // primitive: context lands without triggering an AI turn. An uncrowned
+      // session injects nothing and makes no prompt call; any failure degrades
+      // to silence and never blocks the session.
+      if (event?.type === "session.created") {
+        const sid = event.properties?.sessionID
+        if (sid) {
+          try {
+            const out = await $`cd ${dir} && fno whoami 2>/dev/null`.quiet().text()
+            const crown = (out.match(/^crown:.*$/m) || [])[0]
+            if (crown) {
+              await client.session.prompt({
+                path: { id: sid },
+                body: {
+                  noReply: true,
+                  parts: [
+                    {
+                      type: "text",
+                      text: `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/king-for-a-day/references/cli-commands.md.`,
+                    },
+                  ],
+                },
+              })
+            }
+          } catch (e) {
+            console.error(`[footnote] crown inject failed: ${e}`)
+          }
+        }
+        return
+      }
       if (event?.type !== "session.idle") return
       const sid = event.properties?.sessionID
       if (!sid) return

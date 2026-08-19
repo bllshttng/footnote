@@ -43,6 +43,18 @@ from fno.agents.registry import (
 # ---------------------------------------------------------------------------
 
 
+
+def _receipt_line(output: str) -> str:
+    """The line that IS the JSON receipt. CliRunner mixes stderr into output,
+    so a stderr notice (the inherited tier-remap drop warning) can precede or
+    follow the receipt on machines carrying ANTHROPIC_DEFAULT_*_MODEL."""
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return line
+    raise AssertionError(f"no JSON receipt line in output: {output!r}")
+
+
 def _make_runner() -> CliRunner:
     return CliRunner()
 
@@ -352,7 +364,7 @@ def test_spawn_claude_command_receipt_names_effective_message(workdir_claude) ->
     )
 
     assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output.splitlines()[0])
+    receipt = json.loads(_receipt_line(result.output))
     assert receipt["effective_message"] == "/fno:pr check 7"
 
 
@@ -421,7 +433,7 @@ def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output.splitlines()[0])
+    receipt = json.loads(_receipt_line(result.output))
     assert receipt["substrate"] == "headless"
     assert receipt["lifecycle"] == "ephemeral"
     assert all(entry.name != "cagent" for entry in load_registry())

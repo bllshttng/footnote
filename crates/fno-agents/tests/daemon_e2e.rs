@@ -874,6 +874,113 @@ exit 2
 // list, stderr-only so --json stdout stays clean).
 // ---------------------------------------------------------------------------
 
+/// A pane-hosted row must never be answered by `agent.stop` with a success:
+/// stop reaches no pane (the row's one live ref is the mux ref), so a success
+/// receipt would report work it did not perform over a live pane. The refusal
+/// names the pane-kill one-liner with the row's own session and pane id, and
+/// the registry row stays live. Keys on `entry.mux`, never the harness, so it
+/// covers claude, codex, opencode, and agy pane rows in one branch.
+#[tokio::test]
+async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_pane_row(&home, "pane-worker-stop");
+    let _daemon = start_daemon(&home);
+
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.stop", json!({"name": "pane-worker-stop"})),
+    )
+    .await
+    .expect("stop call");
+    assert!(
+        resp.is_err(),
+        "stop must refuse a pane row, got: {:?}",
+        resp.result()
+    );
+    let msg = resp.error().unwrap().message.clone();
+    assert!(
+        msg.contains("fno mux pane kill"),
+        "refusal names the working verb: {msg}"
+    );
+    assert!(msg.contains("main"), "refusal names the session: {msg}");
+    assert!(msg.contains("10"), "refusal names the pane id: {msg}");
+
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(
+        registry.find("pane-worker-stop").unwrap().status,
+        fno_agents::AgentStatus::Live,
+        "nothing was reported stopped that was not"
+    );
+}
+
+/// A non-pane row with an empty short_id keeps its existing no-op receipt:
+/// the mux refusal must not swallow the genuine codex/gemini arm.
+#[tokio::test]
+async fn stop_keeps_non_pane_noop_receipt() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(fno_agents::state::RegistryEntry {
+            name: "codex-ask-row".into(),
+            short_id: String::new(),
+            legacy_provider: "codex".into(),
+            provider: None,
+            harness: Some("codex".into()),
+            harness_session_id: Some("c0d3x".into()),
+            cwd: "/tmp".into(),
+            project_root: String::new(),
+            session_id: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            host_mode: None,
+            cc_session_id: None,
+            status: fno_agents::AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-08-19T00:00:00Z".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+            delivery_policy: None,
+        });
+    })
+    .unwrap();
+    let _daemon = start_daemon(&home);
+
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.stop", json!({"name": "codex-ask-row"})),
+    )
+    .await
+    .expect("stop call");
+    assert!(
+        !resp.is_err(),
+        "non-pane no-op receipt is unchanged, got: {:?}",
+        resp.error()
+    );
+    let body = resp.result().unwrap().clone();
+    assert_eq!(body["no_op"], json!(true), "receipt: {body}");
+    assert_eq!(body["stopped"], json!(true), "receipt: {body}");
+}
+
 #[tokio::test]
 async fn restart_when_down_starts_fresh() {
     // AC2-EDGE: no daemon running -> restart starts a fresh one and reports it,
