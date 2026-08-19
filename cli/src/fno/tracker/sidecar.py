@@ -84,6 +84,13 @@ class Sidecar(BaseModel):
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
 
+    def carries_pr(self, pr_number: int) -> bool:
+        """True when ``pr_number`` is this item's primary PR or an additional one."""
+        return self.pr_number == pr_number or any(
+            isinstance(p, dict) and p.get("number") == pr_number
+            for p in self.additional_prs or []
+        )
+
 
 def _external_mode() -> bool:
     """True when the selected tracker backend is not the default graph one.

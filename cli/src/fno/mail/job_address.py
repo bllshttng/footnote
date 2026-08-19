@@ -86,10 +86,7 @@ def _node_ids_for_pr(pr_number: int) -> list[str]:
 
     out: list[str] = []
     for nid, sc in sidecar_store.load_all().items():
-        if sc.pr_number == pr_number or any(
-            isinstance(p, dict) and p.get("number") == pr_number
-            for p in sc.additional_prs or []
-        ):
+        if sc.carries_pr(pr_number):
             out.append(nid)
     return out
 

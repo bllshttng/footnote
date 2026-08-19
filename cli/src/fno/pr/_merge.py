@@ -847,10 +847,7 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
         for nid, sc in sidecar_store.load_all().items():
             if sc.cwd != root:
                 continue
-            if sc.pr_number == pr_number or any(
-                isinstance(p, dict) and p.get("number") == pr_number
-                for p in sc.additional_prs or []
-            ):
+            if sc.carries_pr(pr_number):
                 hits.add(nid)
         node_id = hits.pop() if len(hits) == 1 else None
     except Exception:
