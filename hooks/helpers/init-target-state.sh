@@ -1211,9 +1211,64 @@ PYEOF
   # to resolve).
   if [[ -z "$_NODE_ID" && -n "${INITIAL_INPUT// /}" ]]; then
     if [[ "$_GUARD_AMBIGUOUS" -eq 1 ]]; then
-      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous, no node claimed" >&2
+      # Still "ambiguous", and the word is load-bearing: the manifest's single
+      # graph_node_id and the in_review guard genuinely cannot pick one. Only
+      # the CLAIM stops treating ambiguity as a reason to record nothing.
+      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous for the manifest, claiming each" >&2
     else
       echo "target: no backlog node resolved from input '$INITIAL_INPUT'; running unclaimed" >&2
+    fi
+  fi
+
+  # A two-node payload used to take ZERO claims. That is the worst of the three
+  # options available: the work is real, two nodes are being built, and the store
+  # recorded neither, so both read free to every king that checked (x-cd1e).
+  #
+  # The ambiguity refusal was written for `graph_node_id` and the in_review
+  # guard, which genuinely need ONE node. A claim does not: a session building
+  # two nodes holds two claims, and that is simply the truth. So _GUARD_AMBIGUOUS
+  # keeps its meaning for those two, and only what the claim block does with it
+  # changes. Single-node resolution above is untouched.
+  _EXTRA_CLAIMED=""
+  if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
+     && command -v fno >/dev/null 2>&1; then
+    _MULTI_HOLDER="target-session:${claim_owner_id}"
+    _MULTI_TTL="${TARGET_CLAIM_TTL:-2h}"
+    _MULTI_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
+    _MULTI_PID_FLAGS=""
+    [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
+    _MULTI_OK=1
+    for _mnode in $_GUARD_MATCHES; do
+      if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:${_mnode}" \
+            --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
+            --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
+        _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
+      else
+        _MULTI_OK=0
+        echo "target: could not claim node:${_mnode} (held elsewhere?); releasing the partial set" >&2
+        break
+      fi
+    done
+    # All or nothing. Half a session's work recorded is a worse lie than none:
+    # a king reading the claimed half would conclude the unclaimed half is free
+    # and staff it, which is the duplicate this whole change exists to stop.
+    if [[ "$_MULTI_OK" -ne 1 ]]; then
+      for _mnode in $_EXTRA_CLAIMED; do
+        FNO_CLAIMS_ROOT="$HOME" fno claim release "node:${_mnode}" \
+          --holder "$_MULTI_HOLDER" >/dev/null 2>&1 || true
+      done
+      _EXTRA_CLAIMED=""
+    fi
+    if [[ -n "$_EXTRA_CLAIMED" ]]; then
+      echo "target: claimed $_EXTRA_CLAIMED for this session" >&2
+      # Recorded so the set is discoverable from the manifest alone. Say the
+      # limit out loud rather than let it be found: `fno-agents loop-check`
+      # renews the single `target_claim_key`, which this path never sets, so
+      # these expire at their TTL instead of being renewed on every stop. An
+      # expiring claim still beats no claim - it is true while the work is young
+      # and then reads STALE, which is reapable and honest, rather than free.
+      echo "target_claim_multi_keys: \"$_EXTRA_CLAIMED\"" >> "$STATE_FILE"
+      echo "target_claim_multi_holder: \"$_MULTI_HOLDER\"" >> "$STATE_FILE"
     fi
   fi
 
