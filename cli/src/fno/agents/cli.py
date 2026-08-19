@@ -47,6 +47,23 @@ class AgentStatusFilter(str, enum.Enum):
     unknown = "unknown"
 
 
+class AgentProgressFilter(str, enum.Enum):
+    """Progress-axis values accepted by ``list --progress``.
+
+    A SECOND axis beside ``--status``, not a finer version of it: reachability
+    answers "can I reach this process"; progress answers "is it advancing,
+    awaiting the operator, parked, or refused" (fno.agents.reachability). The
+    two filter independently -- a row filtered `--progress parked` still
+    counts toward `--status live`.
+    """
+
+    advancing = "advancing"
+    awaiting_operator = "awaiting-operator"
+    parked = "parked"
+    refused = "refused"
+    unknown = "unknown"
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -1921,6 +1938,12 @@ def cmd_list(
     status: AgentStatusFilter = typer.Option(
         None, "--status", help="Filter by liveness (live | orphaned | unknown)."
     ),
+    progress: AgentProgressFilter = typer.Option(
+        None,
+        "--progress",
+        help="Filter by the SECOND axis, progress -- not a finer --status "
+        "(advancing | awaiting-operator | parked | refused | unknown).",
+    ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit JSON regardless of TTY."),
     discovered: bool = typer.Option(
         True,
@@ -1944,12 +1967,14 @@ def cmd_list(
     refuse_retired_provider(_provider_tombstone)
 
     status_value: str | None = status.value if status is not None else None
+    progress_value: str | None = progress.value if progress is not None else None
     is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
 
     result = list_agents(
         cwd=cwd,
         provider=harness,
         status=status_value,
+        progress=progress_value,
         json_out=json_out,
         tty=is_tty,
         discover=discovered,

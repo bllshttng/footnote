@@ -398,6 +398,19 @@ def test_unreadable_pane_liveness_never_condemns(monkeypatch) -> None:
     assert registry_falsifier(_pane_row()) is None
 
 
+def test_ac9_fr_the_x_e747_import_shape_survives_the_progress_axis() -> None:
+    """``_ACTIVE_STATES`` and ``WIRE_STATUS`` are untouched by the new axis.
+
+    The x-e747 king-loop plan imports ``_ACTIVE_STATES`` rather than copying
+    it, so this pins the shape by assertion rather than by memory.
+    """
+    import fno.agents.reachability as reach
+
+    assert reach._ACTIVE_STATES == frozenset({"working", "watching", "your-move"})
+    assert len(reach.WIRE_STATUS) == 3
+    assert set(reach.WIRE_STATUS) == {REACHABLE, UNREACHABLE, UNKNOWN}
+
+
 def test_a_broken_pane_probe_never_condemns(monkeypatch) -> None:
     """A raising probe is an unreadable probe, not a dead pane."""
     from fno.agents import mux_spawn

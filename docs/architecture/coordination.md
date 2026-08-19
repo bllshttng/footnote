@@ -366,3 +366,17 @@ per-harness discovery seam.
 The subagent source is a display-only third input to `fno agents top`; it is
 deliberately not wired into `census()`'s slot arithmetic, so it cannot move
 the spawn gate's `slot_count` denominator.
+
+## Two axes: reachability and progress
+
+`fno.agents.reachability` (`cli/src/fno/agents/reachability.py`) answers two separate questions. It writes each answer to a separate field.
+
+**`reachability`** answers: "Can the system reach this process?" Its values are `reachable` | `unreachable` | `unknown`. The `basis` field names the evidence: `transcript` | `process-gone` | `pane-gone` | `silent` | `no-evidence`. `fno agents list --status` filters the rendered values `live` | `orphaned` | `unknown`.
+
+**`progress`** answers: "Is the worker advancing, waiting for the operator, parked, or refused?" Its values are `advancing` | `awaiting-operator` | `parked` | `refused` | `unknown`. The `progress_basis` field names the evidence: `transcript-turn` | `operator-turn` | `promise` | `model-refused` | `silent` | `no-evidence`. `advancing` requires a transcript advance in the ten-minute evidence window. An older `working` state returns `unknown` / `silent`. An unreadable activity age returns `unknown` / `no-evidence`. `fno agents list --progress` filters this axis independently of `--status`.
+
+These questions need separate fields. A worker can be reachable while it advances, parks after completion, or uses an unsupported model. All three workers are reachable. Before this axis existed, all three rows displayed `live`. Thus, operators did not distinguish a staffed row from a stalled row. One scan showed 31 live processes that used 8513 MB.
+
+A reading about one artifact is not a verdict about the agent. A missing transcript file proves only that the file is missing. Both axes must return `unknown` for this case. They must never report death, refusal, or parking from this absence.
+
+When evidence is absent or unreadable, each falsifier in `reachability.py` returns `None`. `classify_progress` applies the same rule to the transcript model. Only classifiers in `reachability.py` can answer these axes. A reader must not derive liveness or progress from file existence.

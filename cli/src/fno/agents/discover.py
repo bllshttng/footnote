@@ -37,6 +37,7 @@ from fno.agents.reachability import (
     REACHABLE,
     WIRE_STATUS,
     Reachability,
+    classify_progress,
     classify_reachability,
     pid_falsifier,
     registry_falsifier,
@@ -785,6 +786,10 @@ class DiscoveredSession:
     #: knows about panes, exit tombstones and pids; carried rather than
     #: re-derived so this lane never grows a second copy of those rules.
     registry_falsifier: Optional[str] = None
+    #: The five-variant reading from ``fno.provenance.observed.observed_model``,
+    #: set alongside ``truth_state`` from the same truth probe. Feeds
+    #: ``classify_progress``; ``None`` before that probe has run.
+    observed_model: Optional[dict] = None
 
     def _reachability(self) -> Reachability:
         """This session's verdict from the one shared derivation.
@@ -844,6 +849,17 @@ class DiscoveredSession:
         from fno.agents.format import row_address
 
         reach = self._reachability()
+        # A session in THIS lane was never adopted by the fno registry, so it
+        # was never given an fno spawn-time route -- None is the accurate
+        # reading here, not a guess (Locked Decision 3 fails open on it).
+        progress = classify_progress(
+            truth_state=self.truth_state,
+            reachability=reach.verdict,
+            observed_model=self.observed_model,
+            harness=self.agent,
+            route_settings_path=None,
+            last_activity_age_s=self.last_activity_age_s,
+        )
         return {
             "handle": self.handle,
             "short_id": self.short_id,
@@ -867,6 +883,8 @@ class DiscoveredSession:
             # ALL derived, and which the Rust path re-serves verbatim.
             "reachability": reach.verdict,
             "basis": reach.basis,
+            "progress": progress.verdict,
+            "progress_basis": progress.basis,
             "last_activity_age_s": reach.age_s,
             "agent": self.agent,
         }
@@ -2403,6 +2421,7 @@ def discover_live_sessions(
         session.truth_state = str(truth.get("state") or "unknown")
         age = truth.get("last_activity_age_s")
         session.last_activity_age_s = int(age) if isinstance(age, (int, float)) else None
+        session.observed_model = truth.get("observed_model")
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions
