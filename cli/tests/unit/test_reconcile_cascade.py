@@ -937,9 +937,7 @@ def test_reversible_defer_writers_preserve_contained_children():
 def test_release_is_reported_not_silent(world, dispatches):
     """A silent release turns N invisible nodes into buildable ones unannounced.
 
-    The bare "Deferred <id>" receipt gave the operator no way to know what the
-    next selection pass would pick up - and the helper already returned the ids,
-    which every call site discarded.
+    A permanent-death receipt must name the children it makes dispatchable.
     """
     from typer.testing import CliRunner
 
@@ -947,7 +945,7 @@ def test_release_is_reported_not_silent(world, dispatches):
 
     write, _read = world
     write(_world(Path("/tmp")))
-    result = CliRunner().invoke(cli, ["defer", UNIT, "--reason", "parked"])
+    result = CliRunner().invoke(cli, ["remove", UNIT, "--force"])
     assert result.exit_code == 0, result.output
     assert "Released 2 contained node(s)" in result.output
     assert KID_A in result.output and KID_B in result.output
@@ -961,6 +959,6 @@ def test_release_receipt_is_silent_when_nothing_was_contained(world, dispatches)
 
     write, _read = world
     write([e for e in _world(Path("/tmp")) if e["id"] not in (KID_A, KID_B)])
-    result = CliRunner().invoke(cli, ["defer", UNIT, "--reason", "parked"])
+    result = CliRunner().invoke(cli, ["remove", UNIT, "--force"])
     assert result.exit_code == 0, result.output
     assert "Released" not in result.output

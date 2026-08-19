@@ -1951,7 +1951,7 @@ def _gnow():
 def test_selection_guards_dead_ancestor_superseded():
     now = _gnow()
     child = {"id": "c", "parent": "p", "status": "ready",
-             "plan_path": "x", "created_at": now.isoformat()}
+             "created_at": now.isoformat()}
     by_id = {"c": child, "p": {"id": "p", "status": "superseded"}}
     assert adv.selection_guards(child, by_id, now) == "dead-ancestor:p"
 
@@ -1969,7 +1969,7 @@ def test_selection_guards_dead_ancestor_transitive_deferred():
 def test_selection_guards_missing_parent_no_verdict():
     now = _gnow()
     child = {"id": "c", "parent": "gone", "status": "ready",
-             "plan_path": "x", "created_at": now.isoformat()}
+             "created_at": now.isoformat()}
     assert adv.selection_guards(child, {"c": child}, now) is None
 
 
@@ -1977,7 +1977,7 @@ def test_selection_guards_parent_cycle_terminates():
     now = _gnow()
     by_id = {
         "a": {"id": "a", "parent": "b", "status": "ready",
-              "plan_path": "x", "created_at": now.isoformat()},
+              "created_at": now.isoformat()},
         "b": {"id": "b", "parent": "a", "status": "ready"},
     }
     # No dead ancestor in the cycle; must terminate and (recent) not quarantine.
@@ -1994,7 +1994,7 @@ def test_selection_guards_stale_quarantine():
 def test_selection_guards_healthy_ready_selected():
     now = _gnow()
     recent = (now - timedelta(days=2)).isoformat()
-    node = {"id": "c", "status": "ready", "plan_path": "x", "created_at": recent}
+    node = {"id": "c", "status": "ready", "created_at": recent}
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
@@ -2049,9 +2049,8 @@ def test_selection_guards_blueprinted_plan_is_armed(tmp_path):
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
-def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
-    # Fail OPEN: plans live in a symlinked vault, so an unreadable plan must
-    # never quarantine the node (an unmounted vault would starve the backlog).
+def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
+    # A bound plan that cannot be read cannot prove its hold is absent.
     now = _gnow()
     node = {
         "id": "c",
@@ -2059,7 +2058,7 @@ def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
         "plan_path": str(tmp_path / "gone.md"),
         "created_at": now.isoformat(),
     }
-    assert adv.selection_guards(node, {"c": node}, now) is None
+    assert adv.selection_guards(node, {"c": node}, now) == "dispatch-hold-invalid:c"
 
 
 def test_selection_guards_dead_ancestor_via_field_not_status():
@@ -2136,7 +2135,7 @@ def test_selection_guards_empty_contained_in_stays_armed():
     now = _gnow()
     recent = (now - timedelta(days=2)).isoformat()
     for value in (None, "", 0):
-        node = {"id": "c", "status": "ready", "plan_path": "x",
+        node = {"id": "c", "status": "ready",
                 "contained_in": value, "created_at": recent}
         assert adv.selection_guards(node, {"c": node}, now) is None
 

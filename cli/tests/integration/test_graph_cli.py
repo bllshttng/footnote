@@ -1077,10 +1077,11 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
     """x-571f US3: the model pin must ride in the `ready` and `next` JSON so the
     lane-fill (`_ready_nodes`) and sequential-drain (`fno backlog next`)
     dispatchers can thread it into the spawn they build (AC1-HP / AC2-HP)."""
+    plan = _write_plan(tmp_graph.parent, "pinned.md", "Pinned")
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-pinned00", "title": "Pinned", "priority": "p1",
-             "plan_path": "x.md", "status": "ready", "model": "fable",
+             "plan_path": str(plan), "status": "ready", "model": "fable",
              "created_at": _recent_iso(1)},
         ]
     }))
@@ -1137,13 +1138,14 @@ def test_priority_read_path_backfill(tmp_graph):
     the first mutation triggers the on-disk backfill - `_apply_graph_defaults`
     rewrites legacy values in memory.
     """
+    plan = _write_plan(tmp_graph.parent, "priority.md", "Priority")
     tmp_graph.write_text(json.dumps({
         "entries": [
             {"id": "ab-mem00low", "title": "Was low", "priority": "low",
-             "plan_path": "x.md", "status": "ready",
+             "plan_path": str(plan), "status": "ready",
              "created_at": _recent_iso(2)},
             {"id": "ab-mem00hi0", "title": "Was high", "priority": "high",
-             "plan_path": "x.md", "status": "ready",
+             "plan_path": str(plan), "status": "ready",
              "created_at": _recent_iso(1)},
         ]
     }))
@@ -1543,7 +1545,7 @@ def test_ac3_err_unknown_subcommand_exits_nonzero():
 
 # --- C3 (ab-82e65b72): epics-first selection precedence ---
 
-def _epics_first_entries():
+def _epics_first_entries(plan_path: str):
     """Epic (p2) with a p3 ready child, plus a p0 loose node.
 
     Epics-first must rank the p3 epic child ahead of the p0 loose node.
@@ -1552,19 +1554,20 @@ def _epics_first_entries():
         {"id": "ab-epic", "title": "Epic", "type": "epic",
          "status": "ready", "priority": "p2",
          "created_at": _recent_iso(3), "project": "p", "blocked_by": [],
-         "plan_path": "x.md"},
+         "plan_path": plan_path},
         {"id": "ab-child", "title": "Child", "status": "ready", "priority": "p3",
          "created_at": _recent_iso(2), "project": "p", "parent": "ab-epic",
-         "blocked_by": [], "plan_path": "x.md"},
+         "blocked_by": [], "plan_path": plan_path},
         {"id": "ab-loose", "title": "Loose", "status": "ready", "priority": "p0",
          "created_at": _recent_iso(1), "project": "p", "blocked_by": [],
-         "plan_path": "x.md"},
+         "plan_path": plan_path},
     ]
 
 
 def test_graph_next_picks_epic_child_over_higher_priority_loose(tmp_graph):
     """C3: `fno graph next` selects the epic child over a p0 loose node."""
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries()}) + "\n")
+    plan = _write_plan(tmp_graph.parent, "epic-next.md", "Epic next")
+    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
@@ -1573,7 +1576,8 @@ def test_graph_next_picks_epic_child_over_higher_priority_loose(tmp_graph):
 
 def test_graph_ready_orders_epic_children_before_loose(tmp_graph):
     """C3: `fno graph ready` lists epic children ahead of loose nodes."""
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries()}) + "\n")
+    plan = _write_plan(tmp_graph.parent, "epic-order.md", "Epic order")
+    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert ids.index("ab-child") < ids.index("ab-loose")
@@ -1584,7 +1588,8 @@ def test_graph_ready_excludes_epics(tmp_graph):
     `dispatch-node.sh --all-ready` bulk path enumerates - must NOT list a
     container, or that path would launch a /target worker against the box.
     Shares the epic filter with `next` so the two surfaces agree."""
-    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries()}) + "\n")
+    plan = _write_plan(tmp_graph.parent, "epic-ready.md", "Epic ready")
+    tmp_graph.write_text(json.dumps({"entries": _epics_first_entries(str(plan))}) + "\n")
     r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert "ab-epic" not in ids        # the container is excluded
@@ -1597,17 +1602,18 @@ def test_graph_next_skips_in_progress_epic_for_leaf(tmp_graph):
     top-ranked ready node but must NOT be selected - `next` falls through to a
     buildable leaf instead of repeatedly returning the container ('it keeps
     assuming this one is next')."""
+    plan = _write_plan(tmp_graph.parent, "epic-progress.md", "Epic progress")
     entries = [
         # Epic: ready, p0 -> would rank ahead of everything if selectable.
         {"id": "ab-epic", "title": "Epic", "status": "ready", "priority": "p0",
-         "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": "x.md"},
+             "created_at": "2026-01-01", "project": "p", "blocked_by": [], "plan_path": str(plan)},
         # One child done, one still pending -> the epic is IN PROGRESS.
         {"id": "ab-cdone", "title": "Done child", "status": "done", "priority": "p2",
          "created_at": "2026-01-02", "project": "p", "parent": "ab-epic",
-         "completed_at": "2026-01-03", "blocked_by": [], "plan_path": "x.md"},
+             "completed_at": "2026-01-03", "blocked_by": [], "plan_path": str(plan)},
         {"id": "ab-cpend", "title": "Pending child", "status": "ready", "priority": "p3",
          "created_at": _recent_iso(1), "project": "p", "parent": "ab-epic",
-         "blocked_by": [], "plan_path": "x.md"},
+             "blocked_by": [], "plan_path": str(plan)},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     r = _invoke("backlog", "next", "--all")
@@ -2154,9 +2160,13 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def test_next_excludes_stale_ready_with_receipt(tmp_graph):
+    import os
+
+    plan = _write_plan(tmp_graph.parent, "stale.md", "Stale")
+    os.utime(plan, (0, 0))
     _seed(tmp_graph, [{
         "id": "ab-stale", "title": "abandoned", "project": "fno",
-        "plan_path": "/nonexistent/plan.md", "priority": "p2",
+        "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-01-01T00:00:00+00:00",  # ~200d before real now -> stale
     }])
     r = _invoke("backlog", "next", "--project", "fno")
@@ -2168,11 +2178,12 @@ def test_next_excludes_dead_ancestor_child_with_receipt(tmp_graph):
     from datetime import datetime, timezone, timedelta
 
     recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    plan = _write_plan(tmp_graph.parent, "dead-child.md", "Dead child")
     _seed(tmp_graph, [
         {"id": "ab-epic", "title": "epic", "project": "fno",
          "superseded_by": "ab-new"},
         {"id": "ab-child", "title": "child", "project": "fno",
-         "parent": "ab-epic", "plan_path": "/nonexistent/plan.md",
+         "parent": "ab-epic", "plan_path": str(plan),
          "created_at": recent, "priority": "p2"},
     ])
     r = _invoke("backlog", "next", "--project", "fno")
@@ -2250,19 +2261,22 @@ def test_maintain_apply_skips_in_review_node(tmp_graph):
 def test_ready_excludes_stale_and_dead_ancestor(tmp_graph):
     # `ready` feeds lane-fill / the daemon / --all-ready dispatch, so it must
     # apply the SAME guard as `next` (code-reviewer finding, x-3236).
+    import os
     from datetime import datetime, timezone, timedelta
 
     recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    plan = _write_plan(tmp_graph.parent, "ready-guards.md", "Ready guards")
+    os.utime(plan, (0, 0))
     _seed(tmp_graph, [
         {"id": "ab-live0", "title": "live", "project": "fno", "status": "ready",
-         "plan_path": "/no/p.md", "created_at": recent, "priority": "p2"},
+         "plan_path": str(plan), "created_at": recent, "priority": "p2"},
         {"id": "ab-stale0", "title": "stale", "project": "fno", "status": "ready",
-         "plan_path": "/no/p.md", "created_at": "2026-01-01T00:00:00+00:00",
+         "plan_path": str(plan), "created_at": "2026-01-01T00:00:00+00:00",
          "priority": "p2"},
         {"id": "ab-deadep", "title": "epic", "project": "fno",
          "superseded_by": "ab-new"},
         {"id": "ab-deadch", "title": "child", "project": "fno", "status": "ready",
-         "parent": "ab-deadep", "plan_path": "/no/p.md", "created_at": recent,
+         "parent": "ab-deadep", "plan_path": str(plan), "created_at": recent,
          "priority": "p2"},
     ])
     ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--project", "fno").stdout)]

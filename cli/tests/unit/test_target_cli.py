@@ -1139,14 +1139,16 @@ def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypat
     """No delivery unit on the plan at all -> still a contained node."""
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    result = runner.invoke(app, ["target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert ran == []
     _clear_root_cache()
@@ -1245,11 +1247,13 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     """
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-6320", "plan_path": "/p/one.md", "pr_number": 700,
+        {"id": "x-6320", "plan_path": str(plan), "pr_number": 700,
          "completed_at": "2026-07-29T00:00:00+00:00"},
-        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     _init_env(tmp_path, monkeypatch)
@@ -1368,11 +1372,15 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     """
     import json
 
+    owner_plan = tmp_path / "one.md"
+    child_plan = tmp_path / "two.md"
+    owner_plan.write_text("---\nstatus: ready\n---\n")
+    child_plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-6320", "plan_path": "/p/one.md", "superseded_by": "x-9999",
+        {"id": "x-6320", "plan_path": str(owner_plan), "superseded_by": "x-9999",
          "deferred_at": "2026-07-29T00:00:00+00:00"},
-        {"id": "x-261c", "plan_path": "/p/two.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(child_plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
