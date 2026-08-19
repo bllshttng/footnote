@@ -5454,11 +5454,25 @@ async fn handle_rm_with(
             ),
         );
     }
-    if entry.status == AgentStatus::Live && !force {
+    // The stored enum is what fno last WROTE, not what is true (MODE B,
+    // x-76d1): a session torn down by hand with `claude stop`/`claude rm`
+    // never updates it. A row absent from the roster is provably gone,
+    // whoever removed it. Anything less than proof keeps refusing.
+    let provably_gone = claude_agents.as_ref().is_some_and(|snap| {
+        snap.is_known() && claude_row_id(&entry).is_some_and(|id| snap.find(&id).is_none())
+    });
+    if entry.status == AgentStatus::Live && !force && !provably_gone {
         return Response::err(
             req.id,
             ErrorCode::Busy,
-            format!("agent {name} is still live; use `stop` first or pass --force"),
+            format!(
+                "agent {name} is still live. Its harness row {row} is present in \
+                 `claude agents --json --all`. Stop it with `fno agents stop {name}`, or \
+                 by hand with `claude stop {row}` then `claude rm {row}` (claude takes the \
+                 SHORT ID {row}, never the agent name {name}). rm proceeds on its own \
+                 once that row is gone.",
+                row = claude_row_id(&entry).unwrap_or_else(|| "(no harness row id)".into()),
+            ),
         );
     }
     let harness_row_id = claude_row_id(&entry);
@@ -7551,6 +7565,124 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_removes_a_stored_live_row_provably_gone_from_the_roster() {
+        // AC2-HP (x-76d1 MODE B): a row torn down by hand with `claude
+        // stop`/`claude rm` never gets AgentStatus::Live written back. The
+        // live gate must reconcile with the roster, not the stored enum.
+        let home = short_home("rmprovengone");
+        let mut row = claude_rm_row(
+            "hand-torn-down",
+            "ffff6666",
+            "ffff6666-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "hand-torn-down"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| panic!("row already absent from the roster must not reach claude rm"),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_a_stored_live_row_when_the_roster_is_unknown() {
+        // AC2-EDGE: an Unknown snapshot (the shellout failed, timed out, or
+        // parsed badly) is not proof of anything; keep refusing.
+        let home = short_home("rmrosterunknown");
+        let mut row = claude_rm_row(
+            "maybe-live",
+            "aaaa9999",
+            "aaaa9999-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "maybe-live"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::unknown("list timed out"),
+            &|_| panic!("an unknown roster must not reach claude rm"),
+            &|_, _| panic!("an unknown roster must not reach mux kill"),
+        )
+        .await;
+
+        assert!(response.error().is_some());
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_a_row_the_roster_still_carries_and_names_no_force() {
+        // AC2-NEG + AC2-COV: the short id IS present in a known snapshot, so
+        // the row really is live. The refusal names the working incantation
+        // (claude takes the short id, not the agent name) and never --force,
+        // which a king previously read as the remedy and applied to five
+        // genuinely-live rows.
+        let home = short_home("rmstilllive");
+        let mut row = claude_rm_row(
+            "genuinely-live",
+            "bbbb8888",
+            "bbbb8888-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "genuinely-live"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("bbbb8888", Some("running")),
+                ])
+            },
+            &|_| panic!("a genuinely live row must not reach claude rm"),
+            &|_, _| panic!("a genuinely live row must not reach mux kill"),
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("claude agents --json --all"));
+        assert!(message.contains("claude stop bbbb8888"));
+        assert!(message.contains("claude rm bbbb8888"));
+        assert!(!message.contains("--force"));
+        assert!(!message.contains("-F"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
