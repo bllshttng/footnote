@@ -91,9 +91,15 @@ if [[ ! -e "$WORKTREE_PATH/.git" ]]; then
     # A worktree is the largest thing fno deletes. Trash-moving it reclaims
     # nothing. command -p rm + /bin/rm, never bare rm. See
     # docs/architecture/disposable-deletes.md.
-    command -p rm -rf "$WORKTREE_PATH" 2>/dev/null || /bin/rm -rf "$WORKTREE_PATH"
-    log_event "removed" "\"reason\":\"unregistered_dir\""
-    exit 0
+    if { command -p rm -rf "$WORKTREE_PATH" 2>/dev/null || /bin/rm -rf "$WORKTREE_PATH"; } \
+       && [[ ! -e "$WORKTREE_PATH" ]]; then
+        log_event "removed" "\"reason\":\"unregistered_dir\""
+        exit 0
+    fi
+    # Exit code is the whole signal: claim removal only when the path is gone.
+    echo "Could not remove worktree (delete failed): $WORKTREE_PATH" >&2
+    log_event "remove_failed" "\"reason\":\"unregistered_delete_failed\""
+    exit 1
 fi
 
 echo "Could not remove worktree (dirty or locked): $WORKTREE_PATH" >&2
