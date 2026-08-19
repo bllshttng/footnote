@@ -190,6 +190,22 @@ For each item line under that heading, in order:
 
 **Report** each action as `item -> <id>` (and any `warn:` lines) so the dispatcher transcript shows exactly what was filed. Then continue to step 5 with the rewritten body.
 
+### 4.6 Add the exact Backlog-Closure trailer
+
+**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5 - every other named node stayed open forever (x-59a6). The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds; free-text mentions never count.
+
+Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph:
+
+```bash
+if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
+  CLOSURE_TRAILER=$(fno pr closure-trailer "$NODE_ID")
+fi
+```
+
+`fno pr closure-trailer` prints nothing (not an error) when `$NODE_ID` is empty or unresolvable, so `$CLOSURE_TRAILER` is safe to append unconditionally. If the commits or plan show this PR also genuinely ships a node not reachable via `contained_in` (rare - most such cases ARE `contained_in`), add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
+
+Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line and never add an id to it that this command did not produce - a wrong id in an exact trailer silently binds the wrong node at merge.
+
 ### 5. Create PR
 
 ```bash
@@ -214,11 +230,24 @@ gh pr create \
 ## Linear
 
 [{TEAM}-XXX](https://linear.app/{workspace}/issue/{TEAM}-XXX) (only if Linear configured and ticket exists in commits)
+
+$CLOSURE_TRAILER
 EOF
 )"
 ```
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
+
+**Verify the trailer round-tripped.** Best-effort, non-fatal (same posture as step 4.5): a mismatch here means the body `gh pr create` actually wrote differs from what was composed (e.g. a body-length or style gate rewrote it), and merge-time binding would then miss a claim silently.
+
+```bash
+if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
+  ACTUAL_BODY=$(gh pr view "$PR_NUMBER" --json body -q .body)
+  if ! printf '%s' "$ACTUAL_BODY" | grep -qF "$CLOSURE_TRAILER"; then
+    echo "warn: PR #$PR_NUMBER body does not contain the composed Backlog-Closure trailer verbatim - merge-time closure may miss a claim" >&2
+  fi
+fi
+```
 
 ### 5.5 Link the PR to the backlog node
 
