@@ -17,7 +17,7 @@ A recording script is the exact terminal run, expected output, and edit list for
 | L08 | The PR lifecycle | cast | `L08-the-pr-lifecycle.md` | planned |
 | L10 | Capture and shape work | cast | `L10-capture-and-shape-work.md` | planned |
 | L12 | Worktrees | cast | `L12-worktrees.md` | planned |
-| L13 | Spawn a peer agent | video | `L13-spawn-a-peer-agent.md` | planned |
+| L13 | Spawn a peer agent | video | `L13-spawn-a-peer-agent.md` | scripted |
 | L14 | Make agents talk | cast | `L14-make-agents-talk.md` | planned |
 | L15 | Mux | cast | `L15-mux.md` | planned |
 
