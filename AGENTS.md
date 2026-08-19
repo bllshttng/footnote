@@ -16,7 +16,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 1. **Think before coding.** State assumptions; if uncertain, ask. Surface alternative interpretations and simpler options instead of silently picking.
 2. **Simplicity first.** Minimum code that solves the problem. No speculative features, single-use abstractions, unrequested config. If 200 lines could be 50, rewrite.
 3. **OSS-first: fix in the project, never memory-only.** Anything load-bearing (workaround, invariant, gotcha, "next time do X") goes in code, docs, `--help` text, a gate, a test, or a filed node - never private agent memory, which ships to nobody. Full rule: [.claude/rules/oss-fix-not-memory.md](.claude/rules/oss-fix-not-memory.md).
-4. **Fix what you find - overrides "surgical changes."** Touch what the task requires and match existing style; that restraint is the only surgical constraint. Any pre-existing problem you discover (bug, flaky test, lint, dead code) gets FIXED in the same PR while context is warm, even when unrelated to the task. Prefer FEWER, larger PRs: batch the fix as its own atomic commit rather than splitting work across PRs. Carveouts (`fno carveout add`) / follow-up nodes are for genuinely large separable efforts only.
+4. **Fix what you find - overrides "surgical changes."** Fix pre-existing problems in this PR, even when unrelated. Prefer FEWER, larger PRs. Carveouts (`fno carveout add`) / follow-up nodes are for genuinely large separable efforts only.
 5. **Goal-driven execution.** Turn tasks into verifiable goals with a verify step each ("add validation" -> "write failing tests, make them pass").
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
@@ -26,7 +26,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. Inlined, not linked: AGENTS.md is the one channel proven to reach every harness at session start, and codex sees this body, not linked rule bodies.
 
-**Cap: bytes, not the count.** Every entry is paid at every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first, near 5. This prose is at its floor: funding a new entry is unsolved.
+**Cap: bytes, not count.** Every entry is paid at session start. `check-pitfalls.sh` fails on an 11th entry, a missing field or one over 60 days. The byte budget binds first near 5. This prose is at its floor; funding growth is unsolved.
 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line refs, `graduates-to:` the guard that retires it, `added:` YYYY-MM-DD. Remove an entry in the PR where its guard lands.
 
@@ -46,14 +46,6 @@ Receipts, manifest snapshots, process argv and liveness probes have each lied ab
 
 - specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
 - graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) and transcript-keyed liveness.
-- added: 2026-07-23
-
-### Judgment delegated to a subprocess on a truncated context produces junk
-
-A subprocess seeing only a tail of structured signals makes wrong calls confidently. The deprecated distill path saw a 50-line tail and made junk. Keep ALL judgment (candidate selection, promotion, review) on full-context main threads and delegate only mechanical work.
-
-- specimens: `docs/architecture/memory-system.md:77` (Haiku distillation deprecated for cause).
-- graduates-to: a check refusing to route a judgment call to a headless or bg subprocess.
 - added: 2026-07-23
 
 ### Assert a positive marker, never an absence

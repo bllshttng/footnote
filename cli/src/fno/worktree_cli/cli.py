@@ -83,11 +83,28 @@ def cleanup(
         help="With --merged, SIGTERM ppid-1 orphan processes squatting in a "
         "candidate worktree instead of skipping it. Live process trees are never killed.",
     ),
+    cargo_targets: bool = typer.Option(
+        False,
+        "--cargo-targets",
+        help="Reap inactive Cargo target directories by age and total-byte cap. Dry-run by default.",
+    ),
+    cap_bytes: int = typer.Option(
+        68_719_476_736,
+        "--cap-bytes",
+        min=1,
+        help="With --cargo-targets, maximum aggregate allocated target bytes (default 64 GiB).",
+    ),
+    target_max_age: str = typer.Option(
+        "7d",
+        "--target-max-age",
+        help="With --cargo-targets, reap inactive targets at least this old (default 7d).",
+    ),
 ) -> None:
-    """Remove stale worktrees with no active target session.
+    """Remove stale worktrees or inactive Cargo target directories.
 
     Two selection modes (mutually exclusive): --older-than (commit age) or
-    --merged (branch already merged into origin/main).
+    --merged (branch already merged into origin/main). --cargo-targets is a
+    separate dry-run-by-default mode bounded by target age and allocated bytes.
     """
     if merged and older_than:
         typer.echo("worktree cleanup: --merged and --older-than are mutually exclusive", err=True)
@@ -105,6 +122,16 @@ def cleanup(
         args.append("--apply")
     if kill_orphans:
         args.append("--kill-orphans")
+    if cargo_targets:
+        args.extend(
+            [
+                "--cargo-targets",
+                "--cap-bytes",
+                str(cap_bytes),
+                "--target-max-age",
+                target_max_age,
+            ]
+        )
     raise typer.Exit(code=_run_lifecycle(*args))
 
 

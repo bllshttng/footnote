@@ -242,3 +242,4 @@ worktree-status.py
 # points and need no fno verb between them and the lib. Pure sourcing
 # library; no standalone CLI of its own.
 postcompact-carrier.sh
+cargo-rustc-wrapper.sh
