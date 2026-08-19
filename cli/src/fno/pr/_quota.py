@@ -10,6 +10,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
+from fno.setup.github_cli import PROXY_EXEC_LINE
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
@@ -18,6 +19,33 @@ _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 def quota_lock_path() -> Path:
     return graphql_quota_lock()
+
+
+_SHIM_SCAN_BYTES = 65536
+
+
+def _is_proxy_shim(path: Path) -> bool:
+    """Is this ``gh`` our own broker shim, judged by content rather than location?
+
+    ``github_cli_proxy_dir()`` is TMPDIR-derived, so directory identity only
+    recognizes a shim written by a process sharing our TMPDIR. A background job
+    or a launchd agent inherits the shim on PATH but computes a different
+    directory, and so fails to recognize it. The shim is a two-line script, but
+    a wrapper generator may pad it with extra lines before or after the exec
+    line, so the read is bounded, not gated on total size: ``_SHIM_SCAN_BYTES``
+    comfortably covers any realistic wrapper while staying far below a real
+    compiled ``gh`` binary. The match is anchored to the exec line
+    ``ensure_proxy`` writes (``PROXY_EXEC_LINE``) rather than a bare substring,
+    so a real ``gh`` that merely mentions the proxy name in a comment is not
+    mistaken for the shim.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_SHIM_SCAN_BYTES)
+    except OSError:
+        return False
+    text = head.decode("utf-8", errors="ignore")
+    return any(line.strip() == PROXY_EXEC_LINE for line in text.splitlines())
 
 
 def _proxy_dirs() -> set[str]:
@@ -38,7 +66,9 @@ def delegate_environment() -> dict[str, str]:
     proxy_dirs = _proxy_dirs()
     env["PATH"] = os.pathsep.join(
         part for part in env.get("PATH", "").split(os.pathsep)
-        if part and str(Path(part).resolve()) not in proxy_dirs
+        if part
+        and str(Path(part).resolve()) not in proxy_dirs
+        and not _is_proxy_shim(Path(part) / "gh")
     )
     env.pop("FNO_REAL_GH", None)
     env.pop(_PROXY_DIR_ENV, None)
@@ -54,19 +84,22 @@ def resolve_real_gh() -> Optional[str]:
             candidate.is_file()
             and os.access(candidate, os.X_OK)
             and str(candidate.parent.resolve()) not in proxy_dirs
+            and not _is_proxy_shim(candidate)
         ):
             return str(candidate.resolve())
-    skipped_proxy = False
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory:
             continue
         candidate = Path(directory) / "gh"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        if str(candidate.parent.resolve()) in proxy_dirs:
-            skipped_proxy = True
+        if str(candidate.parent.resolve()) in proxy_dirs or _is_proxy_shim(candidate):
             continue
-        return str(candidate.resolve()) if skipped_proxy else "gh"
+        # Always absolute, never the bare name. `delegate` execve's this and
+        # execve does no PATH lookup, so a bare name raises FileNotFoundError.
+        # `execute_graphql` runs it while holding the flock, so a bare name
+        # re-enters the shim and blocks until the outer command times out.
+        return str(candidate.resolve())
     return None
 
 
