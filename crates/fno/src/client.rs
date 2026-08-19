@@ -10252,8 +10252,7 @@ async fn handle_stdin(
                             let long_press = !view.menu_usurping_open()
                                 && held.is_some_and(|(start, moved)| {
                                     !moved
-                                        && Instant::now().duration_since(start)
-                                            >= MENU_LONG_PRESS
+                                        && Instant::now().duration_since(start) >= MENU_LONG_PRESS
                                 });
                             if long_press {
                                 let opened = still_on_row
