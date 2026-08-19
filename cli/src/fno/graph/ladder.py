@@ -31,11 +31,44 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
+from datetime import date
 from enum import Enum
 from typing import Optional
 
 #: One-shot latch so a missing PyYAML warns once per process, not once per plan.
 _WARNED_NO_YAML = False
+
+
+class DispatchHoldState(Enum):
+    ABSENT = "absent"
+    HELD = "held"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True)
+class DispatchHold:
+    state: DispatchHoldState
+    reason: str = ""
+    release_when: str = ""
+    review_on: str = ""
+    set_by: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class DispatchHoldVerdict:
+    owner_id: str
+    hold: DispatchHold
+
+    @property
+    def guard_reason(self) -> str:
+        prefix = (
+            "dispatch-hold"
+            if self.hold.state is DispatchHoldState.HELD
+            else "dispatch-hold-invalid"
+        )
+        return f"{prefix}:{self.owner_id}"
 
 
 def resolve_plan_probe(entry: dict) -> Optional[str]:
@@ -117,7 +150,8 @@ _DISPATCHABLE: frozenset[Rung] = frozenset(
 )
 
 # Rungs the daemon must NOT pick up on its own. Undesigned work needs a design
-# pass first; every other rung (including UNREADABLE) stays in the pool.
+# pass first. UNREADABLE remains outside this rung set because the attributable
+# hold reader supplies its own stronger fail-closed verdict for unreadable plans.
 #
 # Public because ``selection_guards`` needs the SET, not the bool: it reports a
 # rung-specific reason and would otherwise pay a second filesystem read to
@@ -126,45 +160,27 @@ _DISPATCHABLE: frozenset[Rung] = frozenset(
 UNSELECTABLE_RUNGS: frozenset[Rung] = frozenset({Rung.IDEA, Rung.DESIGN})
 
 
-def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
-    """``(status_or_None, readable)`` for the plan at *probe*.
-
-    Deliberately NOT built on ``_read_plan_frontmatter``: that function returns
-    ``{}`` for missing, unreadable, malformed AND status-less alike (its
-    docstring calls the total collapse a feature, and for its own callers it
-    is). A rung resolver cannot inherit it, because "cannot read this file" and
-    "this file declares no status" must route to opposite failure policies.
-
-    ``readable`` is False only when we genuinely could not parse the document.
-    A readable doc with no frontmatter, or frontmatter with no ``status``,
-    returns ``(None, True)`` - an answer, not a failure.
-    """
+def _read_frontmatter(probe: str) -> tuple[Optional[dict], bool]:
+    """``(mapping_or_None, readable)`` for the plan at *probe*."""
     try:
         text = open(probe, encoding="utf-8").read()
     except (OSError, UnicodeDecodeError, ValueError):
         return (None, False)
 
     if not text.strip():
-        # An empty file is a truncated write or a stray `touch`, not a plan that
-        # predates the status vocabulary. Silence means READY below, which would
-        # make a 0-byte file dispatchable; "cannot classify" is the honest read.
         return (None, False)
 
     lines = text.splitlines()
     if lines[0].strip() != "---":
-        return (None, True)  # no frontmatter block: declares nothing, readably
+        return ({}, True)
 
     end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
     if end is None:
-        return (None, False)  # opened a frontmatter block and never closed it
+        return (None, False)
 
     try:
         import yaml
     except ImportError:
-        # A tooling gap, not a plan defect - and it parks EVERY plan at once,
-        # so say so rather than letting the operator read "malformed
-        # frontmatter" nine times about nine healthy docs. Warned once per
-        # process; the verdict is still UNREADABLE (fail closed for dispatch).
         global _WARNED_NO_YAML
         if not _WARNED_NO_YAML:
             _WARNED_NO_YAML = True
@@ -181,12 +197,104 @@ def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
         return (None, False)
 
     if fm is None:
-        return (None, True)  # empty frontmatter block
+        return ({}, True)
     if not isinstance(fm, dict):
-        return (None, False)  # a scalar or list where a mapping belongs
+        return (None, False)
+    return (fm, True)
+
+
+def _read_status_scalar(probe: str) -> tuple[Optional[str], bool]:
+    """``(status_or_None, readable)`` for the plan at *probe*.
+
+    Deliberately NOT built on ``_read_plan_frontmatter``: that function returns
+    ``{}`` for missing, unreadable, malformed AND status-less alike (its
+    docstring calls the total collapse a feature, and for its own callers it
+    is). A rung resolver cannot inherit it, because "cannot read this file" and
+    "this file declares no status" must route to opposite failure policies.
+
+    ``readable`` is False only when we genuinely could not parse the document.
+    A readable doc with no frontmatter, or frontmatter with no ``status``,
+    returns ``(None, True)`` - an answer, not a failure.
+    """
+    fm, readable = _read_frontmatter(probe)
+    if not readable or fm is None:
+        return (None, False)
     if "status" not in fm:
         return (None, True)
     return (str(fm["status"] if fm["status"] is not None else ""), True)
+
+
+def dispatch_hold(entry: object) -> DispatchHold:
+    """Read one plan's hold declaration, failing closed on an unreadable plan."""
+    if not isinstance(entry, dict):
+        return DispatchHold(DispatchHoldState.ABSENT)
+    plan_path = entry.get("plan_path")
+    if not isinstance(plan_path, str) or not plan_path:
+        return DispatchHold(DispatchHoldState.ABSENT)
+    probe = resolve_plan_probe(entry)
+    if not probe:
+        return DispatchHold(
+            DispatchHoldState.INVALID,
+            detail="declared plan path cannot be resolved",
+        )
+    fm, readable = _read_frontmatter(probe)
+    if not readable or fm is None:
+        return DispatchHold(
+            DispatchHoldState.INVALID,
+            detail=f"plan frontmatter is unreadable: {probe}",
+        )
+    if "dispatch_hold" not in fm:
+        return DispatchHold(DispatchHoldState.ABSENT)
+    try:
+        from fno.plan.schema import DispatchHoldBlock
+
+        parsed = DispatchHoldBlock.model_validate(fm["dispatch_hold"])
+    except Exception as exc:  # noqa: BLE001 - invalid means refuse, never raise
+        return DispatchHold(
+            DispatchHoldState.INVALID,
+            detail=f"dispatch_hold is invalid: {exc}",
+        )
+    review_on = parsed.review_on.isoformat()
+    detail = ""
+    if parsed.review_on < date.today():
+        detail = f"review date {review_on} has passed; hold remains active"
+    return DispatchHold(
+        DispatchHoldState.HELD,
+        reason=parsed.reason,
+        release_when=parsed.release_when,
+        review_on=review_on,
+        set_by=parsed.set_by,
+        detail=detail,
+    )
+
+
+def dispatch_hold_verdict(
+    entry: object,
+    entries_by_id: dict,
+) -> Optional[DispatchHoldVerdict]:
+    """Find a hold on a node, its parents, or its contained delivery owner."""
+    if not isinstance(entry, dict):
+        return None
+    queue = [entry]
+    seen: set[str] = set()
+    steps = 0
+    while queue and steps < 64:
+        current = queue.pop(0)
+        node_id = str(current.get("id") or "unknown")
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        hold = dispatch_hold(current)
+        if hold.state is not DispatchHoldState.ABSENT:
+            return DispatchHoldVerdict(node_id, hold)
+        for relation in ("contained_in", "parent"):
+            related = current.get(relation)
+            if isinstance(related, str) and related and related not in seen:
+                ancestor = entries_by_id.get(related)
+                if isinstance(ancestor, dict):
+                    queue.append(ancestor)
+        steps += 1
+    return None
 
 
 def plan_rung(entry: object) -> Rung:

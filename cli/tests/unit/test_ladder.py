@@ -621,8 +621,8 @@ def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
     ) is None
 
 
-def test_an_unreadable_plan_stays_selectable_through_the_guard(tmp_path):
-    """Fail-open survives the rewrite: a vault unmount must not quarantine."""
+def test_an_unreadable_plan_fails_closed_through_the_guard(tmp_path):
+    """An unreadable plan cannot prove its plan-level hold is absent."""
     from datetime import datetime, timezone
 
     from fno.backlog.advance import selection_guards
@@ -630,7 +630,7 @@ def test_an_unreadable_plan_stays_selectable_through_the_guard(tmp_path):
     node = _ready_row(str(tmp_path / "gone.md"))
     assert selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
-    ) is None
+    ) == "dispatch-hold-invalid:x-stale01"
 
 
 def test_the_policy_set_is_the_one_selection_uses():
@@ -638,6 +638,86 @@ def test_the_policy_set_is_the_one_selection_uses():
     from fno.graph.ladder import UNSELECTABLE_RUNGS, Rung
 
     assert UNSELECTABLE_RUNGS == frozenset({Rung.IDEA, Rung.DESIGN})
+
+
+def _held_plan(tmp_path, *, set_by="king:119e3c52", name="held.md"):
+    plan = tmp_path / name
+    plan.write_text(
+        "---\n"
+        "status: ready\n"
+        "dispatch_hold:\n"
+        "  reason: Blocking review finding is unresolved\n"
+        "  release_when: The finding is fixed and re-reviewed\n"
+        "  review_on: 2026-08-20\n"
+        f"  set_by: {set_by}\n"
+        "---\n"
+    )
+    return plan
+
+
+def test_dispatch_hold_is_attributable_and_remains_active_on_review_date(tmp_path):
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold
+
+    hold = dispatch_hold(_plan(tmp_path, _held_plan(tmp_path).read_text()))
+    assert hold.state is DispatchHoldState.HELD
+    assert hold.reason == "Blocking review finding is unresolved"
+    assert hold.release_when == "The finding is fixed and re-reviewed"
+    assert hold.review_on == "2026-08-20"
+    assert hold.set_by == "king:119e3c52"
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "dispatch_hold: blocked",
+        "dispatch_hold:\n  reason: why",
+        "dispatch_hold:\n  reason: why\n  release_when: fixed\n  review_on: soon\n  set_by: king",
+        "dispatch_hold:\n  reason: '   '\n  release_when: fixed\n  review_on: 2026-08-20\n  set_by: king",
+        "dispatch_hold:\n  reason: why\n  release_when: fixed\n  review_on: 2026-08-20\n  set_by: '   '",
+    ],
+)
+def test_malformed_dispatch_hold_fails_closed(tmp_path, declaration):
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold
+
+    entry = _plan(tmp_path, f"---\nstatus: ready\n{declaration}\n---\n")
+    assert dispatch_hold(entry).state is DispatchHoldState.INVALID
+
+
+def test_unreadable_bound_plan_fails_closed_for_hold_policy(tmp_path):
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold
+
+    missing = {"id": "x-held", "plan_path": str(tmp_path / "missing.md")}
+    assert dispatch_hold(missing).state is DispatchHoldState.INVALID
+
+
+def test_dispatch_hold_walks_parent_and_contained_owner(tmp_path):
+    from fno.graph.ladder import dispatch_hold_verdict
+
+    owner_plan = _held_plan(tmp_path)
+    owner = {"id": "x-owner", "plan_path": str(owner_plan)}
+    parent = {"id": "x-parent", "parent": "x-owner"}
+    child = {"id": "x-child", "contained_in": "x-parent"}
+    by_id = {row["id"]: row for row in (owner, parent, child)}
+    verdict = dispatch_hold_verdict(child, by_id)
+    assert verdict is not None
+    assert verdict.guard_reason == "dispatch-hold:x-owner"
+
+
+def test_selection_guards_refuse_held_node_and_held_ancestry(tmp_path):
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+
+    owner = {
+        "id": "x-owner",
+        "status": "ready",
+        "plan_path": str(_held_plan(tmp_path)),
+    }
+    child = {"id": "x-child", "status": "ready", "parent": "x-owner"}
+    by_id = {row["id"]: row for row in (owner, child)}
+    now = datetime.now(timezone.utc)
+    assert selection_guards(owner, by_id, now) == "dispatch-hold:x-owner"
+    assert selection_guards(child, by_id, now) == "dispatch-hold:x-owner"
 
 
 # every readiness path re-probes the rung, not just `design` (sigma panel) -----

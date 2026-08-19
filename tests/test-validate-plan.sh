@@ -449,6 +449,50 @@ else
     echo "  SKIP:  AC8g: uv not installed"
 fi
 
+# --- AC9: Attributable dispatch holds ---
+echo ""
+echo "--- AC9: Dispatch Hold Shape ---"
+
+PLAN_HOLD="$TMPDIR_BASE/dispatch-hold.md"
+cat > "$PLAN_HOLD" <<'HEREDOC'
+---
+status: ready
+created: 2026-08-18
+project: fno
+consolidation:
+  outcome: proceed_alone
+dispatch_hold:
+  reason: Blocking review finding is unresolved
+  release_when: The finding is fixed and re-reviewed
+  review_on: 2099-08-20
+  set_by: king:119e3c52
+---
+
+# Held plan
+HEREDOC
+OUTPUT=$(bash "$VALIDATE" "$PLAN_HOLD" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && echo "$OUTPUT" | grep -q "dispatch_hold has reason"; then
+    pass "AC9a: Complete attributable dispatch_hold validates"
+else
+    fail "AC9a: Complete dispatch_hold rejected: $OUTPUT"
+fi
+
+for malformed in scalar partial invalid-date blank-setter; do
+    cp "$PLAN_HOLD" "$TMPDIR_BASE/hold-$malformed.md"
+    case "$malformed" in
+        scalar) awk '/^dispatch_hold:/{print "dispatch_hold: blocked"; skip=1; next} skip && /^---$/{skip=0} !skip{print}' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
+        partial) sed '/  set_by:/d' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
+        invalid-date) sed 's/review_on: 2099-08-20/review_on: soon/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
+        blank-setter) sed 's/set_by: king:119e3c52/set_by: "   "/' "$PLAN_HOLD" > "$TMPDIR_BASE/hold-$malformed.md" ;;
+    esac
+    OUTPUT=$(bash "$VALIDATE" "$TMPDIR_BASE/hold-$malformed.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+    if [[ $EXIT_CODE -eq 1 ]] && echo "$OUTPUT" | grep -q "malformed dispatch_hold"; then
+        pass "AC9b: $malformed dispatch_hold fails closed"
+    else
+        fail "AC9b: $malformed dispatch_hold did not fail closed: $OUTPUT"
+    fi
+done
+
 # An installed fno older than this checkout advertises --execution while missing
 # the guards this source defines, so an unrunnable source tree must refuse rather
 # than hand the plan to it. PATH is stripped so uv is unreachable too.

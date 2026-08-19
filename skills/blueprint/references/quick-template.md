@@ -24,6 +24,11 @@ created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
 #                                 # one records executor routing (do | impeccable |
 #                                 # mixed). Omit to let runtime surface inference
 #                                 # choose per task. See docs/guides/per-task-executors.md.
+# dispatch_hold:                  # Optional manual hold. Presence blocks every
+#   reason: <why work must stop>   # dispatcher and merger until this whole block
+#   release_when: <evidence>       # is removed by a plan author. review_on only
+#   review_on: <YYYY-MM-DD>        # prompts review; it never auto-releases.
+#   set_by: <person-or-agent>      # Required attribution for safe ownership/lift.
 # depends_on:                     # Graph edges wired at auto-adopt time
 #   - ../2026-04-19-sibling-slug  # sibling plan (resolved against graph.plan_path)
 #   - ab-d359579e                 # or an existing graph node ID

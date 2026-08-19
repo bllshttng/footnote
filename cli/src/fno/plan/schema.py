@@ -89,6 +89,22 @@ class ConsolidationBlock(BaseModel):
         return self
 
 
+class DispatchHoldBlock(BaseModel):
+    """One attributable, manually released plan-level dispatch hold."""
+
+    reason: str = Field(min_length=1)
+    release_when: str = Field(min_length=1)
+    review_on: date
+    set_by: str = Field(min_length=1)
+
+    @field_validator("reason", "release_when", "set_by")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
 class PlanFrontmatter(BaseModel):
     """The canonical shape of a single-doc plan's YAML frontmatter.
 
@@ -156,6 +172,7 @@ class PlanFrontmatter(BaseModel):
     # same permissive shape as `kill_criteria`, since the Rust runner parses the
     # raw frontmatter itself.
     close_probes: str | list[Any] | None = None
+    dispatch_hold: DispatchHoldBlock | None = None
     company_work: CompanyWorkRefs | None = None
 
     @field_validator("status", mode="before")

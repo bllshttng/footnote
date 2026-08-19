@@ -2,6 +2,10 @@
 
 Read a gate only when its trigger fires. The dispatch table in SKILL.md ("## Gates (read by state)") names each trigger; this file holds the bodies. Every gate is mechanical - same input yields the same output, no LLM judgment - unless noted.
 
+## Plan-level dispatch hold
+
+When the plan must not start or merge until named evidence exists, author one `dispatch_hold` mapping in frontmatter with non-blank `reason`, `release_when`, and `set_by` strings plus an ISO `review_on` date. Presence is the hold; `review_on` only prompts a review and never releases automatically. Every autonomous selector, named target start, sanctioned merge, direct merge veto, remediation merge, and native auto-merge arm reads the same declaration and fails closed when it is malformed or unreadable. Lift the hold by removing the mapping after the setter or an authorized operator confirms `release_when`; never copy it into graph status or a private dispatcher file.
+
 ## Plan Claims Ingestion (MANDATORY when input is a node id)
 
 Before any other classifier runs, check if the argument is an existing graph
