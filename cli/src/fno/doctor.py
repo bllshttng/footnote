@@ -2190,6 +2190,126 @@ def _codex_app_server_report() -> dict[str, Any]:
     return {"present": socket_path.exists(), "socket_path": str(socket_path)}
 
 
+def _codex_version() -> Optional[str]:
+    """The installed codex CLI's own version string, or None on any miss."""
+    try:
+        proc = subprocess.run(
+            ["codex", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or proc.stderr or "").strip() or None
+
+
+#: The production binding window (mirrors the codex harness contract's
+#: 60000ms timeout_ms). A module constant, not an inline literal, so a test
+#: can shrink it rather than spend real wall-clock time on a negative probe.
+_CODEX_BIND_CANARY_WINDOW_S = 60.0
+
+
+def _codex_bind_report() -> dict[str, Any]:
+    """Spawn one throwaway codex pane and time which oracle binds it.
+
+    The lane canary beside ``--codex-hooks`` (x-e336): the pane-binding
+    defect measured for that node was an upstream codex upgrade silently
+    breaking the fallback lane, invisible until a rate-limited primary made
+    it load-bearing. This reports a POSITIVE marker - a returned session id
+    and which oracle produced it - never the absence of an error line, so a
+    future regression reads as a version change on a red canary rather than
+    a mystery some weeks later.
+    """
+    import time
+    import uuid as _uuid
+
+    from fno.agents.mux_spawn import (
+        _backfill_codex_session_id,
+        _codex_daemon_bind,
+        _codex_session_ids_loaded,
+        _lookup_child_pid,
+        _reap_spawned_pane,
+        _run_mux,
+        build_pane_argv,
+        resolve_mux_session,
+    )
+
+    version = _codex_version()
+    cwd = Path.cwd()
+    session = resolve_mux_session()
+    name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
+    argv = build_pane_argv("codex", "", cwd, True, None, name=name)
+    baseline_ids = _codex_session_ids_loaded(cwd) or set()
+    spawn_started_ms = int(time.time() * 1000)
+    proc = _run_mux(
+        ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
+        subprocess.run,
+    )
+    if proc.returncode != 0:
+        return {
+            "bound": False,
+            "oracle": None,
+            "elapsed_s": 0.0,
+            "codex_version": version,
+            "error": (proc.stderr or proc.stdout or "no output").strip(),
+        }
+    try:
+        pane_id = int((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {
+            "bound": False,
+            "oracle": None,
+            "elapsed_s": 0.0,
+            "codex_version": version,
+            "error": f"unparseable pane run output {proc.stdout!r}",
+        }
+
+    child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
+    started = time.monotonic()
+    session_id: Optional[str] = None
+    oracle: Optional[str] = None
+    if child_pid is not None:
+        window_s = _CODEX_BIND_CANARY_WINDOW_S
+        last_daemon_probe = 0.0
+        while time.monotonic() - started < window_s:
+            sid = _backfill_codex_session_id(
+                cwd, spawn_started_ms, child_pid=child_pid, attempts=1
+            )
+            if sid:
+                session_id, oracle = sid, "rollout-fd"
+                break
+            now_s = time.monotonic()
+            if now_s - last_daemon_probe >= 2.0:
+                last_daemon_probe = now_s
+                sid = _codex_daemon_bind(cwd, baseline_ids)
+                if sid:
+                    session_id, oracle = sid, "daemon"
+                    break
+            time.sleep(0.75)
+    elapsed = time.monotonic() - started
+    _reap_spawned_pane(session, pane_id, subprocess.run)
+    return {
+        "bound": session_id is not None,
+        "oracle": oracle,
+        "elapsed_s": round(elapsed, 2),
+        "codex_version": version,
+        "error": None if session_id else "neither oracle bound within the window",
+    }
+
+
+def _emit_codex_bind_report(result: dict[str, Any]) -> None:
+    if result["bound"]:
+        typer.echo(
+            f"fno doctor: codex bind: ok, oracle={result['oracle']} "
+            f"elapsed={result['elapsed_s']}s codex={result['codex_version'] or 'unknown'}"
+        )
+    else:
+        typer.echo(
+            f"fno doctor: codex bind: FAILED codex={result['codex_version'] or 'unknown'}: "
+            f"{result['error']}"
+        )
+
+
 def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
     """Render one summary plus actionable Codex hook diagnostics."""
 
@@ -3014,6 +3134,12 @@ def doctor_command(
         "--codex-hooks",
         help="Inspect Codex user-level SessionStart hook layers and trust (advisory).",
     ),
+    codex_bind: bool = typer.Option(
+        False,
+        "--codex-bind",
+        help="Spawn one throwaway codex pane and report which binding oracle "
+        "caught it (rollout-fd, daemon, or neither); the pane-binding lane canary.",
+    ),
     context_audit: bool = typer.Option(
         False,
         "--context-audit",
@@ -3047,9 +3173,10 @@ def doctor_command(
 ) -> None:
     """Report skew between the installed fno and its source checkout."""
     if context_audit:
-        if fix or cost_check or codex_hooks:
+        if fix or cost_check or codex_hooks or codex_bind:
             raise typer.BadParameter(
-                "--context-audit cannot be combined with --fix, --cost-check, or --codex-hooks"
+                "--context-audit cannot be combined with --fix, --cost-check, "
+                "--codex-hooks, or --codex-bind"
             )
         from fno.context_audit import (
             SUPPORTED_ENTRY_STATES,
@@ -3112,6 +3239,16 @@ def doctor_command(
         else:
             _emit_codex_hooks_report(result, err=False)
         raise typer.Exit(0)
+
+    if codex_bind:
+        if fix or source is not None or cost_check:
+            raise typer.BadParameter("--codex-bind may only be combined with --json")
+        result = _codex_bind_report()
+        if json_out:
+            typer.echo(json.dumps(result))
+        else:
+            _emit_codex_bind_report(result)
+        raise typer.Exit(0 if result["bound"] else 1)
 
     if cost_check:
         # Dedicated mode: the staleness check stays network-free and
