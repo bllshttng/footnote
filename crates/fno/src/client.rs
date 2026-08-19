@@ -2983,6 +2983,17 @@ impl View {
         })
     }
 
+    /// (x-7683) The `display_rows()` index of the agent row that owns `pid`, or
+    /// `None` when no visible row hosts that pane (a scratch pane, or a roster
+    /// that no longer carries it). A pane-cell right-press resolves its menu
+    /// through this, so a pane and its sideline row can never disagree about
+    /// whose menu opens. Cold-path only (menu open), like `open_row_menu`.
+    fn agent_row_index_for_pane(&self, pid: u64) -> Option<usize> {
+        self.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(pid)))
+    }
+
     /// The flat popup target under a screen cell while the row menu is open, for
     /// mouse hover/click; `None` off the popup.
     fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
@@ -10145,6 +10156,24 @@ async fn handle_stdin(
                     continue;
                 }
             }
+            // (x-7683) A right-press on a PANE cell opens the owning agent's
+            // row menu - the same menu its sideline row opens - so a pane is a
+            // menu-bearing surface too. Same swallow-only-when-opened rule: an
+            // agent-less pane falls through to the forward below, keeping the
+            // inner app's own right-click (AC3-EDGE).
+            if let Some((pane, _, _)) = view.hit_test(rep.row, rep.col) {
+                if let Some(i) = view.agent_row_index_for_pane(pane) {
+                    if view.open_row_menu(
+                        i,
+                        Anchor::At {
+                            row: rep.row,
+                            col: rep.col,
+                        },
+                    ) {
+                        continue;
+                    }
+                }
+            }
         }
         // Wheel over the sideline scrolls the workspace/session list (there is no
         // pane there to forward to); a wheel over the content area falls through
@@ -11671,9 +11700,25 @@ async fn row_menu_mouse(
                         view.row_menu = None;
                     }
                 }
-                // On the menu itself (not a sideline row): swallow, do not dismiss.
+                // On the menu itself (not a sideline row): swallow, do not
+                // dismiss. (x-7683) A pane cell re-anchors too - panes are
+                // menu-bearing now, and a second right-press on another pane
+                // swapping in that pane's agent menu keeps the one-press
+                // contract the tab re-anchor above cites.
                 None => {
-                    if !view.row_menu_block_contains(rep.row, rep.col) {
+                    let pane_menu = view
+                        .hit_test(rep.row, rep.col)
+                        .and_then(|(pane, _, _)| view.agent_row_index_for_pane(pane))
+                        .is_some_and(|i| {
+                            view.open_row_menu(
+                                i,
+                                Anchor::At {
+                                    row: rep.row,
+                                    col: rep.col,
+                                },
+                            )
+                        });
+                    if !pane_menu && !view.row_menu_block_contains(rep.row, rep.col) {
                         view.row_menu = None;
                     }
                 }
@@ -19475,6 +19520,92 @@ mod tests {
             .iter()
             .position(|a| *a == action)
             .unwrap_or_else(|| panic!("menu should offer {action:?}"));
+    }
+
+    // ---- (x-7683) wave 1: right-click coverage on pane cells -----------------
+
+    #[tokio::test]
+    async fn x7683_right_press_in_a_pane_opens_the_owning_agents_row_menu() {
+        // A pane cell is the one menu-bearing surface right-click skipped: the
+        // press forwarded to the inner app instead. Now it opens the menu of the
+        // agent that OWNS the pane under the cursor - the same menu its sideline
+        // row opens - and nothing reaches the pane (AC1-HP).
+        let mut v = view_with_agents(vec![agent_row(
+            "w",
+            10,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        // SGR right-press at 0-based (5, 30): content col 2, inside pane 10's
+        // rect (x 0..35, content origin col 28).
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;31;6M", &mut buf)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "w"
+            ),
+            "the pane's owning agent menu opened"
+        );
+        assert!(buf.is_empty(), "no press forwards to the pane");
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_in_an_agentless_pane_still_forwards() {
+        // AC3-EDGE preserved: a pane no agent row owns (scratch panes, an exited
+        // and reaped roster) has no menu to open, so the press forwards to the
+        // inner app exactly as before the pane path existed.
+        let mut v = view_with_agents(vec![]);
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;31;6M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.row_menu.is_none(), "no owner, no menu, no swallow");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10, "forwarded to pane 10"),
+            other => panic!("expected a pane mouse forward, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_on_a_pane_re_anchors_an_open_menu() {
+        // While a menu is open, a right-press on a DIFFERENT pane's cell swaps
+        // in that pane's agent menu in one press - the same re-anchor contract
+        // a tab cell and a sideline row already carry.
+        let mut v = view_with_agents(vec![
+            agent_row("a", 10, Some(AgentBadge::Working), false),
+            agent_row("b", 11, Some(AgentBadge::Working), false),
+        ]);
+        assert!(v.open_row_menu(0, Anchor::Center));
+        let mut buf: Vec<u8> = Vec::new();
+        super::row_menu_mouse(
+            &mut v,
+            crate::mouse::MouseReport {
+                row: 5,
+                // Content col 40 (screen col 68): inside pane 11's rect
+                // (x 36..71, content origin col 28), past pane 10.
+                col: 68,
+                kind: MouseKind::Press(MouseButton::Right),
+                shift: false,
+            },
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "b"
+            ),
+            "one press re-anchored onto pane 11's agent"
+        );
     }
 
     #[tokio::test]
