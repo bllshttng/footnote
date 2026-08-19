@@ -225,6 +225,65 @@ Two enforcement points:
    degrades to no filtering (the acquire/refuse mutex above is the authoritative
    backstop).
 
+## Who writes `node:<id>`, and who can prove it dead
+
+Measured 2026-08-19: nine nodes each named by a live roster worker, and seven read `free`. Two live claimants landed on one node and a third nearly did. The claim is documented as THE work-claim primitive, so four kings read `free` and staffed duplicates onto nodes that already had someone on them.
+
+The cause was a guard on one of many paths. `node:<id>` had exactly one producer, a shell script that tokenized a prompt string, and it only ran under `fno target init`. Every other route to a node bypassed it: a verb buried mid-sentence, a payload naming two ids, a run that went through `/blueprint` instead. This section records the rules that replaced it, because each one is a trap somebody will otherwise re-derive.
+
+### Exactly two producers, and that ceiling is load-bearing
+
+`fno target init` and `fno agents spawn --node`. Those two callers hold the node id as a TYPED argument, not as prose to be re-derived. Adding a third is a design change, not a fix. Some paths have no node id at all, such as a prose payload or a hand-started session. Adding producers leaves those permanently unclaimed. That is the same decorative-guard shape wearing a new coat.
+
+`/blueprint` deliberately does NOT claim. It writes a plan and does not build. A claim taken there is held across the plan-then-target gap and blocks the target run that follows it. Its frontmatter `claims:` field is plan adoption, an unrelated concept that shares the word.
+
+The ceiling is also what makes the abandonment probe below safe. That probe assumes a node claim always has a roster-visible counterpart, and both producers create one. A third producer that claims a node without writing a worktree manifest or a registry row makes the probe report a live worker as abandoned.
+
+### The reader is the half that covers every path
+
+No producer can reach a prose payload or a hand-started session, so `fno claim status node:<id>` cross-checks the fleet roster before it renders a `free` reading. It names its instrument in four distinct ways, and each string is produced by exactly one outcome:
+
+```
+UNCLAIMED but a live worker is on this node: <rows>
+free, no live worker found (roster scanned: N rows)
+free, no live worker found (...); M finished session(s) resolved to it: ...
+free, roster not consulted (<reason>)
+```
+
+The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`.
+
+The join resolves a row's node from the worktree manifest and then the session-keyed ledger, both machine-written. **Never a name regex.** Eight auto-named workers read as nobody-on-this-node on 2026-08-15 and were nearly double-dispatched. Worker names carry their node only by convention, and a convention is not a guard.
+
+### Two kinds of death, two proofs
+
+The store also failed in the opposite direction. When nobody was building, it said HELD. Which proof a claim needs depends on what its holder is.
+
+| Claim | Holder | Can it come back under a new pid? | Proof of death |
+|---|---|---|---|
+| `node:<id>` | a session | yes, the daemon respawns it | pid dead AND the roster scanned rows and found none on this node |
+| `dispatch:<id>` | `spawn-cli:<pid>` | no, it launches and exits | pid dead on this machine |
+| any, expired TTL | any | n/a | the clock, from any host |
+
+An **expired TTL** is a wall-clock fact and needs no same-machine proof. Requiring one is what made the store fill forever. This machine wrote `BB16s-MBP`, `BB16s-MacBook-Pro.local` and a tailnet name within one hour. Rows predating the `machine_id` field carry only that moving name, so nothing satisfies their same-machine proof.
+
+**`machine_id` is authoritative whenever present** and every new same-machine proof keys on it through `is_same_machine`, never on a hostname compare. The hostname fallback exists only for pre-`machine_id` rows, and reproducing it exactly is deliberate: those classify no worse than they did before the field existed.
+
+A **`node:` claim is reaped only on a positive finding**. All four must hold. Same machine, pid dead or reused, the roster join actually ran, and it scanned rows with none on this node. A join that cannot run yields unknown, and **unknown KEEPS the claim**. Reaping on a probe that returned nothing archives a live worker's claim, which is two sessions in one worktree and a duplicate PR.
+
+The one exception is a **launch window**. A claim held under `spawn-handover:<worker>` is exempt from the probe. Between the spawn and the worker's first `fno target init` there is no worktree manifest and no ledger row. So the roster cannot see that worker BY CONSTRUCTION. Nothing is stranded by the exemption: that claim is TTL-bound, and an expired claim is provably dead on its own.
+
+### Renewal re-anchors, and PID-reuse detection survives
+
+`claims::renew` used to preserve the recorded pid while moving `expires_at`. A respawned worker renewing under a new pid then left a claim byte-identical to a dead worker's: dead pid, unexpired TTL, SUSPECT. Nothing on disk separated a live session from a corpse. So every reader that must not steal from the first was forced to protect the second.
+
+When the recorded pid is dead and the claim is local, renewal now rewrites `pid`, `host`, `machine_id` and `acquired_at` together. Reuse detection compares `create_time(pid)` against `acquired_at`. It survives **because the anchor moves with the pid**. The new anchor postdates the holder's start, and a later recycle of that pid number still reads as reused. A live recorded pid is never rewritten.
+
+The anchor is the DURABLE session pid from `fno claim session-pid`, never the renewing process. `fno-agents loop-check` exits about a second after it renews. Anchoring to it re-files the corpse under a fresh number and fixes nothing.
+
+### A wedge fails, benign dedup does not
+
+A refusal because a live worker holds the node is dedup: the desired end state is already true and a batch sweep must keep going. Exit 0. A refusal on a suspect claim, a corrupted one, or a reservation whose holder nothing can prove dead is a wedge. Nobody is building the node, and nobody will until someone intervenes. Exit non-zero, and the message names the clearing command. Both used to exit 0 while launching nothing.
+
 ## Operator runbook
 
 **Who holds a claim?**
