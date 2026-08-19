@@ -219,8 +219,7 @@ You are looking for three things: what landed since the last pass, what is runni
 A node claiming to be ready with no plan, and a blocked node whose blocker merged, are both worth a second look.
 
 **`done` does not mean merged. Cross-check the wave gate yourself.**
-`done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged.
-This is not cosmetic. It is the wave gate. A stale `done` means the whole tail behind it is waiting on a merge nobody performed.
+`done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged. This is not cosmetic. It is the wave gate. A stale `done` means the whole tail behind it is waiting on a merge nobody performed.
 
 Run `fno pr info <n>` for state, head, and mergeability, and run `fno pr status <n>` for CI on every child whose PR number you are treating as landed. Reconcile before you plan a single edge.
 
