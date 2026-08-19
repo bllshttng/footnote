@@ -50,6 +50,11 @@ def _patch_run(monkeypatch, result):
         return result
 
     monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (False, None),
+    )
     return seen
 
 
@@ -113,8 +118,30 @@ def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
     assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
 
 
+def test_dispatch_hold_veto_prefers_inprocess_reader(monkeypatch):
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (True, "dispatch-hold:x-5a5c: blocked"),
+    )
+    monkeypatch.setattr(
+        git_protection.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("subprocess fallback must not run"),
+    )
+    assert "dispatch-hold:x-5a5c" in git_protection._dispatch_hold_refusal(
+        "gh pr merge 900"
+    )
+
+
 def test_dispatch_hold_veto_falls_back_to_source_cli(monkeypatch):
     calls = []
+
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (False, None),
+    )
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)

@@ -636,6 +636,24 @@ _VETO_PROBE_TIMEOUT = 25
 _HOLD_PROBE_TIMEOUT = 5
 
 
+def _inprocess_dispatch_hold_reason(pr_number):
+    """``(available, reason)`` from the shared Python hold reader."""
+    try:
+        cli_src = Path(__file__).resolve().parent.parent / "cli" / "src"
+        if cli_src.is_dir() and str(cli_src) not in sys.path:
+            sys.path.insert(0, str(cli_src))
+        from fno.pr._hold import merge_hold_reason
+    except (ImportError, ModuleNotFoundError):
+        return False, None
+    try:
+        return True, merge_hold_reason(int(pr_number), os.getcwd())
+    except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
+        return True, (
+            f"dispatch hold check unavailable ({type(exc).__name__}); "
+            "refusing to assume unheld"
+        )
+
+
 def _fno_veto_refusal(args, timeout, fallback):
     """One fno-verb probe: deny on the verb's exit-3 refusal line, else open.
 
@@ -719,6 +737,9 @@ def _dispatch_hold_refusal(command=""):
         return None
     if _targets_other_repo(command):
         return "cannot verify plan dispatch hold for a merge targeting another repository"
+    available, reason = _inprocess_dispatch_hold_reason(pr_number)
+    if available:
+        return reason
     kwargs = {
         "capture_output": True,
         "text": True,

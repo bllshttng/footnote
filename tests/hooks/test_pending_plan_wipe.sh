@@ -31,6 +31,10 @@ command -v python3 >/dev/null 2>&1 || skip "python3 not on PATH"
 
 bash -n "$INIT" || { echo "bash -n rejected $INIT" >&2; exit 1; }
 
+# This harness exercises stale-sidecar cleanup after wrapper policy checks.
+# Direct fallback gates have dedicated review, containment, and hold tests.
+export FNO_TARGET_INIT_GATED=1
+
 # Write a sidecar with a given session_id into <repo>/.fno/.pending-plan.md
 write_sidecar() {
   local dir="$1" sid="$2"
