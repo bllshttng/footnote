@@ -1409,13 +1409,13 @@ def production_handoff_candidate(
                         proof_path = paths.state_dir() / "recovery" / "provider-canaries"
                         proof_path.mkdir(parents=True, exist_ok=True)
                         digest = hashlib.sha256(
-                            f"{entry.account_record_id}\0{spawned.pane_id}".encode()
+                            f"{candidate.record_id}\0{spawned.pane_id}".encode()
                         ).hexdigest()[:20]
                         from fno.state.io import atomic_write
 
                         atomic_write(proof_path / f"{digest}.json", json.dumps({
-                            "provider": entry.route_provider_id,
-                            "account": entry.account_record_id,
+                            "provider": candidate.provider,
+                            "account": candidate.record_id,
                             "pane_id": str(spawned.pane_id),
                             "observed_at": observed,
                             "content": HEALTH_MARKER,

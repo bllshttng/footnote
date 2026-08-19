@@ -1228,9 +1228,10 @@ def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp
 
 
 def test_ac5_hlth_production_candidate_canaries_configured_route_without_registry_row(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
-    from fno.agents.provider_outage import CanaryProof
+    from fno import paths
+    from fno.agents import provider_outage
 
     config = tmp_path / ".fno" / "config.toml"
     config.parent.mkdir()
@@ -1261,13 +1262,23 @@ providers = ["broken", "codex-backup"]
 strategy = "fallback"
 """, encoding="utf-8")
     canaries = []
+    state = tmp_path / "state"
+    monkeypatch.setattr(paths, "state_dir", lambda: state)
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="FNO_PROVIDER_HEALTH_OK\n", stderr=""
+        ),
+    )
 
-    def canary(candidate, _row, now_s):
+    def run_canary(candidate, **kwargs):
         canaries.append(candidate)
-        return CanaryProof(
-            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=now_s,
-            persisted=True, assistant_role=False, pane_id="88", stopped=True,
-        )
+        return kwargs["collect_proof"](SimpleNamespace(
+            session="stable-session", pane_id=88, name="health-canary",
+        ))
+
+    monkeypatch.setattr(provider_outage, "run_health_canary", run_canary)
 
     selected = watchdog.production_handoff_candidate(
         {"provider": "zai", "account": "broken"},
@@ -1277,7 +1288,6 @@ strategy = "fallback"
         runtime_exhausted_fn=lambda _account, _root: False,
         harness_installed_fn=lambda harness: harness == "codex",
         pane_occupancy_fn=lambda _harness: 0,
-        canary_fn=canary,
         open_breakers_provider=lambda: [],
     )
 
@@ -1290,6 +1300,10 @@ strategy = "fallback"
     ) == ("codex-backup", "codex", "openai", "gpt-5.6-sol")
     assert selected.account_env == {"OPENAI_API_KEY": "test"}
     assert [candidate.record_id for candidate in canaries] == ["codex-backup"]
+    [proof] = list((state / "recovery" / "provider-canaries").glob("*.json"))
+    persisted = json.loads(proof.read_text())
+    assert persisted["provider"] == "openai"
+    assert persisted["account"] == "codex-backup"
 
 
 def test_ac5_hlth_node_pin_to_broken_route_refuses_automatic_movement(tmp_path):
