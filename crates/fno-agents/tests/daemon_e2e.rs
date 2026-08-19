@@ -82,12 +82,36 @@ fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
     panic!("event never appeared within {budget:?}: {needle}");
 }
 
-/// A stand-in daemon binary that exits immediately. Lets a client test tell
-/// "spawned it" (`DaemonExitedEarly`) apart from "declined to spawn it"
-/// (`DaemonStartTimeout`) by which error comes back.
+/// Every pid that ever reached the accept loop under this home.
+///
+/// A daemon emits `daemon_started` with its own pid once it is serving, so the
+/// ALIVE subset of these pids is the supervisor count for this socket. Counted
+/// from the home's own event log rather than a process scan, which would also
+/// see every other parallel test's daemon.
+fn daemon_started_pids(home: &AgentsHome) -> Vec<u32> {
+    std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == "daemon_started")
+        .filter_map(|v| v["data"]["pid"].as_u64().map(|p| p as u32))
+        .collect()
+}
+
+/// A stand-in daemon binary that records that it ran, then exits 0 without
+/// binding -- the race loser's shape.
+///
+/// It leaves a FILE rather than signalling through its exit code, because the
+/// exit code no longer separates the cases: a clean exit is now a legitimate
+/// outcome the client waits through rather than an error it reports. "Did the
+/// child run" is the question, so the child answers it directly.
 fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
     let path = home.root().join("fake-daemon.sh");
-    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake daemon");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\ntouch \"$FNO_AGENTS_HOME/fake-daemon-ran\"\nexit 0\n",
+    )
+    .expect("write fake daemon");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("chmod fake daemon");
     path
@@ -358,25 +382,26 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
 /// `call()` reaches `ensure_daemon` from every client verb, so with a fleet
 /// firing loop-check at each turn boundary, a daemon too busy to accept in time
 /// minted a new supervisor per timed-out verb. A failed connect has two
-/// explanations, dead and merely busy; only the lock separates them.
+/// explanations, dead and merely busy, and only the lock separates them.
 ///
-/// The two outcomes are told apart by which error returns, both positive
-/// signals: a daemon bin that exits immediately yields `DaemonExitedEarly` when
-/// it was spawned and `DaemonStartTimeout` when it was not. The unlocked half is
-/// the positive control -- it proves the fake bin really is spawned when
-/// spawning is legitimate, so the locked half's timeout means "declined to
-/// spawn" rather than "the seam never worked".
+/// The two outcomes are separated by whether the child RAN, read from a file
+/// the child itself writes. The unlocked half is the positive control: it
+/// proves the marker mechanism works, so the locked half's missing marker means
+/// "declined to spawn" rather than "the marker never worked".
 #[tokio::test]
 async fn client_declines_to_spawn_while_the_singleton_lock_is_held() {
     let home = short_home();
     home.ensure_root().unwrap();
     let fake = fake_daemon_bin(&home);
+    let marker = home.root().join("fake-daemon-ran");
 
-    // Positive control: lock free -> the client does spawn, and the fake exits.
-    match ensure_daemon(&home, &fake).await {
-        Err(ClientError::DaemonExitedEarly(_)) => {}
-        other => panic!("control: a free lock must spawn the daemon bin, got {other:?}"),
-    }
+    // Positive control: with the lock free, the client does spawn the child.
+    let _ = ensure_daemon(&home, &fake).await;
+    assert!(
+        marker.exists(),
+        "control: a free lock must spawn the daemon bin"
+    );
+    std::fs::remove_file(&marker).expect("clear the marker");
 
     // Now hold the lock, as a live daemon holds it for its whole lifetime.
     let lock = std::fs::OpenOptions::new()
@@ -388,12 +413,171 @@ async fn client_declines_to_spawn_while_the_singleton_lock_is_held() {
     lock.try_lock().expect("test takes the singleton lock");
 
     match ensure_daemon(&home, &fake).await {
-        Err(ClientError::DaemonStartTimeout(_)) => {}
-        other => panic!("a held lock must make the client wait, not spawn; got {other:?}"),
+        Err(ClientError::DaemonBusy(_)) => {}
+        other => panic!("a held lock must report a busy incumbent, got {other:?}"),
     }
+    assert!(
+        !marker.exists(),
+        "a held lock must stop the client forking a competitor for it"
+    );
 
     drop(lock);
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-ef7f: `fno agents restart` is the amplifier the operator measured.
+///
+/// Restart tears down the incumbent and immediately brings up a successor over
+/// the whole roster, and the successor's sweeps fork one truth probe per row.
+/// At 28 live rows that is 28 forks at once. accept() starves, every concurrent
+/// client's connect fails, and each failed connect used to fork ANOTHER daemon.
+/// Measured on either side of one operator restart: four daemons before,
+/// thirteen after, and not one of them serving. The highest held 21 fds where a
+/// live daemon holds 49.
+///
+/// The roster size is a parameter because the defect scales with it. At two
+/// rows the sweep is over before anything can pile up, so the assertion passes
+/// for the wrong reason. It has to hold at the size that actually broke.
+async fn restart_leaves_exactly_one_daemon(rows: usize) {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+
+    for i in 0..rows {
+        seed_codex_source(
+            &home,
+            &format!("row-{i:02}"),
+            &format!("uuid-restart-{i:02}"),
+            fno_agents::AgentStatus::Live,
+        );
+    }
+
+    // Hold the successor's startup sweep open. Post-fix this does not delay
+    // serving at all, which is the whole point -- pre-fix it is the window in
+    // which the successor is silent and every client below reads that silence
+    // as "no daemon" and forks its own. Inherited by the daemon `restart`
+    // spawns, which is why it goes on the test process rather than on a child.
+    std::env::set_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000");
+
+    let mut incumbent = start_daemon(&home);
+    let incumbent_pid = incumbent.id();
+
+    // The storm: a restart and a burst of ordinary client verbs at the same
+    // moment. Every verb routes through `ensure_daemon`, which is the site that
+    // used to treat a failed connect as licence to fork.
+    const CONCURRENT_VERBS: u64 = 8;
+    let storm_started = Instant::now();
+    let restart = {
+        let h = home.clone();
+        let b = daemon_bin.clone();
+        tokio::spawn(async move { fno_agents::client::restart_daemon(&h, &b).await })
+    };
+    let mut verbs = Vec::new();
+    for i in 0..CONCURRENT_VERBS {
+        let h = home.clone();
+        let b = daemon_bin.clone();
+        verbs.push(tokio::spawn(async move {
+            call(&h, &b, &Request::new(100 + i, "agent.status", json!({}))).await
+        }));
+    }
+
+    let outcome = restart
+        .await
+        .expect("restart task joins")
+        .expect("restart over a large roster succeeds");
+
+    // Every verb in the burst must be ANSWERED. This is the assertion that
+    // discriminates, and the daemon count below is not: the daemon-side flock
+    // alone already forces one supervisor, so a process count stays at one
+    // whether or not the successor can talk. What the storm actually broke was
+    // the callers -- silence from a sweeping successor made them fail.
+    let mut answered = 0;
+    let mut failures = Vec::new();
+    for v in verbs {
+        match v.await.expect("verb task joins") {
+            Ok(resp) if !resp.is_err() => answered += 1,
+            Ok(resp) => failures.push(format!("{:?}", resp.error())),
+            Err(e) => failures.push(format!("{e}")),
+        }
+    }
+    let storm_took = storm_started.elapsed();
+    std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
+    assert_eq!(
+        answered,
+        CONCURRENT_VERBS,
+        "every verb fired during a restart over {rows} rows must be answered; \
+         {} failed: {failures:?}",
+        failures.len()
+    );
+
+    // The discriminating assertion, and the reason it is a LATENCY bound rather
+    // than a success count or a process count. Neither of those can fail on the
+    // old code: the flock already forced one supervisor, and the client's 10s
+    // budget still connected eventually, so both stayed green over a successor
+    // nobody could talk to for seconds. Only the time to answer moves. Measured
+    // on this test: 6.2s with the sweep awaited before accept, 176ms with it
+    // concurrent. The bound sits between them with room for a slow runner.
+    assert!(
+        storm_took < Duration::from_secs(2),
+        "a restart storm over {rows} rows must clear in under 2s; took {storm_took:?}"
+    );
+
+    assert_eq!(
+        outcome.old_pid,
+        Some(incumbent_pid),
+        "restart must replace the incumbent this test started"
+    );
+
+    // Reap the incumbent before counting. It is our child, so until it is
+    // waited on it lingers as a zombie, and `kill(pid, 0)` answers ALIVE for a
+    // zombie -- the count would then report two supervisors for one live one.
+    let _ = incumbent.wait();
+
+    // The successor serves. `status` stays on the async runtime, so this reads
+    // the event loop's liveness rather than a handler's own work.
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.status", json!({})),
+    )
+    .await
+    .expect("the restarted daemon serves");
+    assert!(!resp.is_err(), "status failed: {:?}", resp.error());
+
+    // Secondary, and honest about its strength: the flock makes this hold with
+    // or without the rest of the fix. It is here to catch a regression that
+    // weakens the singleton guard itself, not to evidence the starvation fix.
+    let started = daemon_started_pids(&home);
+    let alive: Vec<u32> = started.iter().copied().filter(|p| pid_alive(*p)).collect();
+    assert_eq!(
+        alive.len(),
+        1,
+        "a restart over {rows} rows must leave exactly one supervisor; \
+         {} daemons started, {alive:?} still alive",
+        started.len()
+    );
+    // Deliberately not asserting WHICH pid survives. A verb in the burst can
+    // legitimately win the lock ahead of restart's own child, and then restart's
+    // child is the one that defers and exits. One supervisor is the invariant;
+    // which process holds the role is not.
+    assert!(
+        started.contains(&outcome.new_pid),
+        "restart's successor must at least have reached the accept loop"
+    );
+
+    unsafe {
+        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn restart_over_a_large_roster_leaves_exactly_one_daemon() {
+    // 28 rows is the size at which the operator's fleet actually broke. Eight
+    // rows the week before did not.
+    restart_leaves_exactly_one_daemon(28).await;
 }
 
 /// status (Wave 5, US6.10, AC10-ERR): with no daemon running, the `fno-agents

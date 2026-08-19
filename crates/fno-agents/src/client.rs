@@ -18,6 +18,11 @@ pub enum ClientError {
     Io(#[from] std::io::Error),
     #[error("daemon did not come up within {0:?}")]
     DaemonStartTimeout(Duration),
+    #[error(
+        "a daemon holds the supervisor singleton lock but did not answer within \
+         {0:?} - it is alive and saturated, not absent"
+    )]
+    DaemonBusy(Duration),
     #[error("daemon exited during startup with status {0}")]
     DaemonExitedEarly(std::process::ExitStatus),
     #[error(
@@ -50,6 +55,15 @@ pub fn resolve_daemon_bin() -> PathBuf {
 /// the lock only to ask the question and release it immediately -- the daemon
 /// we spawn takes it for real, for its whole lifetime.
 ///
+/// SHARED, not exclusive. An exclusive probe answers the same question but
+/// blocks every other taker while it runs, which turns a read-only question
+/// into interference: two clients probing at once make one of them see a
+/// phantom incumbent, and a probe landing on a daemon's own acquisition makes
+/// that daemon believe it lost a race nobody was running. A shared lock
+/// conflicts with the daemon's exclusive hold, which is the signal we want, and
+/// with nothing else. The daemon also retries its acquisition, so neither side
+/// depends on the other being fast.
+///
 /// A lock error that is NOT `WouldBlock` (no flock support, an unwritable
 /// state root) answers `true`. The daemon refuses to start at all without a
 /// working flock (`flock_self_test`), so failing open here preserves today's
@@ -65,7 +79,7 @@ fn daemon_lock_is_free(home: &AgentsHome) -> bool {
         Ok(f) => f,
         Err(_) => return true,
     };
-    match file.try_lock() {
+    match file.try_lock_shared() {
         Ok(()) => true, // dropping `file` releases it on return
         Err(e) => {
             let io_err: std::io::Error = e.into();
@@ -83,6 +97,43 @@ async fn wait_for_socket(sock: &Path, start: Instant, budget: Duration) -> Resul
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     Err(ClientError::DaemonStartTimeout(budget))
+}
+
+/// Outcome of waiting on an incumbent that holds the singleton lock.
+enum Incumbent {
+    /// It answered. Nothing to start.
+    Serving,
+    /// It released the lock without ever answering, so no daemon owns the
+    /// socket now and starting one is legitimate again.
+    Gone,
+    /// It held the lock for the whole budget and never answered.
+    Busy,
+}
+
+/// Wait for whoever holds the singleton lock, re-checking the lock each tick.
+///
+/// Polling the socket alone is not enough. `restart` SIGTERMs the daemon and
+/// resumes the moment the socket stops answering, but the dying daemon still
+/// holds its flock for the rest of `run()`. A client landing in that window
+/// would otherwise wait the full budget for a socket nobody will ever bind, and
+/// report a start that never happened. Re-reading the lock turns that into a
+/// `Gone`, and the caller starts the daemon `restart` was asking for.
+async fn wait_for_incumbent(
+    home: &AgentsHome,
+    sock: &Path,
+    start: Instant,
+    budget: Duration,
+) -> Incumbent {
+    while start.elapsed() < budget {
+        if UnixStream::connect(sock).await.is_ok() {
+            return Incumbent::Serving;
+        }
+        if daemon_lock_is_free(home) {
+            return Incumbent::Gone;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Incumbent::Busy
 }
 
 /// Ensure a daemon is serving on `home`'s socket, lazy-starting one if not.
@@ -118,9 +169,14 @@ pub async fn ensure_daemon(
     let budget = Duration::from_secs(10);
 
     // A daemon owns the singleton and is merely slow to answer (booting, or
-    // saturated). Wait it out; spawning here is what compounded the wedge.
+    // saturated). Wait it out. Spawning here is what compounded the wedge.
     if !daemon_lock_is_free(home) {
-        return wait_for_socket(&sock, start, budget).await;
+        match wait_for_incumbent(home, &sock, start, budget).await {
+            Incumbent::Serving => return Ok(()),
+            Incumbent::Busy => return Err(ClientError::DaemonBusy(budget)),
+            // It let the lock go without binding. Fall through and start one.
+            Incumbent::Gone => {}
+        }
     }
 
     // The lock was free a moment ago, so no daemon is entitled to this socket.
@@ -151,7 +207,15 @@ pub async fn ensure_daemon(
         // cause, not burn the full socket budget on a socket that will never
         // appear (code-review on PR 924).
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(ClientError::DaemonExitedEarly(status));
+            if !status.success() {
+                return Err(ClientError::DaemonExitedEarly(status));
+            }
+            // Exit ZERO without a socket is the race loser's designed ending:
+            // it found the lock held, deferred to the winner, and stopped. The
+            // winner is coming up on this same socket right now, so failing the
+            // verb here would turn "one short-lived extra process" into a
+            // user-visible error. Wait for the winner instead.
+            return wait_for_socket(&sock, start, budget).await;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

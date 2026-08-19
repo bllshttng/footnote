@@ -1861,6 +1861,13 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 /// Returns the lock `File` alongside the listener: the caller must keep it
 /// alive for the whole process lifetime (dropping it, or process exit,
 /// releases the lock).
+/// How many times [`bind_supervisor_socket`] tries for the singleton lock
+/// before concluding an incumbent owns it, and how long it waits between
+/// tries. The product only has to exceed the microseconds a client's probe
+/// holds the lock, never the lifetime of a real incumbent.
+const LOCK_ACQUIRE_ATTEMPTS: usize = 6;
+const LOCK_ACQUIRE_RETRY: Duration = Duration::from_millis(25);
+
 pub async fn bind_supervisor_socket(
     home: &AgentsHome,
 ) -> Result<(UnixListener, std::fs::File), DaemonError> {
@@ -1876,12 +1883,35 @@ pub async fn bind_supervisor_socket(
         .truncate(false)
         .write(true)
         .open(&lock_path)?;
-    if let Err(e) = lock_file.try_lock() {
-        let io_err: std::io::Error = e.into();
-        if io_err.kind() == std::io::ErrorKind::WouldBlock {
-            return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
+
+    // Retry rather than concede on the first `WouldBlock`. A client's liveness
+    // probe takes this same lock for microseconds to ask whether anyone owns
+    // the singleton, and conceding to that would let a READ-ONLY question kill
+    // a legitimate cold start -- the client then reports a daemon that exited
+    // during startup while no daemon runs at all. The retry separates the two
+    // cases on the one axis that distinguishes them, duration: an incumbent
+    // holds the lock for its entire life and still wins every retry, while a
+    // probe is long gone before the second attempt.
+    let mut lock_held = false;
+    for attempt in 0..LOCK_ACQUIRE_ATTEMPTS {
+        match lock_file.try_lock() {
+            Ok(()) => {
+                lock_held = true;
+                break;
+            }
+            Err(e) => {
+                let io_err: std::io::Error = e.into();
+                if io_err.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(io_err.into());
+                }
+                if attempt + 1 < LOCK_ACQUIRE_ATTEMPTS {
+                    tokio::time::sleep(LOCK_ACQUIRE_RETRY).await;
+                }
+            }
         }
-        return Err(io_err.into());
+    }
+    if !lock_held {
+        return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
     }
 
     let sock = home.supervisor_sock();
@@ -2001,15 +2031,17 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let report = recover(&home, &emitter)?;
 
     // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
-    // as part of recovery and BEFORE the accept loop serves any client, so the
-    // first `list` reads truthful process-liveness status instead of stale
-    // creation-time values. Reuses the same bounded machinery as the `reconcile`
-    // RPC (fairness order + 250ms/probe + 5s budget). Strictly non-fatal: a sweep
-    // that returns an error (registry write failed -> registry unchanged) or even
-    // panics degrades to serving last-recorded status -- we emit and continue,
-    // never abort the daemon (AC1-FR). Completing before `accept` upholds the
-    // Concurrency invariant that no client observes a half-applied sweep. Opt out
-    // via FNO_AGENTS_NO_STARTUP_RECONCILE for the fastest cold start (discretion #5).
+    // as part of recovery, CONCURRENTLY with the accept loop (x-ef7f), so a
+    // large roster no longer keeps a cold daemon silent while it probes. Reuses
+    // the same bounded machinery as the `reconcile` RPC (fairness order +
+    // 250ms/probe + 5s budget). Strictly non-fatal: a sweep that returns an
+    // error (registry write failed -> registry unchanged) or even panics
+    // degrades to serving last-recorded rows -- we emit and continue, never
+    // abort the daemon (AC1-FR). No client observes a half-applied sweep, which
+    // the registry's advisory lock gives rather than the old ordering: what the
+    // ordering additionally gave, and this does not, is a guarantee that the
+    // FIRST `list` is post-sweep. Opt out via FNO_AGENTS_NO_STARTUP_RECONCILE
+    // for the fastest cold start (discretion #5).
     if opts.reconcile_on_start {
         // Off the startup path and onto the blocking pool (x-ef7f). The sweep
         // probes reachability PER REGISTRY ROW, each probe bounded but not
@@ -2208,8 +2240,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
                     let notify_on_blocked = ctx.opts.notify_on_blocked;
                     tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
-                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
                 // Dead-row GC (x-b1aa): remove terminal, past-grace, clean
@@ -2233,13 +2265,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
                     let grace_cwd = ctx.opts.dead_row_grace_cwd.clone();
                     tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
                         let grace_for_harness = |harness: &str| {
                             Duration::from_secs(crate::agents_config::dead_row_grace_secs(
                                 &grace_cwd, harness,
                             ))
                         };
                         let _ = gc_sweep(&home, &emitter, &grace_for_harness);
-                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
                 // Worktree report sweep: the backstop for what the merge ritual
@@ -2252,6 +2284,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
                     tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
                         worktree_sweep(&home, &emitter, now, &roots, &|root| {
@@ -2263,7 +2296,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 .filter(|o| o.status.success())
                                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                         });
-                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
                 // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
@@ -2277,8 +2309,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let home = ctx.home.clone();
                     let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
                     tokio::spawn(async move {
+                        let _gate = SweepGate(flag);
                         terminal_stop_sweep(&home, &emitter).await;
-                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
                 let empty = state::load_registry(&ctx.home.registry_json())
@@ -2390,6 +2422,23 @@ async fn serve_connection(ctx: Arc<Ctx>, mut stream: UnixStream) {
     }
     let resp = dispatch(&ctx, &req).await;
     let _ = write_response(&mut stream, &resp).await;
+}
+
+/// Clears a one-in-flight sweep gate on drop.
+///
+/// Every sweep below sets its gate, then runs off-loop and clears the gate as
+/// the closure's last statement. A PANICKING sweep never reaches that
+/// statement: the panic is captured by a `JoinHandle` the spawner immediately
+/// drops, so the gate stays latched and that sweep is silently disabled for the
+/// daemon's whole life. `gc_sweep` and the scrape sweep both shell out and
+/// parse the output, so this is not hypothetical. A guard clears the gate on
+/// the unwind path too.
+struct SweepGate(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SweepGate {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Run a synchronous (flock + CPU, no socket I/O) handler on the blocking pool
@@ -6652,10 +6701,21 @@ mod tests {
                 async move { bind_supervisor_socket(&h).await },
             ));
         }
+        // Collect every result FIRST, then count, so no winner's lock guard is
+        // dropped while another task is still trying for it. Counting inside
+        // the join loop released the lock at the first `Ok(_)` and handed it to
+        // a task still mid-retry, which read as three winners -- an artifact of
+        // the test's own teardown order, not of the guard. In production the
+        // holder keeps its guard for the whole process lifetime, which is what
+        // this shape reproduces.
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.unwrap());
+        }
         let mut ok_count = 0;
         let mut already_running = 0;
-        for handle in handles {
-            match handle.await.unwrap() {
+        for r in &results {
+            match r {
                 Ok(_) => ok_count += 1,
                 Err(DaemonError::AlreadyRunning(_)) => already_running += 1,
                 Err(e) => panic!("unexpected error: {e:?}"),
@@ -6663,6 +6723,8 @@ mod tests {
         }
         assert_eq!(ok_count, 1, "exactly one bind must survive the race");
         assert_eq!(already_running, 7);
+        drop(results);
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     // x-ef7f / x-e98b: the bound-inode check is what lets a daemon detect
