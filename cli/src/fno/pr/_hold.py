@@ -1,7 +1,6 @@
 """One plan-level hold reader shared by every PR merge path."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 from fno.graph.ladder import DispatchHoldState, DispatchHoldVerdict, dispatch_hold_verdict
@@ -53,23 +52,38 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # on its failure) for a lookup whose answer is always None.
         return None
 
-    from fno.worktree_paths import resolve_project_id
+    import os
 
-    try:
-        _our_project = resolve_project_id(Path(cwd))
-    except ValueError:
-        _our_project = None
-    if _our_project is not None and not any(
-        isinstance(entry, dict) and entry.get("project") == _our_project
-        for entry in entries
-    ):
+    from fno.graph._intake import repo_root
+
+    _root = os.path.normpath(repo_root())
+    _root_prefix = _root.rstrip(os.sep) + os.sep
+
+    def _cwd_in_this_repo(entry: object) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        raw_cwd = entry.get("cwd")
+        if not isinstance(raw_cwd, str) or not raw_cwd:
+            return False
+        norm = os.path.normpath(os.path.expanduser(raw_cwd))
+        return norm == _root or norm.startswith(_root_prefix)
+
+    if not any(_cwd_in_this_repo(entry) for entry in entries):
         # graph.json is a single store shared across every project on the
         # machine - a non-empty by_id only proves SOME project has nodes,
-        # never THIS one. A repo with zero backlog nodes of its own paid the
-        # same unconditional gh fetch (and the same fail-closed trip on a
-        # blip) as a repo with hundreds. resolve_project_id is local only
-        # (settings.yaml, then a local `git remote get-url origin` read - no
-        # network) so this costs nothing extra when it doesn't short-circuit.
+        # never THIS one. Matched on cwd (the same field/normalization
+        # detect_project uses to find a node's own project at intake), not
+        # on a resolved project-NAME string: an earlier version derived "our
+        # project id" independently (settings.toml -> git remote -> dirname)
+        # and compared that string against each entry's stored `project`
+        # field, but the two schemes read different config and can drift -
+        # and a node created via `fno backlog new`, not yet claimed by a
+        # plan, legitimately carries `project: null`, which a name-string
+        # comparison would silently treat as "not this repo" even when its
+        # cwd matches exactly. Matching on cwd sidesteps both failure modes
+        # (review fix). Local only (a `git worktree list` / `git rev-parse`
+        # read - no network) so this costs nothing extra when it doesn't
+        # short-circuit.
         return None
 
     from fno.graph._reconcile import node_pr_refs
