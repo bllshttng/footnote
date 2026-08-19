@@ -50,6 +50,15 @@ command rm -rf "$X"
 EOF
 run 1 'command rm (no -p) fails: still hits a PATH wrapper' "$TMP/commandrm.sh"
 
+# A QUOTED command word is the classic alias-bypass spelling, and it does not
+# bypass a PATH wrapper either. The gate must catch it before it strips
+# quoted strings (codex peer review P2 on this gate's first ship).
+cat > "$TMP/quotedrm.sh" <<'EOF'
+"rm" -rf "$LOCKDIR"
+'rm' -rf "$TMPHOME"
+EOF
+run 1 'quoted rm command word fails' "$TMP/quotedrm.sh"
+
 # A guarded file that vanished fails closed.
 run 1 'missing listed file fails closed' "$TMP/does-not-exist.sh"
 

@@ -60,16 +60,28 @@ check_file() {
     VIOLATIONS=$((VIOLATIONS + 1))
     return
   fi
-  # Detection, per line: strip double- then single-quoted strings (an `rm`
+  # Detection, per line, in two passes over the same numbered text.
+  # Pass 1 (quoted word): BEFORE string-stripping, a quoted command word -
+  # "rm" or 'rm', the classic alias-bypass spelling that does NOT bypass a
+  # PATH wrapper - is itself a violation.
+  # Pass 2 (bare word): strip double- then single-quoted strings (an `rm`
   # inside an echo message is advice to a human, not a call), strip the
   # comment (after string-stripping, the first # starts one), then mask the
   # sanctioned spellings. What survives is a command word `rm`.
+  # Both passes mask `command -p rm` and `/bin/rm` first, so a sanctioned
+  # spelling never fires either detector, quoted or not.
   local hits
   hits="$(
-    nl -ba "$path" \
-      | sed -E 's/"[^"]*"//g; s/'"'"'[^'"'"']*'"'"'//g; s/#.*$//;
-                s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
-      | awk -F'\t' '$0 ~ /(^|[^A-Za-z0-9_\/.-])rm([^A-Za-z0-9_-]|$)/ {print $1}'
+    {
+      nl -ba "$path" \
+        | sed -E 's/#.*$//;
+                  s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
+        | grep -E "(^|[^A-Za-z0-9_/.-])[\"']rm[\"']([[:space:]]|$)" | cut -f1
+      nl -ba "$path" \
+        | sed -E 's/"[^"]*"//g; s/'"'"'[^'"'"']*'"'"'//g; s/#.*$//;
+                  s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
+        | awk -F'\t' '$0 ~ /(^|[^A-Za-z0-9_\/.-])rm([^A-Za-z0-9_-]|$)/ {print $1}'
+    } | sort -un
   )"
   [[ -z "$hits" ]] && return
   local n
