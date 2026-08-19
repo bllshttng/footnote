@@ -5250,9 +5250,10 @@ mod tests {
         // Missing file -> empty (not an error).
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 0);
 
-        // Real Python format: top-level "agents". A valid row carries the
-        // required AgentEntry fields (name/provider/cwd/log_path).
+        // Legacy Python format: top-level "agents" with provider as the
+        // harness identity. Current rows carry harness separately.
         let valid = r#"{"name":"cx","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
+        let valid_current = r#"{"name":"cx","harness":"codex","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         fs::write(
             &reg,
             format!(r#"{{"schema_version":3,"agents":[{valid}]}}"#),
@@ -5305,7 +5306,13 @@ mod tests {
         // take the fleet down. Matches Python load_registry.
         fs::write(
             &reg,
-            format!(r#"{{"schema_version":99,"agents":[{valid}]}}"#),
+            format!(r#"{{"schema_version":99,"agents":[{valid_current}]}}"#),
+        )
+        .unwrap();
+        assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
+        fs::write(
+            &reg,
+            format!(r#"{{"schema_version":15,"agents":[{valid_current}]}}"#),
         )
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);

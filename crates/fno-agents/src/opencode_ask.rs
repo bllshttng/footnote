@@ -364,6 +364,7 @@ mod tests {
             "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
             "agents": [{
                 "name": name,
+                "harness": provider,
                 "provider": provider,
                 "cwd": "/x",
                 "status": "live",
