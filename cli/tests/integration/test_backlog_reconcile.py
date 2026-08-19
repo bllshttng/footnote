@@ -1053,3 +1053,149 @@ def test_reconcile_real_stamp_marks_never_shipped_plan_done(cli_env, monkeypatch
     assert "status: done" in text  # graduate flipped shipped->done (1 url >= 1)
     assert "shipped_at:" in text
     assert "pull/800" in text
+
+
+# ---------------------------------------------------------------------------
+# --pr-number closure binding (x-59a6)
+# ---------------------------------------------------------------------------
+
+def _stub_closure_ctx(body: str, *, number: int = 900, url: str | None = None,
+                       state: str = "MERGED"):
+    from fno.pr.closure import PrClosureContext
+
+    return PrClosureContext(
+        number=number,
+        body=body,
+        url=url or f"https://github.com/test-owner/test-repo/pull/{number}",
+        state=state,
+        merged_at="2026-08-18T00:00:00Z" if state == "MERGED" else None,
+    )
+
+
+def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
+    """AC3-HP + AC4-HP: one merged PR's trailer names two open nodes -> both
+    refs bind and both nodes close in one invocation, even though only one
+    was ever individually stamped at creation."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-100001"), _node("ab-100002")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Fixes both.\n\nBacklog-Closure: ab-100001 ab-100002\n", number=900,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({900: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "900", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_claims"] == ["ab-100001", "ab-100002"]
+    assert set(payload["closure_bound"]) == {"ab-100001", "ab-100002"}
+    assert payload["closure_refused"] is None
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100001", "ab-100002"}
+
+    entries = _read_entries(graph_path)
+    for nid in ("ab-100001", "ab-100002"):
+        n = next(e for e in entries if e["id"] == nid)
+        assert n["pr_number"] == 900
+        assert n["completed_at"] is not None
+        assert (sentinel_dir / f"{nid}.json").exists()
+
+
+def test_reconcile_pr_number_idempotent_rerun(cli_env, monkeypatch):
+    """AC4-EDGE: a second run against the same merged trailer reports the same
+    claims, zero new bindings, and zero new closes without error."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100003"), _node("ab-100004")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100003 ab-100004\n", number=901,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({901: "MERGED"}))
+
+    first = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "901", "--json"])
+    assert first.exit_code == 0, first.output
+    assert set(json.loads(first.output)["closure_bound"]) == {"ab-100003", "ab-100004"}
+
+    second = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "901", "--json"])
+    assert second.exit_code == 0, second.output
+    payload2 = json.loads(second.output)
+    assert payload2["closure_claims"] == ["ab-100003", "ab-100004"]
+    assert payload2["closure_bound"] == []  # already bound: nothing NEW
+    assert payload2["closed"] == []  # already closed: no new closes
+    assert payload2["closure_refused"] is None
+
+
+def test_reconcile_pr_number_refuses_unknown_claim_mutates_nothing(cli_env, monkeypatch):
+    """AC3-ERR: an unknown claim refuses the whole binding; no claimed node
+    mutates or closes."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100005")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100005 ab-999999\n", number=902,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({902: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "902", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_claims"] == ["ab-100005", "ab-999999"]
+    assert payload["closure_bound"] == []
+    assert payload["closure_refused"] is not None and "ab-999999" in payload["closure_refused"]
+    assert payload["closed"] == []
+    # ab-100005 was never bound to a PR ref (AC3-ERR: no claimed node mutates),
+    # so the drift scan below has nothing to query either.
+    n = next(e for e in _read_entries(graph_path) if e["id"] == "ab-100005")
+    assert n["pr_number"] is None
+    assert n["completed_at"] is None
+
+
+def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch):
+    """Operator verification (x-59a6): a multi-node feature where one PR
+    merges and another does not - the epic must report EXACTLY which sibling
+    ship is still outstanding, not just stay silently open."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-e00001"),  # the epic; no PR of its own
+        _node("ab-e00002", parent="ab-e00001"),  # ships in PR 903 (merges)
+        _node("ab-e00003", parent="ab-e00001", pr_number=904,
+              pr_url="https://github.com/test-owner/test-repo/pull/904"),  # PR 904 (still open)
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-e00002\n", number=903,
+        ),
+    )
+    # PR 903 (this run's claim) is merged; PR 904 (the sibling's own ref, from
+    # the forward scan) is still open.
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({903: "MERGED", 904: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "903", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    # The claimed sibling closed...
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-e00002"}
+    # ...but the epic is not done, and the report names EXACTLY the
+    # outstanding ship - not a bare silence about the epic.
+    assert payload["epics_waiting"] == [
+        {"epic": "ab-e00001", "outstanding": ["ab-e00003"]}
+    ]
+    entries = _read_entries(graph_path)
+    epic = next(e for e in entries if e["id"] == "ab-e00001")
+    assert epic["completed_at"] is None  # not all children done yet

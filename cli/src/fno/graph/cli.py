@@ -7993,6 +7993,22 @@ def cmd_reconcile(
         "--json", "-J",
         help="Emit structured JSON instead of a human summary.",
     ),
+    pr_number: Optional[int] = typer.Option(
+        None,
+        "--pr-number",
+        help="Bind every node named in this merged PR's exact Backlog-Closure "
+        "trailer to the PR (filling an absent primary or appending to "
+        "additional_prs) BEFORE the drift scan below runs, so a PR naming "
+        "several nodes closes all of them in this one invocation rather than "
+        "only the one node stamped at creation (x-59a6). All-or-nothing: an "
+        "unknown, malformed, or cross-repo claim binds nothing.",
+    ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help="owner/repo scoping --pr-number's gh query and cross-repo claim "
+        "check. Resolved from the checkout's origin remote when omitted.",
+    ),
 ) -> None:
     """Close open backlog nodes whose PR has merged outside the ship gate.
 
@@ -8022,6 +8038,64 @@ def cmd_reconcile(
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
+
+    # --pr-number: bind every exact Backlog-Closure claim on this PR to its
+    # node BEFORE the scan below, so the forward scan (which needs a PR ref to
+    # query) can see a node that was named in the body but never individually
+    # stamped at creation. Reuses the unchanged scan/close pipeline that
+    # follows - this only makes the newly-bound nodes visible to it.
+    closure_claims: list[str] = []
+    closure_bound: list[str] = []
+    closure_refused: Optional[str] = None
+    if pr_number is not None:
+        from fno.pr.closure import (
+            ClosureQueryError,
+            bind_closure_claims,
+            fetch_pr_closure_context,
+            parse_closure_trailer,
+        )
+
+        try:
+            pr_ctx = fetch_pr_closure_context(pr_number, repo=repo)
+        except ClosureQueryError as exc:
+            closure_refused = f"could not query PR #{pr_number}: {exc}"
+            if not json_out:
+                typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
+        else:
+            closure_claims = parse_closure_trailer(pr_ctx.body)
+            if closure_claims and not dry_run:
+                _refusal_box: list = [None]
+                _bound_box: list = []
+
+                def _closure_mutator(entries2):
+                    result = bind_closure_claims(
+                        entries2,
+                        closure_claims,
+                        pr_number=pr_number,
+                        pr_url=pr_ctx.url,
+                        repo=repo,
+                    )
+                    if result.outcome == "refused":
+                        _refusal_box[0] = result.refusal
+                    else:
+                        _bound_box.extend(result.bound_ids)
+                    return entries2
+
+                locked_mutate_graph(_graph_path(), _closure_mutator)
+                closure_refused = _refusal_box[0]
+                closure_bound = _bound_box
+                if closure_refused and not json_out:
+                    typer.echo(
+                        f"warning: reconcile --pr-number {pr_number}: refused "
+                        f"binding: {closure_refused}",
+                        err=True,
+                    )
+                elif closure_bound and not json_out:
+                    typer.echo(
+                        f"reconcile --pr-number {pr_number}: bound "
+                        f"{', '.join(closure_bound)}",
+                        err=True,
+                    )
 
     entries = read_graph(_graph_path())
     records = scan_merge_drift(entries, node_id=node)
@@ -8591,9 +8665,53 @@ def cmd_reconcile(
         if not json_out:
             typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
 
+    # x-59a6: for a multi-node feature where this run's --pr-number closure
+    # claims land under a still-open parent epic, name exactly which sibling
+    # ship(s) keep it open - not just that the epic did not close. Without
+    # this, a PR that ships one of two required nodes reads as silent
+    # (`closed=[thisone]`) rather than naming the outstanding one, and an
+    # operator cannot tell "genuinely unfinished" from "closure never fired"
+    # for the epic itself. Read-only: never mutates.
+    epics_waiting: list[dict] = []
+    if closure_claims:
+        _ew_entries = entries if dry_run else read_graph(_graph_path())
+        _ew_epics: set = set()
+        for _cid in closure_claims:
+            _cn = _find_node(_ew_entries, _cid)
+            _pid = _cn.get("parent") if _cn else None
+            if isinstance(_pid, str):
+                _ew_epics.add(_pid)
+        for _eid in sorted(_ew_epics):
+            _epic = _find_node(_ew_entries, _eid)
+            if _epic is None or _epic.get("completed_at"):
+                continue  # unknown, or already closed - nothing outstanding
+            _outstanding = sorted(
+                e["id"] for e in _ew_entries
+                if isinstance(e, dict) and e.get("parent") == _eid and not e.get("completed_at")
+            )
+            if _outstanding:
+                epics_waiting.append({"epic": _eid, "outstanding": _outstanding})
+                if not json_out:
+                    typer.echo(
+                        f"{_eid} still open, waiting on: {', '.join(_outstanding)}",
+                        err=True,
+                    )
+
     if json_out:
         payload = {
             "dry_run": dry_run,
+            # --pr-number closure binding (x-59a6), reported separately from
+            # `closed` below: zero closes must never masquerade as zero claims.
+            # `closure_claims` is every id the trailer named; `closure_bound` is
+            # the subset newly bound THIS run (already-bound/already-done ids are
+            # claimed but not counted here); `closure_refused` names the reason
+            # the WHOLE binding was refused, or null.
+            "closure_claims": closure_claims,
+            "closure_bound": closure_bound,
+            "closure_refused": closure_refused,
+            # Parent epics of this run's closure claims that are still open,
+            # each naming its still-open sibling children exactly (x-59a6).
+            "epics_waiting": epics_waiting,
             "candidates": [
                 {
                     "node_id": r.node_id,
@@ -8651,6 +8769,7 @@ def cmd_reconcile(
         and not contained_closed
         and not reverted_stamped
         and not promise_unmet
+        and not closure_claims
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return

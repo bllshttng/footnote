@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 import json
 import os
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -444,3 +444,35 @@ def ritual(
         autonomous = True
     rc = _ritual.run_ritual(pr_number, autonomous)
     raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "closure-trailer",
+    help=(
+        "Print the exact `Backlog-Closure:` trailer for NODE plus its "
+        "contained_in descendants (x-59a6). Compose it into a PR body before "
+        "`gh pr create` so every node the PR ships gets bound at merge, not "
+        "just the one stamped by --pr-number. Prints nothing (exit 0) when "
+        "NODE is unresolvable or nothing well-formed remains, so a caller "
+        "can append the output to a body unconditionally."
+    ),
+)
+def closure_trailer(
+    node: str = typer.Argument(..., help="Node id to render the trailer for."),
+    extra: List[str] = typer.Option(
+        [], "--extra",
+        help="Additional genuinely-shipped node ids beyond NODE and its "
+             "contained_in descendants (repeatable).",
+    ),
+) -> None:
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+    from fno.pr.closure import render_pr_closure_trailer
+
+    try:
+        entries = read_graph(graph_json())
+    except Exception:
+        return
+    line = render_pr_closure_trailer(entries, node, extra_ids=list(extra))
+    if line:
+        typer.echo(line)
