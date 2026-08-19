@@ -421,11 +421,11 @@ fn final_answer_check_keeps_a_daemon_that_binds_at_the_deadline() {
 }
 
 /// AC1-HP (Architecture B, plan ab-70faa65b): a cold daemon start runs ONE
-/// bounded reconcile sweep BEFORE serving, so the first `list` reads truthful
-/// liveness. A stale `ask` row recorded `live` at creation (its one-shot process
-/// long gone) settles to `exited` -- even though its provider session id makes it
-/// "resumable" -- and surfaces that resumability via `session_id`. The startup
-/// sweep is what flips it: no explicit `reconcile` RPC is issued here.
+/// bounded reconcile sweep concurrently with serving. A stale `ask` row recorded
+/// `live` at creation (its one-shot process long gone) settles to `exited` -- even
+/// though its provider session id makes it "resumable" -- and surfaces that
+/// resumability via `session_id`. The startup sweep is what flips the stored row:
+/// no explicit `reconcile` RPC is issued here.
 #[tokio::test]
 async fn cold_start_reconciles_stale_ask_row_to_exited() {
     let home = short_home();
@@ -475,8 +475,8 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
 
     let mut daemon = start_daemon(&home);
 
-    // The first served RPC necessarily follows the startup sweep (the accept loop
-    // runs only after the sweep completes), so the listed status is post-sweep.
+    // Serving and reconciliation are concurrent. The list truth pass must render
+    // current liveness without waiting for the startup sweep to commit.
     let resp = call(
         &home,
         &daemon_bin,
@@ -499,6 +499,21 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // AC4-EDGE: a one-shot ask has no managed process, so pid is null in --json.
     assert!(row["pid"].is_null(), "ask row must have null pid: {row}");
 
+    // Wait on the sweep's positive completion marker before asserting its
+    // registry write. An absence-only check would pass if the sweep never ran.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let events = loop {
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        if events.contains("startup_reconcile_done") {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "startup_reconcile_done event not emitted"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
     // The startup sweep wrote the registry: status exited + CHECKED stamped.
     let reg = state::load_registry(&home.registry_json()).unwrap();
     let entry = reg.find("stale-ask").unwrap();
@@ -509,7 +524,6 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     );
     assert_eq!(entry.pid, None, "ask row never carries a pid");
 
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
     assert!(
         events.contains("startup_reconcile_done"),
         "startup_reconcile_done event not emitted"
