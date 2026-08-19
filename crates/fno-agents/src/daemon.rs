@@ -1367,9 +1367,7 @@ pub fn gc_sweep_dry_run(
 /// lowered to the state string alone, for EVERY escalated handle in one
 /// subprocess. Injected into [`gc_sweep_impl`] so the decision path is
 /// unit-testable without shelling out to a real `fno`.
-fn live_truth_tail_states(
-    handles: &[String],
-) -> std::collections::HashMap<String, String> {
+fn live_truth_tail_states(handles: &[String]) -> std::collections::HashMap<String, String> {
     crate::claude_ask::family1_truth_probe_many(handles)
         .into_iter()
         .map(|(handle, probe)| (handle, probe.state))
@@ -12400,9 +12398,11 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| {
-            probe_with_verdict("working", "reachable")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| probe_with_verdict("working", "reachable")),
+        );
         let row = &response.result().unwrap()["agents"][0];
 
         assert_eq!(row["reachability"], "reachable");
@@ -12459,9 +12459,11 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
 
         let parked = Request::new(1, "agent.list", json!({"progress": "parked"}));
-        let response = handle_list_with_truth(&ctx, &parked, per_handle(|_handle| {
-            probe_with_verdict("done", "reachable")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &parked,
+            per_handle(|_handle| probe_with_verdict("done", "reachable")),
+        );
         assert_eq!(
             response.result().unwrap()["agents"]
                 .as_array()
@@ -12471,9 +12473,11 @@ done
         );
 
         let advancing = Request::new(2, "agent.list", json!({"progress": "advancing"}));
-        let response = handle_list_with_truth(&ctx, &advancing, per_handle(|_handle| {
-            probe_with_verdict("done", "reachable")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &advancing,
+            per_handle(|_handle| probe_with_verdict("done", "reachable")),
+        );
         assert!(response.result().unwrap()["agents"]
             .as_array()
             .unwrap()
@@ -12530,19 +12534,23 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| {
-            Some(crate::claude_ask::TruthProbe {
-                state: "working".into(),
-                reachability: Some("reachable".into()),
-                basis: Some("transcript".into()),
-                last_activity_age_s: Some(3.5),
-                last_event_at: None,
-                last_message: None,
-                observed_model: json!({
-                    "kind": "observed", "model": "glm-5.2", "samples": 300
-                }),
-            })
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| {
+                Some(crate::claude_ask::TruthProbe {
+                    state: "working".into(),
+                    reachability: Some("reachable".into()),
+                    basis: Some("transcript".into()),
+                    last_activity_age_s: Some(3.5),
+                    last_event_at: None,
+                    last_message: None,
+                    observed_model: json!({
+                        "kind": "observed", "model": "glm-5.2", "samples": 300
+                    }),
+                })
+            }),
+        );
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"]["model"], "glm-5.2");
         assert_eq!(row["observed_model"]["kind"], "observed");
@@ -12740,10 +12748,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(seen.into_inner(), vec!["uuid-abc12345"]);
@@ -12765,10 +12777,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12792,10 +12808,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12820,10 +12840,14 @@ done
         let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        }));
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12861,7 +12885,10 @@ done
         let calls = calls.into_inner();
         assert_eq!(calls.len(), 1, "one page, one batch");
         assert_eq!(calls[0].len(), rows, "every filtered row rides that batch");
-        let entries = response.result().unwrap()["agents"].as_array().unwrap().len();
+        let entries = response.result().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .len();
         assert_eq!(entries, rows);
         std::fs::remove_dir_all(home.root()).ok();
     }

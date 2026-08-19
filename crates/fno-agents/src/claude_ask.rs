@@ -613,9 +613,7 @@ fn family1_truth_batch_attempt(
         Some(object) => TruthBatchAttempt {
             probes: object
                 .iter()
-                .filter_map(|(handle, value)| {
-                    Some((handle.clone(), parse_truth_payload(value)?))
-                })
+                .filter_map(|(handle, value)| Some((handle.clone(), parse_truth_payload(value)?)))
                 .collect(),
             crashed: false,
         },
@@ -4839,11 +4837,13 @@ mod tests {
             |handles| {
                 spawns.set(spawns.get() + 1);
                 assert_eq!(handles.len(), 2);
-                sh("printf '{\"h1\":{\"state\":\"working\",\"reachability\":\"reachable\",\
+                sh(
+                    "printf '{\"h1\":{\"state\":\"working\",\"reachability\":\"reachable\",\
                     \"basis\":\"transcript\",\"last_activity_age_s\":12.5,\
                     \"observed_model\":{\"kind\":\"observed\",\"model\":\"glm-5.3\"}},\
                     \"h2\":{\"state\":\"done\",\"reachability\":\"reachable\",\
-                    \"basis\":\"transcript\"}}'")
+                    \"basis\":\"transcript\"}}'",
+                )
             },
             Duration::from_secs(5),
         );
@@ -4932,14 +4932,23 @@ mod tests {
         let twelve = family1_truth_batch_timeout(12);
         let forty = family1_truth_batch_timeout(40);
 
-        assert!(one >= Duration::from_secs(5), "never below the single budget");
+        assert!(
+            one >= Duration::from_secs(5),
+            "never below the single budget"
+        );
         assert!(twelve > one, "more handles must buy more time");
         assert!(forty > twelve);
 
         // Real measurements this must clear, with headroom: 12 handles in 1.6 s
         // and the full 31-row roster in 3.9 s after the resolver hoists.
-        assert!(twelve >= Duration::from_secs(8), "12 handles took 1.6s measured");
-        assert!(forty >= Duration::from_secs(15), "31 handles took 3.9s measured");
+        assert!(
+            twelve >= Duration::from_secs(8),
+            "12 handles took 1.6s measured"
+        );
+        assert!(
+            forty >= Duration::from_secs(15),
+            "31 handles took 3.9s measured"
+        );
 
         // Capped, so one pathological transcript cannot wedge a sweep for
         // minutes. The daemon runs this off the select arm, so the ceiling is
