@@ -2472,7 +2472,12 @@ mod tests {
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":15,"agents":[]}"#).unwrap();
+        let future = REGISTRY_SCHEMA_VERSION + 1;
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version":{future},"agents":[]}}"#),
+        )
+        .unwrap();
         assert!(
             load_registry(&path).is_ok(),
             "a newer writer must not brick this reader"
@@ -2495,12 +2500,15 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            &format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
 
@@ -2521,12 +2529,15 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            &format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":{{"state":"live","since":1}},"created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
 
@@ -2545,10 +2556,13 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":14,"agents":[
-                {"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            &format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"bad","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION
+            ),
         )
         .unwrap();
 
@@ -2562,12 +2576,13 @@ mod tests {
         let dir = tmpdir("version-write-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        let newer = r#"{"schema_version":16,"agents":[]}"#;
-        std::fs::write(&path, newer).unwrap();
+        let future = REGISTRY_SCHEMA_VERSION + 1;
+        let newer = format!(r#"{{"schema_version":{future},"agents":[]}}"#);
+        std::fs::write(&path, &newer).unwrap();
 
         match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 16);
+                assert_eq!(found, future);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
@@ -3046,12 +3061,15 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            &format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
         let (reg, raw) = load_registry_with_counts(&path).unwrap();
