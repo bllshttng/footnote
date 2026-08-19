@@ -597,6 +597,10 @@ struct TabDrag {
     /// (x-7683) When the press began - the long-press clock, unlike `last_at`
     /// which motion refreshes.
     start_at: Instant,
+    /// (x-7683) Whether any drag report arrived: a long-press needs a hold
+    /// with NO motion, and the clock alone cannot tell a hold from a slow
+    /// drag that ends zone-less.
+    moved: bool,
 }
 
 /// (x-10ec) The workspace peek body: everything the layout already holds for
@@ -673,6 +677,10 @@ struct RowDrag {
     /// (x-7683) When the press began - the long-press clock, unlike `last_at`
     /// which motion refreshes.
     start_at: Instant,
+    /// (x-7683) Whether any drag report arrived: a long-press needs a hold
+    /// with NO motion, and the clock alone cannot tell a hold from a slow
+    /// drag that ends zone-less.
+    moved: bool,
 }
 
 /// The last `Layout` as the client holds it.
@@ -3898,6 +3906,7 @@ impl View {
             zone: None,
             last_at: now,
             start_at: now,
+            moved: false,
         });
     }
 
@@ -3950,6 +3959,7 @@ impl View {
             zone: None,
             last_at: now,
             start_at: now,
+            moved: false,
         });
     }
 
@@ -9988,11 +9998,18 @@ async fn handle_stdin(
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
+                    // (x-7683) Real motion disqualifies the long-press. Set
+                    // here, not in tab_drag_to: the Release arm calls it too
+                    // (zone recompute at release coords) and a hold that never
+                    // moved must stay a hold.
+                    if let Some(d) = view.tab_drag.as_mut() {
+                        d.moved = true;
+                    }
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
-                    let held = view.tab_drag.map(|d| (d.src_tab, d.start_at));
+                    let held = view.tab_drag.map(|d| (d.src_tab, d.start_at, d.moved));
                     match view.commit_tab_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -10002,30 +10019,30 @@ async fn handle_stdin(
                         // A zone-less release still ON the strip is a plain click:
                         // select the tab (the click-to-select affordance the strip
                         // has always had). Released off the strip it is a cancelled
-                        // drag - nothing travels. (x-7683) A hold past
+                        // drag - nothing travels. (x-7683) A motionless hold past
                         // MENU_LONG_PRESS opens the tab menu instead - the
                         // no-config path for terminals that never forward a
-                        // right-click - resolved through the same tab_cell_at the
-                        // drag pickup used, so the menu pins the tab under the
-                        // release.
+                        // right-click. `moved` gates it: the clock alone cannot
+                        // tell a hold from a slow drag that ends zone-less. A hold
+                        // is never a click either way, so whether or not a menu
+                        // opened, no SelectTab rides it.
                         None => {
-                            let long_press = held.is_some_and(|(_, start)| {
-                                Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                            let long_press = held.is_some_and(|(_, start, moved)| {
+                                !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
                             });
-                            if long_press
-                                && view.open_tab_menu(
+                            if long_press {
+                                view.open_tab_menu(
                                     rep.row,
                                     rep.col,
                                     Anchor::At {
                                         row: rep.row,
                                         col: rep.col,
                                     },
-                                )
-                            {
+                                );
                                 view.refresh_hover_affordances(rep.row, rep.col);
                                 continue;
                             }
-                            if let Some((tid, _)) = held {
+                            if let Some((tid, _, _)) = held {
                                 if view.strip_at(rep.row, rep.col) {
                                     write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
                                         .await
@@ -10048,6 +10065,13 @@ async fn handle_stdin(
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
                     view.row_drag_to(rep.row, rep.col, Instant::now());
+                    // (x-7683) Real motion disqualifies the long-press. Set
+                    // here, not in row_drag_to: the Release arm calls it too
+                    // (zone recompute at release coords) and a hold that never
+                    // moved must stay a hold.
+                    if let Some(d) = view.row_drag.as_mut() {
+                        d.moved = true;
+                    }
                     continue;
                 }
                 MouseKind::Release(MouseButton::Left) => {
@@ -10056,7 +10080,7 @@ async fn handle_stdin(
                     // drag, so a zone-less release can verify it landed back on the
                     // SAME row.
                     let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
-                    let pressed_at = view.row_drag.as_ref().map(|d| d.start_at);
+                    let held = view.row_drag.as_ref().map(|d| (d.start_at, d.moved));
                     match view.commit_row_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -10071,16 +10095,18 @@ async fn handle_stdin(
                         // chrome (row_drag_source_at skips the density button) -
                         // resolves to a different source (or None), so the gesture
                         // cancels rather than acting on the wrong agent.
-                        // (x-7683) A hold past MENU_LONG_PRESS on that same row
-                        // opens its context menu instead - the no-config path for
-                        // terminals that never forward a right-click - through the
-                        // same sideline_row_at + open_row_menu a right-press uses.
+                        // (x-7683) A motionless hold past MENU_LONG_PRESS on that
+                        // same row opens its context menu instead - the no-config
+                        // path for terminals that never forward a right-click -
+                        // through the same sideline_row_at + open_row_menu a
+                        // right-press uses. `moved` gates it like the tab arm.
                         None => {
                             let still_on_row = pressed.is_some()
                                 && view.row_drag_source_at(rep.row, rep.col) == pressed;
                             if still_on_row {
-                                let long_press = pressed_at.is_some_and(|start| {
-                                    Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                                let long_press = held.is_some_and(|(start, moved)| {
+                                    !moved
+                                        && Instant::now().duration_since(start) >= MENU_LONG_PRESS
                                 });
                                 let menu = long_press
                                     && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
@@ -10234,17 +10260,22 @@ async fn handle_stdin(
             // row menu - the same menu its sideline row opens - so a pane is a
             // menu-bearing surface too. Same swallow-only-when-opened rule: an
             // agent-less pane falls through to the forward below, keeping the
-            // inner app's own right-click (AC3-EDGE).
-            if let Some((pane, _, _)) = view.hit_test(rep.row, rep.col) {
-                if let Some(i) = view.agent_row_index_for_pane(pane) {
-                    if view.open_row_menu(
-                        i,
-                        Anchor::At {
-                            row: rep.row,
-                            col: rep.col,
-                        },
-                    ) {
-                        continue;
+            // inner app's own right-click (AC3-EDGE). Skipped while a centered
+            // overlay is up (peek/nav don't intercept the mouse, so a pane
+            // press under them always fell through to the pane; it still does,
+            // and the overlay survives the press).
+            if view.peek.is_none() && view.nav.is_none() {
+                if let Some((pane, _, _)) = view.hit_test(rep.row, rep.col) {
+                    if let Some(i) = view.agent_row_index_for_pane(pane) {
+                        if view.open_row_menu(
+                            i,
+                            Anchor::At {
+                                row: rep.row,
+                                col: rep.col,
+                            },
+                        ) {
+                            continue;
+                        }
                     }
                 }
             }
@@ -11774,12 +11805,20 @@ async fn row_menu_mouse(
                         view.row_menu = None;
                     }
                 }
-                // On the menu itself (not a sideline row): swallow, do not
-                // dismiss. (x-7683) A pane cell re-anchors too - panes are
-                // menu-bearing now, and a second right-press on another pane
-                // swapping in that pane's agent menu keeps the one-press
-                // contract the tab re-anchor above cites.
+                // The menu's own body swallows the press, never re-anchors and
+                // never dismisses. This check MUST come before the pane
+                // re-anchor below: hit_test is overlay-blind, so a menu
+                // anchored over pane content sits on cells hit_test still
+                // resolves, and the re-anchor would otherwise run on the
+                // menu's own body (x-7683 review finding).
                 None => {
+                    if view.row_menu_block_contains(rep.row, rep.col) {
+                        return Ok(());
+                    }
+                    // (x-7683) A pane cell re-anchors too - panes are
+                    // menu-bearing now, and a second right-press on another
+                    // pane swapping in that pane's agent menu keeps the
+                    // one-press contract the tab re-anchor above cites.
                     let pane_menu = view
                         .hit_test(rep.row, rep.col)
                         .and_then(|(pane, _, _)| view.agent_row_index_for_pane(pane))
@@ -11792,7 +11831,7 @@ async fn row_menu_mouse(
                                 },
                             )
                         });
-                    if !pane_menu && !view.row_menu_block_contains(rep.row, rep.col) {
+                    if !pane_menu {
                         view.row_menu = None;
                     }
                 }
@@ -19711,6 +19750,7 @@ mod tests {
             zone: None,
             last_at: Instant::now(),
             start_at: Instant::now() - Duration::from_millis(600),
+            moved: false,
         });
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, tr, tc, &mut buf).await.unwrap();
@@ -19735,6 +19775,7 @@ mod tests {
             zone: None,
             last_at: Instant::now(),
             start_at: Instant::now() - Duration::from_millis(600),
+            moved: false,
         });
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, 1, 5, &mut buf).await.unwrap();
@@ -19760,6 +19801,7 @@ mod tests {
             zone: None,
             last_at: Instant::now(),
             start_at: Instant::now(),
+            moved: false,
         });
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, tr, tc, &mut buf).await.unwrap();
@@ -19863,6 +19905,101 @@ mod tests {
             text.contains("terminal forwards it") || text.contains("terminal that"),
             "the caveat names the forwarding condition"
         );
+    }
+
+    // ---- (x-7683) review fixes: findings from the code-review drain ---------
+
+    #[tokio::test]
+    async fn x7683_right_press_on_the_menu_body_over_a_pane_is_swallowed() {
+        // B1: hit_test is overlay-blind, so a menu floating over pane content
+        // must win its own cells BEFORE the pane re-anchor runs - else a
+        // right-press on the menu's body re-anchors onto the pane beneath it,
+        // breaking the in-block swallow rule the comment still promises.
+        let mut v = view_with_agents(vec![
+            agent_row("a", 10, Some(AgentBadge::Working), false),
+            agent_row("b", 11, Some(AgentBadge::Working), false),
+        ]);
+        let b = agent_row_at(&v, |a| a.name == "b");
+        assert!(v.open_row_menu(b, Anchor::At { row: 5, col: 30 }));
+        // A cell inside the rendered menu block that also sits over a pane.
+        let cell = (0..v.term.0)
+            .flat_map(|r| (0..v.term.1).map(move |c| (r, c)))
+            .find(|&(r, c)| v.row_menu_block_contains(r, c) && v.hit_test(r, c).is_some())
+            .expect("a menu cell floating over pane content");
+        let mut buf: Vec<u8> = Vec::new();
+        super::row_menu_mouse(
+            &mut v,
+            crate::mouse::MouseReport {
+                row: cell.0,
+                col: cell.1,
+                kind: MouseKind::Press(MouseButton::Right),
+                shift: false,
+            },
+            &mut buf,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "b"
+            ),
+            "a press on the menu body neither re-anchors nor dismisses"
+        );
+    }
+
+    #[tokio::test]
+    async fn x7683_slow_drag_that_ends_zoneless_is_a_click_not_a_menu() {
+        // B2: the long-press clock alone cannot tell a hold from a slow drag.
+        // A drag that MOVED (drag reports arrived) and ends zone-less on its
+        // own tab keeps the plain click behavior, however long it took.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: v.tab_cell_at(tr, tc).unwrap(),
+            zone: None,
+            last_at: Instant::now(),
+            start_at: Instant::now() - Duration::from_millis(600),
+            moved: true,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, tr, tc, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "a moved drag never opens a menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::SelectTab(_)) => {}
+            other => panic!("expected SelectTab on a slow cancelled drag, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_in_a_pane_under_peek_still_forwards() {
+        // B3: peek/nav don't intercept the mouse, so a pane-cell press under
+        // them always fell through to the pane. The pane menu must not change
+        // modes under an open overlay, and must not clear peek.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.peek = Some(PeekView {
+            cursor: agent_row_at(&v, |a| a.name == "w"),
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+            refresh_pending: false,
+            squad: None,
+        });
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;31;6M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.row_menu.is_none(), "no menu under an open overlay");
+        assert!(v.peek.is_some(), "peek survives the press");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10),
+            other => panic!("expected the pane forward, got {other:?}"),
+        }
     }
 
     #[tokio::test]
