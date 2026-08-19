@@ -1145,10 +1145,11 @@ def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
     move (GitHub caps the response at 300 files) and fails in the merging
     direction, so truncation is a miss too."""
 
-    def _miss(why: str) -> None:
+    def _miss(why: str) -> Optional[List[str]]:
         sys.stderr.write(
             f"pr-merge: overlap probe unavailable ({why}); holding for a rebase\n"
         )
+        return None
 
     refs = _pr_base_head_refs(pr_number, cwd)
     if refs is None:
