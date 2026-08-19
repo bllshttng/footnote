@@ -1221,6 +1221,66 @@ def test_reconcile_pr_number_idempotent_rerun(cli_env, monkeypatch):
     assert payload2["closure_refused"] is None
 
 
+def test_reconcile_pr_number_scan_scope_ignores_a_cross_repo_number_collision(
+    cli_env, monkeypatch,
+):
+    """Review fix (x-59a6): _pr_touch_ids's bare pr_number match must be
+    repo-scoped like every other PR-matching path in this module - a
+    different project's node carrying the SAME pr_number by coincidence
+    must never be pulled into this PR's scan scope."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-700001"),  # this PR's own claimed node
+        # Coincidentally shares pr_number=810 but belongs to a DIFFERENT repo.
+        _node("ab-700002", pr_number=810,
+              pr_url="https://github.com/other-owner/other-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-700001\n", number=810,
+            url="https://github.com/test-owner/test-repo/pull/810",
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--pr-number", "810", "--repo", "test-owner/test-repo", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-700001"}
+    other = next(e for e in _read_entries(graph_path) if e["id"] == "ab-700002")
+    assert other["completed_at"] is None  # untouched: a different repo's node
+
+
+def test_reconcile_pr_number_refuses_binding_an_unmerged_pr(cli_env, monkeypatch):
+    """Review fix (x-59a6): a --pr-number call must never bind a trailer
+    claim before the PR is actually merged - an OPEN PR could still be
+    abandoned or closed unmerged, leaving a claimed node holding a dead ref."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-600001")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-600001\n", number=930, state="OPEN",
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "930", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_bound"] == []
+    assert payload["closure_refused"] is not None and "not merged" in payload["closure_refused"]
+    assert payload["closed"] == []
+    n = next(e for e in _read_entries(graph_path) if e["id"] == "ab-600001")
+    assert n["pr_number"] is None
+
+
 def test_reconcile_pr_number_refuses_unknown_claim_mutates_nothing(cli_env, monkeypatch):
     """AC3-ERR: an unknown claim refuses the whole binding; no claimed node
     mutates or closes."""

@@ -192,7 +192,7 @@ For each item line under that heading, in order:
 
 ### 4.6 Add the exact Backlog-Closure trailer
 
-**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever (x-59a6). The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
+**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever. The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
 
 Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph:
 

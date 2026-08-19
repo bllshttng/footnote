@@ -183,6 +183,22 @@ def test_bind_refuses_cross_repo_mutates_nothing():
     assert entries == before
 
 
+def test_bind_refuses_cross_repo_when_existing_ref_has_no_parseable_url():
+    # x-59a6 review fix (round 5): the mirror of the cross-repo check above -
+    # our_repo IS resolvable this time, but the CLAIMED node's existing ref
+    # has pr_number set with no parseable pr_url (a stale pre-repo-scoping
+    # stamp). Silently treating that as "no conflict" is the same
+    # silent-wrong-close a definite mismatch refuses; fail closed instead.
+    entries = [_node(id="x-2222", pr_number=5, pr_url=None)]
+    before = [dict(e) for e in entries]
+    result = bind_closure_claims(
+        entries, ["x-2222"], pr_number=1, pr_url="https://github.com/o/r/pull/1"
+    )
+    assert result.outcome == "refused"
+    assert "unverifiable cross-repo" in result.refusal
+    assert entries == before
+
+
 def test_bind_refuses_unscoped_claim_against_a_node_with_an_existing_ref():
     # x-59a6 review fix: when our_repo cannot be resolved at all (no --repo,
     # unparseable pr_url), the cross-repo check can never run - so a node

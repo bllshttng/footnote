@@ -245,7 +245,22 @@ def bind_closure_claims(
         if our_repo:
             for _num, url in existing_refs:
                 existing_repo = repo_slug_from_url(url)
-                if existing_repo and existing_repo.lower() != our_repo.lower():
+                if existing_repo is None:
+                    # A stale ref can carry pr_number with no parseable
+                    # pr_url (e.g. a pre-repo-scoping stamp). our_repo IS
+                    # known here, so silently treating this as "no conflict"
+                    # is the same silent-wrong-close the definite-mismatch
+                    # branch below refuses - fail closed instead.
+                    return ClosureBindResult(
+                        outcome="refused",
+                        claimed_ids=claimed_ids,
+                        refusal=(
+                            f"{nid} already carries a PR #{_num} ref with no "
+                            "resolvable repo; this PR is "
+                            f"{our_repo} - refusing an unverifiable cross-repo claim"
+                        ),
+                    )
+                if existing_repo.lower() != our_repo.lower():
                     return ClosureBindResult(
                         outcome="refused",
                         claimed_ids=claimed_ids,

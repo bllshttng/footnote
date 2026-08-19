@@ -56,6 +56,14 @@ while [[ $i -lt ${#_segments[@]} ]]; do
     pair="${_segments[$i]}-${_segments[$((i + 1))]}"
     if [[ "$pair" =~ ^${node_id_re}$ ]]; then
       candidates+=("$pair")
+      # Skip BOTH consumed segments, not just one: a real id's all-hex
+      # suffix (e.g. "cdef" in "x-cdef") is itself a valid node-id PREFIX
+      # shape, so sliding by one would re-glue it with the next segment
+      # ("cdef-1234") and invent a second, bogus candidate. Reproduced
+      # live: PR_HEAD_REF="feature/x-cdef-1234" used to demand a
+      # "Backlog-Closure: cdef-1234" line that names nothing real.
+      i=$((i + 2))
+      continue
     fi
   fi
   i=$((i + 1))

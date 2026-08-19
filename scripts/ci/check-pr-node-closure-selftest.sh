@@ -62,4 +62,11 @@ else
   pass "prose-only mention fails"
 fi
 
+# all-hex suffix: a real id's suffix ("cdef") is itself a valid node-id
+# PREFIX shape, so a following segment must never re-glue with it into a
+# second, bogus candidate (review fix: reproduced live pre-fix).
+run "Backlog-Closure: x-cdef" "feature/x-cdef-1234" \
+  && pass "all-hex suffix never invents a second candidate" \
+  || fail "all-hex suffix should not invent a bogus second candidate"
+
 log "all scenarios passed"

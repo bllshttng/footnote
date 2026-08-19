@@ -8048,19 +8048,34 @@ def cmd_reconcile(
     # merge, since it left `node` at None just like the truly-bare case).
     _full_sweep = node is None and pr_number is None
 
-    def _pr_touch_ids(_entries: list[dict], _pr_number: int, _claims: list[str]) -> set[str]:
+    def _pr_touch_ids(
+        _entries: list[dict], _pr_number: int, _claims: list[str], _our_repo: Optional[str],
+    ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
         own claims, plus any node already carrying ``_pr_number`` as a ref
         (stamped at creation, before this feature existed). Pure in-memory
         walk - no I/O - so scoping the scan to this set costs nothing extra.
+
+        The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
+        would pull in a same-numbered PR belonging to a different repo's
+        node. Scoped by repo like every other PR-matching path in this
+        module - a ref with no parseable url is still accepted (best-effort,
+        matching ``_find_pr_node_id``'s established stance).
         """
-        from fno.graph._reconcile import node_pr_refs
+        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
 
         ids = set(_claims)
         for _e in _entries:
             _nid = _e.get("id")
-            if isinstance(_nid, str) and any(n == _pr_number for n, _ in node_pr_refs(_e)):
-                ids.add(_nid)
+            if not isinstance(_nid, str):
+                continue
+            for _num, _url in node_pr_refs(_e):
+                if _num != _pr_number:
+                    continue
+                _ref_repo = repo_slug_from_url(_url)
+                if _our_repo is None or _ref_repo is None or _ref_repo.lower() == _our_repo.lower():
+                    ids.add(_nid)
+                break
         return ids
 
     def _bind_and_report(
@@ -8115,9 +8130,24 @@ def cmd_reconcile(
             pr_ctx = fetch_pr_closure_context(pr_number, repo=repo)
         except ClosureQueryError as exc:
             closure_refused = f"could not query PR #{pr_number}: {exc}"
+            pr_ctx = None
             if not json_out:
                 typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
         else:
+            if pr_ctx.state != "MERGED":
+                # A binding is a MERGE-time close signal, never a promise on
+                # an OPEN or CLOSED-unmerged PR - the caller could later
+                # abandon or close it unmerged, leaving a claimed node
+                # holding a dead ref. The three real callers (the ritual,
+                # fno pr merge, the bare sweep) only ever reach this with an
+                # already-merged PR; this guards a direct manual
+                # `--pr-number` invocation against the same premature bind.
+                closure_refused = f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+                pr_ctx = None
+                if not json_out:
+                    typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
+
+        if pr_ctx is not None:
             closure_claims = parse_closure_trailer(pr_ctx.body)
             if closure_claims:
                 closure_refused, closure_bound = _bind_and_report(
@@ -8143,9 +8173,17 @@ def cmd_reconcile(
     # (x-59a6 review fix: this used to fall through to an unscoped scan on
     # every merge, since `node` stays None for a --pr-number-only call, the
     # same shape as a truly bare sweep). An explicit --node still wins.
-    _scan_scope = node if node is not None else (
-        _pr_touch_ids(entries, pr_number, closure_claims) if pr_number is not None else None
-    )
+    if node is not None:
+        _scan_scope = node
+    elif pr_number is not None:
+        from fno.graph._reconcile import repo_slug_from_url as _repo_slug_from_url
+
+        _our_repo = repo or (
+            _repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None
+        )
+        _scan_scope = _pr_touch_ids(entries, pr_number, closure_claims, _our_repo)
+    else:
+        _scan_scope = None
     records = scan_merge_drift(entries, node_id=_scan_scope)
 
     # Auto-bind closure claims for every OTHER merged PR this sweep just
