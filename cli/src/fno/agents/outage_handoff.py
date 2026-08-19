@@ -333,6 +333,8 @@ def _revalidate_persisted_and_raw_evidence(
     transcript_path_for: Callable[[Any], Path | None] | None = None,
     pane_read_fn: Callable[[str, Any], str] | None = None,
     pane_snapshot_dir: Path | None = None,
+    pane_freshness_s: float = 120,
+    evidence_freshness_s: float = 600,
     now_s: float | None = None,
 ) -> EvidenceProof:
     """Re-read each persisted source through its original evidence transport."""
@@ -388,6 +390,7 @@ def _revalidate_persisted_and_raw_evidence(
                 session_id=session_id, cwd=snapshot.source.cwd,
             )],
             now_s=now, transcript_path_for=transcript_path_for,
+            evidence_freshness_s=evidence_freshness_s,
         )
         raw = {record.fingerprint for record in records}.intersection(expected)
         if refusals or raw != transcript_expected:
@@ -407,7 +410,10 @@ def _revalidate_persisted_and_raw_evidence(
         for fingerprint in pane_expected:
             persisted = source_records[fingerprint]
             age_anchor = persisted.get("snapshot_at", persisted.get("observed_at"))
-            if not isinstance(age_anchor, (int, float)) or not 0 <= now - age_anchor <= 600:
+            if (
+                not isinstance(age_anchor, (int, float))
+                or not 0 <= now - age_anchor <= pane_freshness_s
+            ):
                 return EvidenceProof(False, len(verified), "persisted pane evidence is stale")
             if str(persisted.get("pane_id")) != str(pane_id):
                 return EvidenceProof(False, len(verified), "stable pane identity drifted")
@@ -448,6 +454,9 @@ def production_handoff_dependencies(
     transcript_path_for: Callable[[Any], Path | None] | None = None,
     pane_read_fn: Callable[[str, Any], str] | None = None,
     pane_snapshot_dir: Path | None = None,
+    policy: Any | None = None,
+    settings: Any | None = None,
+    pane_runner: Callable[..., object] = subprocess.run,
     now_s: Callable[[], float] = time.time,
 ) -> HandoffDependencies:
     """Build the real claim, registry, manifest, stop, and spawn transaction."""
@@ -463,10 +472,36 @@ def production_handoff_dependencies(
     from fno.claims.io import claims_root_for
     from fno.graph.store import read_graph
     from fno.agents.provider_outage import journal_path as provider_outage_journal_path
+    from fno.agents.provider_outage import OutagePolicy
     from fno.state.outage_handoff import (
         ManifestAuthority,
         inspect_target_manifest,
         prepare_target_handoff,
+    )
+
+    if policy is None:
+        if settings is None:
+            try:
+                from fno.config import load_settings
+
+                settings = load_settings()
+            except Exception:
+                settings = None
+        policy = OutagePolicy.from_settings(settings) if settings is not None else OutagePolicy()
+    if pane_read_fn is None:
+        from fno import _subprocess_util
+
+        def pane_read_fn(session: str, pane_id: Any) -> str:
+            proc = pane_runner(
+                [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
+                 "--session", session, str(pane_id), "--lines", "80"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if getattr(proc, "returncode", 1) != 0:
+                raise RuntimeError(str(getattr(proc, "stderr", "") or "mux pane read failed"))
+            return str(getattr(proc, "stdout", "") or "")
+    resolved_pane_snapshot_dir = pane_snapshot_dir or (
+        paths.state_dir() / "recovery" / "provider-pane-revalidations"
     )
 
     def acquire(key: str, holder: str) -> bool:
@@ -561,7 +596,9 @@ def production_handoff_dependencies(
             path=outage_evidence_path or provider_outage_journal_path(),
             transcript_path_for=transcript_path_for,
             pane_read_fn=pane_read_fn,
-            pane_snapshot_dir=pane_snapshot_dir,
+            pane_snapshot_dir=resolved_pane_snapshot_dir,
+            pane_freshness_s=policy.pane_freshness_s,
+            evidence_freshness_s=policy.evidence_freshness_s,
             now_s=now_s(),
         )
 

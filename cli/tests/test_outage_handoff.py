@@ -33,7 +33,7 @@ from fno.state.outage_handoff import (
     prepare_target_handoff,
 )
 from fno.claims.core import HolderMismatch
-from fno.agents.provider_outage import OutageEvidence
+from fno.agents.provider_outage import OutageEvidence, OutagePolicy
 
 
 def _request() -> HandoffRequest:
@@ -284,7 +284,7 @@ def test_ac7_con_production_revalidator_rereads_raw_and_persisted_evidence(
 
 
 def test_ac7_con_production_revalidator_rereads_and_persists_exact_pane(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     now = 1_787_100_000.0
     content = "API Error: Request rejected (429) fair usage policy"
@@ -312,13 +312,22 @@ def test_ac7_con_production_revalidator_rereads_and_persists_exact_pane(
             mux={"session": "stable", "pane_id": "19"},
         ),
     )
-    snapshot_dir = tmp_path / "under-lease-pane-snapshots"
+    from fno import paths
+
+    state_root = tmp_path / "state"
+    monkeypatch.setattr(paths, "state_dir", lambda: state_root)
+    snapshot_dir = state_root / "recovery" / "provider-pane-revalidations"
+
+    class PaneRead:
+        returncode = 0
+        stdout = content
+        stderr = ""
+
     deps = production_handoff_dependencies(
         outage_evidence_path=journal,
-        pane_read_fn=lambda session, pane_id: (
-            content if (session, str(pane_id)) == ("stable", "19") else ""
+        pane_runner=lambda cmd, **_kwargs: (
+            PaneRead() if "stable" in cmd and "19" in cmd else pytest.fail(cmd)
         ),
-        pane_snapshot_dir=snapshot_dir,
         now_s=lambda: now,
     )
 
@@ -329,6 +338,36 @@ def test_ac7_con_production_revalidator_rereads_and_persists_exact_pane(
     persisted = json.loads((snapshot_dir / f"{evidence.fingerprint}.json").read_text())
     assert persisted["row_id"] == "source-row"
     assert persisted["pane_id"] == "19"
+
+
+def test_ac7_con_policy_controls_under_lease_pane_freshness(tmp_path: Path):
+    now = 1000.0
+    evidence = OutageEvidence(
+        source="pane", observed_at=now - 2, row_id="source-row", harness="agy",
+        provider="anthropic", account="claude-work", role="assistant",
+        raw_status=429, raw_kind="api_error", content="API Error 429",
+        pane_id="19", persisted=True, snapshot_at=now - 2,
+    )
+    journal = tmp_path / "provider-outages.json"
+    journal.write_text(json.dumps({"evidence": [asdict(evidence)], "breakers": [{
+        "provider": "anthropic", "account": "claude-work", "outage_epoch": "epoch-1",
+        "fingerprints": [evidence.fingerprint],
+    }]}), encoding="utf-8")
+    request = replace(_request(), evidence_fingerprints=(evidence.fingerprint,))
+    snapshot = replace(_snapshot(tmp_path), source=replace(
+        _snapshot(tmp_path).source, harness="agy", harness_session_id=None,
+        mux={"session": "stable", "pane_id": "19"},
+    ))
+    deps = production_handoff_dependencies(
+        outage_evidence_path=journal, pane_read_fn=lambda *_args: "API Error 429",
+        pane_snapshot_dir=tmp_path / "snapshots", now_s=lambda: now,
+        policy=OutagePolicy(pane_freshness_s=1, evidence_freshness_s=1),
+    )
+
+    proof = deps.revalidate_evidence(request, snapshot)
+
+    assert proof.verified is False
+    assert "stale" in proof.reason
 
 
 def test_ac7_con_exact_holder_change_after_stop_parks_before_archive(tmp_path: Path):

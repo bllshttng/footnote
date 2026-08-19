@@ -1477,19 +1477,10 @@ def cmd_spawn(
     spawn_succeeded = False
     try:
         if substrate == "pane" and not once:
-            from fno.agents.mux_spawn import (
-                dispatch_spawn_bounded_pane,
-                dispatch_spawn_pane,
-            )
+            from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
 
             try:
-                exact_placement = any(value is not None for value in (split, at, tab_id))
-                use_bounded_placement = bounded_placement or not exact_placement
-                pane_dispatch = (
-                    dispatch_spawn_bounded_pane
-                    if use_bounded_placement
-                    else dispatch_spawn_pane
-                )
+                pane_dispatch = dispatch_spawn_bounded_pane
                 pane_kwargs = dict(
                     name=name,
                     message=message,
@@ -1520,12 +1511,7 @@ def cmd_spawn(
                     account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                 )
-                if use_bounded_placement:
-                    for placement_key in ("split", "at", "tab_id"):
-                        pane_kwargs.pop(placement_key)
-                    pane_kwargs["workspace"] = squad
-                else:
-                    pane_kwargs["squad"] = squad
+                pane_kwargs["workspace"] = squad
                 pane_result = pane_dispatch(**pane_kwargs)
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)

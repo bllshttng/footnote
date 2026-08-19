@@ -2255,6 +2255,19 @@ def dispatch_spawn_bounded_pane(
             f"placement lease held by {live_holder}; no pane spawned", exit_code=2
         ) from exc
     try:
+        explicit_geometry = any(
+            spawn_kwargs.get(key) is not None for key in ("split", "at", "tab_id")
+        )
+        if explicit_geometry:
+            return dispatch_spawn_pane(
+                session=session,
+                squad=workspace,
+                runner=runner,
+                enforce_tab_capacity=True,
+                **spawn_kwargs,
+            )
+        for geometry_key in ("split", "at", "tab_id"):
+            spawn_kwargs.pop(geometry_key, None)
         tab_id = _select_or_create_bounded_tab(session, workspace, runner)
         return dispatch_spawn_pane(
             session=session,
@@ -2287,6 +2300,7 @@ def dispatch_spawn_pane(
     split: Optional[str] = None,
     at: Optional[str] = None,
     tab_id: Optional[str] = None,
+    enforce_tab_capacity: bool = False,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
@@ -2687,19 +2701,28 @@ def dispatch_spawn_pane(
                 ) from exc
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
-        if tab_id:
-            expected_tab_id = int(tab_id[3:])
+        if tab_id or enforce_tab_capacity:
+            expected_tab_id = int(tab_id[3:]) if tab_id else None
             try:
                 listed = _strict_json_list(
                     ["mux", "pane", "ls", "--session", session, "--json"],
                     runner,
                     noun="pane listing",
                 )
+                if expected_tab_id is None:
+                    spawned_row = next(
+                        (item for item in listed if item.get("pane_id") == pane_id), None
+                    )
+                    expected_tab_id = (
+                        spawned_row.get("tab_id") if isinstance(spawned_row, dict) else None
+                    )
                 in_tab = [
                     item for item in listed
                     if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
                 ]
-                placed = any(item.get("pane_id") == pane_id for item in in_tab)
+                placed = expected_tab_id is not None and any(
+                    item.get("pane_id") == pane_id for item in in_tab
+                )
                 if not placed or len(in_tab) > 4:
                     reason = "wrong tab" if not placed else "fifth pane"
                     raise DispatchAskError(

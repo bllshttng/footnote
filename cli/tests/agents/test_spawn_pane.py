@@ -1924,7 +1924,7 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     assert captured["account_record_id"] == "work"
     assert captured["model_name"] == "gpt-5.6-sol"
     assert captured["workspace"] is None
-    assert "tab_id" not in captured
+    assert captured["tab_id"] is None
 
 
 def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
@@ -1957,6 +1957,35 @@ def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> Non
 
     assert result.exit_code == 0, result.output
     assert captured["workspace"] is None
+
+
+def test_cmd_spawn_explicit_split_still_uses_global_placement_lease(monkeypatch) -> None:
+    from typer.testing import CliRunner
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured = {}
+    monkeypatch.setattr(
+        mux_spawn, "dispatch_spawn_bounded_pane",
+        lambda **kwargs: captured.update(kwargs) or MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=3, child_pid=None, session_uuid="u",
+        ),
+    )
+    monkeypatch.setattr(
+        mux_spawn, "dispatch_spawn_pane",
+        lambda **_kwargs: pytest.fail("explicit split bypassed global lease"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "split", "--harness", "claude", "--split", "right", "work"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["split"] == "right"
 
 
 def test_cmd_spawn_refuses_ordinal_tab_id_before_dispatch(tmp_path: Path, monkeypatch) -> None:
