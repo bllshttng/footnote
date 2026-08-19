@@ -58,6 +58,10 @@ def _parse_iso(value: object) -> Optional[datetime]:
 
 
 def _format_age(seconds: float) -> str:
+    # Deliberately not fno.mail.cli._humanize_age: that one shows raw
+    # seconds under a minute (a live process's last-log-line staleness),
+    # this one floors at "1m ago" (a board line has no use for sub-minute
+    # precision on a merge or a cached verdict).
     seconds = max(0, int(seconds))
     if seconds < 3600:
         return f"{max(1, seconds // 60)}m ago"
@@ -190,12 +194,16 @@ def compute_board(
         )
 
     # -- On deck: board order, excluding done/deferred/superseded/roadmap and
-    # anything already counted as In progress.
+    # anything already counted as In progress. The status=="in_progress" check
+    # is independent of in_progress_ids (which the claims-fault branch leaves
+    # empty) - a node the graph itself marks in_progress must never fall
+    # through to On deck just because the live-claims read failed.
     deck_entries = [
         e for e in sorted(scoped, key=board_order)
         if column_for(e) not in (None, "Done")
         and isinstance(e.get("id"), str)
         and e["id"] not in in_progress_ids
+        and e.get("status") != "in_progress"
     ]
     on_deck = _section(
         [_row(e, _on_deck_fact(e, id_to_entry)) for e in deck_entries[:MAX_ROWS_PER_SECTION]],

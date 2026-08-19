@@ -248,6 +248,22 @@ def test_claims_fault_degrades_in_progress_to_unknown_not_empty(monkeypatch, cac
     assert board["just_finished"]["rows"][0]["id"] == "x-done1"
 
 
+def test_claims_fault_does_not_leak_a_status_in_progress_node_to_on_deck(monkeypatch, cache_dir):
+    """A node the graph itself marks in_progress must stay out of On deck
+    even when the live-claims read fails (in_progress_ids is empty then,
+    but status alone is still enough to exclude it)."""
+
+    def _raise(**_kw):
+        raise RuntimeError("claims root unreadable")
+
+    monkeypatch.setattr(board_module, "live_claimed_node_ids", _raise)
+    entries = [_node("x-prog1", status="in_progress")]
+
+    board = compute_board(entries, project="fno", now=NOW)
+
+    assert board["on_deck"]["rows"] == []
+
+
 def test_graph_unreadable_renders_unknown_and_exits_nonzero(tmp_path, monkeypatch):
     graph_path = tmp_path / "graph.json"
     graph_path.write_text("not json", encoding="utf-8")
