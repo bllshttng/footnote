@@ -308,9 +308,9 @@ With no code in the diff there is no identity to match, which is the fail-closed
 
 ### The dispatcher's own ordering matters as much as the carry rule
 
-The carry rule cannot save a review bought by an avoidable rebase. Measured one night (x-b130): a king ordered about ten rebases on one PR and requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time and still could not help, because the carry only ever compares the CURRENT head against the LAST reviewed one - it has nothing to say about a review that was requested and completed before the next rebase moved the head again.
+The carry rule cannot save a review bought by an avoidable rebase. Measured one night: a king ordered about ten rebases on one PR. It requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time. It still cannot help here, because the carry only ever compares the CURRENT head against the LAST reviewed one. It has nothing to say about a review that was requested and completed before the next rebase moved the head again.
 
-Any dispatcher (a king, `/fno:pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them: batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake - it is the same mistake, since the next review request pays for it again.
+Any dispatcher (a king, `/fno:pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them. Batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake. It is the same mistake, since the next review request pays for it again.
 
 ### Named, not closed: the derivation-latency window
 

@@ -31,7 +31,7 @@ Reading both the control-plane path set (`include:`) and the exclusions (`exclud
 
 Two layers keep this out of the merge gate:
 
-- The "Check control-plane doc colocation" step, in [`.github/workflows/guards.yml`](../../.github/workflows/guards.yml)'s `guards-pr` job since x-b130's consolidation, sets `continue-on-error: true`. The run succeeds regardless of branch protection.
+- The "Check control-plane doc colocation" step, in [`.github/workflows/guards.yml`](../../.github/workflows/guards.yml)'s `guards-pr` job, sets `continue-on-error: true`. The run succeeds regardless of branch protection.
 - The script exits 0 on every path, including the warning path. Any error it would otherwise raise (no base ref, missing manifest, failed diff) degrades to a soft no-op notice rather than a failure.
 
 There is intentionally no exception ledger (unlike the ratchet's `loc-exception:` + trajectory protocol). A warning you disagree with is simply ignored; the goal is a reminder, not a checkpoint.

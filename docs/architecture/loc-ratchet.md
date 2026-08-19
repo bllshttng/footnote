@@ -16,7 +16,7 @@ This is a **per-PR delta gate**, not a ratchet against a baseline. There is no b
 |---|---|---|
 | Manifest | `scripts/ci/loc-ratchet-manifest.yaml` | Single source of scope: include paths, extensions, test-exclusion patterns |
 | Gate script | `scripts/ci/loc-ratchet.sh` | Computes delta, enforces the decision, prints per-file breakdown |
-| Workflow | `.github/workflows/guards.yml` (`guards-pr` job) | Runs the script on every PR, then the test harness, consolidated with other PR-only guards (x-b130) |
+| Workflow | `.github/workflows/guards.yml` (`guards-pr` job) | Runs the script on every PR, then the test harness, consolidated with other PR-only guards |
 
 Gate tooling lives in `scripts/ci/` - outside manifest scope - so the gate never counts itself. Manifest edits are review-guarded.
 

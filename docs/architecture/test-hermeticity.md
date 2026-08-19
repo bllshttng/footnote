@@ -109,7 +109,7 @@ A dirty-lane failure of the canary is never something to fix by pinning it.
 
 ## CI
 
-`smoke` is the merge gate. A separate `smoke-dirty` CI job used to rerun the full suite under synthetic ambient state beside it, advisory. Its full history (122 runs, 2026-08-11 to 2026-08-19) caught zero real ambient leaks. It was deleted (x-b130) rather than kept as a second 1500s+ full-suite run for no observed signal. The hermeticity fixture and `cli/tests/unit/test_ambient_canary.py` keep running inside `smoke` itself. `fno test smoke --ambient dirty` (see above) still exists for local verification and `tests/ci/test_hermetic_lanes.sh`. If a future ambient leak surfaces some other way, narrow a lane to the tests that can observe it rather than reviving the full-suite rerun.
+`smoke` is the merge gate. A separate `smoke-dirty` CI job used to rerun the full suite under synthetic ambient state beside it, advisory. Its full history (122 runs, 2026-08-11 to 2026-08-19) caught zero real ambient leaks. It was deleted rather than kept as a second 1500s+ full-suite run for no observed signal. The hermeticity fixture and `cli/tests/unit/test_ambient_canary.py` keep running inside `smoke` itself. `fno test smoke --ambient dirty` (see above) still exists for local verification and `tests/ci/test_hermetic_lanes.sh`. If a future ambient leak surfaces some other way, narrow a lane to the tests that can observe it rather than reviving the full-suite rerun.
 
 ## The uncovered path
 

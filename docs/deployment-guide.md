@@ -170,7 +170,7 @@ python scripts/sync-codex-agents.py
 
 ### Codex Bootstrap Check
 
-The Codex bootstrap check validates that the plugin bootstraps correctly on a clean Ubuntu environment with Codex as the provider. It runs as the "Run Codex setup (no package setup)" and "Run doctor checks" steps. Both live inside `.github/workflows/guards.yml`'s `guards` job, consolidated there with 10 other structural guards (x-b130).
+The Codex bootstrap check validates that the plugin bootstraps correctly on a clean Ubuntu environment with Codex as the provider. It runs as the "Run Codex setup (no package setup)" and "Run doctor checks" steps. Both live inside `.github/workflows/guards.yml`'s `guards` job, consolidated there with 10 other structural guards.
 
 ### Adding your own CI checks
 
