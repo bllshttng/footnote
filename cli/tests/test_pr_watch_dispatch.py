@@ -9,6 +9,7 @@ filesystem-global writes.  Temporary directories replace ~/.fno.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -2180,6 +2181,13 @@ class TestTickRecordsAndDeadline:
 
         monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
 
+        # A MagicMock interval int()s to 1, so the derived deadline is ONE
+        # SECOND and the real catch-up leg races it. Give the harness a
+        # generous bound unless the test pinned its own (the timeout test does,
+        # before it gets here).
+        if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
+            monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+
         settings = MagicMock()
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
@@ -2273,6 +2281,118 @@ class TestTickRecordsAndDeadline:
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends[0]["outcome"] == "degraded"
         assert ends[0]["sweep_failures"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Fleet leg ordering + heartbeat
+# ---------------------------------------------------------------------------
+
+
+class TestFleetLegRunsBeforeThePRLegs:
+    """AC7: the failover trigger must be inside the tick deadline, not behind it.
+
+    The tick arms a SIGALRM and re-raises TickDeadlineExceeded, which propagates
+    before the old recovery phase was ever reached. A slow PR leg therefore
+    aborted the tick before the one leg that detects a capped worker.
+    """
+
+    def _invoke(self, monkeypatch, tmp_path, dispatch_tick, sweep_fn):
+        import typer
+        from typer.testing import CliRunner
+        from unittest.mock import MagicMock
+
+        from fno import fleet_state as fs
+        from fno.agents import sweep as agents_sweep
+        from fno.pr_watch import cli as prcli
+        import fno.recovery as rec
+
+        monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
+        monkeypatch.setattr(rec, "run_recovery_sweep", sweep_fn, raising=True)
+        # The silence backstop reads the real registry and resolves every
+        # worker's transcript; that is seconds of work these tests do not want.
+        monkeypatch.setattr(
+            agents_sweep, "run_sweep", lambda **_kw: ([], 0), raising=True,
+        )
+
+        if not os.environ.get("FNO_PR_WATCH_TICK_TIMEOUT"):
+            monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+
+        hb = tmp_path / "fleet-sweep-state.json"
+        monkeypatch.setattr(fs, "fleet_state_path", lambda: hb, raising=True)
+
+        settings = MagicMock()
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.recovery.enabled = True
+        settings.autonomy.enabled = True
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
+
+        events: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            prcli, "_emit_event",
+            lambda t, d, **_kw: events.append((t, dict(d))) or True,
+            raising=True,
+        )
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        res = CliRunner().invoke(app, [])
+        return res, events, hb
+
+    def test_ac7_hp_fleet_leg_ran_and_heartbeat_written_despite_a_pr_timeout(
+        self, monkeypatch, tmp_path
+    ):
+        import time as _time
+
+        ran: list[str] = []
+
+        def _stall(**_kw):
+            _time.sleep(1.5)
+            raise AssertionError("deadline did not interrupt the stalled tick")
+
+        def _sweep(_cfg, emit=None, **_kw):
+            ran.append("fleet")
+            if emit is not None:
+                emit("worker_refused", {"short_id": "aaaa1111"})
+            return 3
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
+        res, events, hb = self._invoke(monkeypatch, tmp_path, _stall, _sweep)
+
+        # The tick still dies at its deadline - this change does not bound the
+        # gh leg, it only moves the trigger in front of it.
+        assert res.exit_code == 75, res.output
+        assert ran == ["fleet"]
+        assert hb.exists(), "the fleet watermark must be written before the PR legs"
+        import json as _json
+        payload = _json.loads(hb.read_text(encoding="utf-8"))
+        assert payload["candidates"] == 3
+        assert payload["refused"] == 1
+        assert ("worker_refused", {"short_id": "aaaa1111"}) in events
+
+    def test_ac7_edge_a_raising_fleet_leg_still_lets_the_pr_legs_run(
+        self, monkeypatch, tmp_path
+    ):
+        from fno.pr_watch._dispatch import TickResult
+
+        pr_ran: list[str] = []
+
+        def _pr(**_kw):
+            pr_ran.append("pr")
+            return TickResult(open_prs=0, acted=0)
+
+        def _sweep(_cfg, **_kw):
+            raise RuntimeError("registry unreadable")
+
+        res, events, hb = self._invoke(monkeypatch, tmp_path, _pr, _sweep)
+
+        assert pr_ran == ["pr"]
+        assert res.exit_code == 0, res.output
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[0]["outcome"] == "ok"
+        # The leg raised BEFORE its watermark, so the watermark honestly reads
+        # stale rather than claiming a sweep that never finished.
+        assert not hb.exists()
 
 
 # ---------------------------------------------------------------------------

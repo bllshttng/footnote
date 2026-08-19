@@ -88,6 +88,11 @@ def _emit_event(
         return False
 
 
+def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
+    """run_sweep's emit contract drops the write receipt _emit_event returns."""
+    _emit_event(event_type, data)
+
+
 def _notify_parked(message: str) -> None:
     """Send an OS notification for a parked PR.
 
@@ -333,6 +338,86 @@ def tick() -> None:
             # available, run unbounded like before.
             log.debug("pr-watch: SIGALRM unavailable outside main thread")
 
+        # Session recovery rides this same launchd cadence: a sweep over
+        # footnote-launched bg /target sessions that rotates providers on swap-class
+        # deaths and surfaces finished-but-lingering sessions to close. The held
+        # socket nudge was removed (a bypass recipient holds it by design), so the
+        # sweep no longer resumes idle-but-incomplete sessions. Gated by
+        # config.recovery.enabled and wrapped non-fatally so a recovery failure
+        # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
+        # this gate too - a recovery respawn is exactly the "session starts itself"
+        # behavior the panic switch exists to stop.
+        #
+        # It runs BEFORE the PR legs, not after. The tick arms a SIGALRM deadline
+        # above and re-raises TickDeadlineExceeded, which propagates out of the
+        # tick before set_tick_phase("recovery") is ever reached - so a slow PR
+        # leg no longer hangs the daemon forever, it aborts the tick at the
+        # deadline instead, and the leg it aborts before reaching is the failover
+        # trigger. Measured on the pre-deadline code: no pr_watch_tick heartbeat
+        # for six hours and eighteen minutes against a 600s interval,
+        # failover_swapped never emitted once, and the in-flight tick's child a
+        # `gh pr list --limit 10000`. The wrapper stays non-fatal in both
+        # directions: a fleet-leg exception logs and lets the PR legs run.
+        set_tick_phase("recovery")
+        _fleet_candidates = 0
+        _fleet_refused = 0
+        _fleet_silent = 0
+        _fleet_swept = False
+        if settings.recovery.enabled and settings.autonomy.enabled:
+            try:
+                from fno.recovery import run_recovery_sweep
+
+                def emit_recovery(event_type: str, data: dict) -> None:
+                    nonlocal _fleet_refused
+                    if event_type == "worker_refused":
+                        _fleet_refused += 1
+                    _emit_event(event_type, data)
+
+                _fleet_candidates = run_recovery_sweep(
+                    settings.recovery, emit=emit_recovery
+                )
+                _fleet_swept = True
+                typer.echo(f"recovery sweep: candidates={_fleet_candidates}")
+            except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
+                log.warning("pr-watch: recovery sweep failed: %s", exc)
+
+            # The cadence-deadline backstop, for a refusal the taxonomy does
+            # not recognise. It reads the FULL registry, which the recovery
+            # sweep's candidate set does not: that set drops every non-claude
+            # row, so a codex successor is invisible to it. Report only - this
+            # leg stops, spawns and unclaims nothing. Wrapped separately from
+            # the recovery sweep so neither takes the other down.
+            try:
+                from fno.agents.sweep import run_sweep as _run_silence_sweep
+
+                _rows, _fleet_silent = _run_silence_sweep(emit=_emit_for_sweep)
+                if _fleet_silent:
+                    typer.echo(f"silence sweep: silent={_fleet_silent}")
+            except Exception as exc:  # noqa: BLE001 - a backstop never breaks the tick
+                log.warning("pr-watch: silence sweep failed: %s", exc)
+
+            # The fleet leg's own watermark and its liveness proof. `fno pr-watch
+            # status` reported the agent loaded through a six-hour outage, so a
+            # status line is not evidence that anything ticked; a file with a
+            # timestamp is.
+            #
+            # Written only when the sweep COMPLETED. A failed sweep that still
+            # stamped a watermark would render as a healthy quiet fleet -
+            # candidates=0, refused=0, fresh timestamp - which is the exact
+            # absence-as-evidence shape this whole node exists to kill. The
+            # missing write turns a broken sweep into loud staleness inside two
+            # ticks instead.
+            if _fleet_swept:
+                try:
+                    from fno.fleet_state import write_heartbeat
+
+                    write_heartbeat(
+                        candidates=_fleet_candidates, refused=_fleet_refused,
+                        silent=_fleet_silent,
+                    )
+                except Exception as exc:  # noqa: BLE001 - never fatal to the PR legs
+                    log.warning("pr-watch: fleet heartbeat write failed: %s", exc)
+
         set_tick_phase("sweep")
         # A dead tick must not kill the legs below. The receipt contract makes
         # _tick raise on a failed emission even though state is already persisted,
@@ -388,28 +473,6 @@ def tick() -> None:
                 typer.echo(
                     f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                 )
-
-        # Session recovery rides this same launchd cadence: a sweep over
-        # footnote-launched bg /target sessions that rotates providers on swap-class
-        # deaths and surfaces finished-but-lingering sessions to close. The held
-        # socket nudge was removed (a bypass recipient holds it by design), so the
-        # sweep no longer resumes idle-but-incomplete sessions. Gated by
-        # config.recovery.enabled and wrapped non-fatally so a recovery failure
-        # never breaks the PR-watch tick. The master switch (x-aaaf wave 3) outranks
-        # this gate too - a recovery respawn is exactly the "session starts itself"
-        # behavior the panic switch exists to stop.
-        set_tick_phase("recovery")
-        if settings.recovery.enabled and settings.autonomy.enabled:
-            try:
-                from fno.recovery import run_recovery_sweep
-
-                def emit_recovery(event_type: str, data: dict) -> None:
-                    _emit_event(event_type, data)
-
-                n = run_recovery_sweep(settings.recovery, emit=emit_recovery)
-                typer.echo(f"recovery sweep: candidates={n}")
-            except Exception as exc:  # noqa: BLE001 - never let recovery break pr-watch
-                log.warning("pr-watch: recovery sweep failed: %s", exc)
 
         set_tick_phase("watchdog")
         # Imported here, not at module scope: the watchdog package pulls the

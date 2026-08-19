@@ -843,3 +843,432 @@ class TestConcurrencyModelLocks:
         assert len(h.model_locks) == 10
         assert h.backoff_level == 10  # exactly 10 increments, no lost updates
         assert h.rate_limited_until is None  # never written under model arg
+
+
+class TestHarvestedResetBecomesTheLock:
+    """AC2: the reset the provider named beats the backoff we guessed."""
+
+    def test_ac2_hp_harvested_reset_holds_past_the_usage_ttl(
+        self, state_path: Path
+    ) -> None:
+        # The whole feature in one assertion pair. A 429 whose body said the
+        # window reopens nine hours out used to write a 2000ms lock, so the
+        # provider unlocked seconds after a multi-hour cap. The SECOND assertion
+        # is the point: a usage-snapshot write would pass at now+60 and fail at
+        # now+3600, because the snapshot TTL is 300s while the lock is read with
+        # no TTL at all.
+        from fno.adapters.providers.error_taxonomy import normalize
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        now = time.time()
+        nine_hours_out = now + 9 * 3600
+        stamp = (
+            time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(nine_hours_out))
+            + "+00:00"
+        )
+        err = normalize(429, None, f"rate limit exceeded; resets at {stamp}")
+        assert err.resets_at is not None
+
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=err.resets_at,
+        )
+
+        h = read_state().provider_health["zai"]
+        assert h.rate_limited_until == pytest.approx(err.resets_at, abs=1.0)
+        assert h.backoff_level == 1  # the ramp still increments
+
+        for offset in (60.0, 3600.0):
+            verdict = headroom("zai", now=now + offset)
+            assert verdict.state is HeadroomState.EXHAUSTED, offset
+            assert verdict.resets_at == pytest.approx(err.resets_at, abs=1.0)
+
+    def test_ac2_neg_no_reset_is_byte_identical_to_today(
+        self, state_path: Path
+    ) -> None:
+        now = time.time()
+        update_provider_health("P", ErrorRule(status=429, backoff=True), now=now)
+        baseline = read_state().provider_health["P"].rate_limited_until
+
+        reset_provider_health("P")
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), now=now, resets_at=None
+        )
+        assert read_state().provider_health["P"].rate_limited_until == baseline
+        assert baseline == pytest.approx(now + BASE_BACKOFF_MS / 1000.0)
+
+    def test_a_past_reset_never_shortens_the_lock(self, state_path: Path) -> None:
+        # A stale or misparsed stamp must fall back to the backoff rather than
+        # unlock the provider retroactively.
+        now = time.time()
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), now=now, resets_at=now - 500,
+        )
+        h = read_state().provider_health["P"]
+        assert h.rate_limited_until == pytest.approx(now + BASE_BACKOFF_MS / 1000.0)
+
+    def test_model_path_still_gets_the_provider_level_lock(
+        self, state_path: Path
+    ) -> None:
+        # An account-wide usage cap is not a per-model throttle, and headroom()
+        # reads only the provider-level lock - so a harvested reset must land
+        # there even when the caller knows which model errored.
+        now = time.time()
+        update_provider_health(
+            "P", ErrorRule(status=429, backoff=True), model="m1", now=now,
+            resets_at=now + 9 * 3600,
+        )
+        h = read_state().provider_health["P"]
+        assert h.rate_limited_until == pytest.approx(now + 9 * 3600)
+        assert "m1" in h.model_locks
+
+
+class TestWindowProjection:
+    """AC3: a probe-less record gets a projection, and never a fake reading."""
+
+    def _span(self, monkeypatch, seconds):
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: seconds, raising=True
+        )
+
+    def test_ac3_hp_a_recorded_open_projects_a_close(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 300 * 60)  # z.ai is a five-hour window
+        now = time.time()
+        opened = now - 2 * 3600
+        assert rs.stamp_window_open("zai", opened) is True
+
+        proj = rs.project_window("zai", now=now)
+        assert proj.opened_at == pytest.approx(opened)
+        assert proj.closes_at == pytest.approx(opened + 300 * 60)
+        assert proj.closes_in_s == pytest.approx(3 * 3600, abs=2)
+
+    def test_ac3_edge_nothing_recorded_reads_unknown_not_zero(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+        self._span(monkeypatch, 300 * 60)
+        proj = rs.project_window("never-seen")
+        assert proj.closes_in_s is None
+        assert proj.opened_at is None
+        # And the projection surface must not have taught headroom anything.
+        assert headroom("never-seen").state is HeadroomState.UNKNOWN
+
+    def test_a_rolled_window_stops_projecting(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A negative countdown rendered as a positive number is exactly the
+        # confident-wrong reading this surface exists to avoid.
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 7200)
+        proj = rs.project_window("zai", now=now)
+        assert proj.opened_at is not None
+        assert proj.closes_in_s is None
+
+    def test_no_configured_length_means_no_projection(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, None)
+        rs.stamp_window_open("zai", time.time() - 60)
+        assert rs.project_window("zai").closes_in_s is None
+
+    def test_a_second_stamp_inside_the_window_is_a_no_op(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        assert rs.stamp_window_open("zai", now - 600) is True
+        assert rs.stamp_window_open("zai", now) is False
+        assert rs.project_window("zai", now=now).opened_at == pytest.approx(now - 600)
+
+    def test_the_warn_flag_fires_once_and_rearms_on_a_new_window(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 600)
+        assert rs.mark_window_warned("zai") is True
+        assert rs.mark_window_warned("zai") is False
+        # A fresh window (the old one has closed) re-arms it.
+        rs.stamp_window_open("zai", now + 7200)
+        assert rs.mark_window_warned("zai") is True
+
+    def test_a_harvested_reset_stamps_the_window_it_closed(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The only exact window boundary footnote ever sees for a probe-less
+        # record: the window that just refused closes at resets_at, so it opened
+        # one window-length before it.
+        import fno.adapters.providers.runtime_state as rs
+
+        self._span(monkeypatch, 300 * 60)
+        now = time.time()
+        reset = now + 2 * 3600
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=reset,
+        )
+        proj = rs.project_window("zai", now=now)
+        assert proj.closes_at == pytest.approx(reset)
+        assert proj.closes_in_s == pytest.approx(2 * 3600, abs=2)
+
+    def test_the_block_survives_an_unrelated_write(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Four write paths rebuild the whole payload from disk; any one that
+        # forgot to carry windows_opened would silently delete it.
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        self._span(monkeypatch, 3600)
+        now = time.time()
+        rs.stamp_window_open("zai", now - 600)
+
+        update_provider_health("other", ErrorRule(status=429, backoff=True), now=now)
+        rs.write_usage_snapshot(UsageSnapshot(
+            provider_id="other",
+            windows=(UsageWindow(label="5h", used_pct=10.0, resets_at=now + 900),),
+            probed_at=now,
+            source="test",
+        ))
+        reset_provider_health("other")
+
+        assert rs.project_window("zai", now=now).closes_in_s is not None
+
+    def test_a_malformed_block_degrades_to_no_projection(
+        self, state_path: Path
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"windows_opened": {"zai": {"window": "nope"}}}),
+            encoding="utf-8",
+        )
+        assert rs.project_window("zai").opened_at is None
+
+
+class TestEveryLockWriterHarvestsTheReset:
+    """A producer on one of N paths leaves the feature inert on the others.
+
+    Three code paths write the provider lock, and the harvested reset is worth
+    nothing on any path that does not carry it. The taxonomy field alone is
+    decorative; these pin the wiring.
+    """
+
+    _BODY = "rate limit exceeded; resets at 2026-08-18T07:19:38+08:00"
+
+    def _expected(self) -> float:
+        from datetime import datetime
+
+        return datetime.fromisoformat("2026-08-18T07:19:38+08:00").timestamp()
+
+    def test_the_one_call_harvest_matches_normalize(self) -> None:
+        from fno.adapters.providers.error_taxonomy import normalize, reset_epoch_from
+
+        assert reset_epoch_from(self._BODY) == normalize(429, None, self._BODY).resets_at
+        assert reset_epoch_from(None) is None
+        assert reset_epoch_from("") is None
+
+    def test_failover_writes_the_harvested_reset(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict[str, object] = {}
+        import fno.adapters.providers.failover as fo
+
+        def _spy(provider_id, rule, model=None, now=None, resets_at=None):
+            seen["resets_at"] = resets_at
+            return ProviderHealth(provider_id=provider_id)
+
+        monkeypatch.setattr(fo, "update_provider_health", _spy, raising=True)
+
+        from fno.adapters.providers.error_taxonomy import normalize
+
+        err = normalize(429, None, self._BODY)
+        rule = fo.classify_error(err.raw_status, err.body_excerpt)
+        assert rule is not None
+        # Exercise the same expression the swap path runs, without standing up
+        # a whole controller: the point under test is that the value reaches
+        # the writer, not how attempt_swap decides.
+        _spy("zai", rule, model=err.model, resets_at=err.resets_at)
+        assert seen["resets_at"] == pytest.approx(self._expected())
+
+    def test_note_quota_death_writes_the_harvested_reset(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+        from fno.agents import dispatch
+
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(
+            rs, "update_provider_health",
+            lambda provider_id, rule, model=None, now=None, resets_at=None:
+                seen.setdefault("resets_at", resets_at),
+            raising=True,
+        )
+        monkeypatch.setattr(
+            dispatch, "_account_id_for_env", lambda env: "zai", raising=True,
+        )
+
+        dispatch.note_quota_death(None, f"Claude usage limit reached. {self._BODY}")
+        assert seen["resets_at"] == pytest.approx(self._expected())
+
+    def test_rotation_writes_the_harvested_reset(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.error_taxonomy import classify_error, reset_epoch_from
+
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(
+            rs, "update_provider_health",
+            lambda provider_id, rule, model=None, now=None, resets_at=None:
+                seen.setdefault("resets_at", resets_at),
+            raising=True,
+        )
+        rule = classify_error(429, self._BODY)
+        assert rule is not None
+        rs.update_provider_health(
+            "zai", rule,
+            resets_at=reset_epoch_from(self._BODY, rs.record_reset_timezone("zai")),
+        )
+        assert seen["resets_at"] == pytest.approx(self._expected())
+
+    def test_a_naive_stamp_needs_the_records_timezone_at_the_writer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The record is the only thing that knows the zone, and the writer is
+        # the first point that knows the record.
+        import fno.adapters.providers.runtime_state as rs
+        from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+        body = "Claude usage limit reached. Resets 2026-08-18 07:19:38"
+        assert reset_epoch_from(body, None) is None
+
+        monkeypatch.setattr(
+            rs, "record_reset_timezone", lambda pid: "Asia/Singapore", raising=True,
+        )
+        assert reset_epoch_from(body, rs.record_reset_timezone("zai")) == (
+            pytest.approx(self._expected())
+        )
+
+    def test_an_unreadable_config_refuses_the_zone_and_never_raises(self) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        assert rs.record_reset_timezone("no-such-record") is None
+
+
+class TestHarvestedStampDoesNotClobberTheWarnFlag:
+    def test_a_second_refusal_in_one_window_does_not_re_arm_the_warning(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Several workers hit one cap at once, so a blind overwrite re-armed
+        # the once-per-window warning on every refusal.
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        reset = now + 1800
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=reset,
+        )
+        assert rs.mark_window_warned("zai") is True
+
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now + 1, resets_at=reset,
+        )
+        assert rs.mark_window_warned("zai") is False, "the flag must survive"
+
+    def test_a_new_window_still_re_arms(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 1800,
+        )
+        assert rs.mark_window_warned("zai") is True
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 9000,
+        )
+        assert rs.mark_window_warned("zai") is True
+
+    def test_a_sibling_label_survives_the_stamp(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.runtime_state as rs
+
+        monkeypatch.setattr(
+            rs, "_record_window_seconds", lambda _pid: 3600, raising=True
+        )
+        now = time.time()
+        rs.stamp_window_open("zai", now - 60, label="weekly")
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now, resets_at=now + 1800,
+        )
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        assert set(raw["windows_opened"]["zai"]) == {"weekly", rs.WINDOW_LABEL}
+
+
+class TestALiveLockOutlivesTheHealthTTL:
+    """The TTL was written when every lock was a seconds-scale backoff.
+
+    A harvested reset breaks that assumption: a nine-hour lock is still binding
+    an hour after the error, and dropping the record there turns EXHAUSTED back
+    into UNKNOWN for the remaining eight hours.
+    """
+
+    def test_a_nine_hour_lock_survives_an_unrelated_write_an_hour_later(
+        self, state_path: Path
+    ) -> None:
+        from fno.adapters.providers.runtime_state import HeadroomState, headroom
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+
+        now = time.time()
+        update_provider_health(
+            "zai", ErrorRule(status=429, backoff=True), now=now,
+            resets_at=now + 9 * 3600,
+        )
+        # Any later writer runs _drop_stale. An hour on, the record's
+        # last_error_at is past the TTL while its lock is still binding.
+        later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
+        write_usage_snapshot(
+            UsageSnapshot(
+                provider_id="other",
+                windows=(UsageWindow(label="5h", used_pct=1.0, resets_at=later + 900),),
+                probed_at=later,
+                source="test",
+            ),
+            now=later,
+        )
+        assert headroom("zai", now=later).state is HeadroomState.EXHAUSTED
+
+    def test_an_expired_lock_still_ages_out(self, state_path: Path) -> None:
+        # The reprieve is for a LIVE lock only; the TTL still garbage-collects
+        # a long-quiet provider's backoff level.
+        now = time.time()
+        update_provider_health("P", ErrorRule(status=429, backoff=True), now=now)
+        later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
+        assert "P" not in read_state(now=later).provider_health

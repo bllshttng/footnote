@@ -709,6 +709,182 @@ def test_stop_refuses_recycled_pid(tmp_path: Path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# stop_agent escalates to the pid arm — AC4-*
+# ---------------------------------------------------------------------------
+
+
+def test_stop_escalates_to_pid_when_the_cooperative_shellout_times_out(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC4-HP: a capped worker HAS a short id, so it never reached the pid arm.
+
+    `claude stop` asks the session to shut ITSELF down, which needs an API
+    call, and a provider-capped session has no API left. It burned the whole
+    30s timeout and raised exit 15 with the process still running. Reproduced
+    on three live sessions.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, start_token = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="capped",
+                harness="claude",
+                short_id="b5eed96b",
+                pid=proc.pid,
+                pid_start_time=start_token,
+            ),
+        )
+        _force_claude_on_path(monkeypatch, tmp_path)
+
+        from fno.agents import dispatch
+        from fno.agents.harnesses import claude as claude_mod
+
+        def _hang(short_id, *, timeout=30.0):
+            raise subprocess.TimeoutExpired(cmd="claude stop", timeout=timeout)
+
+        monkeypatch.setattr(claude_mod, "claude_stop", _hang)
+
+        result = dispatch.stop_agent("capped")
+
+        assert result.name == "capped"
+        # The process is really gone, not merely reported stopped.
+        assert proc.wait(timeout=10) is not None
+        stop_events = [
+            e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"
+        ]
+        assert len(stop_events) == 1, "one stop, one receipt"
+        assert stop_events[0]["stopped_by"] == "pid"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_stop_escalates_to_pid_when_the_shellout_exits_non_zero(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The other give-up point: a refusing session can also answer non-zero."""
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, start_token = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="refusing",
+                harness="claude",
+                short_id="b5eed96b",
+                pid=proc.pid,
+                pid_start_time=start_token,
+            ),
+        )
+        _force_claude_on_path(monkeypatch, tmp_path)
+
+        from fno.agents import dispatch
+        from fno.agents.harnesses import claude as claude_mod
+
+        monkeypatch.setattr(
+            claude_mod, "claude_stop",
+            lambda short_id, *, timeout=30.0: (7, "usage limit reached\n"),
+        )
+
+        result = dispatch.stop_agent("refusing")
+        assert result.name == "refusing"
+        assert proc.wait(timeout=10) is not None
+        stop_events = [
+            e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"
+        ]
+        assert [e["stopped_by"] for e in stop_events] == ["pid"]
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_ac4_edge_an_unprovable_pid_refuses_and_signals_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """"Cannot tell" is not "gone".
+
+    Without the incarnation token the row cannot prove the pid is its worker,
+    so nothing is signalled and the caller keeps the original exit 15. The
+    caller MUST see a failure here: a re-dispatch after an unproved stop puts
+    two live writers on one worktree.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, _ = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="unprovable",
+                harness="claude",
+                short_id="b5eed96b",
+                pid=proc.pid,
+                # no pid_start_time
+            ),
+        )
+        _force_claude_on_path(monkeypatch, tmp_path)
+
+        from fno.agents import dispatch
+        from fno.agents.harnesses import claude as claude_mod
+
+        def _hang(short_id, *, timeout=30.0):
+            raise subprocess.TimeoutExpired(cmd="claude stop", timeout=timeout)
+
+        monkeypatch.setattr(claude_mod, "claude_stop", _hang)
+
+        with pytest.raises(dispatch.DispatchAskError) as exc_info:
+            dispatch.stop_agent("unprovable")
+
+        assert exc_info.value.exit_code == 15
+        assert proc.poll() is None, "an unprovable pid must not be signalled"
+        stop_events = [
+            e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"
+        ]
+        assert stop_events[0]["timed_out"] is True
+        assert stop_events[0]["stopped_by"] == "shellout"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_ac4_neg_a_healthy_stop_sends_no_signal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A cooperative stop that exits zero takes the same path it always did."""
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, start_token = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="healthy",
+                harness="claude",
+                short_id="7c5dcf5d",
+                pid=proc.pid,
+                pid_start_time=start_token,
+            ),
+        )
+        _force_claude_on_path(monkeypatch, tmp_path)
+
+        from fno.agents import dispatch
+        from fno.agents.harnesses import claude as claude_mod
+
+        monkeypatch.setattr(
+            claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, ""),
+        )
+
+        result = dispatch.stop_agent("healthy")
+        assert result.claude_exit == 0
+        assert proc.poll() is None, "a cooperative stop signals nothing"
+        stop_events = [
+            e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"
+        ]
+        assert len(stop_events) == 1
+        assert stop_events[0]["stopped_by"] == "shellout"
+        assert stop_events[0]["claude_exit"] == 0
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+# ---------------------------------------------------------------------------
 # rm_agent — AC2-*
 # ---------------------------------------------------------------------------
 

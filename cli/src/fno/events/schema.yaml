@@ -3317,6 +3317,99 @@ event_types:
         detail:
           type: string
           description: "The named reason the action was refused."
+  - name: worker_refused
+    description: "A live worker's own last turn carries a provider refusal the taxonomy classifies as swap-class. Positive evidence that a worker cannot think, emitted once per (short_id, error_class) so silence is never the only signal. Fires on the FIRST tick after the refusal rather than after recovery.idle_threshold_seconds: a refusal is affirmative evidence and must not wait behind a timer built for silence, nor be suppressed by a stale promise reading done."
+    sources: [daemon]
+    data:
+      required: [short_id, error_class, source]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the refusing session."
+        node:
+          type: string
+          description: "Backlog node id read from the worker's worktree manifest; absent for a node-less session."
+        error_class:
+          type: string
+          description: "The NormalizedError class: provider_4xx_quota | provider_4xx_auth | provider_5xx."
+        source:
+          type: string
+          description: "Where the refusal text came from: output_result (a dead session's last result) or transcript (a LIVE worker's last turn)."
+        model:
+          type: string
+          description: "The model the transcript shows the worker actually answering as, when the tail names one."
+        resets_at:
+          type: number
+          description: "Epoch the refusal body said the window reopens, when one was parseable. Absent when the body named no time, or named one that could not be resolved to an epoch."
+        reset_stamp_unparsed:
+          type: string
+          description: "A reset stamp that WAS present and was refused - a naive stamp with no accounts.<id>.reset_timezone configured. Present instead of resets_at, never alongside it."
+        excerpt:
+          type: string
+          description: "The refusal body excerpt, capped by the taxonomy at 256 chars."
+
+  - name: worker_silent
+    description: "A registered worker of ANY harness has produced no transcript activity for longer than its cadence deadline. A REPORT, never an action: nothing is stopped, spawned, or unclaimed on this signal, because an absence has two explanations and a component that acts on the wrong reading loses work. A worker whose transcript age is unknowable emits nothing at all."
+    sources: [daemon]
+    data:
+      required: [handle, age_s, deadline_s]
+      properties:
+        handle:
+          type: string
+          description: "The registry row's name."
+        harness:
+          type: string
+          description: "The worker's harness, read from its registry row."
+        age_s:
+          type: integer
+          description: "Seconds since the worker's last transcript activity."
+        deadline_s:
+          type: integer
+          description: "The cadence deadline it exceeded (config.agents.silence_deadline_seconds)."
+        node:
+          type: string
+          description: "Backlog node id read from the worker's worktree manifest, when it has one."
+        last_message:
+          type: string
+          description: "The flattened text of the worker's last turn, as the truth layer capped it."
+
+  - name: failover_exhausted
+    description: "Every link of a node's fallback chain has been tried or is itself known exhausted, so nothing was spawned. The terminal of the re-dispatch walk: a chain that ends is a bounded stop, a chain that loops is a worse failure."
+    sources: [daemon]
+    data:
+      required: [node]
+      properties:
+        node:
+          type: string
+          description: "The backlog node whose chain ran out."
+        short_id:
+          type: string
+          description: "The refusing worker's 8-hex jobId, when the walk started from one."
+        links_tried:
+          type: string
+          description: "Comma-separated harness/model links already spent on this node."
+        reason:
+          type: string
+          description: "chain-empty (config named no chain), all-tried, all-exhausted (every remaining link's own provider reads EXHAUSTED), or chain-malformed:<detail> (the chain refused validation and nothing was spawned)."
+
+  - name: provider_window_closing
+    description: "A provider record's PROJECTED usage window is within the configured warning threshold of closing. A projection from a recorded window open plus a configured length, never a utilization measurement - a record with no probe still reads UNKNOWN for headroom. Emitted once per window so a long tick loop does not re-warn."
+    sources: [daemon, cli]
+    data:
+      required: [provider_id, closes_in_s]
+      properties:
+        provider_id:
+          type: string
+          description: "The account record id."
+        label:
+          type: string
+          description: "The window label the projection is for."
+        closes_in_s:
+          type: integer
+          description: "Projected seconds until the window closes."
+        closes_at:
+          type: number
+          description: "Projected epoch the window closes."
 
   - name: operator_initiated
     retention: durable

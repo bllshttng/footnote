@@ -1579,6 +1579,27 @@ class AgentsBlock(BaseModel):
     # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
     # rung above defaults in precedence. Resolved at the spawn seam.
     profiles: dict[str, SpawnDefaultsBlock] = Field(default_factory=dict)
+    # The operator's own simple-versus-complex split, written where a daemon can
+    # read it: an ordered fallback chain per node size, consulted only when a
+    # provider refuses and the account queue cannot answer. Keys are S, M, L and
+    # `default`; each value is an ordered list of partial axis bundles reusing
+    # `SpawnDefaultsBlock`, so no new axis vocabulary enters the codebase.
+    #
+    # Every size wants MORE THAN ONE link. A chain with one link is not a chain:
+    # a claude weekly cap and a z.ai five-hour cap are different meters with
+    # different periods, and either can be the one that is down.
+    # Held RAW, and typed loosely on purpose. The strict check lives in
+    # ``spawn_defaults.validate_fallback``, which the failover path calls.
+    # Raising in a field validator here would fail ``load_settings()`` for the
+    # whole process: one typo would make every ``fno`` command raise and kill
+    # the pr-watch tick at its settings phase, which is the opposite of the
+    # bounded stop Locked Decision 11 asks for. Refuse on the path that reads
+    # it, not on the path that loads it.
+    fallback: dict[str, Any] = Field(default_factory=dict)
+    # Seconds of transcript silence after which `fno agents sweep` reports a
+    # worker as silent. A REPORT, never an action - nothing is stopped, spawned
+    # or unclaimed on this signal.
+    silence_deadline_seconds: int = 600
     confirm: str = "auto"
     # When true, the SessionStart register hook auto-joins EVERY hand-started
     # session to the roster (discoverable + mail-addressable). Default false is
@@ -1647,6 +1668,19 @@ class AgentsBlock(BaseModel):
         if not isinstance(v, dict):
             return {}
         return {k: val for k, val in v.items() if isinstance(val, dict)}
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _coerce_fallback(cls, v: object) -> object:
+        """Keep the table exactly as written, or empty. Never raise.
+
+        A non-mapping value cannot be a chain, so it reads as no chain and the
+        pre-existing no-failover behavior stands. Everything else passes
+        through untouched, INCLUDING a malformed link, because the failover
+        path has to be able to see the mistake and name it. The strict check is
+        ``spawn_defaults.validate_fallback``.
+        """
+        return v if isinstance(v, dict) else {}
 
     @field_validator("confirm")
     @classmethod

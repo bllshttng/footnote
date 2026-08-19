@@ -306,6 +306,110 @@ def usage_providers(
             )
 
 
+@cli.command("window")
+def window_providers(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit one JSON object keyed by account id."
+    ),
+    warn_seconds: float = typer.Option(
+        None, "--warn-seconds",
+        help="Emit provider_window_closing under this many seconds to close "
+             "(default 1800). Once per window.",
+    ),
+) -> None:
+    """Where each account's rolling usage window is, without probing anything.
+
+    The gap this fills: ``usage.py`` registers probes for claude and codex only,
+    so glm, gemini, openclaw, hermes and every api_key record are UNKNOWN to the
+    quota layer - and ``rotation.py`` treats UNKNOWN as never-exhausted. The one
+    provider that actually caps here was the one provider nothing could see. The
+    operator learned they were at 90 percent, then 99, then capped, from a
+    dashboard and a pasted 429.
+
+    Where a probe exists, this prints its headroom verdict. Where none does, it
+    prints a PROJECTION from a recorded window open plus ``window_minutes`` on
+    the account record: seconds to close and the projected close time.
+
+    A projection is not a utilization reading, and this surface never pretends
+    otherwise. It writes no synthetic usage window, so ``headroom()`` keeps
+    answering UNKNOWN for a probe-less record and ``fno config accounts list``
+    never renders a percentage no probe measured. A record with nothing recorded
+    prints ``unknown``, which is the honest answer and not a zero.
+    """
+    import json as _json
+    import time as _time
+
+    from fno.adapters.providers.runtime_state import (
+        DEFAULT_WINDOW_WARN_SECONDS,
+        headroom,
+        mark_window_warned,
+        project_window,
+    )
+    def _emit(event_type: str, data: dict) -> None:
+        """Best-effort canonical emit. A warning that cannot be logged is
+        still a warning that was printed, so this never raises."""
+        try:
+            from fno.events import _build, append_event
+            from fno.paths import state_dir
+
+            append_event(
+                _build(event_type, "cli", data), state_dir() / "events.jsonl"
+            )
+        except Exception:  # noqa: BLE001 - a read-only report never fails on its log
+            pass
+
+    threshold = (
+        DEFAULT_WINDOW_WARN_SECONDS if warn_seconds is None else float(warn_seconds)
+    )
+    config = _load()
+    now = _time.time()
+
+    rows: dict[str, dict[str, object]] = {}
+    for record in config.records:
+        proj = project_window(record.id, now=now)
+        verdict = headroom(record.id, now=now)
+        rows[record.id] = {
+            "harness": record.harness,
+            "headroom": verdict.state.value,
+            "headroom_resets_at": verdict.resets_at,
+            "window_minutes": record.window_minutes,
+            "opened_at": proj.opened_at,
+            "closes_at": proj.closes_at,
+            # Always present, including as null: `done_probe 2` greps for the
+            # key, and a key that appears only on the happy path lets a shapeless
+            # answer pass the gate.
+            "closes_in_s": (
+                None if proj.closes_in_s is None else int(proj.closes_in_s)
+            ),
+        }
+        if proj.closes_in_s is not None and proj.closes_in_s <= threshold:
+            if mark_window_warned(record.id):
+                _emit("provider_window_closing", {
+                    "provider_id": record.id,
+                    "label": proj.label,
+                    "closes_in_s": int(proj.closes_in_s),
+                    "closes_at": proj.closes_at,
+                })
+
+    if json_output:
+        typer.echo(_json.dumps(rows))
+        return
+
+    if not config.records:
+        typer.echo("No accounts configured.")
+        return
+    for pid, row in rows.items():
+        closes_in = row["closes_in_s"]
+        when = (
+            "unknown"
+            if closes_in is None
+            else f"closes {_fmt_resets_in(float(cast(float, row['closes_at'])), now)}"
+        )
+        typer.echo(
+            f"{pid}  [{row['harness']}]  headroom={row['headroom']:<9} {when}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # required-bot-check (quota-aware dispatch, x-5d3e US5)
 # ---------------------------------------------------------------------------
@@ -918,6 +1022,20 @@ def pick_account(
     chosen = next_healthy_provider(
         Combo(name="pick", providers=tuple(launchable)), quota=quota
     )
+    if chosen is not None:
+        # The window this account is about to spend opens here, unless one is
+        # already recorded and still running. Without this the only writer of
+        # `windows_opened` is the harvested reset, which lands AFTER a cap - so
+        # `fno config accounts window` would read unknown right up until the
+        # moment the operator no longer needs it, and the whole point is lead
+        # time. Idempotent inside a live window and best-effort: a projection
+        # is advisory and must never fail a pick.
+        try:
+            from fno.adapters.providers.runtime_state import stamp_window_open
+
+            stamp_window_open(chosen, _resolve_time())
+        except Exception:  # noqa: BLE001 - a projection never blocks a launch
+            pass
     if chosen is None:
         return PickVerdict(
             None,

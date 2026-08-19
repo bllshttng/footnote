@@ -155,6 +155,18 @@ class ProviderRuntimeState:
     provider_health: dict[str, ProviderHealth]
     combo_cursors: dict[str, ComboCursor] = dataclasses.field(default_factory=dict)
     usage: dict[str, UsageSnapshot] = dataclasses.field(default_factory=dict)
+    # When each provider's rolling usage window OPENED, as
+    # ``{provider_id: {label: {"opened_at": float, "warned": bool}}}``. The one
+    # thing footnote can know about a provider with no usage probe: z.ai is
+    # UNKNOWN to the quota layer (usage.py registers probes for claude and codex
+    # only), so nothing could ever say how close its five-hour window was to
+    # closing. A recorded open plus a configured length is a PROJECTION, never a
+    # utilization reading - it deliberately does not become a UsageWindow,
+    # because headroom() would then render a confident percentage no probe
+    # measured. Additive, so v2 files read forward with no migration.
+    windows_opened: dict[str, dict[str, dict[str, Any]]] = dataclasses.field(
+        default_factory=dict
+    )
     schema_version: int = SCHEMA_VERSION
 
 
@@ -233,8 +245,237 @@ def _serialize_state(state: ProviderRuntimeState) -> str:
         "usage": {
             pid: dataclasses.asdict(s) for pid, s in state.usage.items()
         },
+        "windows_opened": state.windows_opened,
     }
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+WINDOW_LABEL = "window"
+# Default warning threshold for a projected window close, in seconds. The
+# operator learned they were at 90 percent, then 99, then capped, from a
+# dashboard and a pasted 429; half an hour is the smallest lead time that lets
+# work be parked rather than lost.
+DEFAULT_WINDOW_WARN_SECONDS = 1800.0
+
+
+@dataclasses.dataclass(frozen=True)
+class WindowProjection:
+    """Where a provider's rolling usage window is, projected from a recorded open.
+
+    A PROJECTION, never a measurement. ``closes_in_s`` is None when nothing is
+    recorded or the projected window has already rolled - "I do not know" and
+    "it closes in an hour" must never render as the same thing, which is the
+    same discipline that keeps a probe-less record reading UNKNOWN for headroom
+    instead of a confident OK.
+    """
+
+    provider_id: str
+    label: str = WINDOW_LABEL
+    opened_at: float | None = None
+    closes_at: float | None = None
+    closes_in_s: float | None = None
+    warned: bool = False
+
+
+def _record_window_seconds(provider_id: str) -> float | None:
+    """``accounts.<id>.window_minutes`` in seconds, or None.
+
+    Lazy-imported and fail-open: this sits inside the health-write lock, and a
+    config read that raises there would turn "we could not project a window"
+    into "the provider lock was never written", which is far worse.
+    """
+    try:
+        from fno.adapters.providers.cli import _load
+
+        for rec in _load().records:
+            if rec.id == provider_id:
+                minutes = getattr(rec, "window_minutes", None)
+                return float(minutes) * 60.0 if minutes else None
+    except Exception:  # noqa: BLE001 - a config miss must never break the lock path
+        return None
+    return None
+
+
+def record_reset_timezone(provider_id: str) -> str | None:
+    """``accounts.<id>.reset_timezone``, or None.
+
+    Only a NAIVE reset stamp needs it. Fail-open for the same reason as
+    :func:`_record_window_seconds`: a config read that raises on the lock-write
+    path would turn "we could not resolve a timezone" into "the lock was never
+    written", which is strictly worse than falling back to the backoff.
+    """
+    try:
+        from fno.adapters.providers.cli import _load
+
+        for rec in _load().records:
+            if rec.id == provider_id:
+                return getattr(rec, "reset_timezone", None) or None
+    except Exception:  # noqa: BLE001 - a config miss refuses the stamp, not the write
+        return None
+    return None
+
+
+def project_window(
+    provider_id: str,
+    *,
+    now: float | None = None,
+    repo_root: Path | None = None,
+) -> WindowProjection:
+    """Where ``provider_id``'s window is, from the recorded open plus its length.
+
+    Reads local files only. Nothing is asked of any provider, which is the
+    whole reason this surface exists: the one provider that actually caps here
+    is the one the quota layer cannot see.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        raw = _read_disk_payload(_resolve_state_path(repo_root))
+    except Exception:  # noqa: BLE001 - a corrupt read is "unknown", never an error
+        raw = None
+    entry = (_parse_windows_opened(raw or {}).get(provider_id) or {}).get(
+        WINDOW_LABEL
+    )
+    if entry is None:
+        return WindowProjection(provider_id)
+    span = _record_window_seconds(provider_id)
+    if not span:
+        return WindowProjection(provider_id, opened_at=entry["opened_at"])
+    closes_at = entry["opened_at"] + span
+    if closes_at <= now:
+        # The window rolled and nothing has stamped the new one. Report the
+        # open we have and NO projection: a negative countdown read as a
+        # positive number is the confident-wrong reading this whole surface
+        # exists to avoid.
+        return WindowProjection(
+            provider_id, opened_at=entry["opened_at"],
+            warned=bool(entry.get("warned")),
+        )
+    return WindowProjection(
+        provider_id,
+        opened_at=entry["opened_at"],
+        closes_at=closes_at,
+        closes_in_s=closes_at - now,
+        warned=bool(entry.get("warned")),
+    )
+
+
+def mark_window_warned(
+    provider_id: str, repo_root: Path | None = None
+) -> bool:
+    """Flip the once-per-window warn flag. True iff this call set it.
+
+    The flag lives beside the recorded open, so a new window (a fresh stamp,
+    which always writes ``warned: False``) re-arms the warning by construction.
+    """
+    state_path = _resolve_state_path(repo_root)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with filelock.FileLock(str(_lock_path(state_path)), timeout=LOCK_TIMEOUT_SECONDS):
+            raw = _read_disk_payload(state_path) or {}
+            windows_opened = _parse_windows_opened(raw)
+            entry = (windows_opened.get(provider_id) or {}).get(WINDOW_LABEL)
+            if entry is None or entry.get("warned"):
+                return False
+            entry["warned"] = True
+            now = time.time()
+            health_map, _ = _drop_stale(_parse_state_payload(raw), now)
+            cursors, _ = _drop_stale_cursors(_parse_cursors_payload(raw), now)
+            _write_state_atomic(state_path, _serialize_state(ProviderRuntimeState(
+                provider_health=health_map,
+                combo_cursors=cursors,
+                usage=_parse_usage_payload(raw),
+                windows_opened=windows_opened,
+                schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
+            )))
+            return True
+    except filelock.Timeout:
+        logger.warning(
+            "runtime_state: lock contention marking window warned for %r", provider_id
+        )
+        return False
+
+
+def stamp_window_open(
+    provider_id: str,
+    opened_at: float,
+    *,
+    label: str = WINDOW_LABEL,
+    repo_root: Path | None = None,
+) -> bool:
+    """Record when ``provider_id``'s current window opened. True iff written.
+
+    Idempotent against a window still in force: a second stamp inside the same
+    window is a no-op, so a repeated dispatch never resets the countdown.
+    """
+    state_path = _resolve_state_path(repo_root)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    span = _record_window_seconds(provider_id)
+    try:
+        with filelock.FileLock(str(_lock_path(state_path)), timeout=LOCK_TIMEOUT_SECONDS):
+            raw = _read_disk_payload(state_path) or {}
+            windows_opened = _parse_windows_opened(raw)
+            prior = (windows_opened.get(provider_id) or {}).get(label)
+            if prior is not None and span:
+                if prior["opened_at"] + span > opened_at:
+                    return False  # the recorded window has not closed yet
+            windows_opened.setdefault(provider_id, {})[label] = {
+                "opened_at": float(opened_at), "warned": False,
+            }
+            now = time.time()
+            health_map, _ = _drop_stale(_parse_state_payload(raw), now)
+            cursors, _ = _drop_stale_cursors(_parse_cursors_payload(raw), now)
+            _write_state_atomic(state_path, _serialize_state(ProviderRuntimeState(
+                provider_health=health_map,
+                combo_cursors=cursors,
+                usage=_parse_usage_payload(raw),
+                windows_opened=windows_opened,
+                schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
+            )))
+            return True
+    except filelock.Timeout:
+        logger.warning(
+            "runtime_state: lock contention stamping window open for %r", provider_id
+        )
+        return False
+
+
+def _parse_windows_opened(
+    raw: dict[str, Any]
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Best-effort parse of the ``windows_opened`` block.
+
+    Same drop-the-bad-entry discipline as :func:`_parse_usage_payload`: one
+    corrupt record must never cost the whole file. A projection is advisory, so
+    a dropped entry costs a printed ``unknown`` and nothing else.
+    """
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    block = raw.get("windows_opened") or {}
+    if not isinstance(block, dict):
+        return out
+    for pid, labels in block.items():
+        if not isinstance(labels, dict):
+            logger.warning(
+                "runtime_state: dropping windows_opened for %r (not a dict)", pid
+            )
+            continue
+        kept: dict[str, dict[str, Any]] = {}
+        for label, entry in labels.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                kept[str(label)] = {
+                    "opened_at": float(entry["opened_at"]),
+                    "warned": bool(entry.get("warned", False)),
+                }
+            except (KeyError, TypeError, ValueError):
+                logger.warning(
+                    "runtime_state: dropping window %r for %r (malformed)",
+                    label, pid,
+                )
+        if kept:
+            out[str(pid)] = kept
+    return out
 
 
 def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
@@ -472,12 +713,28 @@ def _read_disk_payload(state_path: Path) -> dict[str, Any] | None:
 def _drop_stale(
     health: dict[str, ProviderHealth], now: float
 ) -> tuple[dict[str, ProviderHealth], int]:
-    """Return (kept_entries, dropped_count)."""
+    """Return (kept_entries, dropped_count).
+
+    An entry with a LIVE lock is never stale, whatever its age. The TTL exists
+    to garbage-collect a long-quiet provider's backoff level, and it was
+    written when every lock was a seconds-scale backoff step, so "an hour since
+    the error" implied "the lock is long gone". A harvested reset breaks that
+    implication: a nine-hour lock is still binding at t+1h, and dropping the
+    record there turns EXHAUSTED back into UNKNOWN for the remaining eight
+    hours - which never means exhausted, so dispatch walks straight back into
+    the capped provider. The lock outlives the record's age by design now, so
+    the predicate has to say so.
+    """
     cutoff = now - PROVIDER_HEALTH_TTL_SECONDS
     kept: dict[str, ProviderHealth] = {}
     dropped = 0
     for pid, h in health.items():
-        if h.last_error_at is not None and h.last_error_at < cutoff:
+        # Only the PROVIDER-level lock earns the reprieve. A model lock is a
+        # seconds-scale backoff, and ProviderHealth documents its TTL as
+        # record-level on purpose: when last_error_at ages out, every
+        # model_locks entry goes with it.
+        locked = h.rate_limited_until is not None and h.rate_limited_until > now
+        if not locked and h.last_error_at is not None and h.last_error_at < cutoff:
             dropped += 1
             continue
         kept[pid] = h
@@ -517,6 +774,7 @@ def read_state(now: float | None = None) -> ProviderRuntimeState:
         provider_health=kept,
         combo_cursors=cursors_kept,
         usage=usage,
+        windows_opened=_parse_windows_opened(raw),
         schema_version=schema_version,
     )
 
@@ -526,6 +784,7 @@ def _next_health(
     rule: ErrorRule,
     now: float,
     model: str | None = None,
+    resets_at: float | None = None,
 ) -> ProviderHealth:
     """Compute the next ProviderHealth given an ErrorRule + current state.
 
@@ -542,6 +801,20 @@ def _next_health(
     provider regardless of model so a second 429 on a sibling model
     feels the longer step. When ``model`` is None, behavior is the
     Plan A baseline (write ``rate_limited_until`` only).
+
+    When ``resets_at`` is supplied and lies in the future, it replaces the
+    computed cooldown as ``rate_limited_until``. This is the whole point of
+    harvesting it: a 429 whose body said the window reopens nine hours out was
+    writing a 2000ms lock, so the provider unlocked seconds after a multi-hour
+    cap and every reroute path routed straight back in. The backoff LEVEL still
+    increments, because the ramp is a per-provider property and a second cap
+    should still feel the longer step.
+
+    A harvested reset writes ``rate_limited_until`` even on the model path: an
+    account-wide usage cap is not a per-model throttle, and ``headroom()`` reads
+    only the provider-level lock. The model lock is still written alongside, so
+    that path loses nothing. When ``resets_at`` is None or already past, the
+    arithmetic is untouched and the write is byte-identical to today.
     """
     if rule.backoff:
         old_level = current.backoff_level
@@ -552,13 +825,18 @@ def _next_health(
         next_level = current.backoff_level
         cooldown_ms = rule.cooldown_ms or 0
     until_ts = now + (cooldown_ms / 1000.0)
+    # A reset the provider itself named beats a backoff we guessed. Guarded on
+    # "in the future" so a stale or misparsed stamp can never SHORTEN a lock.
+    harvested = resets_at if (resets_at is not None and resets_at > now) else None
     if model is not None:
         new_locks = dict(current.model_locks)
         new_locks[model] = until_ts
         return ProviderHealth(
             provider_id=current.provider_id,
             backoff_level=next_level,
-            rate_limited_until=current.rate_limited_until,
+            rate_limited_until=(
+                harvested if harvested is not None else current.rate_limited_until
+            ),
             last_error_at=now,
             model_locks=new_locks,
         )
@@ -570,7 +848,7 @@ def _next_health(
     return ProviderHealth(
         provider_id=current.provider_id,
         backoff_level=next_level,
-        rate_limited_until=until_ts,
+        rate_limited_until=harvested if harvested is not None else until_ts,
         last_error_at=now,
         model_locks=dict(current.model_locks),
     )
@@ -581,6 +859,7 @@ def update_provider_health(
     rule: ErrorRule,
     model: str | None = None,
     now: float | None = None,
+    resets_at: float | None = None,
 ) -> ProviderHealth:
     """Atomically increment backoff state for ``provider_id``.
 
@@ -596,6 +875,15 @@ def update_provider_health(
     because the cooldown ramp is a per-provider property regardless of
     which model errored (Locked Decision 5). When ``model`` is None,
     behavior matches the Plan A baseline.
+
+    ``resets_at`` is the epoch harvested from the refusal body by
+    ``error_taxonomy.normalize``. Supplied and in the future, it becomes
+    ``rate_limited_until`` in place of the computed cooldown, so the lock
+    holds for the real window rather than for a backoff step. It is written
+    to the lock and NOT to the usage snapshot on purpose: ``headroom()``
+    reads the lock with no TTL and drops a snapshot older than
+    ``DEFAULT_USAGE_TTL_SECONDS``, and a snapshot-based write decays to
+    UNKNOWN after five minutes - which never means exhausted.
 
     Does NOT swallow programmer errors: ValueError on a malformed
     ErrorRule, TypeError from a future refactor mismatch, etc.,
@@ -626,16 +914,50 @@ def update_provider_health(
             cursors = _parse_cursors_payload(raw or {})
             cursors, _ = _drop_stale_cursors(cursors, now)
             usage = _parse_usage_payload(raw or {})
+            windows_opened = _parse_windows_opened(raw or {})
 
             current = health_map.get(
                 provider_id, ProviderHealth(provider_id=provider_id)
             )
-            new_health = _next_health(current, rule, now, model=model)
+            new_health = _next_health(
+                current, rule, now, model=model, resets_at=resets_at
+            )
             health_map[provider_id] = new_health
+
+            # A harvested reset is the ONLY exact window boundary footnote ever
+            # sees for a provider with no usage probe. The window that just
+            # refused closes at ``resets_at``, so it opened one window-length
+            # before that, and the projection derived from the pair is right to
+            # the second. Stamped inside the lock we already hold - no second
+            # write, no second lock. No configured length means no stamp, and
+            # the record honestly reads unknown.
+            if resets_at is not None and resets_at > now:
+                span = _record_window_seconds(provider_id)
+                if span:
+                    labels = windows_opened.setdefault(provider_id, {})
+                    opened_at = resets_at - span
+                    prior = labels.get(WINDOW_LABEL)
+                    # Preserve `warned` while the window is the SAME one, and
+                    # never touch a sibling label. Several workers hit one cap
+                    # at once, so a blind overwrite re-armed the once-per-window
+                    # warning on every refusal and `provider_window_closing`
+                    # fired again for a window already reported.
+                    same = (
+                        prior is not None
+                        and abs(float(prior["opened_at"]) - opened_at) < 1.0
+                    )
+                    labels[WINDOW_LABEL] = {
+                        "opened_at": opened_at,
+                        "warned": (
+                            bool(prior.get("warned")) if prior is not None and same else False
+                        ),
+                    }
+
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
                 usage=usage,
+                windows_opened=windows_opened,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -693,11 +1015,13 @@ def reset_provider_health(
                 return
             health_map.pop(provider_id, None)
             usage = _parse_usage_payload(raw)
+            windows_opened = _parse_windows_opened(raw)
             schema_version = int(raw.get("schema_version", SCHEMA_VERSION))
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
                 usage=usage,
+                windows_opened=windows_opened,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -822,12 +1146,14 @@ def write_usage_snapshot(
             cursors = _parse_cursors_payload(raw)
             cursors, _ = _drop_stale_cursors(cursors, now)
             usage = _parse_usage_payload(raw)
+            windows_opened = _parse_windows_opened(raw)
             usage[snapshot.provider_id] = snapshot
             schema_version = int(raw.get("schema_version", SCHEMA_VERSION))
             new_state = ProviderRuntimeState(
                 provider_health=health_map,
                 combo_cursors=cursors,
                 usage=usage,
+                windows_opened=windows_opened,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))
@@ -1278,6 +1604,7 @@ def advance_cursor(
             cursors = _parse_cursors_payload(raw)
             cursors, _ = _drop_stale_cursors(cursors, now)
             usage = _parse_usage_payload(raw)
+            windows_opened = _parse_windows_opened(raw)
 
             new_cursor = _next_cursor(
                 cursors.get(combo_name),
@@ -1293,6 +1620,7 @@ def advance_cursor(
                 provider_health=health_map,
                 combo_cursors=cursors,
                 usage=usage,
+                windows_opened=windows_opened,
                 schema_version=schema_version,
             )
             _write_state_atomic(state_path, _serialize_state(new_state))

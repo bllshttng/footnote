@@ -2207,16 +2207,31 @@ def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None)
     if not tail:
         return
     try:
-        from fno.adapters.providers.error_taxonomy import classify_error
+        from fno.adapters.providers.error_taxonomy import (
+            classify_error,
+            reset_epoch_from,
+        )
         from fno.adapters.providers.loader import effective_active
-        from fno.adapters.providers.runtime_state import update_provider_health
+        from fno.adapters.providers.runtime_state import (
+            record_reset_timezone,
+            update_provider_health,
+        )
 
         rule = classify_error(None, tail)
         if rule is None:
             return
         provider_id = _account_id_for_env(account_env) or effective_active()
         if provider_id:
-            update_provider_health(provider_id, rule)
+            # The tail that proves the death usually also names when the window
+            # reopens. Without it this wrote a seconds-scale backoff over a
+            # multi-hour cap, and the next pick handed the successor the account
+            # that had just refused.
+            update_provider_health(
+                provider_id, rule,
+                resets_at=reset_epoch_from(
+                    tail, record_reset_timezone(provider_id),
+                ),
+            )
     except Exception:  # noqa: BLE001 - never let a health write break teardown
         pass
 
@@ -3024,14 +3039,23 @@ _PID_STOP_POLL_S = 0.1
 
 
 def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
-    """Stop an agent that has no transport id by signalling its recorded pid.
+    """Stop an agent OUT OF BAND, by signalling its recorded pid.
 
-    The last resort after ``stop_agent`` finds no ``short_id``. A registry
-    row can carry a live process and no transport id at all when the spawn
-    receipt never yielded one; refusing there left the
-    operator holding a running worker with no verb that addressed it, which
-    is the duplicate-worker half of the wave-boundary handoff failure --
-    one had to be killed by hand to restore one-writer semantics.
+    This is the arm for a session that cannot answer. ``claude stop`` asks the
+    session to shut ITSELF down, which needs an API call, and the population
+    that most needs stopping is the one whose API is gone: a provider-capped
+    worker refuses once, holds a full session of context, and then burns the
+    whole 30s shellout timeout before the caller raises exit 15 with the
+    process still running. Nothing about that population lacks a transport id,
+    which is why the old scoping of this function -- "the last resort after
+    ``stop_agent`` finds no ``short_id``" -- meant it never ran for the exact
+    workers it saves. A docstring that scopes a capability out of its real
+    population is a capability nobody has.
+
+    It is also still the arm for a row carrying a live process and no transport
+    id at all, which the spawn receipt sometimes never yields; refusing there
+    left the operator holding a running worker with no verb that addressed it,
+    the duplicate-worker half of the wave-boundary handoff failure.
 
     Ownership is re-proved through ``_pid_alive`` immediately before every
     signal. It compares the recorded process-start token, so a pid recycled by
@@ -3222,12 +3246,40 @@ def stop_agent(
             # `short_id` is the whole transport-id chain on this path: only
             # claude rows reach here, and `AgentEntry.session_id` is a property
             # that resolves to `short_id` for claude (HARNESS_SESSION_ID_FIELDS),
-            # so there is no second id to try. Falling back to the recorded pid
-            # is the last resort for a row carrying a live process and no
-            # transport id at all, which used to be refused outright.
+            # so there is no second id to try. A row with no transport id at all
+            # goes straight to the signal arm. A row WITH one still reaches it,
+            # by escalation, when the cooperative stop cannot land - see
+            # `_escalate_to_pid` below.
             short_id = existing.short_id
             if not short_id:
                 return _stop_by_pid(name, existing)
+
+            def _escalate_to_pid() -> Optional[StopResult]:
+                """The cooperative stop could not land: try the signal arm.
+
+                No recovery mechanism may depend on the capped provider.
+                ``claude stop`` needs the session to make an API call, so
+                against a capped worker it can only ever time out. The pid arm
+                needs no API: it re-proves the recorded process-start token
+                immediately before every signal, allows a 5s grace, and refuses
+                a row it cannot prove it owns.
+
+                Returns None when there is nothing provable to signal, or when
+                the signal arm itself refused. "Cannot tell" is not "gone", so
+                the caller must raise on None rather than report a stop it did
+                not achieve - and must not spawn a successor either, or one
+                worktree gets two writers.
+                """
+                if not existing.pid or existing.pid_start_time is None:
+                    return None
+                try:
+                    return _stop_by_pid(name, existing)
+                except DispatchAskError as pid_exc:
+                    print(
+                        f"out-of-band stop for {name!r} also refused: {pid_exc}",
+                        file=sys.stderr,
+                    )
+                    return None
 
             if not is_provider_available("claude"):
                 raise DispatchAskError("claude CLI not on PATH", exit_code=14)
@@ -3241,12 +3293,21 @@ def stop_agent(
                 # the same as not-on-PATH to mirror US1's contract.
                 raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
             except subprocess.TimeoutExpired as exc:
+                # The signature of a capped worker: it cannot answer, so the
+                # cooperative request burns its whole timeout. Escalate BEFORE
+                # emitting, so a successful signal leaves one honest
+                # `agent_stopped` naming the pid arm rather than two events
+                # disagreeing about whether the worker is gone.
+                escalated = _escalate_to_pid()
+                if escalated is not None:
+                    return escalated
                 events.emit(
                     "agent_stopped",
                     name=name,
                     provider="claude",
                     claude_exit=None,
                     timed_out=True,
+                    stopped_by="shellout",
                 )
                 raise DispatchAskError(
                     f"claude stop timed out after {int(shellout_timeout)}s",
@@ -3266,23 +3327,31 @@ def stop_agent(
                 )
                 raise DispatchAskError(f"claude stop failed: {exc}", exit_code=1) from exc
 
-            events.emit(
-                "agent_stopped",
-                name=name,
-                provider="claude",
-                claude_exit=exit_code,
-                short_id=short_id,
-            )
+            def _emit_shellout_stop() -> None:
+                events.emit(
+                    "agent_stopped",
+                    name=name,
+                    provider="claude",
+                    claude_exit=exit_code,
+                    short_id=short_id,
+                    stopped_by="shellout",
+                )
 
             if exit_code != 0:
                 if stderr_text:
                     sys.stderr.write(stderr_text)
                     if not stderr_text.endswith("\n"):
                         sys.stderr.write("\n")
+                escalated = _escalate_to_pid()
+                if escalated is not None:
+                    return escalated
+                _emit_shellout_stop()
                 raise DispatchAskError(
                     f"claude stop {short_id} exited {exit_code}",
                     exit_code=1,
                 )
+
+            _emit_shellout_stop()
 
             _mark_stopped_orphaned(name, existing)
 

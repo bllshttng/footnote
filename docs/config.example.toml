@@ -219,6 +219,10 @@ max_iterations = 40
 [agents]
 # Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb (agents.profiles.<verb>.{provider,model,effort,substrate,permission_mode,route,account}), one rung above agents.defaults in precedence. The verb key is the seed's first token, /-stripped and fno:-namespace-stripped, lowercase (/fno:think and /think resolve alike). The overlay reaches every spawn carrying a slash-verb seed, including autonomous dispatch; an explicit flag always wins. No content-based inference; a table with no matching verb resolves exactly as agents.defaults.
 profiles = {}
+# Ordered fallback chain per node size, consulted ONLY when a provider refuses and the account queue cannot answer (agents.fallback.<S|M|L|default> = a list of {harness,model,effort,substrate,permission_mode,route,account} links). The operator rule 'simple work to a claude sonnet bg thread, complex work to codex' written where a daemon can read it. Give every size more than one link: a claude weekly cap and a z.ai five-hour cap are different meters with different periods, and either can be the one that is down. A link whose own provider reads EXHAUSTED with an unexpired reset is SKIPPED; UNKNOWN is not exhausted and stays eligible. An all-exhausted chain returns empty rather than link zero, because routing into a known-capped provider is worse than holding. Unlike agents.profiles this block REFUSES a malformed value rather than degrading open: degrading open on the failover path spawns a worker at an unintended vendor and bills it.
+fallback = {}
+# Seconds of transcript silence after which `fno agents sweep` reports a worker as silent (default 600). A REPORT and never an action: no stop, no spawn, no claim mutation. A worker whose transcript age is unknowable emits nothing at all, because absence of evidence must not become a finding.
+silence_deadline_seconds = 600
 # Agent-launch confirmation policy (auto/always/never).
 confirm = "auto"
 # Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless.

@@ -63,7 +63,7 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
 from fno.agents.harnesses.claude import ProviderSocketError
@@ -236,6 +236,16 @@ def _close_key(short_id: str) -> str:
     return f"close:{short_id}"
 
 
+def _refused_key(short_id: str, error_class: str) -> str:
+    """Sentinel: ``worker_refused`` has fired once for this id + error class.
+
+    Keyed on the pair rather than the id alone so a quota refusal followed by an
+    auth refusal is two findings, while the SAME refusal re-read on every tick
+    (a capped worker's last turn does not change) stays one.
+    """
+    return f"refused:{short_id}:{error_class}"
+
+
 def recovery_sweep(
     now: datetime,
     cfg,
@@ -281,6 +291,43 @@ def recovery_sweep(
     for c in candidates:
         snap = read_state_fn(c.jobs_dir)
         truth = truth_fn(c)
+
+        # Locked Decision 3: a refusal is affirmative evidence and acts NOW.
+        # Both gates below are built for silence and both swallow a refusal.
+        # ``classify()`` returns NOT_STALE while the transcript mtime is fresh,
+        # and a capped worker's last turn is plain refusal prose with a fresh
+        # mtime; a worker that emitted <promise> earlier reads done and goes to
+        # SKIP_TERMINAL forever. A worker that has SAID it cannot think must not
+        # wait behind either. Both inputs are already in hand, so this costs no
+        # extra read.
+        refusal = classify_worker_refusal(
+            getattr(snap, "output_result", None), truth.get("last_message"),
+            _active_reset_timezone(c.cwd),
+        )
+        refusal_acts = refusal is None or refusal[1] == "output_result"
+        if refusal is not None:
+            _err, _source = refusal
+            _rk = _refused_key(c.short_id, _err.error_class.value)
+            _already = bool(counts.get(_rk))
+            if _source == "transcript":
+                refusal_acts = _transcript_refusal_is_corroborated(_already)
+            if not _already:
+                counts[_rk] = True
+                _observed = truth.get("observed_model")
+                emit("worker_refused", {
+                    "short_id": c.short_id,
+                    "node": _node_id_from_worktree(c.cwd) if c.cwd else None,
+                    "error_class": _err.error_class.value,
+                    "source": _source,
+                    "model": (
+                        _observed.get("model")
+                        if isinstance(_observed, dict) else None
+                    ),
+                    "resets_at": _err.resets_at,
+                    "reset_stamp_unparsed": _err.reset_stamp_unparsed,
+                    "excerpt": _err.body_excerpt,
+                })
+
         truth_state = str(truth.get("state") or "unknown")
         # Probe only behind a terminal promise - every other state is already
         # decided by family 1 alone, so this stays off the hot path.
@@ -331,8 +378,15 @@ def recovery_sweep(
         # per-phase storm-cap inside attempt_swap) and before liveness (a swap
         # re-dispatches a fresh session, it does not need the dead socket).
         if failover_fn is not None and not rotated:
-            err = classify_session_error(getattr(snap, "output_result", None))
-            if err is not None and getattr(err, "triggers_swap", False):
+            # Same evidence the hoisted check already resolved, so a
+            # transcript-sourced refusal reaches failover on the path a death
+            # does. The failover stays HERE, below the staleness gate, on
+            # purpose: the event says "it refused" and fires immediately, while
+            # acting on it wants the second signal that the worker has also
+            # stopped producing turns. Stopping a live worker that retried
+            # through a transient throttle costs more than a tick of patience.
+            err = refusal[0] if (refusal is not None and refusal_acts) else None
+            if err is not None:
                 outcome = failover_fn(c, err)
                 if outcome in ("swapped", "rotated-no-worker", "notified"):
                     # Either way the global active provider rotated, so no
@@ -461,7 +515,9 @@ def _safe_read_state(jobs_dir):
 # 429. So the watchdog is the sole integration point. (cv-59ef0909)
 # ---------------------------------------------------------------------------
 
-def classify_session_error(output_result: Optional[str]):
+def classify_session_error(
+    output_result: Optional[str], reset_timezone: Optional[str] = None
+):
     """Classify a dead session's last ``output.result`` into a ``NormalizedError``.
 
     Returns the ``NormalizedError`` (callers check ``.triggers_swap``) or None
@@ -474,7 +530,113 @@ def classify_session_error(output_result: Optional[str]):
         return None
     from fno.adapters.providers.error_taxonomy import normalize
 
-    return normalize(http_status=None, exit_code=None, body=output_result)
+    return normalize(
+        http_status=None, exit_code=None, body=output_result,
+        reset_timezone=reset_timezone,
+    )
+
+
+#: How much of a live worker's last turn counts as its refusal.
+#:
+#: The transcript source has a false positive the ``output_result`` source
+#: cannot have: a worker whose turn merely DISCUSSES rate limits carries the
+#: taxonomy's bare substrings, and in this repository that is routine - a
+#: worker editing the failover code would do it. Once that worker also goes
+#: stale, the failover branch stops it and re-dispatches its node to another
+#: vendor over a sentence about a cap.
+#:
+#: The first discriminator is position, not a second marker list (Locked
+#: Decision 4). Every refusal measured so far leads with its marker: "Claude
+#: usage limit reached...", "API Error: rate limit exceeded...". Prose about a
+#: refusal usually buries it, so only the leading clause of a live turn is
+#: classified. This narrows the false positives; it does not close them, and a
+#: substring match on a worker's own prose never will. The second
+#: discriminator is in the sweep: see ``_transcript_refusal_is_corroborated``.
+_REFUSAL_LEAD_CHARS = 120
+
+
+def _active_reset_timezone(cwd: Optional[str]) -> Optional[str]:
+    """``reset_timezone`` for the account the candidate is running on, or None.
+
+    Without it the ``worker_refused`` event always reports ``resets_at: null``
+    for a provider that quotes a naive local stamp, which is precisely the
+    z.ai shape the event exists to carry. The later lock write reparses with
+    the record's zone, but it cannot repair an event already on disk.
+
+    Best-effort and project-rooted: the roster is global, so a foreign
+    candidate's active account lives in its own repository.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        from fno.adapters.providers.loader import effective_active, load_providers
+
+        root = _Path(cwd) if cwd else None
+        active = effective_active(repo_root=root)
+        if not active:
+            return None
+        for rec in load_providers(repo_root=root).records:
+            if rec.id == active:
+                return getattr(rec, "reset_timezone", None) or None
+    except Exception:  # noqa: BLE001 - an unresolved zone refuses the stamp, not the event
+        return None
+    return None
+
+
+def classify_worker_refusal(
+    output_result: Optional[str],
+    last_message: Optional[str],
+    reset_timezone: Optional[str] = None,
+):
+    """The provider refusal a candidate is carrying, as ``(err, source)``, or None.
+
+    Two sources, one taxonomy. ``output_result`` is a DEAD session's last result
+    and stays authoritative, so every path that works today keeps its answer.
+    ``last_message`` is the LIVE worker's last turn, already read by the sweep's
+    ``truth_fn``: a capped worker does not die, it answers once with a refusal
+    and then holds a full session of context, so the transcript is the only place
+    its refusal ever appears. Both go through ``classify_session_error`` -> the
+    shipped ``normalize`` rules, so there is no second marker list to drift.
+
+    ``source`` is ``"output_result"`` or ``"transcript"`` and is carried into the
+    event, because "the session died saying this" and "the session is alive
+    saying this" call for different recovery arms.
+
+    Only the LEADING CLAUSE of a live turn is classified - see
+    ``_REFUSAL_LEAD_CHARS``. A dead session's own error text cannot be prose
+    about someone else's cap, so it is read whole.
+    """
+    err = classify_session_error(output_result, reset_timezone)
+    if err is not None and err.triggers_swap:
+        return err, "output_result"
+    lead = last_message[:_REFUSAL_LEAD_CHARS] if last_message else last_message
+    err = classify_session_error(lead, reset_timezone)
+    if err is not None and err.triggers_swap:
+        return err, "transcript"
+    return None
+
+
+def _transcript_refusal_is_corroborated(already_seen: bool) -> bool:
+    """Is a LIVE worker's refusal strong enough to stop it and move its node?
+
+    The event costs nothing when it is wrong; the action costs a stopped worker
+    and a re-dispatched node. So the two are gated differently.
+
+    A dead session's ``output_result`` is its own error text and acts at once,
+    exactly as before. A live worker's turn is prose, and prose about a cap
+    reads the same as a cap to any substring matcher. The independent signal
+    is TIME WITHOUT A NEW TURN: a worker that merely mentioned rate limits and
+    carried on produces a different last turn on the next tick, and its refusal
+    never repeats. A capped worker's last turn never changes, so the same
+    refusal is still there a tick later - which is what ``already_seen`` means,
+    because the once-only sentinel was set by an earlier tick and the current
+    turn still classifies the same way.
+
+    The cost of the gate is one tick of delay, against a fleet that used to
+    stay paused all night. The cost of skipping it is stopping a healthy worker
+    over a sentence.
+    """
+    return already_seen
 
 
 def _node_id_from_worktree(cwd: str) -> Optional[str]:
@@ -539,6 +701,122 @@ def _node_is_done(node: str) -> bool:
     except Exception:  # noqa: BLE001 - a status read must never crash the sweep
         return False
     return False
+
+
+def _node_size(node: str) -> Optional[str]:
+    """The node's ``--size`` (S/M/L), or None.
+
+    Size is already on every node and is already the operator's own
+    simple-versus-complex split, which is why the chain is keyed on it rather
+    than on a second classification nobody maintains. An unreadable graph
+    returns None and the caller reads the ``default`` chain.
+    """
+    try:
+        from fno.graph.load import load_graph
+
+        for entry in load_graph():
+            if entry.get("id") == node:
+                return str(entry.get("size") or "") or None
+    except Exception:  # noqa: BLE001 - a size read must never crash the sweep
+        return None
+    return None
+
+
+def _emit_recovery_event(event_type: str, data: dict) -> None:
+    """Append one canonical event from a non-sweep code path.
+
+    ``_default_failover`` is called as an injected ``failover_fn`` and returns a
+    string; it has no ``emit`` seam. The chain walk still has to say why it
+    stopped, because a silent refusal to spawn is indistinguishable from a
+    fleet with nothing to do - which is the whole failure this node exists to
+    end. Best-effort: a failed emit never breaks the walk.
+    """
+    try:
+        from fno.events import _build, append_event
+        from fno.paths import state_dir
+
+        append_event(_build(event_type, "daemon", data), state_dir() / "events.jsonl")
+    except Exception:  # noqa: BLE001 - a lost event never breaks a recovery arm
+        pass
+
+
+def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
+    """Walk the node's fallback chain one link, or stop and say why.
+
+    Reached at the two points where failover used to give up: a swap that
+    landed somewhere ``/target`` cannot bg-run, and a queue with no alternate
+    account left. Account rotation stays chain position ZERO - same-vendor
+    headroom is cheaper than a vendor swap and it already works - so this only
+    runs after that has been tried.
+
+    Returns the same outcome vocabulary the caller already speaks:
+    ``"swapped"`` when a fresh worker started, ``"rotated-no-worker"`` when
+    nothing was spawned.
+    """
+    cwd = getattr(candidate, "cwd", None)
+    node = _node_id_from_worktree(cwd) if cwd else None
+    if not node:
+        return "rotated-no-worker"
+
+    from fno import fleet_state
+    from fno.agents.spawn_defaults import (
+        link_id,
+        link_to_spawn_flags,
+        resolve_fallback_chain,
+    )
+
+    if _node_is_done(node):
+        # The walk's memory exists to stop ONE node relapping its own links. A
+        # finished node that kept it would read "all-tried" forever and hold on
+        # some unrelated future cap, so the walk is dropped with the node. Done
+        # here rather than in ``_redispatch``: that path is reached on every
+        # respawn and must stay free of state-root I/O.
+        fleet_state.clear_node(node)
+        return "rotated-no-worker"
+
+    tried = fleet_state.links_tried(node)
+    try:
+        # Rooted at the CANDIDATE's worktree. The roster is global and a
+        # candidate can belong to another project, whose chain, whose settings
+        # and whose provider health are all different from the daemon's.
+        chain = resolve_fallback_chain(
+            _node_size(node), exclude=tried, repo_root=cwd,
+        )
+    except Exception as exc:  # noqa: BLE001 - a malformed chain REFUSES, loudly
+        # Locked Decision 11. Degrading open here would spawn a worker at an
+        # unintended vendor and bill it, so the worker stays alive, the node
+        # stays claimed, and the config error is named.
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": f"chain-malformed: {exc}"[:400],
+        })
+        return "rotated-no-worker"
+
+    if not chain:
+        _emit_recovery_event("failover_exhausted", {
+            "node": node,
+            "short_id": candidate.short_id,
+            "links_tried": ",".join(tried),
+            "reason": "all-tried" if tried else "chain-empty",
+        })
+        return "rotated-no-worker"
+
+    link = chain[0]
+    # Recorded BEFORE the spawn, not after: a link whose spawn dies half-way
+    # must still count as tried, or the next tick walks into the same failing
+    # vendor again and the chain loops. A chain that loops is a worse failure
+    # than a chain that ends.
+    fleet_state.record_link(node, link_id(link))
+    # No emit here. The sweep emits exactly one `failover_swapped` for the
+    # "swapped" outcome, and a second one from in here would record two swaps
+    # for one replacement worker. Which link was taken stays readable in the
+    # walk this just wrote, and `failover_exhausted` names them all when the
+    # chain ends.
+    if _redispatch(candidate, flags=link_to_spawn_flags(link)):
+        return "swapped"
+    return "rotated-no-worker"
 
 
 # spawn_think names a birth pass ``think-<node>-<slug>`` and every other pass
@@ -639,17 +917,28 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
-def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool]] = None) -> bool:
+def _redispatch(
+    candidate: "Candidate",
+    *,
+    pre_spawn: Optional[Callable[[], bool]] = None,
+    flags: Optional[Sequence[str]] = None,
+) -> bool:
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
     actually launched (spawn exit 0).
 
-    Caller guarantees the new active provider's cli is ``claude`` before calling,
-    so the substrate is ``bg`` (claude-only) and ``--provider claude`` selects
-    the now-active claude record the swap installed in settings.yaml. (A
-    non-claude swap cannot bg-redispatch a multi-phase /target, so the caller
-    skips this entirely — codex P1.)
+    With no ``flags``, the caller guarantees the new active provider's cli is
+    ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
+    selects the now-active claude record the swap installed in settings.yaml.
+
+    ``flags`` carries one fallback-chain link's axis bundle instead, which is
+    how a refused node reaches ANOTHER VENDOR. That is the axis the old
+    non-claude dead end refused, and it is exactly the axis the operator's own
+    rule names: simple work to a claude sonnet bg thread, complex work to codex.
+    A codex link resolves ``--substrate pane``, because the Rust client rejects
+    ``--substrate bg`` for a non-claude harness - a real difference in the spawn
+    call, not a naming change.
 
     Ordered reuse-first sequence (x-370f residual 1): stop the worker, then
     ``fno claim force-release`` the node claim (the verified reliability gap —
@@ -713,9 +1002,10 @@ def _redispatch(candidate: "Candidate", *, pre_spawn: Optional[Callable[[], bool
         # --provider claude: the swap already installed the new claude record as
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
+        axis = list(flags) if flags else ["--harness", "claude", "--substrate", "bg"]
         proc = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", "--harness", "claude",
-             "--substrate", "bg", "--cwd", cwd, "--name", agent,
+            [*_subprocess_util.fno_py_cmd(), "agents", "spawn", *axis,
+             "--cwd", cwd, "--name", agent,
              f"/target --no-merge {node}"],
             # x-9d11: the env carrier backs the flag - a replacement worker
             # that drops the flag post-compaction still folds the refusal at
@@ -1017,10 +1307,14 @@ def _default_failover(candidate: "Candidate", error) -> str:
             snap = read_active_provider_atomic(settings_path=settings_path)
         except Exception:  # noqa: BLE001
             return "rotated-no-worker"
-        # Autonomous /target only bg-runs on claude; a non-claude target cannot
-        # be bg-redispatched (the Rust client rejects --substrate bg for it).
+        # A non-claude swap cannot bg-redispatch a /target (the Rust client
+        # rejects --substrate bg for it), so this used to dead-end here and fall
+        # through to the held-by-design no-op - which recovery.py records as a
+        # documented no-op for every bypassPermissions recipient, and every
+        # autonomous worker is one. Codex sat completely unused all session. The
+        # chain reaches the harness axis that dead end refused.
         if snap.harness != "claude":
-            return "rotated-no-worker"
+            return _chain_redispatch(candidate, reason="swap-not-bg-runnable")
         # repo_root was already resolved above, before attempt_swap, so the
         # materialize_managed gate and every downstream auto_switch check
         # here read the same value.
@@ -1057,12 +1351,24 @@ def _default_failover(candidate: "Candidate", error) -> str:
     if result.decision is SwapDecision.BLOCKED_THRASH:
         return "blocked-thrash"
     if result.decision is SwapDecision.QUEUE_EXHAUSTED:
-        return "queue-exhausted"
+        # The single-account case, and the case the operator actually lives in.
+        # The account queue is chain position zero and it has now answered
+        # "nothing left"; the harness-and-model chain is what comes next. A
+        # chain that yields nothing falls back to the original outcome, so a
+        # fresh install with no configured chain behaves exactly as today.
+        outcome = _chain_redispatch(candidate, reason="queue-exhausted")
+        return outcome if outcome == "swapped" else "queue-exhausted"
     return "no-swap"
 
 
 def _prune_keep(key: str, live: set) -> bool:
     """Keep a counts entry only while its session is still a live candidate."""
+    if key.startswith("refused:"):
+        # ``refused:<short_id>:<error_class>`` - the id is the middle field, so
+        # this prefix cannot share the plain suffix-strip below. Without an arm
+        # here every refusal key survives forever and the counts file grows
+        # unbounded.
+        return key.split(":")[1] in live
     for prefix in ("capped:", "close:"):
         if key.startswith(prefix):
             return key[len(prefix):] in live

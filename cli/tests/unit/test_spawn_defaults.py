@@ -905,3 +905,293 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
             profiles={"target": profile_fields},
         )
         assert forbidden_value not in out, (explicit_flags, profile_fields)
+
+
+# ---------------------------------------------------------------------------
+# The fallback chain (AC5-*)
+# ---------------------------------------------------------------------------
+
+
+class _ChainSettings:
+    def __init__(self, agents):
+        self.agents = agents
+
+
+def _chain_settings(table):
+    from fno.config import AgentsBlock
+
+    return _ChainSettings(AgentsBlock(fallback=table))
+
+
+_OPERATOR_RULE = {
+    "S": [
+        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
+        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "medium"},
+    ],
+    "L": [
+        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
+    ],
+    "default": [
+        {"harness": "claude", "model": "sonnet", "substrate": "bg"},
+        {"harness": "codex", "model": "gpt-5.6-sol", "effort": "high"},
+    ],
+}
+
+
+class TestResolveFallbackChain:
+    def test_ac5_hp_size_picks_the_operators_own_split(self, monkeypatch) -> None:
+        # "Simple work goes to a claude sonnet background thread, complex work
+        # goes to codex" - the sentence, executable.
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
+        st = _chain_settings(_OPERATOR_RULE)
+
+        assert sd.link_id(sd.resolve_fallback_chain("L", settings=st)[0]) == (
+            "codex/gpt-5.6-sol"
+        )
+        assert sd.link_id(sd.resolve_fallback_chain("S", settings=st)[0]) == (
+            "claude/sonnet"
+        )
+
+    def test_every_size_has_more_than_one_link(self, monkeypatch) -> None:
+        # A chain with one link is not a chain: a claude weekly cap and a z.ai
+        # five-hour cap are different meters, and either can be the one down.
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
+        st = _chain_settings(_OPERATOR_RULE)
+        for size in ("S", "L", "M"):
+            assert len(sd.resolve_fallback_chain(size, settings=st)) >= 2, size
+
+    def test_an_absent_size_reads_default(self, monkeypatch) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
+        st = _chain_settings(_OPERATOR_RULE)
+        assert sd.link_id(sd.resolve_fallback_chain("M", settings=st)[0]) == (
+            "claude/sonnet"
+        )
+        assert sd.link_id(sd.resolve_fallback_chain(None, settings=st)[0]) == (
+            "claude/sonnet"
+        )
+
+    def test_an_absent_table_yields_no_spawns(self) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        assert sd.resolve_fallback_chain("L", settings=_chain_settings({})) == []
+
+    def test_ac5_edge_an_exhausted_link_is_skipped(self, monkeypatch) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(
+            sd, "link_is_exhausted",
+            lambda link, now=None, repo_root=None: sd.link_id(link) == "codex/gpt-5.6-sol",
+        )
+        chain = sd.resolve_fallback_chain("L", settings=_chain_settings(_OPERATOR_RULE))
+        assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
+
+    def test_ac5_edge_an_all_exhausted_chain_returns_empty(self, monkeypatch) -> None:
+        # NOT link zero. Routing into a known-capped provider is worse than
+        # holding, and holding is what an empty chain makes the caller do.
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: True)
+        assert sd.resolve_fallback_chain(
+            "L", settings=_chain_settings(_OPERATOR_RULE)
+        ) == []
+
+    def test_an_already_spent_link_is_not_offered_again(self, monkeypatch) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(sd, "link_is_exhausted", lambda link, now=None, repo_root=None: False)
+        chain = sd.resolve_fallback_chain(
+            "L", exclude=["codex/gpt-5.6-sol"],
+            settings=_chain_settings(_OPERATOR_RULE),
+        )
+        assert [sd.link_id(x) for x in chain] == ["claude/sonnet"]
+
+
+class TestChainValidatorRefuses:
+    """AC5-NEG: the failover path is where degrading open costs money.
+
+    The refusal lives on the READ, not on the load. A field validator would
+    fail load_settings() process-wide, so one typo would make every fno command
+    raise and kill the pr-watch tick at its settings phase - taking down the
+    daemon that runs the failover, which is worse than the mis-spawn it
+    prevents.
+    """
+
+    def _refuses(self, table):
+        import pytest as _pytest
+
+        from fno.agents.spawn_defaults import (
+            FallbackConfigError,
+            resolve_fallback_chain,
+        )
+
+        with _pytest.raises(FallbackConfigError) as exc:
+            resolve_fallback_chain("L", settings=_chain_settings(table))
+        return str(exc.value)
+
+    def test_an_out_of_enum_harness_is_refused_by_name(self) -> None:
+        message = self._refuses({"L": [{"harness": "banana", "model": "x"}]})
+        assert "banana" in message
+        assert "agents.fallback.L[0].harness" in message
+
+    def test_an_unknown_size_key_is_refused_by_name(self) -> None:
+        assert "agents.fallback.XL" in self._refuses({"XL": [{"harness": "codex"}]})
+
+    def test_a_non_list_chain_is_refused(self) -> None:
+        assert "agents.fallback.L" in self._refuses({"L": "codex"})
+
+    def test_a_non_table_link_is_refused(self) -> None:
+        assert "agents.fallback.L[0]" in self._refuses({"L": ["codex"]})
+
+    def test_a_malformed_chain_never_fails_the_config_load(self) -> None:
+        # The whole point of moving the refusal: every one of these loads.
+        from fno.config import AgentsBlock
+
+        for bad in (
+            {"XL": [{"harness": "codex"}]},
+            {"L": "codex"},
+            {"L": ["codex"]},
+            {"L": [{"harness": "banana"}]},
+            "banana",
+        ):
+            AgentsBlock(fallback=bad)
+
+    def test_the_profiles_table_still_degrades_open(self) -> None:
+        # The contrast that makes the refusal deliberate: a typo in profiles
+        # must never brick ordinary spawning.
+        from fno.config import AgentsBlock
+
+        assert AgentsBlock(profiles="banana").profiles == {}
+
+    def test_an_empty_table_is_legal(self) -> None:
+        from fno.config import AgentsBlock
+
+        assert AgentsBlock(fallback={}).fallback == {}
+
+
+class TestLinkToSpawnFlags:
+    def test_no_new_axis_vocabulary(self) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        codex, claude = sd.validate_fallback(_OPERATOR_RULE)["L"]
+        assert sd.link_to_spawn_flags(codex) == [
+            "-H", "codex", "-m", "gpt-5.6-sol", "--effort", "high",
+            "--substrate", "pane",
+        ]
+        assert sd.link_to_spawn_flags(claude) == [
+            "-H", "claude", "-m", "sonnet", "--substrate", "bg",
+        ]
+
+    def test_a_codex_link_defaults_to_a_pane_not_bg(self) -> None:
+        # The Rust client rejects --substrate bg for a non-claude harness, so
+        # this is a real difference in the spawn call, not a naming change.
+        from fno.agents import spawn_defaults as sd
+
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        flags = sd.link_to_spawn_flags(link)
+        assert "--substrate" in flags
+        assert flags[flags.index("--substrate") + 1] == "pane"
+
+    def test_effort_alone_does_not_make_two_links_one_destination(self) -> None:
+        # Retrying the same vendor at a different reasoning setting does not
+        # answer a cap, so the walk's memory key ignores effort.
+        from fno.agents import spawn_defaults as sd
+
+        a, b = sd.validate_fallback({"L": [
+            {"harness": "codex", "model": "m", "effort": "high"},
+            {"harness": "codex", "model": "m", "effort": "low"},
+        ]})["L"]
+        assert sd.link_id(a) == sd.link_id(b)
+
+
+class TestLinkIdentityIncludesTheAccountAxis:
+    def test_two_accounts_on_one_model_are_two_destinations(self) -> None:
+        # An account names a different bill and a different meter. Folding two
+        # links together spends the first and skips the second as spent.
+        from fno.agents import spawn_defaults as sd
+
+        a, b = sd.validate_fallback({"L": [
+            {"harness": "claude", "model": "sonnet", "account": "primary"},
+            {"harness": "claude", "model": "sonnet", "account": "secondary"},
+        ]})["L"]
+        assert sd.link_id(a) != sd.link_id(b)
+
+    def test_an_unpinned_link_keeps_the_bare_identity(self) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        assert sd.link_id(link) == "codex/m"
+
+    def test_the_second_account_is_still_offered_after_the_first(
+        self, monkeypatch
+    ) -> None:
+        from fno.agents import spawn_defaults as sd
+
+        monkeypatch.setattr(
+            sd, "link_is_exhausted",
+            lambda link, now=None, repo_root=None: False, raising=True,
+        )
+        table = {"L": [
+            {"harness": "claude", "model": "sonnet", "account": "primary"},
+            {"harness": "claude", "model": "sonnet", "account": "secondary"},
+        ]}
+        chain = sd.resolve_fallback_chain(
+            "L", exclude=["claude/sonnet@primary"],
+            settings=_chain_settings(table),
+        )
+        assert [sd.link_id(x) for x in chain] == ["claude/sonnet@secondary"]
+
+
+class TestForeignProjectRooting:
+    def test_the_chain_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
+        # The recovery roster is global. A foreign worker resolving the
+        # daemon's chain would spawn on a vendor its own project never
+        # authorized.
+        from fno.agents import spawn_defaults as sd
+
+        seen = {}
+
+        def _for_repo(root):
+            seen["root"] = root
+            return _chain_settings(_OPERATOR_RULE)
+
+        monkeypatch.setattr(
+            "fno.config.load_settings_for_repo", _for_repo, raising=True
+        )
+        monkeypatch.setattr(
+            sd, "link_is_exhausted",
+            lambda link, now=None, repo_root=None: False, raising=True,
+        )
+        sd.resolve_fallback_chain("L", repo_root=str(tmp_path))
+        assert str(seen["root"]) == str(tmp_path)
+
+    def test_headroom_is_read_from_the_candidates_repo(self, monkeypatch, tmp_path):
+        from fno.agents import spawn_defaults as sd
+
+        seen = {}
+
+        class _V:
+            state = object()
+
+        monkeypatch.setattr(
+            sd, "_harness_records",
+            lambda harness, repo_root=None: [type("R", (), {"id": "acct"})()],
+            raising=True,
+        )
+
+        def _headroom(pid, now=None, repo_root=None):
+            seen["root"] = repo_root
+            return _V()
+
+        monkeypatch.setattr(
+            "fno.adapters.providers.runtime_state.headroom", _headroom, raising=True
+        )
+        link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
+        sd.link_is_exhausted(link, repo_root=str(tmp_path))
+        assert str(seen["root"]) == str(tmp_path)
