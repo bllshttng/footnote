@@ -198,4 +198,7 @@ def test_medium_table_covers_exactly_twelve_lessons(tmp_path):
     assert "is missing" in _coverage_errors(copied, tmp_path)[0]
     copied.write_text(readme.read_text())
     (tmp_path / "L99-extra.md").write_text("# Extra\n")
-    assert "has no medium-table row" in _coverage_errors(copied, tmp_path)[0]
+    assert any(
+        "has no medium-table row" in error
+        for error in _coverage_errors(copied, tmp_path)
+    )

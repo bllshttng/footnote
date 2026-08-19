@@ -9,7 +9,7 @@ A recording script is the exact terminal run, expected output, and edit list for
 | lesson | title | medium | file | status |
 |--------|-------|--------|------|--------|
 | L01 | Install and prove it | cast | `L01-install-and-prove-it.md` | planned |
-| L02 | Your first shipped PR | video | `L02-your-first-shipped-pr.md` | planned |
+| L02 | Your first shipped PR | video | `L02-your-first-shipped-pr.md` | scripted |
 | L03 | How done is decided | video | `L03-how-done-is-decided.md` | planned |
 | L04 | Design before code | video | `L04-design-before-code.md` | planned |
 | L06 | Execute a plan | cast | `L06-execute-a-plan.md` | planned |
