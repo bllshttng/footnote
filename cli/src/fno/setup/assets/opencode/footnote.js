@@ -88,7 +88,10 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
       // to silence and never blocks the session.
       if (event?.type === "session.created") {
         const sid = event.properties?.sessionID
-        if (sid) {
+        // Presence guard first (same cheap read as the idle handler): a plain
+        // native session pays nothing, and `fno whoami` would exit 3 on it and
+        // log a spurious error on every session creation.
+        if (sid && fnoSessionId(dir)) {
           try {
             const out = await $`cd ${dir} && fno whoami 2>/dev/null`.quiet().text()
             const crown = (out.match(/^crown:.*$/m) || [])[0]

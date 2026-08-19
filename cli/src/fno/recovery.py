@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -972,11 +973,30 @@ def _redispatch(
                 cwd=cwd, capture_output=True, timeout=30, check=False,
             )
             if stopped.returncode != 0:
-                # Stop failed → the worker may still be live. force-releasing its
-                # claim (an admin override that drops it regardless of holder) and
-                # then spawning would put two /target workers on one node. Bail to
-                # the nudge to preserve the at-most-one-worker invariant (codex P2).
-                return False
+                out = (stopped.stdout or b"") + (stopped.stderr or b"")
+                text = out.decode("utf-8", "replace")
+                m = re.search(r"fno mux pane kill (\S+):(\d+)", text)
+                if m:
+                    # The daemon refuses `stop` on a pane row and names the verb
+                    # that reaches it (daemon.rs handle_stop). This caller is a
+                    # subprocess, so honor the named verb instead of treating the
+                    # refusal as "worker may still be live" - which would degrade
+                    # every pane-worker failover to a nudge. The pane kill does
+                    # not touch the registry row; the claim release below still
+                    # owns that half.
+                    killed = subprocess.run(
+                        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
+                         "--session", m.group(1), m.group(2)],
+                        cwd=cwd, capture_output=True, timeout=30, check=False,
+                    )
+                    if killed.returncode != 0:
+                        return False
+                else:
+                    # Stop failed → the worker may still be live. force-releasing its
+                    # claim (an admin override that drops it regardless of holder) and
+                    # then spawning would put two /target workers on one node. Bail to
+                    # the nudge to preserve the at-most-one-worker invariant (codex P2).
+                    return False
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.

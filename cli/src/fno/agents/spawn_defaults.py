@@ -744,7 +744,9 @@ def _implied_vendor(model: Optional[str]) -> Optional[str]:
     return _MODEL_WORD_VENDORS.get(base)
 
 
-def _warn_model_vendor_mismatch(argv: Sequence[str], err: IO[str]) -> None:
+def _warn_model_vendor_mismatch(
+    argv: Sequence[str], err: IO[str], env: Optional[Mapping[str, str]] = None
+) -> None:
     """Advisory warning when a model string implies a vendor the resolved lane
     does not match (a glm-* model with no zai route, a gpt-* under a claude
     harness). Warn, never refuse: the pairing is legal and passthrough is
@@ -765,7 +767,19 @@ def _warn_model_vendor_mismatch(argv: Sequence[str], err: IO[str]) -> None:
         return
     lane = (_flag_value(toks, "--provider", "-P") or "").strip().lower() or None
     if not lane:
+        # Same lane resolution as the model/effort branches: an explicit -H,
+        # else harness inference from the ambient session, else builtin claude.
+        # Hardcoding claude here would name anthropic as the lane inside a
+        # codex-ambient session and fire a false warning for a correctly
+        # vendored gpt-* model - the noise shape that hides the real misroute.
         harness = (_flag_value(toks, "--harness", "-H") or "").strip().lower()
+        if not harness:
+            try:
+                from fno.dispatch_flags import resolve_dispatch_provider
+
+                harness = resolve_dispatch_provider(None, env=env)[0] or ""
+            except Exception:
+                harness = ""
         lane = _HARNESS_DEFAULT_VENDOR.get(harness or "claude")
     if not lane or lane == implied:
         return
@@ -856,7 +870,7 @@ def inject_spawn_defaults(
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account
     ):
-        _warn_model_vendor_mismatch(out, err)
+        _warn_model_vendor_mismatch(out, err, env)
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -1184,7 +1198,7 @@ def inject_spawn_defaults(
         # the off-pane passthrough gate re-runs on the final argv, not just the
         # operator's.
         _refuse_off_pane_passthrough(out[1:], err)
-    _warn_model_vendor_mismatch(out, err)
+    _warn_model_vendor_mismatch(out, err, env)
     return out
 
 

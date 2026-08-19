@@ -933,7 +933,11 @@ async fn stop_keeps_non_pane_noop_receipt() {
         row.harness = Some("codex".into());
     })
     .unwrap();
-    let _daemon = start_daemon(&home);
+    // The reshaped row (empty short_id, no pid, recorded live) is the stale-ask
+    // shape, and the startup reconcile sweep would settle it to Exited before
+    // the stop call lands - which answers `already_exited`, not the no-op arm
+    // under test. Hold the sweep, the documented lever for a seeded row.
+    let _daemon = start_daemon_env(&home, &[("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")]);
 
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     let resp = call(

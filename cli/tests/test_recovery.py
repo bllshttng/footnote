@@ -1552,7 +1552,7 @@ class TestRedispatch:
         monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: node)
         monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
 
-    def _patch_run(self, monkeypatch, *, stop_rc=0, force_release_rc=0, spawn_rc=0):
+    def _patch_run(self, monkeypatch, *, stop_rc=0, stop_out=b"", force_release_rc=0, spawn_rc=0):
         """Stub subprocess.run; record the (markered) calls for assertions."""
         from types import SimpleNamespace
         import subprocess as sp
@@ -1562,7 +1562,9 @@ class TestRedispatch:
         def fake_run(cmd, **kw):
             calls.append(cmd)
             if cmd[:3] == ["fno-py", "agents", "stop"]:
-                return SimpleNamespace(returncode=stop_rc)
+                return SimpleNamespace(returncode=stop_rc, stdout=stop_out, stderr=b"")
+            if cmd[:3] == ["fno-py", "mux", "pane", "kill"]:
+                return SimpleNamespace(returncode=0)
             # Token containment, not a 3-slice: `claim force-release` became
             # `claim release --force`, and a prefix compare against a 4-token
             # marker is never true - it made this stub return the default 0 and
@@ -1617,6 +1619,28 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand()) is False
         assert self._index_of(calls, ["fno-py", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+
+    def test_pane_refusal_runs_the_named_pane_kill_then_rotates(self, monkeypatch):
+        # The daemon refuses `agents stop` on a pane row and NAMES the pane-kill
+        # verb with the row's own ref. The failover honors it and keeps
+        # rotating; treating the refusal as "may still be live" would degrade
+        # every pane-worker failover to a nudge.
+        self._patch_resolve(monkeypatch)
+        refusal = (
+            b'agent w is a pane worker; `stop` reaches no pane and would report '
+            b'a stop it did not perform. Kill the pane: `fno mux pane kill '
+            b'main:10`. The registry row survives that.'
+        )
+        calls = self._patch_run(monkeypatch, stop_rc=1, stop_out=refusal)
+        assert recovery._redispatch(self._cand()) is True
+        kill = self._index_of(
+            calls, ["fno-py", "mux", "pane", "kill", "--session", "main", "10"]
+        )
+        assert kill is not None, "the named pane-kill verb ran"
+        fr = self._index_of(calls, ["fno-py", "claim", "release", "--force"])
+        spawn = self._index_of(calls, ["fno-py", "agents", "spawn"])
+        assert fr is not None and spawn is not None
+        assert kill < fr < spawn
 
     def test_force_release_failure_skips_spawn(self, monkeypatch):
         # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.

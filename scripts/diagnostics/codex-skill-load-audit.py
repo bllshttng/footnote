@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audit codex rollout transcripts for skill-load by prompt shape.
 
-Answers one question (x-0daa wave 1): when a codex worker is spawned with a
+Answers one question: when a codex worker is spawned with a
 wrapped prose prompt ("run $fno:target x-.... <prose>") instead of a bare
 verb-first prompt ("$fno:target x-...."), does the skill body reach context
 before the first tool call?

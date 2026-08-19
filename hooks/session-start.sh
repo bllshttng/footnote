@@ -185,8 +185,12 @@ fi
 # 3. fno whoami — operational context for the current session
 #    (fleet → walker → session stack, gates, provider). Helps the agent
 #    re-orient after a fresh start or compaction.
+#    Skipped on codex: the dedicated inject-fno-agent-whoami SessionStart entry
+#    in codex-hooks.json owns it there with its own token budget, because the
+#    combined payload below is truncated at ~2500 tokens and the whoami block
+#    sits past the cut. Everywhere else this block is the only carrier.
 whoami_content=""
-if [[ -f "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" ]]; then
+if [[ "$PLATFORM" != "codex" && -f "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" ]]; then
     raw_whoami=$(bash "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" 2>/dev/null || echo "")
     if [[ -n "$raw_whoami" ]]; then
         whoami_content=$(echo "$raw_whoami" | jq -r '.hookSpecificOutput.additionalContext // .additional_context // empty' 2>/dev/null || echo "$raw_whoami")
