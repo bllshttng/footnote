@@ -507,9 +507,18 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let outcome = restart_result
         .expect("restart task joins")
         .expect("restart over a large roster succeeds");
+    // The teardown shapes, named exhaustively so that anything else still
+    // fails this test. All three describe one event: the incumbent's socket
+    // went away with a request in flight. Which one surfaces depends on where
+    // in the exchange the SIGTERM landed and on the platform. macOS tends to
+    // give the clean EOF our framing reports as "connection closed", while
+    // Linux reports ECONNRESET or EPIPE for the same teardown, which is what
+    // made the macOS-only spelling pass here and fail in CI.
+    const TEARDOWN_SHAPES: [&str; 3] = ["connection closed", "connection reset", "broken pipe"];
     for f in &failures {
+        let lowered = f.to_lowercase();
         assert!(
-            f.contains("connection closed"),
+            TEARDOWN_SHAPES.iter().any(|shape| lowered.contains(shape)),
             "a verb failed during the restart storm for a reason other than \
              racing the teardown: {f}"
         );
