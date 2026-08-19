@@ -12,6 +12,7 @@
 #
 # Forgetting a gate is refused at runtime by config.autonomy.enabled.
 # Forgetting to REGISTER a new spawner is refused here, at CI.
+cli/src/fno/agents/outage_handoff.py::spawn_successor_exact  # provider outage handoff (config.recovery.watchdog = handoff)
 cli/src/fno/backlog/advance.py::_spawn_worker  # advance / dispatch_lanes / epic converge (config.auto_continue.enabled)
 cli/src/fno/backlog/groom.py::_spawn_groom_worker  # groom (config.groom.enabled)
 cli/src/fno/cli.py::  # NOT a spawn site: LAZY_SUBCOMMANDS declares "agents" as a command group
