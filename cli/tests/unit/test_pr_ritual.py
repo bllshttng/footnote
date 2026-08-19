@@ -285,6 +285,31 @@ def test_reconcile_closed_still_reads_ok(tmp_path, capsys):
     assert "step=reconcile status=ok detail=closed=1" in out
 
 
+def test_leg_stamp_scopes_reconcile_to_pr_number(tmp_path, capsys):
+    """x-59a6 AC4-HP: leg_stamp routes through plural (--pr-number) reconcile
+    rather than the old bare full sweep, so a multi-node PR's trailer claims
+    get bound here, not just whichever node happens to already carry a ref."""
+    r = _bare(tmp_path, FakeRunner(reconcile_closed=["x-a1", "x-a2"]), pr=42)
+    r.leg_stamp()
+    sub = _argv_sub(r.runner.calls, "backlog")
+    assert sub is not None and "reconcile" in sub
+    assert "--pr-number" in sub and "42" in sub
+
+
+def test_leg_advance_never_keys_off_a_single_closed_id(tmp_path):
+    """x-59a6: --closed keys advance's own dependents check off ONE id, and
+    leg_stamp's reconcile already dispatched dependents for every node it
+    closed - passing node_ids[0] here would silently drop the 2nd+ closed
+    node's dependents from this leg's (redundant) coverage."""
+    r = _bare(tmp_path, FakeRunner(), node_ids=["x-b1", "x-b2"])
+    captured: dict = {}
+    r._stream = lambda step, argv, timeout: captured.update(step=step, argv=argv)
+    r.leg_advance()
+    assert captured["step"] == "advance"
+    assert "advance" in captured["argv"]
+    assert "--closed" not in captured["argv"]
+
+
 def test_reconcile_no_drift_is_distinguishable_from_a_held_close(tmp_path, capsys):
     """"closed=0" alone covered three outcomes; with candidates empty the
     receipt now says no-drift (found no node), distinct from held-open."""

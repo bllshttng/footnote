@@ -3,11 +3,17 @@
 The ship-phase provenance stamp that gave this file its name moved to
 `fno backlog update --pr-number` (the PR-link choke point every shipped node
 passes through). What remains here is the coverage the deletion nearly took
-with it: the codex P1/P2 cross-repo collision guards on `_find_pr_node_id`,
-and the url-only backfill / scoped close / unsuppressed-failure behavior of
-`_reconcile_merged_pr_node` and `_on_confirmed_merge`. These functions still
-run on every confirmed merge, so losing the tests would let a future
-refactor regress the cross-repo safety they pin.
+with it: the codex P1/P2 cross-repo collision guards on `_find_pr_node_id`
+(unused by `_reconcile_merged_pr_node` since x-59a6, but kept as a tested
+utility), and the repo-scoped delegation / unsuppressed-failure behavior of
+`_reconcile_merged_pr_node` and `_on_confirmed_merge`. Those two now
+delegate entirely to `backlog reconcile --pr-number/--repo` (x-59a6) rather
+than resolving and stamping one node by hand, so a PR naming several nodes
+closes all of them, not just the one this process happens to find first;
+the plural binding itself is tested in test_pr_closure.py and
+test_backlog_reconcile.py. These functions still run on every confirmed
+merge, so losing the tests here would let a future refactor regress the
+repo-scoping-is-mandatory guarantee they pin.
 """
 from __future__ import annotations
 
@@ -106,9 +112,13 @@ def test_find_pr_node_id_number_scoped_to_our_repo():
     assert M._find_pr_node_id(entries, 9, f"{_FOOT}/999") == "ab-foot"
 
 
-def test_reconcile_merged_pr_node_stamps_number_and_closes(tmp_path, monkeypatch):
-    # A node linked ONLY by pr_url (no pr_number) is invisible to bare reconcile;
-    # fno pr merge finds it by url, stamps the number, runs the scoped close.
+def test_reconcile_merged_pr_node_delegates_to_pr_number_reconcile(tmp_path, monkeypatch):
+    # x-59a6: this call site no longer resolves a node or stamps pr_number
+    # itself - it delegates entirely to `backlog reconcile --pr-number`,
+    # which binds every node the PR's exact Backlog-Closure trailer names
+    # (not just the one this process happens to find first) before running
+    # the existing close scan. Repo scoping is explicit, resolved from the
+    # PR's own url, never left to a cwd guess.
     url = f"{_FOOT}/777"
     g = _make_graph(tmp_path, [{"id": "ab-recon001", "title": "t", "pr_url": url}])
     _patch(monkeypatch, g)
@@ -117,11 +127,10 @@ def test_reconcile_merged_pr_node_stamps_number_and_closes(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
-    from fno.graph.store import read_graph
-    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
-    assert node["pr_number"] == 777
     assert len(calls) == 1
-    assert calls[0][-4:] == ["backlog", "reconcile", "--node", "ab-recon001"]
+    assert calls[0][-6:] == [
+        "backlog", "reconcile", "--pr-number", "777", "--repo", "bllshttng/footnote",
+    ]
 
 
 def test_reconcile_does_not_clobber_existing_primary(tmp_path, monkeypatch):
@@ -160,7 +169,11 @@ def test_reconcile_surfaces_subprocess_failure(tmp_path, monkeypatch, capsys):
     assert "reconcile for PR #321" in err and "failed" in err
 
 
-def test_reconcile_merged_pr_node_noop_without_matching_node(tmp_path, monkeypatch):
+def test_reconcile_merged_pr_node_delegates_even_without_a_locally_known_node(tmp_path, monkeypatch):
+    # x-59a6: this call site no longer looks up a node before delegating - a
+    # PR with no LOCALLY-matching node might still bind via its trailer
+    # (a fresh node never seen before) or the reverse branch-name map, both
+    # of which only `backlog reconcile --pr-number` itself can resolve.
     g = _make_graph(tmp_path, [{"id": "ab-other01", "title": "t",
                                 "pr_number": 1, "pr_url": f"{_FOOT}/1"}])
     _patch(monkeypatch, g)
@@ -169,7 +182,10 @@ def test_reconcile_merged_pr_node_noop_without_matching_node(tmp_path, monkeypat
     calls = []
     monkeypatch.setattr(M, "run", _stub_run(calls))
     M._reconcile_merged_pr_node(999, cwd=str(tmp_path))
-    assert calls == []  # no node for PR #999 -> nothing closed
+    assert len(calls) == 1
+    assert calls[0][-6:] == [
+        "backlog", "reconcile", "--pr-number", "999", "--repo", "bllshttng/footnote",
+    ]
 
 
 def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
@@ -187,4 +203,6 @@ def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
     node = next(e for e in read_graph(g) if e["id"] == "ab-conf001")
     assert node.get("merge_status") == "merged"
     assert calls
-    assert calls[0][-4:] == ["backlog", "reconcile", "--node", "ab-conf001"]
+    assert calls[0][-6:] == [
+        "backlog", "reconcile", "--pr-number", "556", "--repo", "bllshttng/footnote",
+    ]
