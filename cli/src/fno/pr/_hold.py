@@ -74,14 +74,36 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     )
     _root_prefix = _root.rstrip(os.sep) + os.sep
 
+    from fno.graph._intake import project_root_from_settings
+
+    def _effective_cwd(entry: dict) -> Optional[str]:
+        # Prefer the LIVE settings-resolved root for the entry's project
+        # over its stored `cwd` - the same precedence every other cwd
+        # consumer in this codebase uses (graph/cli.py, dispatch.py,
+        # backlog/advance.py, pr_watch/_discover.py, provenance/spawn_think.py
+        # all read `_resolved_cwd` before `cwd`). A node's stored `cwd` is an
+        # intake-time snapshot; the work-map is the current source of truth,
+        # and the two can drift (a moved checkout, a re-pointed workspace
+        # path) - matching only the stale snapshot would silently misread a
+        # node that genuinely belongs here as "not this repo" (review fix).
+        project = entry.get("project")
+        resolved = (
+            project_root_from_settings(project)
+            if isinstance(project, str) and project
+            else None
+        )
+        raw = resolved or entry.get("cwd")
+        return raw if isinstance(raw, str) and raw else None
+
     def _cwd_in_this_repo(entry: object) -> bool:
         if not isinstance(entry, dict):
             return False
-        raw_cwd = entry.get("cwd")
-        if not isinstance(raw_cwd, str) or not raw_cwd:
-            # A no-cwd node can't be proven NOT this repo's, and there is no
-            # cost to including it - only candidate_ids (populated below
-            # from the ref/trailer match) can ever trigger a gh call.
+        raw_cwd = _effective_cwd(entry)
+        if raw_cwd is None:
+            # Neither a live project root nor a stored cwd - can't be proven
+            # NOT this repo's, and there is no cost to including it - only
+            # candidate_ids (populated below from the ref/trailer match) can
+            # ever trigger a gh call.
             return True
         norm = os.path.normpath(os.path.expanduser(raw_cwd))
         return norm == _root or norm.startswith(_root_prefix)

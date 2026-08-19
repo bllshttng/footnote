@@ -280,6 +280,53 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
     assert verdict.owner_id == "x-5555"
 
 
+def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
+    tmp_path, monkeypatch,
+):
+    """Review fix: numerous other cwd consumers in this codebase
+    (graph/cli.py, dispatch.py, backlog/advance.py, pr_watch/_discover.py,
+    provenance/spawn_think.py) prefer the LIVE settings-resolved root for a
+    node's `project` over its stored `cwd` snapshot, because the two can
+    drift (a moved checkout, a re-pointed workspace path). hold_for_pr must
+    follow the same precedence: a node whose stale stored `cwd` points
+    somewhere else entirely, but whose `project` resolves via settings to
+    THIS repo, still reaches the gh fetch."""
+    plan = tmp_path / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-6666",
+            "cwd": "/nonexistent/stale/checkout",
+            "project": "footnote",
+            "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42",
+            "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(
+        "fno.graph._intake.project_root_from_settings",
+        lambda project: str(tmp_path) if project == "footnote" else None,
+    )
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    verdict = _hold.hold_for_pr(42, str(tmp_path))
+    assert verdict is not None
+    assert verdict.owner_id == "x-6666"
+
+
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
     _graph(
         tmp_path,
