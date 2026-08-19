@@ -45,10 +45,17 @@ use crate::claude_roster::{read_control_key, ClaudeRoster};
 pub const DEFAULT_ATTEMPTS: u32 = 40;
 pub const DEFAULT_INTERVAL_MS: u64 = 250;
 
-/// Settle delay between the envelope inject and the wire-level CR submit. The
-/// paste needs to register in the recipient input box before the Enter
-/// keystroke lands; the proven recipe (2026-07-08, CC 2.1.205) used ~0.8s.
-const CR_SETTLE_MS: u64 = 800;
+const MAX_ENTER_DELAY_MS: u64 = 60_000;
+
+pub fn default_enter_delay_ms() -> u64 {
+    crate::harness_capabilities::HarnessContract::packaged()
+        .and_then(|contract| {
+            contract
+                .capabilities("claude")
+                .map(|caps| caps.send_keys_enter_delay_ms as u64)
+        })
+        .expect("embedded claude submit-delay capability")
+}
 
 /// Interval multiple at which the confirm loop re-sends the wire-level CR. The
 /// initial CR (from `inject_with_submit`) can be swallowed mid-paste by a BUSY
@@ -85,6 +92,7 @@ pub struct MailInjectArgs {
     pub provider: MailInjectProvider,
     pub attempts: u32,
     pub interval_ms: u64,
+    pub enter_delay_ms: u64,
     /// Sender mail handle for the audit event; absent on a direct binary call.
     pub sender: Option<String>,
     /// `--probe`: run resolution ONLY and report whether an injection path
@@ -124,6 +132,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut provider = MailInjectProvider::Claude;
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
+    let mut enter_delay_ms = default_enter_delay_ms();
     let mut sender: Option<String> = None;
     let mut probe = false;
     let mut it = rest.iter();
@@ -169,6 +178,19 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                     "mail-inject: --interval-ms needs a positive integer".to_string(),
                 ))?;
             }
+            "--enter-delay-ms" => {
+                enter_delay_ms = it.next().and_then(|v| v.parse().ok()).ok_or((
+                    2,
+                    "mail-inject: --enter-delay-ms needs an integer from 1 to 60000".to_string(),
+                ))?;
+                if !(1..=MAX_ENTER_DELAY_MS).contains(&enter_delay_ms) {
+                    return Err((
+                        2,
+                        "mail-inject: --enter-delay-ms needs an integer from 1 to 60000"
+                            .to_string(),
+                    ));
+                }
+            }
             other => {
                 return Err((2, format!("mail-inject: unknown flag: {other}")));
             }
@@ -180,6 +202,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         provider,
         attempts,
         interval_ms,
+        enter_delay_ms,
         sender,
         probe,
     })
@@ -380,6 +403,7 @@ pub fn deliver_via_control_sock(
     text: &str,
     attempts: u32,
     interval_ms: u64,
+    enter_delay_ms: u64,
 ) -> Result<(), &'static str> {
     let (sock, short, transcript) = resolve_target(session)?;
     let auth = read_control_key();
@@ -401,12 +425,12 @@ pub fn deliver_via_control_sock(
     // content marker the confirm greps for; it is recorded verbatim once the turn
     // submits.
     let marker = text.lines().next().unwrap_or(text);
-    inject_with_submit(&mut transport, text, Duration::from_millis(CR_SETTLE_MS)).map_err(|e| {
-        match e {
+    inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
+        |e| match e {
             DriveError::UnsafeText => "unsafe-text",
             _ => "io-error",
-        }
-    })?;
+        },
+    )?;
 
     confirm_with_cr_retry(
         &mut transport,
@@ -769,9 +793,13 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     }
 
     let result = match args.provider {
-        MailInjectProvider::Claude => {
-            deliver_via_control_sock(&args.session, &text, args.attempts, args.interval_ms)
-        }
+        MailInjectProvider::Claude => deliver_via_control_sock(
+            &args.session,
+            &text,
+            args.attempts,
+            args.interval_ms,
+            args.enter_delay_ms,
+        ),
         MailInjectProvider::Codex => {
             crate::codex_inject::deliver_via_codex_daemon(&args.session, &text).await
         }
@@ -1366,6 +1394,7 @@ mod tests {
         assert_eq!(a.provider, MailInjectProvider::Claude);
         assert_eq!(a.attempts, DEFAULT_ATTEMPTS);
         assert_eq!(a.interval_ms, DEFAULT_INTERVAL_MS);
+        assert_eq!(a.enter_delay_ms, 800);
 
         let b = parse_args(&argv(&[
             "--session",
@@ -1374,11 +1403,14 @@ mod tests {
             "3",
             "--interval-ms",
             "10",
+            "--enter-delay-ms",
+            "125",
         ]))
         .unwrap();
         assert_eq!(b.session, "a1b2c3d4-1111-2222-3333-444455556666");
         assert_eq!(b.attempts, 3);
         assert_eq!(b.interval_ms, 10);
+        assert_eq!(b.enter_delay_ms, 125);
     }
 
     #[test]
@@ -1422,6 +1454,12 @@ mod tests {
                 .0,
             2
         );
+        for value in ["0", "-1", "notnum", "60001"] {
+            let err =
+                parse_args(&argv(&["--session", "x", "--enter-delay-ms", value])).unwrap_err();
+            assert_eq!(err.0, 2);
+            assert!(err.1.contains("--enter-delay-ms"));
+        }
     }
 
     #[test]

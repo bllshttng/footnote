@@ -121,6 +121,10 @@ class _FakeRunner:
                 [{"pane_id": 7, "squad_id": 1, "tab_id": 1, "cwd": "/w", "child_pid": 4242}]
             )
             return subprocess.CompletedProcess(argv, 0, out, "")
+        if argv[1:4] == ["mux", "pane", "wait"]:
+            return subprocess.CompletedProcess(argv, 11, "", "")
+        if argv[1:4] == ["mux", "pane", "read"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected invocation: {argv}")
 
 

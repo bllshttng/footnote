@@ -186,6 +186,8 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
         unbound_reason = None
         log_path = ""
         recovered = False
+        readiness = "ready"
+        readiness_rule = "live_prompt_box"
 
     monkeypatch.setattr(
         mux_mod, "dispatch_spawn_pane", lambda **kw: PaneResult()

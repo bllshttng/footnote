@@ -101,7 +101,13 @@ def _session_id_for(entry: Any) -> Optional[str]:
 def _build_resume_argv(
     provider: str, session_id: str, cwd: Optional[str] = None
 ) -> Optional[list[str]]:
-    """Provider-specific resume argv. Returns None for unsupported providers."""
+    """Contract-rendered resume identity plus lane-owned sandbox additions."""
+    from fno.agents.harness_map import DispatchResolveError, render_session_argv
+
+    try:
+        argv = render_session_argv(provider, "interactive_resume", session_id)
+    except DispatchResolveError:
+        return None
     if provider == "codex":
         # A bounded codex cannot write git metadata without an explicit grant,
         # and in a linked worktree that metadata sits outside the workspace
@@ -112,19 +118,8 @@ def _build_resume_argv(
         from fno.agents.harnesses.codex import git_writable_config_args
 
         grant = git_writable_config_args(Path(cwd)) if cwd else []
-        return ["codex", *grant, "resume", session_id]
-    if provider == "claude":
-        # Spec: reuse fno's attach surface. claude's attach is
-        # `claude attach <short_id>`.
-        return ["claude", "attach", session_id]
-    if provider == "opencode":
-        # Bare `opencode --session <id>` is the interactive TUI attach (the
-        # `codex resume <id>` precedent). The Rust provider's headless
-        # `opencode run ... --session <id>` argv is a separate lane.
-        return ["opencode", "--session", session_id]
-    if provider == "gemini":
-        return ["gemini", "--resume", session_id]
-    return None
+        return [argv[0], *grant, *argv[1:]]
+    return argv
 
 
 _DEFAULT_WAKE_MESSAGE = "continue"
@@ -721,8 +716,16 @@ def resume_logic(
     # harnesses because _session_id_for returns None for them). Both
     # are exit 13 — module contract reserves 14 for "CLI not on PATH"
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
-    argv = _build_resume_argv(harness or "?", session_id or "", cwd)
-    if argv is None:
+    from fno.agents.harness_map import DispatchResolveError, capabilities
+
+    try:
+        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][
+            "interactive_resume"
+        ]
+        resume_supported = resume_form["kind"] != "unsupported"
+    except (DispatchResolveError, KeyError, TypeError):
+        resume_supported = False
+    if not resume_supported:
         return ResumeResult(
             exit_code=13,
             stderr=(
@@ -738,6 +741,13 @@ def resume_logic(
                 f"fno agents resume: agent {name!r} has no recorded session_id "
                 f"for harness {harness!r}.\n"
             ),
+        )
+
+    argv = _build_resume_argv(harness or "?", session_id, cwd)
+    if argv is None:
+        return ResumeResult(
+            exit_code=13,
+            stderr=f"fno agents resume: harness {harness!r} resume contract is invalid.\n",
         )
 
     # PATH check (defaults to shutil.which).

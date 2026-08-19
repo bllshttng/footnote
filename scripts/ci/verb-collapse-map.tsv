@@ -151,6 +151,7 @@ config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
 delivery	KEEP	delivery	7	single-leaf group
+dispatch capabilities	T1	dispatch capabilities	0
 dispatch one	T1	dispatch one	9
 dispatch resolve	T1	dispatch resolve	23
 doctor	KEEP	doctor	78	single-leaf group

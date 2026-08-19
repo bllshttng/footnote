@@ -749,11 +749,14 @@ def create(
     # The bounded sandbox refuses git metadata writes; grant the git common dir
     # so the worker can actually commit. Full yolo is already unsandboxed.
     git_args = [] if eff_yolo else git_writable_args(cwd)
+    from fno.agents.harness_map import render_session_argv
+
+    identity = render_session_argv("codex", "headless_create")
     argv = [
-        "codex",
+        identity[0],
         *config_args,
         *approval_flag(eff_yolo),
-        "exec", "--json",
+        *identity[1:], "--json",
         "-C", str(cwd),
         "--skip-git-repo-check",
         *add_dir_args,
@@ -810,8 +813,11 @@ def resume(
     # re-resolves the posture from config rather than inheriting the
     # create-time one, so the bounded case re-pins both through `-c`.
     eff_yolo = _effective_yolo(yolo, headless_yolo)
+    from fno.agents.harness_map import render_session_argv
+
+    identity = render_session_argv("codex", "headless_resume", session_id)
     argv = [
-        "codex", "exec", "resume", session_id,
+        *identity,
         "--json",
         "--skip-git-repo-check",
         *sandbox_flag_resume(eff_yolo),

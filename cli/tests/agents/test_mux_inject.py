@@ -131,6 +131,65 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     assert verbs == ["claim", "send", "send"]
 
 
+def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import harness_map
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    sleeps = []
+    monkeypatch.setattr(dispatch_mod.time, "sleep", sleeps.append)
+    original = harness_map.capabilities
+
+    def caps(harness):
+        value = dict(original(harness))
+        value["send_keys_enter_delay_ms"] = 125
+        value["submit_keys"] = ["enter"]
+        return value
+
+    monkeypatch.setattr(harness_map, "capabilities", caps)
+    assert dispatch_mod._mux_pane_send(_mux_entry(), "hi") is True
+    assert sleeps == [0.125]
+    assert fake.calls[1][0][fake.calls[1][0].index("--text") + 1] == "\r"
+
+
+def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(monkeypatch) -> None:
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi") is False
+    assert fake.calls == []
+
+
+def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> None:
+    import json
+
+    from fno import rust_binary
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import harness_map
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/bin/fno-agents"))
+    original = harness_map.capabilities
+
+    def caps(harness):
+        value = dict(original(harness))
+        value["send_keys_enter_delay_ms"] = 321
+        return value
+
+    monkeypatch.setattr(harness_map, "capabilities", caps)
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"delivered": True}), "")
+
+    monkeypatch.setattr(dispatch_mod.subprocess, "run", run)
+    assert dispatch_mod._mail_inject_claude("session", "<fno_mail>hi</fno_mail>")
+    argv = next(argv for argv in seen if "mail-inject" in argv)
+    assert argv[argv.index("--enter-delay-ms") + 1] == "321"
+
+
 def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:
     """Intercept the canonical fno.events append the audit floor uses."""
     import fno.events as events_mod
@@ -313,14 +372,14 @@ def test_ask_mux_dead_pane_raises_transport_error(
 def test_ask_mux_codex_row_also_rides_pane_send(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Mux routing is provider-independent: a mux codex row rides PaneSend too."""
+    """An unpinned Codex submit contract refuses before any pane bytes."""
     use_tmpdir(monkeypatch, tmp_path)
     _seed(_mux_entry(name="cmux", provider="codex"))
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
 
-    from fno.agents.dispatch import dispatch_ask
+    from fno.agents.dispatch import DispatchAskError, dispatch_ask
 
-    result = dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
-    assert result.kind == "followup"
-    assert [c[0][3] for c in fake.calls] == ["claim", "send", "send", "release"]
+    with pytest.raises(DispatchAskError, match="mux pane send"):
+        dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
+    assert fake.calls == []

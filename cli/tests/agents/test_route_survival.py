@@ -68,7 +68,14 @@ def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
     use_tmpdir(monkeypatch, tmp_path)
     for var in ("FNO_SESSION", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
-    from fno.agents.mux_spawn import dispatch_spawn_pane
+    from fno.agents import mux_spawn
+
+    if provider == "codex":
+        monkeypatch.setattr(
+            mux_spawn,
+            "_backfill_codex_session_id",
+            lambda *a, **k: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+        )
 
     if kwargs.get("route_provider") is not None:
         from fno.agents.model_routing import bind_route_provider
@@ -84,7 +91,7 @@ def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
             run_gate("router", "pane", route_provider=kwargs["route_provider"]),
         )
 
-    return dispatch_spawn_pane(
+    return mux_spawn.dispatch_spawn_pane(
         name="router",
         message="go",
         provider=provider,

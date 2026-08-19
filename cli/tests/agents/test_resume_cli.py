@@ -860,6 +860,23 @@ def test_opencode_argv_attaches_the_tui_by_session() -> None:
     assert "run" not in res.exec_argv
 
 
+def test_resume_argv_delegates_identity_to_capability_contract(monkeypatch) -> None:
+    from fno.agents import harness_map
+    from fno.agents.resume_cli import _build_resume_argv
+
+    calls = []
+
+    def render(harness, lane, session_id):
+        calls.append((harness, lane, session_id))
+        return [harness, "contract-resume", session_id]
+
+    monkeypatch.setattr(harness_map, "render_session_argv", render)
+    assert _build_resume_argv("opencode", "ses_1") == [
+        "opencode", "contract-resume", "ses_1"
+    ]
+    assert calls == [("opencode", "interactive_resume", "ses_1")]
+
+
 def test_opencode_without_captured_session_id_errors_clearly() -> None:
     """AC1-UI: an id-less opencode row (backfill missed) refuses, never execs.
 

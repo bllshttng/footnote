@@ -1732,11 +1732,15 @@ pub(crate) fn fno_bin() -> PathBuf {
 /// digest_overlay idiom), and turn its verdict into the client notice. An empty
 /// return says nothing (the launched pane speaks for itself); every error path
 /// yields a visible notice rather than a silent no-op (x-6f77).
+fn dispatch_timeout() -> Duration {
+    Duration::from_secs(75)
+}
+
 async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
     // Selection + spawn crosses a subprocess and a mux socket round-trip, so the
     // budget is seconds, not the digest's 800ms; a hung dispatch still fails
     // open to a notice rather than wedging.
-    const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+    let dispatch_timeout = dispatch_timeout();
     // A targeted node (a clicked work-queue card, x-a496) pins `--node`; without
     // it the porcelain picks the board's next ready node (prefix+g). The claim
     // race, lane cap, and verdict shape are identical either way.
@@ -1758,7 +1762,7 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    match tokio::time::timeout(DISPATCH_TIMEOUT, fut).await {
+    match tokio::time::timeout(dispatch_timeout, fut).await {
         Err(_) => "grab work: timed out".to_string(),
         Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
         // The porcelain ALWAYS prints its `--json` verdict to stdout, even on a
@@ -2413,7 +2417,7 @@ impl Core {
                     tab_id,
                     cwd,
                     child_pid: entry.pty.child_pid(),
-                    title: None,
+                    title: entry.vt.osc_title().map(str::to_string),
                     // (x-d865) The fno_id join: the registry row whose mux ref
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
@@ -13127,16 +13131,29 @@ mod tests {
 
     #[test]
     fn pane_ls_can_join_a_fresh_registry_snapshot_without_viewers() {
-        let mut core = two_tab_core();
+        let (mut core, pane_id) = template_core();
         core.session_name = "sess".into();
-        let mut fresh = agent_in("sess", 1, None, false);
+        let mut fresh = agent_in("sess", pane_id, None, false);
         fresh.harness_session_id = Some("019fb024-fresh".into());
+        core.panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .vt
+            .feed("\x1b]0;⠋ Working\x07".as_bytes());
 
         assert_eq!(
-            core.fno_id_for_pane_with_agents(1, &[fresh]).as_deref(),
+            core.fno_id_for_pane_with_agents(pane_id, &[fresh.clone()])
+                .as_deref(),
             Some("019fb024-fresh")
         );
         assert!(core.agents.is_empty(), "zero-viewer cache stays untouched");
+        match core.pane_ls_from_fresh_agents(Some(&[fresh.clone()])) {
+            ServerMsg::PaneList { panes } => {
+                let pane = panes.iter().find(|pane| pane.pane_id == pane_id).unwrap();
+                assert_eq!(pane.title.as_deref(), Some("⠋ Working"));
+            }
+            other => panic!("pane ls should carry OSC title, got {other:?}"),
+        }
         match core.pane_ls_from_fresh_agents(None) {
             ServerMsg::Err { code, .. } => assert_eq!(code, err_code::REGISTRY_UNAVAILABLE),
             other => panic!("registry failure must surface, got {other:?}"),
@@ -18443,6 +18460,24 @@ mod tests {
             dispatch_notice(r#"{"outcome":"???"}"#),
             "grab work: dispatch failed"
         );
+    }
+
+    #[test]
+    fn dispatch_timeout_exceeds_required_harness_binding_window() {
+        let contract: toml::Value = toml::from_str(include_str!(
+            "../../../cli/src/fno/agents/harness_capabilities.toml"
+        ))
+        .unwrap();
+        let max_binding_ms = contract["harness"]
+            .as_table()
+            .unwrap()
+            .values()
+            .filter_map(|caps| caps.get("session_binding"))
+            .filter(|binding| binding["required"].as_bool() == Some(true))
+            .filter_map(|binding| binding["timeout_ms"].as_integer())
+            .max()
+            .unwrap() as u64;
+        assert!(dispatch_timeout() >= Duration::from_millis(max_binding_ms + 15_000));
     }
 
     #[test]

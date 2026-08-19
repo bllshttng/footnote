@@ -63,6 +63,7 @@ pub mod events;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
+pub mod harness_capabilities;
 mod identity;
 pub mod kill_criteria;
 pub mod logs;

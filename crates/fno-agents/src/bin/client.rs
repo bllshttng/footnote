@@ -40,6 +40,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "loop",
     "loop-check",
     "mail-inject",
+    "manifest-eval",
     "needs",
     "ping",
     "probe-run",
@@ -106,6 +107,10 @@ async fn run(args: Vec<String>) -> i32 {
     // daemon; never lazy-starts one.
     if matches!(verb, "mail-inject") {
         return fno_agents::mail_inject::run_mail_inject(&args[1..]).await;
+    }
+
+    if matches!(verb, "manifest-eval") {
+        return fno_agents::manifest::run_manifest_eval(&args[1..]);
     }
 
     if matches!(verb, "codex-loaded-threads") {

@@ -168,17 +168,16 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
 
 
-def test_non_claude_recipient_keeps_the_bytes_written_verdict(monkeypatch):
-    """The transcript confirm reads ~/.claude/projects only, so a mux-hosted
-    codex pane has nothing to confirm against. Applying it there would report
-    every landed paste as a miss -- a false durable demotion, and a duplicate
-    once the recipient drains the durable copy."""
+def test_non_claude_recipient_refuses_unpinned_submit_contract(monkeypatch):
+    """A successful byte write is not delivery when the harness-specific
+    submit sequence is unknown. Refuse before touching a non-Claude pane."""
 
     def _boom(_entry):
         raise AssertionError("a non-claude pane has no claude transcript to poll")
 
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", _boom)
-    _install_fake_run(monkeypatch, [0, 0, 0, 0])
+    calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
     entry = _entry(harness="codex")
-    assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is True
+    assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is False
+    assert _verbs(calls) == []

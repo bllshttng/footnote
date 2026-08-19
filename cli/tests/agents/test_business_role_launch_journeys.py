@@ -194,7 +194,11 @@ def test_real_manifest_reaches_pane_launch_argv(
         monkeypatch.setenv("ZAI_API_KEY", "zai-key")
     else:
         _configure_codex(monkeypatch)
-        monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
+        monkeypatch.setattr(
+            mux_spawn,
+            "_backfill_codex_session_id",
+            lambda *a, **k: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+        )
     runner = _MuxRunner()
 
     name = f"{provider}-publisher-pane"

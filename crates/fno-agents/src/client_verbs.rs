@@ -1800,20 +1800,12 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Option<Value> {
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for unsupported providers.
 fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
-    match provider {
-        "codex" => Some(vec!["codex".into(), "resume".into(), session_id.into()]),
-        "claude" => Some(vec!["claude".into(), "attach".into(), session_id.into()]),
-        "gemini" => Some(vec!["gemini".into(), "--resume".into(), session_id.into()]),
-        // Bare `opencode --session <id>` is the interactive TUI attach (the
-        // `codex resume <id>` precedent). The provider's headless
-        // `opencode run ... --session <id>` argv is a separate lane.
-        "opencode" => Some(vec![
-            "opencode".into(),
-            "--session".into(),
-            session_id.into(),
-        ]),
-        _ => None,
-    }
+    crate::harness_capabilities::render_session_argv(
+        provider,
+        "interactive_resume",
+        Some(session_id),
+    )
+    .ok()
 }
 
 /// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
