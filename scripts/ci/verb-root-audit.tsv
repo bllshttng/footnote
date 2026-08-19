@@ -1,0 +1,69 @@
+# Approved verb-root audit. Sweep date: 2026-08-19.
+# Four instruments: calls, calls-60d, repo-refs, and runtime-wired.
+# calls: 2,511,278 command strings from 17,664 Claude transcript files (14.0 GB).
+# calls-60d: the same transcript corpus restricted to files modified within 60 days.
+# repo-refs: scripts/diagnostics/verb-callers.py caller counts with positive controls.
+# runtime-wired: executable callers outside docs, tests, baselines, scratchpads, and diffs.
+verb	calls	calls-60d	repo-refs	runtime-wired	verdict	destination	note
+agents	3889	3875	1739	418	keep-as-root	agents	
+annotate	8	8	13	11	keep-and-fold	backlog annotate	
+approvals	7	7	8	3	keep-and-fold	inbox approvals	
+autonomy	2	2	10	3	keep-and-fold	agents autonomy	
+backlog	11461	11335	890	301	keep-as-root	backlog	
+bundle	175	165	19	2	keep-and-fold	doctor bundle	
+carveout	555	551	42	16	keep-and-fold	backlog carveout	
+claim	771	764	162	55	keep-and-fold	agents claim	
+codemap	78	77	18	6	keep-and-fold	doctor codemap	
+config	936	929	267	99	keep-as-root	config	
+context	19	19	15	2	keep-and-fold	whoami context	
+cost	5	5	7	1	keep-and-fold	whoami cost	
+decide	220	220	24	11	keep-and-fold	backlog decide	
+delivery	0	0	6	1	keep-and-fold	do delivery	ZERO calls but LIVE: crates/fno-agents/src/delivery_completion.rs shells `fno delivery evaluate --json`. Call count alone would have deleted it.
+dispatch	22	22	40	16	merge	agents dispatch	third entry point for starting work beside agents spawn and think dispatch
+doctor	109	108	89	14	keep-as-root	doctor	
+done	26	26	49	2	merge	backlog done	backlog done already exists and is the same operation; the root is a second spelling
+evals	1	1	22	7	keep-and-fold	doctor evals	only 1 call but skills/ship gates a doc deliverable on `fno evals grade`.
+event	92	92	56	26	keep-and-fold	doctor event	
+executor	0	0	13	3	delete	-	zero calls; the live resolver is skills/do/scripts/resolve-executor.sh, the CLI verb is an uncalled wrapper
+help	510	499	39	3	keep-as-root	help	stays a root by the decided taxonomy.
+king	18	18	14	6	keep-and-fold	agents king	The king root folds into agents; the king board leaf folds into inbox.
+lint	1511	1506	34	7	keep-and-fold	doctor lint	
+loops	0	0	5	2	keep-and-fold	do loops	ZERO calls, and the lowest-traffic survivor. It stays only because it is the sole WRITER of the pause-all sentinel that cli/src/fno/observer/cli.py reads through fno.paths. Re-audit it after one release.
+mail	4999	4998	347	104	keep-and-fold	agents mail	
+mcp	4	4	10	6	keep-and-fold	agents mcp	only 4 calls but the Rust daemon shells `fno mcp send` on the sidecar path.
+mux	865	865	389	218	keep-as-root	mux	
+notify	107	94	17	3	keep-and-fold	inbox notify	
+observer	6	6	8	2	keep-and-fold	doctor observer	only 6 calls but scripts/lib/eval-sweep-throttle.sh shells `fno observer sweep`.
+outstanding	69	69	16	8	keep-and-fold	inbox outstanding	
+paths	30	30	54	28	keep-and-fold	config paths	
+phase	9	7	16	8	keep-and-fold	do phase	
+plan	796	795	103	63	keep-and-fold	do plan	
+plugins	25	25	10	12	keep-and-fold	config plugins	
+posture	3	3	1	0	delete	-	zero runtime wiring, 3 lifetime calls; writes ordinary config keys that config set already writes
+pr	6322	6322	254	122	keep-and-fold	do pr	
+pr-watch	64	58	16	4	merge	do pr watch	hyphenated root: a subcommand that escaped the pr group
+research	2	2	18	5	keep-and-fold	do research	
+restart	20	20	23	5	keep-and-fold	agents restart	
+resume	9	9	8	4	keep-and-fold	do resume	
+retro	68	68	33	11	keep-and-fold	backlog retro	
+review	78	78	30	12	keep-and-fold	do review	
+roles	5	5	7	9	keep-and-fold	agents roles	only 5 calls but skills/growth-launch shells roles context/show/resolve.
+route	34	34	16	4	keep-and-fold	config route	
+runtime	0	0	4	1	merge	workspace worktree	runtime worktree --action create duplicates worktree; zero lifetime calls
+scoreboard	12	12	13	5	keep-and-fold	whoami scoreboard	
+setup	18	18	62	12	keep-and-fold	config setup	
+skill-diff	9	9	6	3	merge	doctor skill-diff	hyphenated root: a lint/observer leaf that took a root name
+state	343	342	57	17	keep-and-fold	do state	
+status	46	46	22	1	merge	whoami status	whoami (445 calls) and status (46) both report this session; one surface, two names
+status-fanout	1	1	4	2	merge	doctor event fanout	hyphenated root: it sweeps events.jsonl, so it is an event leaf
+stub-manifest	3	3	5	5	merge	do ship stub-manifest	hyphenated root: contract-tier ceremony on the ship path
+target	1361	1338	168	92	keep-and-fold	do target	
+test	3624	3624	108	12	keep-and-fold	doctor test	
+think	266	266	17	9	keep-and-fold	do think	
+tokens	0	0	4	0	delete	-	zero calls and zero runtime wiring; context (19) and cost (5) already cover session token telemetry
+update	67	65	108	7	keep-and-fold	doctor update	
+upgrade	2	2	1	1	delete	-	exact duplicate of update (269 shell-history calls vs 2); its one repo ref is a Rust help string, not a call
+version	3	3	14	4	keep-as-root	version	Rust front, beside mux.
+whoami	445	434	46	5	keep-as-root	whoami	
+worker	8	8	3	4	keep-and-fold	agents worker	
+worktree	129	129	82	38	keep-and-fold	workspace worktree	
