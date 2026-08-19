@@ -237,7 +237,32 @@ if [[ "$N_FOUND" -eq 5 ]]; then pass "all 5 argv-matched pids detected"; else fa
 if [[ "$N_PS" -eq 1 ]]; then pass "exactly 1 ps call for 5 matches (was 1-per-match)"; else fail "O(1) ps calls" "ps invoked $N_PS times, want 1"; fi
 rm -rf "$STUBDIR"
 
-# 5d. Two sweeps racing to reclaim the same dead-holder lock: exactly one
+# 5d. pgrep can still return candidates when a sandbox denies ps. An empty
+# snapshot is not evidence that the candidates are safe, so preserve them all.
+STUBDIR=$(mktemp -d -t ps-empty-stub.XXXXXX)
+cat > "$STUBDIR/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$STUBDIR/pgrep" <<'EOF'
+#!/usr/bin/env bash
+printf '201\n202\n'
+EOF
+cat > "$STUBDIR/ps" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
+WT="$STUBDIR/wt"; mkdir -p "$WT"
+FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
+if [[ "$FOUND" == $'201\n202' ]]; then
+    pass "empty ps snapshot preserves all candidate pids"
+else
+    fail "empty ps fails closed" "want [201 202], got [$FOUND]"
+fi
+rm -rf "$STUBDIR"
+
+# 5e. Two sweeps racing to reclaim the same dead-holder lock: exactly one
 # proceeds, the other backs off - never both, and never neither.
 S=$(new_sandbox)
 git -C "$S" branch -M main >/dev/null 2>&1

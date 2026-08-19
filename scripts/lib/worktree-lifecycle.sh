@@ -117,9 +117,17 @@ _wt_pids() {
     # worktree path (see the lock comment above), so candidates scale with
     # the number of overlapping sweeps and a per-pid `ps` turned that into
     # N sweeps x 49 worktrees x N matches.
+    # The marker keeps awk's first input non-empty and positively identifies a
+    # completed snapshot; otherwise an empty ps makes the candidates FNR==NR.
     awk '
+        BEGIN { snapshot_marker = "__FNO_PS_SNAPSHOT_COMPLETE__" }
         FNR==NR {
             line = $0
+            if (line == snapshot_marker) {
+                snapshot_complete = 1
+                next
+            }
+            snapshot_rows++
             sub(/^[ \t]+/, "", line)
             pid = $1
             sub("^" pid "[ \t]+", "", line)
@@ -128,11 +136,15 @@ _wt_pids() {
         }
         {
             pid = $1
+            if (!snapshot_complete || snapshot_rows == 0) {
+                print pid
+                next
+            }
             cmd = (pid in cmdbypid) ? cmdbypid[pid] : ""
             if (cmd ~ /archive-worktree\.sh/ || cmd ~ /worktree-lifecycle\.sh/) next
             print pid
         }
-    ' <(ps -Ao pid=,command= 2>/dev/null) <(printf '%s\n' "$candidates")
+    ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates")
 }
 
 # Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
