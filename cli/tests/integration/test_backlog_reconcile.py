@@ -1380,6 +1380,38 @@ def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_un
     assert other["completed_at"] is None  # untouched: our_repo was unresolvable
 
 
+def test_reconcile_pr_number_warns_when_repo_unresolved_and_scope_goes_empty(
+    cli_env, monkeypatch,
+):
+    """Round-11 review fix: when this PR's own repo can't be resolved AND
+    there is no trailer claim and no open ref-less node to fall back on,
+    _pr_touch_ids returns an EMPTY scope, so the ordinary ref-stamped,
+    no-trailer close silently sees nothing - the exact case
+    test_reconcile_pr_number_state_blip_with_no_trailer_never_reads_refused
+    covers WITH a resolvable repo. A caller invoking this command directly
+    (no --repo, unparseable pr_ctx.url) must see a warning on stderr, not
+    silence - the same condition leg_stamp already warns about on its own
+    call site, now covered here too."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-810001", pr_number=810,
+              pr_url="https://github.com/test-owner/test-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=810, url="not-a-url"),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810"])
+    assert result.exit_code == 0, result.output
+    assert "could not resolve this repo's slug" in result.output
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-810001")
+    assert node["completed_at"] is None  # scope went empty: ordinary close deferred
+
+
 def test_reconcile_pr_number_state_blip_with_no_trailer_never_reads_refused(cli_env, monkeypatch):
     """Round-8 review fix: a state-read blip on the SEPARATE closure-context
     fetch (fetch_pr_closure_context) must not report closure_refused when the

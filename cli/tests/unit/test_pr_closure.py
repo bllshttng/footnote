@@ -6,8 +6,10 @@ from __future__ import annotations
 
 
 from fno.pr.closure import (
+    ClosureQueryError,
     bind_closure_claims,
     contained_descendant_ids,
+    fetch_pr_closure_context,
     parse_closure_trailer,
     render_closure_trailer,
     render_pr_closure_trailer,
@@ -236,6 +238,29 @@ def test_bind_is_idempotent_on_rerun():
     assert second.outcome == "bound"
     assert second.bound_ids == []
     assert all(b.action == "already_bound" for b in second.bindings)
+
+
+# ---------------------------------------------------------------------------
+# fetch_pr_closure_context
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_closure_context_fails_closed_on_blank_stdout():
+    # A gh exit-0 with blank stdout (truncated pipe, a shim that swallowed
+    # the verb) must never read as a legitimate empty-body PR - that folded
+    # into the json.loads(stdout or "{}") fallback and silently reversed
+    # every caller's fail-closed guarantee into fail-open (x-59a6 review fix).
+    import subprocess
+
+    def _blank_runner(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    try:
+        fetch_pr_closure_context(42, runner=_blank_runner)
+    except ClosureQueryError as exc:
+        assert "no output" in str(exc)
+    else:
+        raise AssertionError("expected ClosureQueryError on blank stdout")
 
 
 def test_bind_skips_already_done_node_without_refusing_batch():

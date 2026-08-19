@@ -156,8 +156,17 @@ def fetch_pr_closure_context(
             f"gh pr view #{pr_number} failed (rc={result.returncode}): "
             f"{(result.stderr or '').strip()}"
         )
+    stdout = result.stdout or ""
+    if not stdout.strip():
+        # An exit-0 gh call with blank stdout (truncated pipe, a shim that
+        # swallowed the verb) is indistinguishable from a real empty answer -
+        # never read a bare exit 0 as permission (AGENTS.md pitfalls corpus).
+        # The old deleted `_pr_url` helper checked this explicitly; folding
+        # it into "{}" here silently reversed the fail-closed guarantee this
+        # module's callers depend on into fail-open.
+        raise ClosureQueryError(f"gh pr view #{pr_number} returned no output (exit 0)")
     try:
-        row = json.loads(result.stdout or "{}")
+        row = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ClosureQueryError(f"gh stdout was not JSON: {exc}") from exc
     return PrClosureContext(

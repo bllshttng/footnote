@@ -8234,6 +8234,22 @@ def cmd_reconcile(
         _our_repo = repo or (
             _repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None
         )
+        if _our_repo is None and not json_out:
+            # _pr_touch_ids refuses to repo-scope a bare-number ref match
+            # when it cannot resolve OUR OWN repo (avoiding a false cross-repo
+            # collision), so the scan below can silently see only trailer
+            # claims and open ref-less nodes - the ordinary ref-stamped,
+            # no-trailer close can go dark with nothing on stderr to say so.
+            # Same condition leg_stamp already warns about before it calls
+            # this same command with an explicit --repo; surface it here too
+            # for a caller (a bare `fno backlog reconcile --pr-number`) that
+            # never resolves one itself (round-11 review fix, x-59a6).
+            typer.echo(
+                f"warning: reconcile --pr-number {pr_number}: could not resolve "
+                "this repo's slug; scoping to exact trailer claims and open "
+                "ref-less nodes only, skipping any ref-stamped bare-number match",
+                err=True,
+            )
         _scan_scope = _pr_touch_ids(entries, pr_number, closure_claims, _our_repo)
     else:
         _scan_scope = None

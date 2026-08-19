@@ -670,7 +670,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
 
         res = run(
             [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
-             "--pr-number", str(pr_number), "--repo", repo],
+             "--pr-number", str(pr_number), "--repo", repo, "--json"],
             cwd=cwd or os.getcwd(),
         )
         if not res.ok:
@@ -682,6 +682,23 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
                 f"{(res.stderr or res.stdout or '').strip()[:200]}",
                 file=sys.stderr,
             )
+        else:
+            # reconcile exits 0 even when the trailer-claimed nodes never got
+            # bound (only an unresolvable PR query exits non-zero) - the same
+            # closure_refused field leg_stamp checks via this identical --json
+            # call. Without this, a refused bind read as a clean, silent
+            # success (round-11 review fix, x-59a6).
+            try:
+                obj = json.loads(res.stdout or "{}")
+            except json.JSONDecodeError:
+                obj = {}
+            closure_refused = obj.get("closure_refused")
+            if closure_refused:
+                print(
+                    f"fno pr merge: reconcile for PR #{pr_number} bound nothing: "
+                    f"{closure_refused}",
+                    file=sys.stderr,
+                )
     except (Exception, SystemExit):
         # Never block the merge outcome on the node-close (mirrors
         # _sync_graph_merge_status: SystemExit covers a corrupt-graph exit).
