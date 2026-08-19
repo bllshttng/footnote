@@ -169,6 +169,24 @@ class TestCensus:
         )
         assert spawn_gate.census().count == 1
 
+    def test_live_registry_row_deduplicates_worker_claim(self, monkeypatch):
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: [_row("revived", pid=ALIVE)],
+        )
+        from fno.claims.core import acquire_claim
+        from fno.claims.io import global_claims_root
+
+        acquire_claim(
+            "worker:revived", "h1", ttl_ms=60_000, root=global_claims_root()
+        )
+
+        result = spawn_gate.census()
+
+        assert result.fno_slot_workers == 1
+        assert result.slot_claims == 0
+        assert result.slot_count == 1
+
     def test_subagent_source_is_outside_slot_arithmetic(self, tmp_path, monkeypatch):
         """AC6-INV (x-af92): the sidechain discovery source never feeds census().
 
@@ -240,7 +258,7 @@ class TestRamFloor:
         assert "skipping the floor check" in capsys.readouterr().err
 
 
-def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
+def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None):
     """Point run_gate at fixed knobs without touching real settings."""
 
     class _A:
@@ -249,6 +267,7 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
     a = _A()
     a.max_live = max_live
     a.min_free_gb = min_free_gb
+    a.max_lanes = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
         pass
@@ -417,6 +436,269 @@ class TestRunGate:
         assert spawn_gate.census().slot_claims == 1
         guard.release()
         assert spawn_gate.census().slot_claims == 0
+
+    def test_cap_two_refuses_third_but_not_codex_then_exit_releases_slot(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        rows: list[AgentEntry] = []
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, _start: bool(pid))
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        for index in (1, 2):
+            guard = spawn_gate.run_gate(f"zai-{index}", "pane", route_provider="zai")
+            rows.append(
+                AgentEntry(
+                    name=f"zai-{index}", harness="claude", provider="zai",
+                    cwd="/tmp", log_path="/tmp/log", pid=100 + index,
+                    pid_start_time=1000 + index,
+                )
+            )
+            guard.release()
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-3", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count 2" in refused and "queued" not in refused
+
+        codex = spawn_gate.run_gate("codex-peer", "pane")
+        codex.release()
+        rows[0].status = "exited"
+        admitted = spawn_gate.run_gate("zai-4", "pane", route_provider="zai")
+        admitted.release()
+
+    def test_unreadable_provider_count_refuses_instead_of_zero(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+
+        def unreadable():
+            raise OSError("registry denied")
+
+        monkeypatch.setattr("fno.agents.registry.load_registry", unreadable)
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-1", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count unavailable" in refused
+
+    def test_partial_forward_registry_refuses_instead_of_undercounting(
+        self, monkeypatch
+    ):
+        from fno.agents.registry import LoadedRegistry
+
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: LoadedRegistry([], complete=False),
+        )
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+
+    def test_force_does_not_bypass_provider_cap(self, monkeypatch):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
+        row = AgentEntry(
+            name="zai-live", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", pid=101, pid_start_time=1001,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate(
+                "zai-forced", "pane", route_provider="zai", force=True
+            )
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+
+    def test_provider_cap_never_queues_on_a_busy_mutex(self, monkeypatch, capsys):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: False
+        )
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-now", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "current count unavailable" in refused and "queued" not in refused
+
+    def test_provider_count_requires_positive_liveness_and_skips_exited(
+        self, monkeypatch
+    ):
+        rows = [
+            AgentEntry(name="positive", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=101, pid_start_time=1001),
+            AgentEntry(name="stale", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=102, pid_start_time=1002),
+            AgentEntry(name="exited", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", status="exited", pid=103, pid_start_time=1003),
+        ]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        monkeypatch.setattr(
+            spawn_gate, "_pid_alive",
+            lambda pid, _start: {101: True, 102: False, 103: True}[pid],
+        )
+        assert spawn_gate.provider_live_count("zai") == 1
+
+    def test_live_pid_without_incarnation_token_refuses_but_dead_pid_skips(
+        self, monkeypatch
+    ):
+        row = AgentEntry(
+            name="ambiguous", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", pid=101,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: False)
+        assert spawn_gate.provider_live_count("zai") == 0
+
+    def test_headless_provider_claim_holds_and_releases_a_lane(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+
+        first = spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
+        second = spawn_gate.run_gate("peer-2", "headless", route_provider="zai")
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("peer-3", "headless", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        assert "current count 2" in capsys.readouterr().err
+
+        first.release()
+        replacement = spawn_gate.run_gate(
+            "peer-4", "headless", route_provider="zai"
+        )
+        replacement.release()
+        second.release()
+
+    def test_known_unrouted_headless_claim_does_not_block_capped_provider(
+        self, monkeypatch
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+
+        unrelated = spawn_gate.run_gate("codex-peer", "headless")
+        assert spawn_gate.provider_live_count("zai") == 0
+        unrelated.release()
+
+    def test_suspect_claim_for_other_provider_does_not_block_count(
+        self, tmp_path, monkeypatch
+    ):
+        claims = tmp_path / ".fno" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "worker%3Aopenai-peer.lock").write_text("claim")
+        monkeypatch.setattr(spawn_gate, "_gate_claims_root", lambda: tmp_path)
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        other_provider = "openai"
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda *_args, **_kwargs: {
+                "state": "suspect",
+                "metadata": {"model_provider": other_provider},
+            },
+        )
+
+        assert spawn_gate.provider_live_count("zai") == 0
+
+    def test_capped_headless_refuses_when_lane_reservation_is_unwritable(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(
+            "fno.claims.core.acquire_claim",
+            lambda *args, **kwargs: (
+                True
+                if args[0] == "spawn-gate"
+                else (_ for _ in ()).throw(OSError("claim store denied"))
+            ),
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count unavailable" in refused
+
+    def test_release_failures_are_loud_and_retain_retry_state(
+        self, monkeypatch, capsys
+    ):
+        guard = spawn_gate.GateGuard(
+            _gate_holder="gate-holder",
+            _worker_key="worker:peer",
+            _worker_holder="worker-holder",
+        )
+        monkeypatch.setattr(
+            "fno.claims.core.release_claim",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("store denied")),
+        )
+
+        guard.release()
+
+        assert guard._gate_holder == "gate-holder"
+        assert guard._worker_key == "worker:peer"
+        refused = capsys.readouterr().err
+        assert "could not release gate mutex" in refused
+        assert "could not release worker reservation worker:peer" in refused
+
+    def test_release_retries_transient_claim_store_failures(self, monkeypatch):
+        guard = spawn_gate.GateGuard(
+            _gate_holder="gate-holder",
+            _worker_key="worker:peer",
+            _worker_holder="worker-holder",
+        )
+        attempts: dict[str, int] = {}
+
+        def flaky_release(key, *_args, **_kwargs):
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] < 3:
+                raise OSError("transient store failure")
+
+        monkeypatch.setattr("fno.claims.core.release_claim", flaky_release)
+
+        guard.release()
+
+        assert attempts == {"spawn-gate": 3, "worker:peer": 3}
+        assert guard._gate_holder is None
+        assert guard._worker_key is None
+
+    def test_pidless_bg_requires_a_readable_positive_roster_marker(
+        self, tmp_path, monkeypatch
+    ):
+        row = AgentEntry(
+            name="zai-bg", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", short_id="11111111",
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+        _write_roster(
+            tmp_path,
+            {"zai-bg": {"sessionId": "11111111-2222-3333-4444-55555555abcd", "pid": ALIVE}},
+        )
+        assert spawn_gate.provider_live_count("zai") == 1
 
 
 class TestQos:

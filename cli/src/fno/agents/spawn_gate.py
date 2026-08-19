@@ -13,8 +13,9 @@ the slot cap (x-bdf9 — only a row that is ALSO in the fno registry counts, so
 non-work sessions never consume slots). Its only writes are its own claims
 (``spawn-gate`` check→dispatch mutex,
 ``worker:<name>`` headless slot claims, both under the GLOBAL claims root —
-the RAM budget is machine-wide). Every guard fails OPEN on read errors: the
-gate must never become the thing that bricks spawning.
+the RAM budget is machine-wide). Global guards fail OPEN on read errors. The
+per-provider cap is stricter: an unreadable live count refuses, never assumes
+zero.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, NoReturn, Optional
 from urllib.parse import unquote
 
 from fno.harness_identity import claude_transport_short_id
@@ -34,6 +35,7 @@ from fno.harness_identity import claude_transport_short_id
 EXIT_QUEUE_TIMEOUT = 75
 EXIT_NO_WAIT = 76
 EXIT_RAM_REFUSED = 77
+EXIT_PROVIDER_CAP = 78
 
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
@@ -50,6 +52,7 @@ GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
 MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
+CLAIM_RELEASE_ATTEMPTS = 3
 
 #: Registry statuses that can hold a live process. `idle` counts when the pid
 #: is alive (an unreaped idle process still holds RAM); a reaped pid drops out
@@ -242,6 +245,7 @@ def census() -> LiveCensus:
     degrades to zero contribution with one warning."""
     out = LiveCensus()
     counted_short_ids: set[str] = set()
+    live_registry_names: set[str] = set()
 
     # claude roster first: display + dedup key for adopted sessions. Kept in the
     # union for `fno agents top`, but excluded from the slot cap (see slot_count).
@@ -330,6 +334,7 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
+        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             continue  # already shown as its roster row in the display union
@@ -350,8 +355,194 @@ def census() -> LiveCensus:
             )
         )
 
-    out.slot_claims = _live_worker_slot_claims(out.warnings)
+    out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
     return out
+
+
+class ProviderCountUnavailable(RuntimeError):
+    """A provider count cannot be proved from registry/liveness evidence."""
+
+
+_KNOWN_UNROUTED_PROVIDER = "__uncapped__"
+_PROVIDER_ADMISSION_TOKEN = object()
+
+
+def _provider_roster_live_short_ids(short_ids: set[str]) -> set[str]:
+    """Return requested bg ids with a positive live roster marker."""
+    try:
+        raw = json.loads(_roster_path().read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ProviderCountUnavailable(f"claude roster unreadable: {exc}") from exc
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, dict):
+        raise ProviderCountUnavailable("claude roster has no workers object")
+
+    live: set[str] = set()
+    undecidable: set[str] = set()
+    for worker in workers.values():
+        if not isinstance(worker, dict):
+            continue
+        session_id = worker.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        short_id = claude_transport_short_id(session_id)
+        if short_id not in short_ids:
+            continue
+        pid = worker.get("pid") if isinstance(worker.get("pid"), int) else None
+        state = _pid_alive(pid, None)
+        if state is True:
+            live.add(short_id)
+        elif state is None:
+            undecidable.add(short_id)
+    unknown = undecidable - live
+    if unknown:
+        raise ProviderCountUnavailable(
+            f"process incarnation unreadable for bg worker(s) {sorted(unknown)}"
+        )
+    return live
+
+
+def provider_live_count(provider: str) -> int:
+    """Count provider rows only when status and positive liveness agree."""
+    try:
+        from fno.agents.registry import load_registry
+
+        loaded = load_registry()
+        if getattr(loaded, "complete", True) is not True:
+            raise ProviderCountUnavailable(
+                "registry forward read skipped rows; provider count is incomplete"
+            )
+        candidates = [
+            row
+            for row in loaded
+            if row.provider == provider and row.status in LIVE_STATUSES
+        ]
+    except Exception as exc:
+        raise ProviderCountUnavailable(f"fno registry unreadable: {exc}") from exc
+
+    bg_short_ids = {
+        row.short_id
+        for row in candidates
+        if row.pid is None
+        and row.harness == "claude"
+        and bool(row.short_id)
+    }
+    bg_live = (
+        _provider_roster_live_short_ids(bg_short_ids) if bg_short_ids else set()
+    )
+
+    count = 0
+    counted_names: set[str] = set()
+    for row in candidates:
+        if row.pid is not None:
+            if row.pid_start_time is None:
+                state = _pid_alive(row.pid, None)
+                if state is False:
+                    continue
+                if isinstance(row.mux, dict):
+                    try:
+                        from fno.agents.mux_spawn import _mux_pane_alive
+
+                        pane_state = _mux_pane_alive(row.mux)
+                    except Exception as exc:
+                        raise ProviderCountUnavailable(
+                            f"pane liveness unreadable for {row.name}: {exc}"
+                        ) from exc
+                    if pane_state is True:
+                        count += 1
+                        counted_names.add(row.name)
+                        continue
+                    if pane_state is False:
+                        continue
+                raise ProviderCountUnavailable(
+                    f"process incarnation token missing for {row.name}"
+                )
+            state = _pid_alive(row.pid, row.pid_start_time)
+            if state is None:
+                raise ProviderCountUnavailable(
+                    f"process incarnation unreadable for {row.name}"
+                )
+            if state is True:
+                count += 1
+                counted_names.add(row.name)
+            continue
+        if isinstance(row.mux, dict):
+            try:
+                from fno.agents.mux_spawn import _mux_pane_alive
+
+                pane_state = _mux_pane_alive(row.mux)
+            except Exception as exc:
+                raise ProviderCountUnavailable(
+                    f"pane liveness unreadable for {row.name}: {exc}"
+                ) from exc
+            if pane_state is True:
+                count += 1
+                counted_names.add(row.name)
+                continue
+            if pane_state is False:
+                continue
+            raise ProviderCountUnavailable(
+                f"pane liveness unreadable for {row.name}"
+            )
+        if row.short_id and row.short_id in bg_live:
+            count += 1
+            counted_names.add(row.name)
+    return count + _provider_live_slot_claims(provider, counted_names)
+
+
+def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
+    """Count provider-tagged headless reservations not represented by rows."""
+    try:
+        from fno.claims.core import claim_status
+
+        root = _gate_claims_root()
+        claims_dir = root / ".fno" / "claims"
+        if not claims_dir.exists():
+            return 0
+        paths = list(claims_dir.glob("worker%3A*.lock"))
+    except Exception as exc:
+        raise ProviderCountUnavailable(
+            f"worker reservations unreadable: {exc}"
+        ) from exc
+
+    count = 0
+    for path in paths:
+        key = unquote(path.name[: -len(".lock")])
+        name = key.removeprefix("worker:")
+        if name in counted_names:
+            continue
+        try:
+            status = claim_status(key, root=root)
+        except Exception as exc:
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} unreadable: {exc}"
+            ) from exc
+        state = status.get("state")
+        if state in ("free", "stale"):
+            continue
+        if state == "corrupted":
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} is corrupted"
+            )
+        metadata = status.get("metadata")
+        model_provider = (
+            metadata.get("model_provider") if isinstance(metadata, dict) else None
+        )
+        if not isinstance(model_provider, str) or not model_provider:
+            raise ProviderCountUnavailable(
+                f"live worker reservation {key} has no model_provider"
+            )
+        if model_provider == _KNOWN_UNROUTED_PROVIDER:
+            continue
+        if model_provider != provider:
+            continue
+        if state == "suspect":
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} liveness is suspect"
+            )
+        if state == "live":
+            count += 1
+    return count
 
 
 def _gate_claims_root() -> Path:
@@ -360,7 +551,9 @@ def _gate_claims_root() -> Path:
     return global_claims_root()
 
 
-def _live_worker_slot_claims(warnings: list[str]) -> int:
+def _live_worker_slot_claims(
+    warnings: list[str], counted_names: Optional[set[str]] = None
+) -> int:
     """Live ``worker:<name>`` slot claims under the GLOBAL claims root."""
     try:
         from fno.claims.core import claim_status
@@ -371,8 +564,11 @@ def _live_worker_slot_claims(warnings: list[str]) -> int:
     if not claims_dir.is_dir():
         return 0
     n = 0
+    counted_names = counted_names or set()
     for f in claims_dir.glob("worker%3A*.lock"):
         key = unquote(f.name[: -len(".lock")])
+        if key.removeprefix("worker:") in counted_names:
+            continue
         try:
             state = claim_status(key, root=root).get("state")
         except Exception:
@@ -397,36 +593,106 @@ class GateGuard:
     _gate_holder: Optional[str] = None
     _worker_key: Optional[str] = None
     _worker_holder: Optional[str] = None
+    _route_provider: Optional[str] = None
+    _spawn_name: Optional[str] = None
+    _substrate: Optional[str] = None
+    _admission_token: object | None = None
+    _consumed: bool = False
+    _released: bool = False
+
+    def _consume_provider(self, provider: str, name: str, substrate: str) -> bool:
+        authorized = (
+            self._admission_token is _PROVIDER_ADMISSION_TOKEN
+            and self._route_provider == provider
+            and self._spawn_name == name
+            and self._substrate == substrate
+            and not self._consumed
+            and not self._released
+        )
+        if authorized:
+            self._consumed = True
+        return authorized
+
+    def retain_revived_worker(
+        self,
+        short_id: str,
+        *,
+        worker_name: Optional[str] = None,
+        worker_pid: Optional[int] = None,
+        positive_marker: str = "claude-respawn-ok",
+    ) -> None:
+        """Convert a BG admission into durable fail-closed worker evidence."""
+        if self._route_provider is None or self._spawn_name is None:
+            raise ProviderCountUnavailable("provider admission identity unavailable")
+        holder = self._gate_holder or f"spawn-gate:{os.getpid()}:{self._spawn_name}"
+        _acquire_worker_slot(
+            self,
+            worker_name or self._spawn_name,
+            holder,
+            self._route_provider,
+            fail_closed=True,
+            worker_pid=worker_pid,
+            metadata={
+                "session_short_id": short_id,
+                "positive_marker": positive_marker,
+            },
+        )
+
+    def release_worker_reservation(self) -> None:
+        if self._worker_key is None:
+            return
+        key = self._worker_key
+        if not _release_claim_bounded(key, self._worker_holder or ""):
+            return
+        self._worker_key = None
+        self._worker_holder = None
 
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
             return
-        holder, self._gate_holder = self._gate_holder, None
-        try:
-            from fno.claims.core import release_claim
-
-            release_claim("spawn-gate", holder, root=_gate_claims_root())
-        except Exception:
-            pass
+        holder = self._gate_holder
+        if not _release_claim_bounded("spawn-gate", holder):
+            return
+        self._gate_holder = None
 
     def release(self) -> None:
+        self._released = True
         self.release_gate_mutex()
-        if self._worker_key is None:
-            return
-        key, self._worker_key = self._worker_key, None
-        try:
-            from fno.claims.core import release_claim
+        self.release_worker_reservation()
 
-            release_claim(key, self._worker_holder or "", root=_gate_claims_root())
-        except Exception:
-            pass
+
+def consume_provider_admission(
+    guard: object, provider: str, name: str, substrate: str
+) -> bool:
+    """Consume one genuine opaque admission; duck-typed substitutes never pass."""
+    return isinstance(guard, GateGuard) and guard._consume_provider(
+        provider, name, substrate
+    )
+
+
+def _release_claim_bounded(key: str, holder: str) -> bool:
+    """Release a gate claim with a short retry budget for transient store faults."""
+    from fno.claims.core import release_claim
+
+    last_error: Exception | None = None
+    for attempt in range(CLAIM_RELEASE_ATTEMPTS):
+        try:
+            release_claim(key, holder, root=_gate_claims_root())
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < CLAIM_RELEASE_ATTEMPTS:
+                time.sleep(0.01)
+    label = "gate mutex" if key == "spawn-gate" else f"worker reservation {key}"
+    _warn(f"spawn-gate: could not release {label}: {last_error}")
+    return False
 
 
 class GateRefused(SystemExit):
     """Raised (as SystemExit subclass) when the gate refuses the spawn."""
 
 
-def _acquire_gate_mutex(holder: str) -> bool:
+def _acquire_gate_mutex(holder: str, *, fail_closed: bool = False) -> bool:
     """One attempt at the spawn-gate mutex. True = held. Errors fail open."""
     try:
         from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim
@@ -445,8 +711,26 @@ def _acquire_gate_mutex(holder: str) -> bool:
             # opposite: someone else has it, so this attempt fails closed.
             return False
     except Exception as exc:
+        if fail_closed:
+            raise ProviderCountUnavailable(f"spawn mutex unavailable: {exc}") from exc
         _warn(f"spawn-gate: mutex unavailable ({exc}); proceeding unserialized")
         return True
+
+
+def _refuse_provider_cap(
+    provider: str,
+    cap: int,
+    *,
+    current: Optional[int] = None,
+    error: Optional[BaseException] = None,
+) -> NoReturn:
+    current_text = str(current) if current is not None else "unavailable"
+    detail = f" ({error})" if error is not None else ""
+    _warn(
+        f"spawn-gate: provider {provider}, cap {cap}, current count "
+        f"{current_text}{detail}; refusing immediately; no worker launched"
+    )
+    raise GateRefused(EXIT_PROVIDER_CAP)
 
 
 def _check_ram_floor(floor_gb: float) -> None:
@@ -465,17 +749,40 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED)
 
 
-def _acquire_worker_slot(guard: GateGuard, name: str, holder: str) -> None:
+def _acquire_worker_slot(
+    guard: GateGuard,
+    name: str,
+    holder: str,
+    route_provider: Optional[str] = None,
+    *,
+    fail_closed: bool = False,
+    worker_pid: Optional[int] = None,
+    metadata: Optional[dict[str, object]] = None,
+) -> None:
     key = f"worker:{name}"
     try:
         from fno.claims.core import acquire_claim
 
+        claim_metadata: dict[str, object] = {
+            "model_provider": route_provider or _KNOWN_UNROUTED_PROVIDER
+        }
+        if metadata:
+            claim_metadata.update(metadata)
         acquire_claim(
-            key, holder, ttl_ms=WORKER_CLAIM_TTL_MS, root=_gate_claims_root()
+            key,
+            holder,
+            ttl_ms=WORKER_CLAIM_TTL_MS,
+            metadata=claim_metadata,
+            pid=worker_pid,
+            root=_gate_claims_root(),
         )
         guard._worker_key = key
         guard._worker_holder = holder
-    except Exception:
+    except Exception as exc:
+        if fail_closed:
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} unavailable: {exc}"
+            ) from exc
         # Fail open: a slot claim is count VISIBILITY, not a correctness gate.
         _warn(f"spawn-gate: worker slot claim {key} unavailable; proceeding uncounted")
 
@@ -486,6 +793,7 @@ def run_gate(
     *,
     force: bool = False,
     no_wait: bool = False,
+    route_provider: Optional[str] = None,
 ) -> GateGuard:
     """Run the full gate. Returns a :class:`GateGuard` to hold across dispatch
     on pass; raises :class:`GateRefused` (a SystemExit) on refusal/timeout.
@@ -495,23 +803,37 @@ def run_gate(
     # the REAL machine's live workers, and it doubles as an operator escape.
     if os.environ.get("FNO_SPAWN_GATE") == "0":
         _maybe_emit_spawn_cap_escape()
-        return GateGuard()
+        return GateGuard(
+            _route_provider=route_provider,
+            _spawn_name=name,
+            _substrate=substrate,
+            _admission_token=_PROVIDER_ADMISSION_TOKEN,
+        )
     try:
         from fno.config import load_settings
 
         agents_cfg = load_settings().agents
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
+        max_lanes = dict(getattr(agents_cfg, "max_lanes", {"zai": 5}))
     except Exception:
         cap, floor_gb = 3, 4.0
+        max_lanes = {"zai": 5}
+
+    provider_cap = max_lanes.get(route_provider) if route_provider is not None else None
 
     holder = f"spawn-gate:{os.getpid()}:{name}"
-    guard = GateGuard()
+    guard = GateGuard(
+        _route_provider=route_provider,
+        _spawn_name=name,
+        _substrate=substrate,
+        _admission_token=_PROVIDER_ADMISSION_TOKEN,
+    )
 
-    if force:
+    if force and provider_cap is None:
         _warn("spawn-gate: forced past cap and RAM floor (--force)")
         if substrate == "headless":
-            _acquire_worker_slot(guard, name, holder)
+            _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
 
     started = time.monotonic()
@@ -523,10 +845,25 @@ def run_gate(
     mutex_blocked_since: Optional[float] = None
 
     while True:
-        acquired = _acquire_gate_mutex(holder)
+        try:
+            acquired = (
+                _acquire_gate_mutex(holder, fail_closed=True)
+                if provider_cap is not None
+                else _acquire_gate_mutex(holder)
+            )
+        except ProviderCountUnavailable as exc:
+            _refuse_provider_cap(route_provider or "unknown", provider_cap or 0, error=exc)
         if acquired:
             mutex_blocked_since = None
         else:
+            if provider_cap is not None:
+                _refuse_provider_cap(
+                    route_provider or "unknown",
+                    provider_cap,
+                    error=ProviderCountUnavailable(
+                        "spawn mutex is busy; current count cannot be serialized"
+                    ),
+                )
             now = time.monotonic()
             if mutex_blocked_since is None:
                 mutex_blocked_since = now
@@ -550,6 +887,42 @@ def run_gate(
                 acquired = True
         if acquired:
             guard._gate_holder = holder
+            if provider_cap is not None:
+                try:
+                    provider_slots = provider_live_count(route_provider or "")
+                except ProviderCountUnavailable as exc:
+                    guard.release_gate_mutex()
+                    _refuse_provider_cap(
+                        route_provider or "unknown", provider_cap, error=exc
+                    )
+                if provider_slots >= provider_cap:
+                    guard.release_gate_mutex()
+                    _refuse_provider_cap(
+                        route_provider or "unknown",
+                        provider_cap,
+                        current=provider_slots,
+                    )
+            if force:
+                _warn(
+                    "spawn-gate: forced past cap and RAM floor (--force); "
+                    "provider cap remains enforced"
+                )
+                if substrate == "headless":
+                    try:
+                        _acquire_worker_slot(
+                            guard,
+                            name,
+                            holder,
+                            route_provider,
+                            fail_closed=provider_cap is not None,
+                        )
+                    except ProviderCountUnavailable as exc:
+                        guard.release()
+                        _refuse_provider_cap(
+                            route_provider or "unknown", provider_cap or 0, error=exc
+                        )
+                    guard.release_gate_mutex()
+                return guard
             c = census()
             for w in c.warnings:
                 _warn(w)
@@ -561,7 +934,19 @@ def run_gate(
                     guard.release()
                     raise
                 if substrate == "headless":
-                    _acquire_worker_slot(guard, name, holder)
+                    try:
+                        _acquire_worker_slot(
+                            guard,
+                            name,
+                            holder,
+                            route_provider,
+                            fail_closed=provider_cap is not None,
+                        )
+                    except ProviderCountUnavailable as exc:
+                        guard.release()
+                        _refuse_provider_cap(
+                            route_provider or "unknown", provider_cap or 0, error=exc
+                        )
                     guard.release_gate_mutex()
                 # pane/bg: keep the mutex until dispatch returns (the row
                 # exists by then); the caller releases via guard.release().

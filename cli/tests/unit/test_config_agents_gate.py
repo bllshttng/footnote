@@ -6,9 +6,16 @@ protective infrastructure and a settings typo must never brick spawning.
 from fno.config import AgentsBlock
 
 
+def test_provider_loader_reserved_keys_match_agents_schema():
+    from fno.adapters.providers.loader import _AGENTS_RESERVED_KEYS
+
+    assert _AGENTS_RESERVED_KEYS == set(AgentsBlock.model_fields)
+
+
 def test_defaults():
     b = AgentsBlock()
     assert b.max_live == 3
+    assert b.max_lanes == {"zai": 5}
     assert b.min_free_gb == 4.0
     assert b.worker_qos == "utility"
 
@@ -25,6 +32,16 @@ def test_max_live_below_one_coerces_to_default():
     assert AgentsBlock(max_live=-2).max_live == 3
     assert AgentsBlock(max_live="banana").max_live == 3
     assert AgentsBlock(max_live=True).max_live == 3
+
+
+def test_max_lanes_is_per_provider_and_invalid_shape_keeps_safe_default():
+    assert AgentsBlock(max_lanes={"zai": 2, "openai": 7}).max_lanes == {
+        "zai": 2,
+        "openai": 7,
+    }
+    assert AgentsBlock(max_lanes={}).max_lanes == {}
+    assert AgentsBlock(max_lanes={"zai": 0}).max_lanes == {"zai": 5}
+    assert AgentsBlock(max_lanes="broken").max_lanes == {"zai": 5}
 
 
 def test_min_free_gb_zero_is_valid_disable():

@@ -113,10 +113,29 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     runner = kwargs.pop("runner", FakeRunner())
+    provider = kwargs.pop("provider", "claude")
+    name = kwargs.pop("name", "peer")
+    # Routed Claude fixtures in this module are z.ai routes. Supply the vendor
+    # axis explicitly so the production seam never has to infer it from env.
+    if provider == "claude" and kwargs.get("route_env") is not None:
+        kwargs.setdefault("route_provider", "zai")
+    if kwargs.get("route_provider") is not None:
+        from fno.agents.model_routing import bind_route_provider
+        from fno.agents.spawn_gate import run_gate
+
+        monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        if kwargs.get("route_env") is not None:
+            kwargs["route_env"] = bind_route_provider(
+                kwargs["route_env"], kwargs["route_provider"]
+            )
+        kwargs.setdefault(
+            "provider_gate",
+            run_gate(name, "pane", route_provider=kwargs["route_provider"]),
+        )
     result = dispatch_spawn_pane(
-        name=kwargs.pop("name", "peer"),
+        name=name,
         message=kwargs.pop("message", "hello"),
-        provider=kwargs.pop("provider", "claude"),
+        provider=provider,
         cwd=kwargs.pop("cwd", tmp_path),
         runner=runner,
         **kwargs,
@@ -1963,11 +1982,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     from fno.cli import app
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
-    class Gate:
-        def release(self) -> None:
-            pass
-
     use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    monkeypatch.setattr(spawn_gate, "_maybe_emit_spawn_cap_escape", lambda: None)
     fake_runner = FakeRunner()
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
@@ -1975,8 +1992,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
         return real_dispatch(**kwargs, runner=fake_runner)
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
-    monkeypatch.setattr(mux_spawn.shutil, "which", lambda binary: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn.shutil, "which", lambda binary, **_kwargs: "/usr/local/bin/happy"
+    )
     monkeypatch.setattr(
         mux_spawn,
         "happy_routed_panes_enabled",

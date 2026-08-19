@@ -233,6 +233,8 @@ happy_routed_panes = false
 dead_row_grace = 3600
 # Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).
 max_live = 3
+# Immediate-refusal concurrent live-worker caps keyed by model provider; unlisted providers are uncapped (default zai = 5).
+max_lanes = { zai = 5 }
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
 min_free_gb = 4.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.

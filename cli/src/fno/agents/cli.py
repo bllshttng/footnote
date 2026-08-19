@@ -875,7 +875,7 @@ def cmd_spawn(
     # decides whether the route is materialized at all: without this a routed
     # `--once` reaches dispatch as claude+once+not-headless and dies on the
     # "claude peers are persistent bg threads" refusal.
-    if once and route is not None and substrate == "pane":
+    if once and substrate == "pane":
         substrate = "headless"
     if substrate not in ("pane", "bg", "headless"):
         print(
@@ -1108,7 +1108,11 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.agents.model_routing import _parse_target, resolve_explicit_route
+        from fno.agents.model_routing import (
+            _parse_target,
+            bind_route_provider,
+            resolve_explicit_route,
+        )
 
         parsed = _parse_target(route)
         if parsed is None:
@@ -1142,6 +1146,7 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        route_env = bind_route_provider(route_env, route_provider)
 
     if monitor == "happy" and route_provider != "zai":
         print(
@@ -1160,16 +1165,20 @@ def cmd_spawn(
         )
 
         intent = f"routed role {role!r}" if role is not None else f"route {route!r}"
+        resolved_providers: list[str] = []
         try:
             route_env = resolve_spawn_route(
                 role,
                 route_env,
                 intent=intent,
                 notice=lambda note: print(note, file=sys.stderr),
+                resolved_provider=resolved_providers.append,
             )
         except RouteCompositionError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=2) from exc
+        if route_provider is None and resolved_providers:
+            route_provider = resolved_providers[-1]
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and
@@ -1298,6 +1307,51 @@ def cmd_spawn(
             guard["reservation_holder"],
         )
 
+    # A resume may restore a recorded route inside dispatch_spawn. Resolve its
+    # separately stored provider axis before admission so the gate judges the
+    # destination the revived worker will actually use.
+    if resume is not None and route_provider is None:
+        from fno.agents.registry import load_registry
+
+        try:
+            loaded = load_registry()
+            if getattr(loaded, "complete", True) is not True:
+                raise RuntimeError("registry forward read is incomplete")
+        except Exception as exc:
+            print(
+                f"resume provider unreadable ({exc}); refusing because its provider "
+                "cap cannot be evaluated; no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from exc
+        source_row = next(
+            (
+                row
+                for row in loaded
+                if row.name == name and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        ) or next(
+            (
+                row
+                for row in loaded
+                if getattr(row, "harness_session_id", None) == resume
+                and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        )
+        if source_row is not None:
+            recorded_provider = getattr(source_row, "provider", None)
+            if not recorded_provider:
+                print(
+                    f"route recorded for {source_row.name!r} has no model-provider "
+                    "axis; refusing because its provider cap cannot be evaluated; "
+                    "no worker launched",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+            route_provider = recorded_provider
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,
@@ -1312,6 +1366,7 @@ def cmd_spawn(
             "headless" if (once or substrate == "headless") else substrate,
             force=force,
             no_wait=no_wait,
+            route_provider=route_provider,
         )
     except BaseException:
         if node_reservation is not None:
@@ -1395,6 +1450,7 @@ def cmd_spawn(
                     route_env=route_env,
                     monitor=monitor,
                     route_provider=route_provider,
+                    provider_gate=gate,
                     passthrough=passthrough,
                 )
             except DispatchAskError as exc:
@@ -1527,6 +1583,8 @@ def cmd_spawn(
                 account_env=account_env,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
+                route_provider=route_provider,
+                provider_gate=gate,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

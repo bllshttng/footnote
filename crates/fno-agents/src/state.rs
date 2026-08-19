@@ -98,7 +98,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // not-live misnomer that misled readers twice). Same X3 passthrough rationale:
 // a Python-only field would be dropped on the daemon's read-modify-write.
 // Accepted set widens to 1..=14.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 14;
+//
+// v15 restores `provider` with its literal model-provider meaning, separate
+// from the harness identity. Rows through v14 still treat an on-disk provider
+// as the removed harness alias and migrate it at the read choke point.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 15;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -369,13 +373,14 @@ pub struct RegistryEntry {
     /// a `"short_id": null` would fail this `String` field's deserialize.)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub short_id: String,
-    /// v10 backfill-only (x-880e): the removed on-disk `provider` key. Deserialized
-    /// under its old name so a legacy row's identity survives the read, but NEVER
-    /// serialized -- [`RegistryEntry::backfill_harness_aliases`] moves it into
-    /// `harness` at load. This is the Rust mirror of Python's `load_registry`
-    /// popping `provider`. `harness` is the sole on-disk identity axis.
-    #[serde(default, rename = "provider", skip_serializing)]
+    /// v10-v14 backfill-only harness alias. The read choke point moves a
+    /// pre-v15 row's `provider` into this field before harness backfill.
+    #[serde(default, skip_serializing)]
     pub legacy_provider: String,
+    /// Model-provider axis (v15), distinct from the harness identity. It is
+    /// stamped from route resolution and never inferred from `harness`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,
@@ -639,6 +644,14 @@ pub const CLAUDE_MODE_STREAM_JSON: &str = "stream_json";
 pub const CLAUDE_MODE_INTERACTIVE: &str = "interactive";
 
 impl RegistryEntry {
+    fn migrate_provider_semantics(&mut self, schema_version: u32) {
+        if schema_version < 15 {
+            if let Some(provider) = self.provider.take() {
+                self.legacy_provider = provider;
+            }
+        }
+    }
+
     /// Two-way sync of `harness`/`harness_session_id` with the legacy
     /// per-provider identity fields (x-ec59), the Rust mirror of Python's
     /// `harness_identity.sync_harness_aliases` + the registry harness back-fill.
@@ -1103,6 +1116,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     // a canonical row written by Rust both round-trip. Applied here (the single
     // read choke point) covers both load_registry and update_registry's RMW read.
     for entry in &mut reg.entries {
+        entry.migrate_provider_semantics(reg.schema_version);
         entry.backfill_harness_aliases();
         // v9 transport-key backfill (x-1b1e): move a legacy row's
         // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
@@ -1515,8 +1529,9 @@ mod tests {
         RegistryEntry {
             name: name.into(),
             short_id: format!("{name}-id"),
-            legacy_provider: "codex".into(),
-            harness: None,
+            legacy_provider: String::new(),
+            provider: None,
+            harness: Some("codex".into()),
             harness_session_id: None,
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
@@ -1585,6 +1600,7 @@ mod tests {
             "gemini_session_id":null,"created_at":"2026-07-13T00:00:00Z","status":"live",
             "last_message_at":null,"mcp_channel_id":null}"#;
         let mut e: RegistryEntry = serde_json::from_str(python_legacy).unwrap();
+        e.migrate_provider_semantics(14);
         e.backfill_harness_aliases();
         assert_eq!(e.harness.as_deref(), Some("claude"));
         assert_eq!(e.harness_session_id.as_deref(), Some("UUID-1"));
@@ -1706,6 +1722,8 @@ mod tests {
         // session file -- the exact defect recover() already had to fix.
         let mut ask = sample_entry("cc-ask");
         ask.legacy_provider = "claude".into();
+        ask.harness = None;
+        ask.backfill_harness_aliases();
         ask.short_id = "7c5dcf5d".into(); // v9: jobId lives here now
         ask.host_mode = None; // exec (shellout), not interactive
         ask.pid = None;
@@ -1977,6 +1995,23 @@ mod tests {
         assert_eq!(row["name"], "w");
         assert_eq!(row["harness"], "codex");
         assert_eq!(row["harness_session_id"], "sid");
+    }
+
+    #[test]
+    fn v15_model_provider_roundtrips_separately_from_harness() {
+        let dual_axis = concat!("open", "code");
+        let python_json = format!(
+            r#"{{"schema_version":15,"agents":[
+            {{"name":"w","harness":"{dual_axis}","provider":"{dual_axis}","cwd":"/p",
+             "log_path":"/l","created_at":"2026-08-19T00:00:00Z","status":"live"}}]}}"#
+        );
+        let reg: Registry = serde_json::from_str(&python_json).unwrap();
+        assert_eq!(reg.entries[0].harness.as_deref(), Some(dual_axis));
+        assert_eq!(reg.entries[0].provider.as_deref(), Some(dual_axis));
+
+        let out = serde_json::to_value(&reg).unwrap();
+        assert_eq!(out["agents"][0]["harness"], dual_axis);
+        assert_eq!(out["agents"][0]["provider"], dual_axis);
     }
 
     #[test]
@@ -2447,7 +2482,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":15,"agents":[
+            r#"{"schema_version":16,"agents":[
                 {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
                 {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
@@ -2473,7 +2508,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":15,"agents":[
+            r#"{"schema_version":16,"agents":[
                 {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
                 {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
@@ -2514,12 +2549,12 @@ mod tests {
         let dir = tmpdir("version-write-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        let newer = r#"{"schema_version":15,"agents":[]}"#;
+        let newer = r#"{"schema_version":16,"agents":[]}"#;
         std::fs::write(&path, newer).unwrap();
 
         match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 15);
+                assert_eq!(found, 16);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
@@ -2998,7 +3033,7 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":15,"agents":[
+            r#"{"schema_version":16,"agents":[
                 {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
                  "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
                 {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",

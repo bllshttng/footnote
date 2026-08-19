@@ -179,7 +179,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # additive-optional shape and same forward-compat rationale as v12/v13: asdict
 # emits the key on every written row, so a pre-v14 reader must reject the
 # store rather than TypeError on the unknown kwarg.
-SCHEMA_VERSION = 14
+# v15 restores `provider` with its literal model-provider meaning. It is
+# intentionally distinct from `harness`: a routed worker can have
+# harness="claude" and provider="zai", while "opencode" is valid on either
+# axis. Rows from v1..v14 retain the legacy meaning where `provider` was a
+# harness alias and are migrated only while reading those schema versions.
+SCHEMA_VERSION = 15
 
 
 class RegistryVersionError(RuntimeError):
@@ -221,12 +226,14 @@ class AgentEntry:
     name: str
     cwd: str
     log_path: str
-    # Canonical identity axis (x-880e, v10). The harness name is the SOLE on-disk
-    # identity; the legacy ``provider`` and per-provider session-id fields are gone.
+    # Canonical harness identity (x-880e, v10). `provider` below is a separate
+    # model-provider axis from v15 onward; neither value may be inferred from the
+    # other because names such as "opencode" are valid on both axes.
     # ``harness_session_id`` (below) is the worker's own session id in its harness's
     # store (claude full UUID, codex thread id, gemini session id). load_registry
     # back-fills both from a legacy row's ``provider`` / per-provider keys on read.
     harness: str
+    provider: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     status: AgentStatus = "live"
     last_message_at: Optional[str] = None
@@ -1004,6 +1011,14 @@ def row_owning_session_id(
     return None
 
 
+class LoadedRegistry(list[AgentEntry]):
+    """Registry rows plus whether a forward read retained every raw row."""
+
+    def __init__(self, rows=(), *, complete: bool = True) -> None:
+        super().__init__(rows)
+        self.complete = complete
+
+
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
@@ -1020,7 +1035,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     ``status`` / ``host_mode`` stays fatal, because there it means a writer
     bug rather than a version gap.
 
-    Identity (provider/harness) is a shape check, not an enumeration: one
+    Harness identity is a shape check, not an enumeration: one
     alien harness never bricks the shared read, and dispatch capability is
     gated at the spawn/ask seam.
     """
@@ -1083,6 +1098,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
         )
     needs_v1_synthesis = on_disk_version == 1
     needs_v2_synthesis = on_disk_version <= 2
+    legacy_provider_semantics = on_disk_version < 15
 
     agents_field = raw.get("agents", [])
     if not isinstance(agents_field, list):
@@ -1111,24 +1127,29 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 )
             provider = row.get("provider")
             harness = row.get("harness")
-            # Identity is one axis (x-8dfc). The read tolerates ANY well-shaped
-            # identity token so a single alien-harness row never bricks the shared
-            # registry read (mail send, spawn-collision check, whoami all ride it);
-            # "can THIS fno DISPATCH the row?" is enforced later at the spawn/ask
-            # seam via KNOWN_PROVIDERS, not here. The corruption guard survives as a
-            # shape check: at least one of provider/harness must be a valid token.
-            if not (_is_identity_token(provider) or _is_identity_token(harness)):
+            # Before v15 `provider` was a harness alias. At v15 and later it is
+            # a separate model-provider axis, so only `harness` can satisfy the
+            # row identity requirement. Both axes accept any well-shaped token;
+            # dispatch capability is enforced later at the spawn/ask seam.
+            valid_legacy_alias = legacy_provider_semantics and _is_identity_token(provider)
+            if not (_is_identity_token(harness) or valid_legacy_alias):
                 raise RegistryVersionError(
                     f"registry at {target} row {index} has no valid identity token "
                     f"(provider={provider!r}, harness={harness!r}); a row needs a "
-                    "non-empty lowercase provider or harness. "
+                    "non-empty lowercase harness. "
                     "Upgrade or downgrade fno to match."
                 )
-            # Divergence is loud, not fatal (x-8dfc): a writer bug stamping
-            # provider != harness surfaces in the skew window instead of silently
-            # after the v10 provider-field removal. harness wins for identity
-            # (the backfill below leaves both in place; session_id keys on harness).
+            if provider is not None and not _is_identity_token(provider):
+                raise RegistryVersionError(
+                    f"registry at {target} row {index} has invalid provider={provider!r}; "
+                    "provider must be a non-empty lowercase token or null."
+                )
+            # Divergence was a writer warning only while both keys represented
+            # the harness axis. In v15, differing values are the normal routed
+            # shape (for example harness=claude, provider=zai).
             if (
+                legacy_provider_semantics
+                and
                 _is_identity_token(provider)
                 and _is_identity_token(harness)
                 and provider != harness
@@ -1175,7 +1196,11 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             # absent OR truthy-but-corrupt (whitespace/uppercase); the gate above
             # guarantees at least one of provider/harness is a valid token, so the
             # healed harness is always valid.
-            if not _is_identity_token(row.get("harness")) and _is_identity_token(row.get("provider")):
+            if (
+                legacy_provider_semantics
+                and not _is_identity_token(row.get("harness"))
+                and _is_identity_token(row.get("provider"))
+            ):
                 row = {**row, "harness": row["provider"]}
             # sync_harness_aliases reads the per-provider session keys still present in
             # the raw row and back-fills harness_session_id from the harness-matching
@@ -1184,7 +1209,10 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             # Drop the removed identity keys now that their values have back-filled
             # harness / harness_session_id, so they never reach AgentEntry(**row)
             # (which no longer defines them) and never round-trip through asdict.
-            for _dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
+            dead_keys = ["codex_session_id", "gemini_session_id", "claude_session_uuid"]
+            if legacy_provider_semantics:
+                dead_keys.append("provider")
+            for _dead in dead_keys:
                 row.pop(_dead, None)
             # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
             # READ only -- a legacy row's jobId moves into `short_id` (the unified
@@ -1250,7 +1278,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
-    return entries
+    return LoadedRegistry(entries, complete=not read_forward and not skipped_rows)
 
 
 def register_existing_session(

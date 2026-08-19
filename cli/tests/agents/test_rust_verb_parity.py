@@ -439,7 +439,7 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
     # Mirrors dispatch.attach_agent's one-shot refusal message + exit 13.
     expected = (
         "codex agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs cx --follow' for live output. Cross-provider "
+        "Use 'fno agents logs cx --follow' for live output. Cross-harness "
         "attach is planned for the Phase 6 supervisor.\n"
     )
     assert rust.stderr == expected

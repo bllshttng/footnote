@@ -222,14 +222,23 @@ class TestRoutedSpawnsAreNotPicked:
             lambda **kw: (seen.update(kw), _Created())[1],
         )
         monkeypatch.setattr(dispatch_mod, "_emit_ev", lambda *a, **k: None)
-        monkeypatch.setattr(
-            "fno.agents.model_routing.resolve_spawn_route",
-            lambda role, route_env, notice=None, **kw: route_env,
-        )
-        dispatch_mod.dispatch_spawn(
-            name="w3", message="hi", provider="claude", cwd=armed,
-            route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
-        )
+        def _resolve(role, route_env, notice=None, **kwargs):
+            kwargs["resolved_provider"]("zai")
+            return route_env
+
+        monkeypatch.setattr("fno.agents.model_routing.resolve_spawn_route", _resolve)
+        monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        from fno.agents.spawn_gate import run_gate
+
+        gate = run_gate("w3", "bg", route_provider="zai")
+        try:
+            dispatch_mod.dispatch_spawn(
+                name="w3", message="hi", provider="claude", cwd=armed,
+                route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
+                provider_gate=gate,
+            )
+        finally:
+            gate.release()
         assert seen["account_env"] is None
 
 

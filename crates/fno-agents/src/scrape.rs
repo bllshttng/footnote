@@ -505,6 +505,7 @@ mod tests {
             name: name.into(),
             short_id: String::new(),
             legacy_provider: provider.into(),
+            provider: None,
             harness: None,
             harness_session_id: None,
             cwd: "/tmp/x".into(),

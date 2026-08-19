@@ -197,14 +197,26 @@ def test_real_manifest_reaches_pane_launch_argv(
         monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
     runner = _MuxRunner()
 
-    mux_spawn.dispatch_spawn_pane(
-        name=f"{provider}-publisher-pane",
-        message="work",
-        provider=provider,
-        cwd=tmp_path,
-        role="publisher",
-        runner=runner,
-    )
+    name = f"{provider}-publisher-pane"
+    gate = None
+    if provider == "claude":
+        from fno.agents.spawn_gate import run_gate
+
+        monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+        gate = run_gate(name, "pane", route_provider=route_provider)
+    try:
+        mux_spawn.dispatch_spawn_pane(
+            name=name,
+            message="work",
+            provider=provider,
+            cwd=tmp_path,
+            role="publisher",
+            runner=runner,
+            provider_gate=gate,
+        )
+    finally:
+        if gate is not None:
+            gate.release()
 
     launched = runner.launched_argv()
     assert env_key in launched

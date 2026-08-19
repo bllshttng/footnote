@@ -161,6 +161,21 @@ class BusinessRoleRoutingProjectionError(RouteCompositionError):
     """A resolved business role lacks a deterministic provider/model route."""
 
 
+class BoundRouteEnv(dict[str, str]):
+    """A validated route environment carrying its model-provider identity."""
+
+    def __init__(self, route: Mapping[str, str], provider: str) -> None:
+        super().__init__(route)
+        self.provider = provider
+
+
+def bind_route_provider(
+    route: Mapping[str, str], provider: str
+) -> BoundRouteEnv:
+    """Bind a trusted provider resolution to the environment it produced."""
+    return BoundRouteEnv(route, provider)
+
+
 def resolve_spawn_route(
     role: Optional[str],
     route_env: Optional[Mapping[str, str]] = None,
@@ -168,6 +183,7 @@ def resolve_spawn_route(
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
     business_lookup: Optional[BusinessRoleLookup] = None,
+    resolved_provider: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve one spawn route; a pre-resolved route must be a complete unit.
 
@@ -201,11 +217,28 @@ def resolve_spawn_route(
     the old trigger read the CALLING process's credential slot, naming an
     account the spawn never used.
     """
-    route = (
-        dict(route_env)
-        if route_env
-        else resolve_route(role, notice=notice, business_lookup=business_lookup)
-    )
+    provider_names: list[str] = []
+    route: Optional[dict[str, str]]
+    if route_env:
+        route_provider = getattr(route_env, "provider", None)
+        route = (
+            BoundRouteEnv(route_env, route_provider)
+            if isinstance(route_provider, str) and route_provider
+            else dict(route_env)
+        )
+        if isinstance(route_provider, str) and route_provider:
+            provider_names.append(route_provider)
+    else:
+        route = resolve_route(
+            role,
+            notice=notice,
+            business_lookup=business_lookup,
+            resolved_provider=provider_names.append,
+        )
+        if route and provider_names:
+            route = BoundRouteEnv(route, provider_names[-1])
+    if provider_names and resolved_provider is not None:
+        resolved_provider(provider_names[-1])
     if route:
         route_intent = intent or (
             f"routed role {role!r}" if role is not None else "pre-resolved route"
@@ -710,6 +743,7 @@ def resolve_route(
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
     business_lookup: Optional[BusinessRoleLookup] = None,
+    resolved_provider: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve per-spawn env overrides for ``role``.
 
@@ -754,7 +788,10 @@ def resolve_route(
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
-    return _route_for_target(pname, model, block, env, notice, ctx=f"role {name!r}")
+    route = _route_for_target(pname, model, block, env, notice, ctx=f"role {name!r}")
+    if route is not None and resolved_provider is not None:
+        resolved_provider(pname)
+    return route
 
 
 def _route_for_target(

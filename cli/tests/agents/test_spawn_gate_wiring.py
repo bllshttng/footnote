@@ -37,9 +37,17 @@ def gate_calls(monkeypatch):
         def release(self):
             FakeGuard.released += 1
 
-    def fake_run_gate(name, substrate, *, force=False, no_wait=False):
+    def fake_run_gate(
+        name, substrate, *, force=False, no_wait=False, route_provider=None
+    ):
         calls.append(
-            {"name": name, "substrate": substrate, "force": force, "no_wait": no_wait}
+            {
+                "name": name,
+                "substrate": substrate,
+                "force": force,
+                "no_wait": no_wait,
+                "route_provider": route_provider,
+            }
         )
         return FakeGuard()
 
@@ -76,7 +84,13 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
     )
     assert result.exit_code == 0, result.output
     assert calls == [
-        {"name": "w1", "substrate": "bg", "force": False, "no_wait": False}
+        {
+            "name": "w1",
+            "substrate": "bg",
+            "force": False,
+            "no_wait": False,
+            "route_provider": None,
+        }
     ]
     # Hand-rolled f-string receipt, byte-parity with the Rust path (LD10).
     # harness axis under `harness`; no -P -> provider/model absent (AC5).

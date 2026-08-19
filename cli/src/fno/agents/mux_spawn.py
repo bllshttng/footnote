@@ -1958,6 +1958,7 @@ def dispatch_spawn_pane(
     route_env: Optional[dict[str, str]] = None,
     monitor: Optional[str] = None,
     route_provider: Optional[str] = None,
+    provider_gate: object | None = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
@@ -2015,6 +2016,7 @@ def dispatch_spawn_pane(
         model=model,
     )
     launch_role = role
+    resolved_providers: list[str] = []
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
@@ -2022,10 +2024,47 @@ def dispatch_spawn_pane(
         )
 
         try:
-            route_env = resolve_spawn_route(role, route_env)
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                resolved_provider=resolved_providers.append,
+            )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+        if resolved_providers:
+            resolved_provider = resolved_providers[-1]
+            if route_provider is not None and route_provider != resolved_provider:
+                raise DispatchAskError(
+                    f"resolved provider {resolved_provider!r} does not match supplied "
+                    f"provider {route_provider!r}; refusing before dispatch",
+                    exit_code=2,
+                )
+            route_provider = resolved_provider
         launch_role = None
+
+    if provider == "claude" and route_env and not resolved_providers:
+        raise DispatchAskError(
+            "pre-resolved route has no bound model-provider identity; refusing "
+            "because its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    if provider == "claude" and route_env and route_provider is None:
+        raise DispatchAskError(
+            "resolved route has no model-provider axis; refusing to launch because "
+            "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    from fno.agents.spawn_gate import consume_provider_admission
+
+    if route_provider is not None and not (
+        provider_gate is not None
+        and consume_provider_admission(provider_gate, route_provider, name, "pane")
+    ):
+        raise DispatchAskError(
+            f"provider {route_provider!r} has no matching admission token; "
+            "refusing before dispatch; no worker launched",
+            exit_code=2,
+        )
 
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
@@ -2648,6 +2687,7 @@ def dispatch_spawn_pane(
                 AgentEntry(
                     name=name,
                     harness=provider,
+                    provider=route_provider,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
                     # a concurrent reconcile cannot land one without the other

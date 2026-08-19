@@ -1312,6 +1312,7 @@ def _claude_create_path(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    route_provider: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1559,6 +1560,7 @@ def _claude_create_path(
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
+        provider=route_provider,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
@@ -2291,6 +2293,8 @@ def dispatch_spawn(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    route_provider: Optional[str] = None,
+    provider_gate: object | None = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -2340,6 +2344,7 @@ def dispatch_spawn(
         account_env = _pick_account_env(role=role, route_env=route_env)
 
     launch_role = role
+    resolved_providers: list[str] = []
     if provider == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
@@ -2351,10 +2356,47 @@ def dispatch_spawn(
                 role,
                 route_env,
                 notice=lambda note: print(note, file=sys.stderr),
+                resolved_provider=resolved_providers.append,
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+        if resolved_providers:
+            resolved_provider = resolved_providers[-1]
+            if route_provider is not None and route_provider != resolved_provider:
+                raise DispatchAskError(
+                    f"resolved provider {resolved_provider!r} does not match supplied "
+                    f"provider {route_provider!r}; refusing before dispatch",
+                    exit_code=2,
+                )
+            route_provider = resolved_provider
         launch_role = None
+
+    if provider == "claude" and route_env and not resolved_providers:
+        raise DispatchAskError(
+            "pre-resolved route has no bound model-provider identity; refusing "
+            "because its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    if provider == "claude" and route_env and route_provider is None:
+        raise DispatchAskError(
+            "resolved route has no model-provider axis; refusing to launch because "
+            "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
+    spawn_substrate = "headless" if (once or headless) else "bg"
+    from fno.agents.spawn_gate import consume_provider_admission
+
+    if route_provider is not None and not (
+        provider_gate is not None
+        and consume_provider_admission(
+            provider_gate, route_provider, name, spawn_substrate
+        )
+    ):
+        raise DispatchAskError(
+            f"provider {route_provider!r} has no matching admission token; "
+            "refusing before dispatch; no worker launched",
+            exit_code=2,
+        )
 
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
@@ -2477,6 +2519,12 @@ def dispatch_spawn(
                 entries = load_registry()
             except (OSError, ValueError, RegistryVersionError) as exc:
                 raise DispatchAskError(f"registry read failed: {exc}", exit_code=12) from exc
+            if resume_session_id and getattr(entries, "complete", True) is not True:
+                raise DispatchAskError(
+                    "registry forward read is incomplete; refusing resume because a "
+                    "recorded provider route may be invisible; no worker launched",
+                    exit_code=12,
+                )
 
             # Revive-in-place (x-9844 Fix 3): a --resume spawn whose target uuid
             # matches an EXITED same-name claude row is a revival, not a
@@ -2524,6 +2572,14 @@ def dispatch_spawn(
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
+                    restored_provider = getattr(source_row, "provider", None)
+                    if not restored_provider:
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} has no model-provider "
+                            "axis in its registry row; refusing to relaunch because its "
+                            "provider cap cannot be evaluated; no worker launched",
+                            exit_code=2,
+                        )
                     # An explicit --account COMPOSES with the restored route, the
                     # same way it composes with a flag-supplied one (x-5ed4): the
                     # route wins endpoint+auth+model as one unit through the
@@ -2540,17 +2596,34 @@ def dispatch_spawn(
                     # route that skipped it would be the one route in the system
                     # exempt from the check - a guard every other route pays and
                     # this one does not.
-                    from fno.agents.model_routing import resolve_spawn_route
+                    from fno.agents.model_routing import (
+                        bind_route_provider,
+                        resolve_spawn_route,
+                    )
 
                     try:
                         route_env = resolve_spawn_route(
                             None,
-                            restored_route,
+                            bind_route_provider(restored_route, restored_provider),
                             intent=f"route recorded for {source_row.name!r}",
                             notice=lambda note: print(note, file=sys.stderr),
                         )
                     except RouteCompositionError as exc:
                         raise DispatchAskError(str(exc), exit_code=2) from exc
+                    if route_provider is None:
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} resolves provider "
+                            f"{restored_provider!r}, but provider admission was not "
+                            "evaluated before dispatch; refusing; no worker launched",
+                            exit_code=2,
+                        )
+                    if route_provider != restored_provider:
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} resolves provider "
+                            f"{restored_provider!r}, but admission was evaluated for "
+                            f"{route_provider!r}; refusing; no worker launched",
+                            exit_code=2,
+                        )
                     # Say so. The Rust `resume` door prints its restore, and a
                     # relaunch that silently changes destination is the failure
                     # shape this whole path exists to remove - a receipt that
@@ -2660,6 +2733,7 @@ def dispatch_spawn(
                         account_env=account_env,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
+                        route_provider=route_provider,
                     )
                     return SpawnResult(
                         kind="created",
@@ -6004,10 +6078,15 @@ def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
     cleanly to the fork rung rather than blocking mail on registry state.
     """
     try:
-        for entry in load_registry():
+        loaded = load_registry()
+        if getattr(loaded, "complete", True) is not True:
+            raise RegistryVersionError(
+                "registry forward read is incomplete; routed wake cannot be classified"
+            )
+        for entry in loaded:
             if getattr(entry, "harness_session_id", None) == session_uuid:
                 return entry
-    except (OSError, RegistryVersionError):
+    except OSError:
         return None
     return None
 
@@ -6091,6 +6170,35 @@ def _release_rung2_guard(session_uuid: str, holder: Optional[str]) -> None:
     release_session_writer_claim(session_uuid=session_uuid, holder=holder)
 
 
+def _stamp_revived_live(entry: AgentEntry) -> None:
+    """Make a successful identity-preserving respawn countable before admission ends."""
+    applied = _update_registry_if_recipient_unchanged(
+        entry.name,
+        _recipient_identity_key(entry),
+        _stamp_status(entry.name, status="live", last_message_at_preserve=True),
+    )
+    if not applied:
+        raise RegistryVersionError(
+            f"registry row {entry.name!r} changed during identity-preserving respawn"
+        )
+
+
+def _revived_roster_pid(short_id: str) -> Optional[int]:
+    """Return the revived worker's positive roster PID when readable."""
+    try:
+        from fno.agents.harnesses._claude_session_registry import roster_sessions
+
+        for row in roster_sessions():
+            if row.get("short_id") != short_id:
+                continue
+            pid = int(row.get("pid") or 0)
+            if pid > 0:
+                return pid
+    except (OSError, TypeError, ValueError):
+        pass
+    return None
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -6144,38 +6252,143 @@ def wake_and_deliver(
     # A respawn miss (claude absent, non-zero) or an inject that still does not
     # land in the probe budget falls through to the fork rung (rung 3) so the
     # mail is never dropped. The x-7fef single-writer claim still guards rung 3.
-    entry = _roster_entry_for_session(session_uuid)
-    if entry is not None and getattr(entry, "status", None) == "exited":
-        short = (
-            getattr(entry, "short_id", None)
-            or getattr(entry, "name", "")
-            or claude_transport_short_id(session_uuid)
-        )
-        # F5: take session:<uuid> so two concurrent wakes of one exited session
-        # don't both respawn+inject (double delivery / competing writers). Another
-        # incarnation holding it -> skip rung 2 and let the fork rung claim/pin.
-        # Released on every exit from this block so rung 3 can claim on fall-through.
-        guard = _acquire_rung2_guard(session_uuid, short)
-        if guard is not None:
-            try:
-                if _respawn_claude_session(short) == 0:
-                    for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
-                        if _mail_inject_claude(session_uuid, wrapped):
-                            return True, short  # revived in place: no new uuid, no new row
-                        time.sleep(_RESPAWN_REINJECT_DELAY_S)
-            finally:
-                _release_rung2_guard(session_uuid, guard)
-            # respawn failed or the revived session did not accept the inject within
-            # the probe budget -> fall through to the fork rung.
+    try:
+        entry = _roster_entry_for_session(session_uuid)
+    except (RegistryVersionError, ValueError):
+        return False, "registry-incomplete"
+
+    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    route_provider = (
+        getattr(entry, "provider", None)
+        if entry is not None and getattr(entry, "route_settings_path", None)
+        else None
+    )
+    from fno.agents.spawn_gate import GateRefused, run_gate
+
+    gate = None
+    revived_reservation = False
+    if route_provider is not None:
+        try:
+            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
+        except GateRefused as exc:
+            return False, f"spawn-exit-{exc.code}"
 
     try:
+        if entry is not None and getattr(entry, "status", None) == "exited":
+            short = (
+                getattr(entry, "short_id", None)
+                or getattr(entry, "name", "")
+                or claude_transport_short_id(session_uuid)
+            )
+            # F5: take session:<uuid> so two concurrent wakes of one exited session
+            # don't both respawn+inject (double delivery / competing writers). Another
+            # incarnation holding it -> skip rung 2 and let the fork rung claim/pin.
+            guard = _acquire_rung2_guard(session_uuid, short)
+            if guard is not None:
+                try:
+                    if gate is not None:
+                        # Establish durable provider evidence BEFORE respawn.
+                        # A claim-store failure therefore creates no worker. The
+                        # row name makes both global and provider counts dedupe
+                        # the reservation once registry+roster evidence catches up.
+                        gate.retain_revived_worker(
+                            short,
+                            worker_name=entry.name,
+                            worker_pid=os.getpid(),
+                            positive_marker="claude-respawn-pending",
+                        )
+                        revived_reservation = True
+                    if _respawn_claude_session(short) == 0:
+                        if gate is not None:
+                            # Rebind the already-durable reservation to the
+                            # revived process when the roster exposes its PID.
+                            gate.retain_revived_worker(
+                                short,
+                                worker_name=entry.name,
+                                worker_pid=_revived_roster_pid(short),
+                            )
+                        try:
+                            _stamp_revived_live(entry)
+                        except Exception as stamp_error:
+                            from fno.agents.harnesses.claude import claude_stop
+
+                            try:
+                                stop_code, stop_detail = claude_stop(short)
+                            except Exception as stop_error:
+                                if gate is not None:
+                                    gate.release_gate_mutex()
+                                    gate = None
+                                raise RuntimeError(
+                                    f"revived worker {short} could not be recorded "
+                                    "or stopped; provider reservation retained"
+                                ) from stop_error
+                            if stop_code != 0 and gate is not None:
+                                # The live worker could not be made countable or
+                                # stopped. Release only the serialization mutex;
+                                # retaining its provider reservation makes later
+                                # matching counts refuse instead of failing open.
+                                gate.release_gate_mutex()
+                                gate = None
+                                raise RuntimeError(
+                                    f"revived worker {short} could not be recorded "
+                                    f"or stopped ({stop_detail}); provider reservation "
+                                    "retained"
+                                ) from stamp_error
+                            if gate is not None:
+                                gate.release()
+                                gate = None
+                                revived_reservation = False
+                            raise RuntimeError(
+                                f"revived worker {short} was stopped because its live "
+                                "registry stamp failed"
+                            ) from stamp_error
+                        for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
+                            if _mail_inject_claude(session_uuid, wrapped):
+                                return True, short
+                            time.sleep(_RESPAWN_REINJECT_DELAY_S)
+                        # The respawn already created a live worker. A fork here
+                        # would spend this one admission twice; durable mail can
+                        # retry delivery without creating another incarnation.
+                        return False, "respawn-inject-unconfirmed"
+                    if gate is not None and revived_reservation:
+                        gate.release_worker_reservation()
+                        revived_reservation = False
+                finally:
+                    try:
+                        _release_rung2_guard(session_uuid, guard)
+                    except Exception as exc:
+                        print(
+                            f"rung-2 writer claim release failed for {short}: {exc}",
+                            file=sys.stderr,
+                        )
+                # A failed respawn created no worker, so the fork rung may use
+                # the admission that is still held.
+
         result = dispatch_spawn(
-            name=f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}",
+            name=spawn_name,
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
+            route_provider=route_provider,
+            provider_gate=gate,
         )
+        short = (
+            getattr(result, "short_id", None)
+            or getattr(result, "name", "")
+            or "unknown"
+        )
+        # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
+        # names both the new handle and the old lineage, and the seed prompt above
+        # carried the lineage prefix. A fork is never silent.
+        print(
+            f"forked new incarnation {short} from lineage "
+            f"{canonical_handle(session_uuid)}",
+            file=sys.stderr,
+        )
+        return True, short
+    except GateRefused as exc:
+        return False, f"spawn-exit-{exc.code}"
     except DispatchAskError as exc:
         # Exit 11 is the writer claim refusing: another writer holds the
         # transcript, so the session is not actually asleep. Exit 2 is the name
@@ -6189,16 +6402,12 @@ def wake_and_deliver(
         return False, f"spawn-exit-{exc.exit_code}"
     except (OSError, RuntimeError) as exc:
         return False, f"spawn-error-{type(exc).__name__}"
-
-    short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
-    # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
-    # names both the new handle and the old lineage, and the seed prompt above
-    # carried the lineage prefix. A fork is never silent.
-    print(
-        f"forked new incarnation {short} from lineage {canonical_handle(session_uuid)}",
-        file=sys.stderr,
-    )
-    return True, short
+    finally:
+        if gate is not None:
+            if revived_reservation:
+                gate.release_gate_mutex()
+            else:
+                gate.release()
 
 
 def wake_drain_agent(

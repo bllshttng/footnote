@@ -18,6 +18,7 @@ so regenerating twice produces byte-identical output (AC1-HP / AC5-FR).
 from __future__ import annotations
 
 import json
+import re
 import typing
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional, TypeGuard
@@ -189,14 +190,16 @@ def _toml_value(value: Any) -> str:
         return str(value)
     if isinstance(value, str):
         return json.dumps(value)
-    # Only empty dicts / scalar lists occur today. json.dumps of a non-empty
-    # dict emits {"k": "v"}, which is NOT valid TOML inline-table syntax
-    # (`{ k = "v" }`), so fail loud at generation rather than emit bad TOML if a
-    # richer default is ever added to the model.
     if isinstance(value, dict):
-        if value:
-            raise ValueError(f"_toml_value: non-empty dict default not supported: {value!r}")
-        return "{}"
+        parts: list[str] = []
+        for key, item in value.items():
+            if not isinstance(key, str) or isinstance(item, (dict, list)):
+                raise ValueError(
+                    f"_toml_value: nested/non-string dict default not supported: {value!r}"
+                )
+            toml_key = key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+            parts.append(f"{toml_key} = {_toml_value(item)}")
+        return "{ " + ", ".join(parts) + " }" if parts else "{}"
     if isinstance(value, list) and any(isinstance(v, dict) for v in value):
         raise ValueError(f"_toml_value: list-of-dict default not supported: {value!r}")
     return json.dumps(value)

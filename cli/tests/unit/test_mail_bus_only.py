@@ -264,7 +264,7 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
         delivery_policy="bus-only",
     )
     assert entry.delivery_policy == "bus-only"
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
 
     # A re-firing SessionStart hook (no policy kwarg) must not clobber the
     # stamp -- the operator would silently revert to injectable.

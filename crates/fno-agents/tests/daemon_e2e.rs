@@ -89,6 +89,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             name: "stale-ask".into(),
             short_id: String::new(),
             legacy_provider: "codex".into(),
+            provider: None,
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -265,6 +266,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             name: name.into(),
             short_id: String::new(),
             legacy_provider: "codex".into(),
+            provider: None,
             harness: None,
             harness_session_id: None,
             cwd: "/tmp".into(),
@@ -309,6 +311,7 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             name: name.into(),
             short_id: String::new(),
             legacy_provider: "claude".into(),
+            provider: None,
             harness: Some("claude".into()),
             harness_session_id: Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into()),
             cwd: "/tmp".into(),
@@ -1023,15 +1026,17 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
         std::thread::sleep(Duration::from_millis(25));
     }
 
-    // A v15 store: the tolerant reader keeps the two rows it can represent and
-    // drops the announced third (an unknown status value). Raw 3, decoded 2.
+    // A future-schema store: the tolerant reader keeps the two rows it can
+    // represent and drops the announced third (an unknown status value).
+    // Raw 3, decoded 2.
     let row = |name: &str, status: &str| {
         format!(
             r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
     let fixture = format!(
-        r#"{{"schema_version":15,"agents":[{},{},{}]}}"#,
+        r#"{{"schema_version":{},"agents":[{},{},{}]}}"#,
+        fno_agents::state::REGISTRY_SCHEMA_VERSION + 1,
         row("worker-alpha", "live"),
         row("worker-beta", "flux"),
         row("worker-gamma", "live")

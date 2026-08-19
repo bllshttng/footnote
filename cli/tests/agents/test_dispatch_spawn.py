@@ -11,7 +11,7 @@ Acceptance criteria (operator-locked):
           fno agents rm hint, exit 0, row still present.
   claude plain spawn: JSON receipt on stdout exact-match, registry row present with
           provider=claude.
-  claude --once refusal exit 2.
+  claude --once selects the ephemeral headless substrate.
   codex plain-spawn (no --once) refusal exit 13 (Python fallback, PTY daemon needed).
   CLI wiring: fno agents spawn registered; RUST_ONLY_VERB_HELP no longer lists spawn;
           help-parity test passes (implicitly via test_rust_only_verb_help_covers_unregistered_verbs).
@@ -406,12 +406,12 @@ def test_spawn_claude_receipt_cwd_json_encoded(workdir_claude, monkeypatch) -> N
 
 
 # ---------------------------------------------------------------------------
-# claude --once: refused, exit 2
+# claude --once: ephemeral headless spawn
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_claude_once_refused(workdir_claude) -> None:
-    """claude --once -> exit 2 with explanation that claude peers are persistent."""
+def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
+    """claude --once is the legacy spelling for an ephemeral headless spawn."""
     from fno.agents.cli import agents_app
 
     runner = _make_runner()
@@ -420,13 +420,11 @@ def test_spawn_claude_once_refused(workdir_claude) -> None:
         ["spawn", "--name", "cagent", "-H", "claude", "--once", "hello"],
     )
 
-    assert result.exit_code == 2, (
-        f"expected exit 2 for claude --once refusal, got {result.exit_code}\n"
-        f"output: {result.output}"
-    )
-    assert "claude" in result.output.lower()
-    # Must explain the restriction
-    assert "--once" in result.output or "persistent" in result.output or "not supported" in result.output
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["substrate"] == "headless"
+    assert receipt["lifecycle"] == "ephemeral"
+    assert all(entry.name != "cagent" for entry in load_registry())
 
 
 # ---------------------------------------------------------------------------

@@ -1989,6 +1989,7 @@ done
                 name: sid.clone(),
                 short_id: sid.clone(),
                 legacy_provider: String::new(),
+                provider: None,
                 harness: Some("claude".into()),
                 harness_session_id: None,
                 cwd: "/tmp".into(),

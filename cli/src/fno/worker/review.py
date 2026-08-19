@@ -172,7 +172,9 @@ def build_review_runner(
         resolved[agent] = route_resolution
         if route_env is None:
             continue
-        route_envs[agent] = route_env
+        from fno.agents.model_routing import bind_route_provider
+
+        route_envs[agent] = bind_route_provider(route_env, route.provider)
         route_specs[agent] = route
     # Cache dimension = the per-agent REQUESTED routing (not just the set of
     # kinds), so two configs that assign the same kinds to different agents

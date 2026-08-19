@@ -161,6 +161,7 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
         timeout=10,
         yolo=False,
         lock_handle=_FakeLockHandle(),
+        route_provider="zai",
     )
 
     assert result.kind == "create"
@@ -171,6 +172,7 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
     entry = entries[0]
     assert entry.name == "frontend-worker"
     assert entry.harness == "claude"
+    assert entry.provider == "zai"
     assert entry.short_id == "7c5dcf5d"
     assert entry.cwd == str(cwd)
 
