@@ -1905,7 +1905,12 @@ pub async fn bind_supervisor_socket(
                     return Err(io_err.into());
                 }
                 if attempt + 1 < LOCK_ACQUIRE_ATTEMPTS {
-                    tokio::time::sleep(LOCK_ACQUIRE_RETRY).await;
+                    // Back off progressively rather than at a fixed interval.
+                    // A waiting client re-probes this lock every 25ms, so a
+                    // fixed 25ms retry can beat against that cadence and lose
+                    // every attempt to read-only probes -- a cold start would
+                    // then exit claiming an incumbent that does not exist.
+                    tokio::time::sleep(LOCK_ACQUIRE_RETRY * (attempt as u32 + 1)).await;
                 }
             }
         }
@@ -1915,10 +1920,20 @@ pub async fn bind_supervisor_socket(
     }
 
     let sock = home.supervisor_sock();
-    // We hold the exclusive lock: no other process can be mid-bind right now,
-    // so any file at `sock` is stale -- remove it unconditionally rather than
-    // probing for a live daemon that, by construction of the lock, cannot
-    // exist.
+    // Holding the lock rules out a same-build competitor, so any file here is
+    // stale -- with one exception the lock cannot see. A daemon from a PREVIOUS
+    // build holds this socket and knows nothing about the lockfile, so the lock
+    // reads free while a live listener serves. Unlinking there recreates the
+    // exact defect this guard removes, once at every `fno update`.
+    //
+    // So keep a connect probe as a BELT on top of the lock, never instead of
+    // it. It is only ever reached when no lock-aware daemon holds the
+    // singleton, which is precisely the upgrade case: every same-build race is
+    // already decided above, where a busy incumbent that would fail this probe
+    // still holds the lock and this line is never reached.
+    if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+        return Err(DaemonError::AlreadyRunning(sock));
+    }
     let _ = std::fs::remove_file(&sock);
 
     let listener = match UnixListener::bind(&sock) {

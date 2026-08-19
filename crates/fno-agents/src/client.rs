@@ -179,6 +179,15 @@ pub async fn ensure_daemon(
         }
     }
 
+    // A FRESH deadline for the start we are about to attempt. Waiting out an
+    // incumbent that then let the lock go can consume most of the budget, and
+    // charging that wait to a daemon we had not spawned yet left the poll loop
+    // below with zero iterations -- `restart` reported a timeout for a start
+    // that never got a single poll. Its `Gone` window is exactly where that
+    // happens, since the outgoing daemon holds the flock for up to the
+    // runtime's shutdown timeout past socket removal.
+    let start = Instant::now();
+
     // The lock was free a moment ago, so no daemon is entitled to this socket.
     // We released it to let the child take it, which leaves a window where a
     // second client also finds it free and also spawns. That race is bounded
@@ -213,8 +222,16 @@ pub async fn ensure_daemon(
             // Exit ZERO without a socket is the race loser's designed ending:
             // it found the lock held, deferred to the winner, and stopped. The
             // winner is coming up on this same socket right now, so failing the
-            // verb here would turn "one short-lived extra process" into a
+            // verb here turns "one short-lived extra process" into a
             // user-visible error. Wait for the winner instead.
+            //
+            // Unless nobody holds the lock. Then no race was lost and nobody is
+            // coming, so this was a real refusal that happened to exit 0 (an
+            // immediate idle-exit, a mismatched binary). Report it now rather
+            // than spend the whole budget on a socket that will never appear.
+            if daemon_lock_is_free(home) {
+                return Err(ClientError::DaemonExitedEarly(status));
+            }
             return wait_for_socket(&sock, start, budget).await;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -446,7 +463,7 @@ pub async fn restart_daemon(
     // already gone (or its pid was recycled), don't signal a stranger -- just
     // start fresh. We do NOT unlink the socket here: a stale socket file is
     // cleaned up race-free by the daemon's own bind_supervisor_socket
-    // (connect-probe then remove + bind), and unlinking from the client could
+    // (exclusive flock, then remove + bind), and unlinking from the client could
     // delete a socket a concurrent client just rebound.
     if !crate::daemon::pid_is_ours(old_pid, recorded_start) {
         let new_pid = start_fresh(home, daemon_bin).await?;

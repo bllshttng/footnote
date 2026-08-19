@@ -148,7 +148,7 @@ crates/fno-agents/src/claims.rs:10
 crates/fno-agents/src/claude_adopt.rs:3
 crates/fno-agents/src/claude_ask.rs:9
 crates/fno-agents/src/claude_roster.rs:6
-crates/fno-agents/src/client.rs:29
+crates/fno-agents/src/client.rs:30
 crates/fno-agents/src/client_verbs.rs:78
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
