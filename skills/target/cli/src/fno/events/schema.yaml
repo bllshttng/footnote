@@ -1485,6 +1485,15 @@ event_types:
         reason:
           type: string
 
+  - name: daemon_socket_lost
+    description: "Socket path no longer resolves to the inode this daemon bound, so it is unreachable and retires."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        reason:
+          type: string
+
   - name: daemon_state
     description: "Periodic daemon health snapshot (agent count, memory, etc.)."
     sources: [daemon]

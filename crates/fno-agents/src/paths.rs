@@ -112,6 +112,13 @@ impl AgentsHome {
         self.root.join("supervisor.sock")
     }
 
+    /// Sidecar advisory-lock file for the supervisor-socket singleton guard
+    /// (x-ef7f). Held exclusively, for the daemon's whole process lifetime, by
+    /// whichever process is entitled to bind `supervisor_sock()`.
+    pub fn supervisor_lock(&self) -> PathBuf {
+        self.root.join("supervisor.sock.lock")
+    }
+
     /// Per-agent directory.
     pub fn agent_dir(&self, short_id: &str) -> PathBuf {
         self.root.join(short_id)

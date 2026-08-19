@@ -70,11 +70,21 @@ fn main() {
         opts.reconcile_on_start = false;
     }
 
-    match rt.block_on(run(home, opts)) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("fno-agents-daemon: {e}");
-            std::process::exit(1);
-        }
+    let outcome = rt.block_on(run(home, opts));
+
+    // Bound the wind-down instead of letting `rt` drop at the end of `main`.
+    // Dropping a runtime WAITS for every already-started `spawn_blocking` task,
+    // and the sweeps are exactly that: a gc sweep over a large roster shells one
+    // child per row and runs for minutes. So a plain drop kept the process alive
+    // long after SIGTERM had been received and `daemon_exited {"clean": true}`
+    // had been written -- an event log claiming an exit that had not happened,
+    // which is a worse signal for the watchdog than a slow exit. The sweeps own
+    // nothing that must survive: each is a read plus an advisory-locked write
+    // that either landed or did not, and the next daemon redoes it.
+    rt.shutdown_timeout(std::time::Duration::from_secs(5));
+
+    if let Err(e) = outcome {
+        eprintln!("fno-agents-daemon: {e}");
+        std::process::exit(1);
     }
 }
