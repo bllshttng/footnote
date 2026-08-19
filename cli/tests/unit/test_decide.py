@@ -977,6 +977,139 @@ def test_decided_by_override_keeps_resolved_agent_authority(
     assert granted["decisions"][0]["authority_source"] == "beastmode"
 
 
+def test_record_decision_refuses_agent_operator_authority_before_either_write(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The engine is the choke point for every current and future CLI spelling."""
+    from fno import harness_identity
+    from fno.decide import RefusedAuthorityError, record_decision
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    with pytest.raises(RefusedAuthorityError, match=handle):
+        record_decision(
+            subject="pr-923",
+            decision="claim operator authority",
+            authority_source="operator",
+            events_root=root,
+        )
+    # Positive control: beastmode reaches both instruments, proving that their
+    # refusal-state contents below are meaningful rather than an unread probe.
+    written = record_decision(
+        subject="pr-923",
+        decision="use the granted authority",
+        authority_source="beastmode",
+        events_root=root,
+    )
+    journal_events = [e for e in _events(root) if e["type"] == "operator_decision"]
+    index_events = [
+        json.loads(line)
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [e["data"]["decision_id"] for e in journal_events] == [
+        written["decision_id"]
+    ]
+    assert [e["data"]["decision_id"] for e in index_events] == [
+        written["decision_id"]
+    ]
+
+
+def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    refused = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "claim operator authority",
+            "--authority",
+            "operator",
+        ],
+    )
+    assert refused.exit_code == 3, refused.output
+    assert handle in refused.output
+    assert "fno outstanding ask" in refused.output
+    assert "drop --authority operator" in refused.output
+
+    # The successful-control write proves both stores were inspected after the
+    # refused command, not merely absent because the writer never ran.
+    granted = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "use the granted authority",
+            "--authority",
+            "beastmode",
+        ],
+    )
+    assert granted.exit_code == 0, granted.output
+    did = granted.stdout.strip().splitlines()[-1]
+    assert [e["data"]["decision_id"] for e in _events(root)] == [did]
+    assert [
+        json.loads(line)["data"]["decision_id"]
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ] == [did]
+
+
+def test_no_identity_explicit_operator_authority_records(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+
+    recorded = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "operator ruling",
+            "--authority",
+            "operator",
+        ],
+    )
+    assert recorded.exit_code == 0, recorded.output
+    did = recorded.stdout.strip().splitlines()[-1]
+    assert _events(root)[0]["data"]["decision_id"] == did
+    assert _events(root)[0]["data"]["authority_source"] == "operator"
+
+
 def test_a_torn_archive_also_stops_the_backfill(
     root: Path, tmp_graph: Path, index: Path
 ):

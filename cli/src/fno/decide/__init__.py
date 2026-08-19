@@ -53,6 +53,16 @@ class IndexWriteError(RuntimeError):
         self.cause = cause
 
 
+class RefusedAuthorityError(RuntimeError):
+    """An agent session tried to record a ruling as operator law."""
+
+    def __init__(self, agent_handle: str) -> None:
+        super().__init__(
+            f"agent {agent_handle} cannot record under operator authority"
+        )
+        self.agent_handle = agent_handle
+
+
 def mint_decision_id() -> str:
     """A stable handle in the q-/fu- family: d-<hex>."""
     return f"d-{secrets.token_hex(4)}"
@@ -70,6 +80,8 @@ def _resolve_decider(
         if ident.session_id and ident.harness
         else None
     )
+    if agent and authority_source == "operator":
+        raise RefusedAuthorityError(agent)
     return (
         decided_by or agent or "operator",
         authority_source or ("agent" if agent else "operator"),

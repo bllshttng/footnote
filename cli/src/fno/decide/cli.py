@@ -75,7 +75,7 @@ def record(
         )
         raise typer.Exit(1)
 
-    from fno.decide import IndexWriteError, record_decision
+    from fno.decide import IndexWriteError, RefusedAuthorityError, record_decision
 
     try:
         result = record_decision(
@@ -91,6 +91,15 @@ def record(
             options=list(option) or None,
             supersedes=supersedes,
         )
+    except RefusedAuthorityError as exc:
+        typer.echo(
+            f"decide: refused. This session is agent {exc.agent_handle}, so it "
+            "cannot record under operator authority. If only the operator can "
+            "settle this, use `fno outstanding ask`. If ruling as an agent, "
+            "drop --authority operator; it records agent coordination.",
+            err=True,
+        )
+        raise typer.Exit(3)
     except IndexWriteError as exc:
         # Exit 1, because the ruling is not recoverable yet. But name the right
         # remedy: the durable event HAS landed, so re-running this command
