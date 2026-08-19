@@ -26,7 +26,7 @@ import pytest
 from fno.agents import mux_spawn
 from fno.agents.mux_spawn import (
     MuxSpawnResult,
-    _await_interactive_readiness,
+    _submit_spawn_seed,
     _await_pane_binding,
     _backfill_codex_session_id,
     _write_pane_death_log,
@@ -434,10 +434,8 @@ def test_shared_readiness_submits_a_preloaded_seed(harness: str) -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _await_interactive_readiness(
-        "main", 81, run, harness=harness, seed="seed text"
-    )
-    assert state == "seeded"
+    state, detail, source = _submit_spawn_seed(harness, "main", 81, "seed text", run)
+    assert state == "submitted"
     assert detail == ""
     assert source == "preloaded"
     send = next(call for call in calls if call[3] == "send")
@@ -456,10 +454,8 @@ def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
             return _proc(17, stdout="")
         raise AssertionError(argv)
 
-    state, detail, source = _await_interactive_readiness(
-        "main", 81, run, harness="agy", seed="seed text"
-    )
-    assert state == "ready"
+    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    assert state == "unconfirmed"
     assert detail == "text delivered, submission unconfirmed"
     assert source == "delivered"
 
@@ -483,10 +479,8 @@ def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _await_interactive_readiness(
-        "main", 81, run, harness="agy", seed="seed text"
-    )
-    assert state == "seeded"
+    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    assert state == "submitted"
     assert detail == ""
     assert source == "trust-cleared"
     sends = [call for call in calls if call[3] == "send"]
@@ -508,10 +502,12 @@ def test_shared_readiness_waits_for_a_slow_first_paint() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _await_interactive_readiness(
-        "main", 81, run, harness="agy", seed="seed text"
+    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    assert (state, detail, source) == (
+        "unconfirmed",
+        "text delivered, submission unconfirmed",
+        "",
     )
-    assert (state, detail, source) == ("seeded", "", "delivered")
 
 
 def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
@@ -524,10 +520,8 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
             return _proc(0)
         raise AssertionError(argv)
 
-    state, detail, source = _await_interactive_readiness(
-        "main", 81, run, harness="agy", seed="seed text"
-    )
-    assert state == "failed"
+    state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    assert state == "unconfirmed"
     assert "trust gate did not clear" in detail
     assert source == "trust-cleared"
 

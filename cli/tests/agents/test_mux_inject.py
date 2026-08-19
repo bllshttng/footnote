@@ -76,7 +76,7 @@ def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
     # guarded=True (no mail-delivery caller passes it any more, node x-1904):
     # the server-side interlock is the authority, so the send never holds the
     # writer claim (which the guard would read as busy: relay and self-refuse).
-    # Just paste --guarded, then CR.
+    # One --submit call owns paste, separate CR, and positive confirmation.
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
@@ -84,15 +84,14 @@ def test_guarded_inject_pastes_and_submits_without_a_claim(monkeypatch) -> None:
     assert _mux_pane_send(_mux_entry(), "<fno_mail>hi</fno_mail>") is True
 
     verbs = [c[0][3] for c in fake.calls]
-    assert verbs == ["send", "send"]
+    assert verbs == ["send"]
     for argv, _ in fake.calls:
         assert argv[argv.index("--session") + 1] == "work"
         assert argv[4] == "7"
-    # Envelope bytes ride --stdin --guarded verbatim; the CR submit is its own send.
-    paste, cr = fake.calls[0], fake.calls[1]
-    assert "--stdin" in paste[0] and "--guarded" in paste[0]
+    # Rust owns the separate CR inside the submit primitive.
+    paste = fake.calls[0]
+    assert "--stdin" in paste[0] and "--guarded" in paste[0] and "--submit" in paste[0]
     assert paste[1] == "<fno_mail>hi</fno_mail>"
-    assert cr[0][cr[0].index("--text") + 1] == "\r"
 
 
 def test_guarded_dead_pane_fails_closed_with_no_cr(monkeypatch) -> None:
@@ -115,7 +114,7 @@ def test_unguarded_follow_up_claims_sends_and_releases(monkeypatch) -> None:
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
     assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
-    assert [c[0][3] for c in fake.calls] == ["claim", "send", "send", "release"]
+    assert [c[0][3] for c in fake.calls] == ["claim", "send", "release"]
     assert "--guarded" not in fake.calls[1][0]
 
 
@@ -128,7 +127,7 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     _patch_mux(monkeypatch, fake)
     assert _mux_pane_send(_mux_entry(), "hi", guarded=False) is True
     verbs = [c[0][3] for c in fake.calls]
-    assert verbs == ["claim", "send", "send"]
+    assert verbs == ["claim", "send"]
 
 
 def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None:
@@ -149,8 +148,8 @@ def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None
 
     monkeypatch.setattr(harness_map, "capabilities", caps)
     assert dispatch_mod._mux_pane_send(_mux_entry(), "hi") is True
-    assert sleeps == [0.125]
-    assert fake.calls[1][0][fake.calls[1][0].index("--text") + 1] == "\r"
+    assert sleeps == []
+    assert "--submit" in fake.calls[0][0]
 
 
 def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(monkeypatch) -> None:
@@ -332,7 +331,7 @@ def test_ask_mux_row_rides_pane_send(tmp_path: Path, monkeypatch) -> None:
     assert result.reply == ""  # fire-and-forget: no captured reply
     assert result.short_id == "work:7"
     verbs = [c[0][3] for c in fake.calls]
-    assert verbs == ["claim", "send", "send", "release"]
+    assert verbs == ["claim", "send", "release"]
     # The body rides --stdin inside the cross-session-message container so the
     # pane reads it as a peer turn, not bare operator input.
     sent = fake.calls[1][1]

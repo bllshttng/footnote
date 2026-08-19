@@ -5695,8 +5695,8 @@ def _mux_pane_send(
         "up": "\x1b[A", "down": "\x1b[B", "esc": "\x1b",
     }
     try:
-        submit_text = [submit_bytes.get(key, key) for key in submit_keys]
-        enter_delay_s = input_caps["send_keys_enter_delay_ms"] / 1000
+        [submit_bytes.get(key, key) for key in submit_keys]
+        input_caps["send_keys_enter_delay_ms"]
     except (KeyError, TypeError):
         return False
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
@@ -5769,7 +5769,7 @@ def _mux_pane_send(
 
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
-        send_args = ["send", pane, "--stdin"]
+        send_args = ["send", pane, "--stdin", "--submit"]
         if guarded:
             send_args.append("--guarded")
         rc = _run(send_args, stdin_text=text)

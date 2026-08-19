@@ -45,7 +45,7 @@ class FakeRunner:
         db_stdout: str = "",
         # x-6928 interactive-readiness gate probes.
         wait_returncode: int = 11,
-        read_stdout: str = "",
+        read_stdout: str = "ready\n",
         read_returncode: int = 0,
         read_stderr: str = "",
         placement: Optional[dict] = None,

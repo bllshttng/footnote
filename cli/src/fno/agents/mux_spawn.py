@@ -1763,6 +1763,29 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 _SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
 
 
+def _ensure_agy_folder_trusted(cwd: Path) -> bool:
+    """Best-effort upsert of agy's exact cwd in its trust file."""
+    home = os.environ.get("HOME")
+    if not home:
+        return False
+    trust_file = Path(home) / ".gemini" / "trustedFolders.json"
+    key = str(cwd if cwd.is_absolute() else Path.cwd() / cwd)
+    try:
+        trust_file.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(trust_file.read_text()) if trust_file.exists() else {}
+        if not isinstance(data, dict):
+            return False
+        if key in data or any(data.get(str(parent)) == "TRUST_PARENT" for parent in Path(key).parents):
+            return True
+        data[key] = "TRUST_FOLDER"
+        tmp = trust_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, trust_file)
+        return True
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _resolve_bound(session_uuid: Optional[str], harness: str) -> Optional[bool]:
     """Tri-state: bound / not bound / this harness binds no session at all."""
     if harness not in _SESSION_BINDING_HARNESSES:
@@ -1791,6 +1814,8 @@ def _resolve_unbound_reason(
     """
     if bound is not False:
         return None
+    if reason == "binding-window-expired":
+        return "binding-window-expired: pane is live; fno agents reconcile will backfill its session id"
     # Generic on purpose: a reason naming the harness reads as "this harness
     # binds no session", which is exactly what `bound is None` means and the
     # opposite of what a MISS means. An opencode backfill miss has a real cause
@@ -2354,6 +2379,8 @@ def dispatch_spawn_pane(
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
+    if provider == "agy":
+        _ensure_agy_folder_trusted(cwd)
     argv = build_pane_argv(
         provider,
         message,
