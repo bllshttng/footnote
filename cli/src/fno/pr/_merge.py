@@ -606,6 +606,12 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     the call is refused rather than risking a same-numbered PR in a different
     repository. Best-effort: any failure is a non-fatal stderr note; never
     blocks the merge.
+
+    Before delegating, backfills ``pr_number`` onto a node this PR's URL
+    already matches but that has no ``pr_number`` yet (a partial stamp, or an
+    off-convention branch name) - ``_find_pr_node_id`` used to catch this case
+    directly; the delegated forward scan needs an int ``pr_number`` to find
+    the node at all, so without this backfill a url-only node can never close.
     """
     try:
         from fno.paths import graph_json
@@ -620,6 +626,23 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         )
         if view.ok:
             pr_url = view.stdout.strip()
+
+        if pr_url:
+            from fno.graph.store import locked_mutate_graph, read_graph
+
+            matched_id = _find_pr_node_id(read_graph(path), pr_number, pr_url)
+            if matched_id:
+                def _backfill(entries: List[dict], _id=matched_id) -> List[dict]:
+                    for e in entries:
+                        if e.get("id") != _id:
+                            continue
+                        if not isinstance(e.get("pr_number"), int):
+                            e["pr_number"] = pr_number
+                            e["pr_url"] = pr_url
+                        break
+                    return entries
+
+                locked_mutate_graph(path, _backfill)
 
         from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
 

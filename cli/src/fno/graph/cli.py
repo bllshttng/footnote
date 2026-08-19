@@ -8033,6 +8033,7 @@ def cmd_reconcile(
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
+        node_is_open,
         resolve_promise_evidence,
         scan_merge_drift,
         write_retro_sentinel,
@@ -8133,10 +8134,13 @@ def cmd_reconcile(
                 discovered[r.pr_number] = r
         auto_bound_any = False
         for _pr_num, _rec in discovered.items():
+            # The record's OWN url wins over the caller's global --repo: the
+            # graph is cross-project, so a --repo passed for the --pr-number
+            # leg above would otherwise mis-scope an unrelated discovered PR.
             _repo_for_pr = (
-                repo
-                or repo_slug_from_url(_rec.pr_url)
+                repo_slug_from_url(_rec.pr_url)
                 or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
+                or repo
             )
             try:
                 _ctx = fetch_pr_closure_context(_pr_num, repo=_repo_for_pr, cwd=_rec.cwd)
@@ -8753,11 +8757,11 @@ def cmd_reconcile(
                 _ew_epics.add(_pid)
         for _eid in sorted(_ew_epics):
             _epic = _find_node(_ew_entries, _eid)
-            if _epic is None or _epic.get("completed_at"):
-                continue  # unknown, or already closed - nothing outstanding
+            if _epic is None or not node_is_open(_epic):
+                continue  # unknown, or already closed/superseded - nothing outstanding
             _outstanding = sorted(
                 e["id"] for e in _ew_entries
-                if isinstance(e, dict) and e.get("parent") == _eid and not e.get("completed_at")
+                if isinstance(e, dict) and e.get("parent") == _eid and node_is_open(e)
             )
             if _outstanding:
                 epics_waiting.append({"epic": _eid, "outstanding": _outstanding})

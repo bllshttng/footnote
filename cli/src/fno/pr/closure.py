@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -242,8 +241,9 @@ def bind_closure_claims(
                 claimed_ids=claimed_ids,
                 refusal=f"unknown node: {nid}",
             )
+        existing_refs = node_pr_refs(node)
         if our_repo:
-            for _num, url in node_pr_refs(node):
+            for _num, url in existing_refs:
                 existing_repo = repo_slug_from_url(url)
                 if existing_repo and existing_repo.lower() != our_repo.lower():
                     return ClosureBindResult(
@@ -254,6 +254,21 @@ def bind_closure_claims(
                             f"this PR is {our_repo} - refusing a cross-repo claim"
                         ),
                     )
+        elif existing_refs:
+            # our_repo is unresolvable (no --repo, no parseable pr_url), so the
+            # cross-repo check above cannot run at all. A node with NO existing
+            # ref is still safe to accept (nothing to collide with); a node
+            # that already carries a ref is not - binding blind here is the
+            # exact silent-wrong-close this function otherwise refuses. Fail
+            # closed instead of skipping the check.
+            return ClosureBindResult(
+                outcome="refused",
+                claimed_ids=claimed_ids,
+                refusal=(
+                    f"{nid} already carries a PR ref and this PR's repo is "
+                    "unresolvable - refusing an unscoped claim"
+                ),
+            )
         nodes[nid] = node
 
     bindings: list[ClosureBinding] = []

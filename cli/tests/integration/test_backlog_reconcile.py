@@ -1225,6 +1225,56 @@ def test_reconcile_auto_binds_closure_claims_for_a_ui_merge(cli_env, monkeypatch
         assert (sentinel_dir / f"{nid}.json").exists()
 
 
+def test_reconcile_auto_discovery_scopes_repo_to_the_discovered_record_not_the_flag(
+    cli_env, monkeypatch,
+):
+    """Review fix (x-59a6): a global --repo (the EXPLICIT --pr-number leg's own
+    repo) must never scope an auto-discovered PR belonging to a different
+    project's repo - the graph is cross-project, and the discovery loop's own
+    comment says so; the code must actually do it."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-300001", pr_number=910,
+              pr_url="https://github.com/test-owner/test-repo/pull/910"),
+        _node("ab-300002", pr_number=911,
+              pr_url="https://github.com/other-owner/other-repo/pull/911"),
+    ])
+
+    def _query(number, repo=None, cwd=None):
+        urls = {
+            910: "https://github.com/test-owner/test-repo/pull/910",
+            911: "https://github.com/other-owner/other-repo/pull/911",
+        }
+        return PrMergeState(
+            number=number, state="MERGED", url=urls[number],
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query)
+
+    fetch_calls: list[tuple[int, str | None]] = []
+    real_ctx = _stub_closure_ctx
+
+    def _tracking_fetch(pr_number, *, repo=None, cwd=None):
+        fetch_calls.append((pr_number, repo))
+        return real_ctx("", number=pr_number, url=(
+            "https://github.com/test-owner/test-repo/pull/910" if pr_number == 910
+            else "https://github.com/other-owner/other-repo/pull/911"
+        ))
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--pr-number", "910", "--repo", "test-owner/test-repo", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+
+    discovered_calls = [c for c in fetch_calls if c[0] == 911]
+    assert discovered_calls == [(911, "other-owner/other-repo")]
+
+
 def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch):
     """Operator verification (x-59a6): a multi-node feature where one PR
     merges and another does not - the epic must report EXACTLY which sibling
@@ -1261,4 +1311,31 @@ def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch)
     ]
     entries = _read_entries(graph_path)
     epic = next(e for e in entries if e["id"] == "ab-e00001")
-    assert epic["completed_at"] is None  # not all children done yet
+    assert epic["completed_at"] is None
+
+
+def test_reconcile_epics_waiting_ignores_a_superseded_sibling(cli_env, monkeypatch):
+    """Review fix (x-59a6): a sibling resolved via supersession (not a merge)
+    must not be reported as an outstanding ship - it is closed, just through
+    a different path than completed_at."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-e10001"),  # the epic
+        _node("ab-e10002", parent="ab-e10001"),  # ships in this PR
+        _node("ab-e10003", parent="ab-e10001", superseded_by="ab-e10002"),  # resolved, not merged
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-e10002\n", number=906,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({906: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "906", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-e10002"}
+    assert payload["epics_waiting"] == []

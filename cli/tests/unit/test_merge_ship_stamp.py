@@ -133,6 +133,25 @@ def test_reconcile_merged_pr_node_delegates_to_pr_number_reconcile(tmp_path, mon
     ]
 
 
+def test_reconcile_backfills_pr_number_for_a_url_only_node(tmp_path, monkeypatch):
+    # x-59a6 review fix: delegating to `backlog reconcile --pr-number` dropped
+    # the pr_url-only backfill `_find_pr_node_id` used to provide. A node
+    # stamped with pr_url but no pr_number (partial stamp, or an
+    # off-convention branch name) must still get pr_number backfilled here,
+    # since the delegated forward scan requires an int pr_number to find it.
+    url = f"{_FOOT}/777"
+    g = _make_graph(tmp_path, [{"id": "ab-recon001", "title": "t", "pr_url": url}])
+    _patch(monkeypatch, g)
+    import fno.pr._merge as M
+    monkeypatch.setattr(M, "_gh", _fake_gh_url(url))
+    monkeypatch.setattr(M, "run", _stub_run([]))
+    M._reconcile_merged_pr_node(777, cwd=str(tmp_path))
+    from fno.graph.store import read_graph
+    node = next(e for e in read_graph(g) if e["id"] == "ab-recon001")
+    assert node["pr_number"] == 777
+    assert node["pr_url"] == url
+
+
 def test_reconcile_does_not_clobber_existing_primary(tmp_path, monkeypatch):
     # The merged PR matches an additional_prs entry on a node that already has a
     # DIFFERENT primary; the primary number/url must be preserved (codex P2).

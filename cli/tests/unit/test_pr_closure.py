@@ -4,7 +4,6 @@ Covers AC1-HP/EDGE, AC2-HP/EDGE, AC3-HP/EDGE/ERR, AC4-EDGE (idempotent rebind).
 """
 from __future__ import annotations
 
-import pytest
 
 from fno.pr.closure import (
     bind_closure_claims,
@@ -182,6 +181,31 @@ def test_bind_refuses_cross_repo_mutates_nothing():
     assert result.outcome == "refused"
     assert "cross-repo" in result.refusal
     assert entries == before
+
+
+def test_bind_refuses_unscoped_claim_against_a_node_with_an_existing_ref():
+    # x-59a6 review fix: when our_repo cannot be resolved at all (no --repo,
+    # unparseable pr_url), the cross-repo check can never run - so a node
+    # that already carries SOME PR ref must refuse rather than bind blind.
+    entries = [_node(id="x-2222", pr_number=5, pr_url="https://github.com/other/repo/pull/5")]
+    before = [dict(e) for e in entries]
+    result = bind_closure_claims(
+        entries, ["x-2222"], pr_number=1, pr_url="not-a-url", repo=None,
+    )
+    assert result.outcome == "refused"
+    assert "unresolvable" in result.refusal
+    assert entries == before
+
+
+def test_bind_accepts_unscoped_claim_against_a_fresh_node():
+    # A node with NO existing ref is still safe to accept when our_repo is
+    # unresolvable - there is nothing to collide with.
+    entries = [_node(id="x-3333")]
+    result = bind_closure_claims(
+        entries, ["x-3333"], pr_number=1, pr_url="not-a-url", repo=None,
+    )
+    assert result.outcome == "bound"
+    assert result.bound_ids == ["x-3333"]
 
 
 def test_bind_is_idempotent_on_rerun():
