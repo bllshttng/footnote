@@ -361,6 +361,43 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
     assert read.rows() == []
 
 
+def test_a_superseded_red_beside_a_fresh_green_reads_mergeable(monkeypatch):
+    """x-b130: PRs 917 and 950, the real shape. A force/amend push leaves the
+    superseded run's FAILURE sitting beside the fresh run's SUCCESS in the
+    same statusCheckRollup, same check name. Flattening every entry's
+    conclusion into one set (the pre-fix behavior) poisons that set with the
+    stale FAILURE and the PR reads red even though the current run is green -
+    which is what nearly made a king dispatch work twice tonight. The fix
+    dedupes to the latest-started run per check name before classifying, same
+    as `_status._latest_per_name`."""
+    from fno.king import board as board_mod
+
+    listing = [
+        {
+            "number": 917,
+            "title": "t",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {
+                    "name": "ci",
+                    "conclusion": "FAILURE",
+                    "status": "COMPLETED",
+                    "startedAt": "2026-08-19T00:00:00Z",
+                },
+                {
+                    "name": "ci",
+                    "conclusion": "SUCCESS",
+                    "status": "COMPLETED",
+                    "startedAt": "2026-08-19T00:10:00Z",
+                },
+            ],
+        }
+    ]
+    monkeypatch.setattr(board_mod, "_run_json", lambda *a, **k: _ok(listing))
+    read, _ = board_mod._read_prs(timeout=1, max_pr_reads=10)
+    assert [r["number"] for r in read.rows()] == [917]
+
+
 # --- the PR listing bound (codex P2) ----------------------------------------
 #
 # `gh pr list` fetches 30 by default. An unbounded listing plus a post-hoc
