@@ -223,13 +223,13 @@ fno backlog board --project fno    # scope to one project (default: the current 
 fno backlog board --json           # same three sections, machine-readable
 ```
 
-Reads only the graph and the on-disk pr-status cache under the state root - never a live GitHub call, so this verb is never the thing that exhausts the GraphQL quota.
+Reads only the graph and the on-disk pr-status cache under the state root. It never makes a live GitHub call, so this verb can never exhaust the GraphQL quota.
 
-Each section caps at five rows (`... and N more`) and each row caps at twelve words after the node id, so the whole board fits on one screen.
+Each section caps at five rows and shows `... and N more` past that. Each row caps at twelve words after the node id, so the whole board fits on one screen.
 
-A source that cannot be read renders as an explicit `(unknown: ...)`, never as an empty section - an empty "Just finished" means nothing landed, not that the read failed.
+When a source cannot be read, the section renders an explicit `(unknown: ...)`. It never renders as an empty section: an empty "Just finished" means nothing landed, not that the read failed.
 
-A PR's blocking fact in "In progress" is served from the cache's newest row for that PR, which may be stale by up to the cache TTL (or older when the PR is quiet); the age is printed beside the verdict so it is never read as the current state.
+The "In progress" blocking fact comes from the cache's newest row for that PR. That row can be stale by up to the cache TTL. When the PR stays quiet, the row can be older still. The line prints the age beside the verdict, so nobody reads it as the current state.
 
 ## Health and hygiene
 
