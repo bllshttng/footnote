@@ -688,6 +688,32 @@ def rebase_equivalent_evidence(
     return None
 
 
+def _preflight_required_by_config(root: Path) -> bool:
+    """Read ``config.preflight.required`` for ``root``; fail OPEN, not closed.
+
+    The failure this policy exists to remove is a gate no one can satisfy
+    stopping a green commit from reaching CI, so an unreadable or malformed
+    config means not-required, never a refusal. CI still re-runs everything on
+    the PR head, so nothing unverified reaches main. ``$FNO_CONFIG`` pins an
+    explicit file and is read directly because ``load_settings_for_repo``
+    does not consult it.
+    """
+    try:
+        from fno.config_io import read_config_flat
+
+        env_path = os.environ.get("FNO_CONFIG")
+        if env_path:
+            block = read_config_flat(Path(env_path)).get("preflight")
+            return bool(isinstance(block, dict) and block.get("required"))
+        from fno.config import load_settings_for_repo
+
+        return bool(
+            getattr(getattr(load_settings_for_repo(root), "preflight", None), "required", False)
+        )
+    except Exception:  # noqa: BLE001 - fail-open is the documented contract
+        return False
+
+
 def local_verification_required(
     *, cwd: str, base_ref: str = "origin/main", env: Optional[Mapping[str, str]] = None
 ) -> tuple[bool, str]:
@@ -695,6 +721,12 @@ def local_verification_required(
     root = Path(cwd).resolve()
     if environment.get("FNO_SKIP_PREFLIGHT") == "1":
         return False, "explicit-skip"
+    # CI is the gate. A full local preflight is an opt-in rehearsal of it, so a
+    # stock config never blocks a ready PR on a job that takes 22 to 47 minutes
+    # and cannot even start under a 256 descriptor limit. Set
+    # config.preflight.required = true to restore the mandatory rehearsal.
+    if not _preflight_required_by_config(root):
+        return False, "policy-opt-in"
     runner = root / "scripts" / "ci" / "preflight.sh"
     base_runner = _git(
         ["ls-tree", base_ref, "--", "scripts/ci/preflight.sh"], str(root)

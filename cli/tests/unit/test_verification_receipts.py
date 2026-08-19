@@ -605,6 +605,16 @@ def test_reader_succeeds_while_preflight_write_lock_is_held(tmp_path: Path) -> N
     assert "lock_error" not in decision["coverage"]
 
 
+def _opt_in_preflight(tmp_path: Path) -> None:
+    """Pin `preflight.required = true` so these tests exercise the GATE.
+
+    The stock default is opt-in (a code diff reads `policy-opt-in` before any
+    git work), so without this pin every assertion below would be vacuous.
+    """
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "config.toml").write_text("[preflight]\nrequired = true\n")
+
+
 def test_local_verification_policy_preserves_explicit_exemptions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -612,6 +622,7 @@ def test_local_verification_policy_preserves_explicit_exemptions(
     runner.parent.mkdir(parents=True)
     runner.write_text("#!/bin/sh\n")
     runner.chmod(0o755)
+    _opt_in_preflight(tmp_path)
 
     def docs_git(args, *_args, **_kwargs):
         output = "100755 blob abc\tscripts/ci/preflight.sh\n" if args[0] == "ls-tree" else "docs/readme.md\n"
@@ -638,6 +649,7 @@ def test_root_readme_is_docs_only(
     runner.parent.mkdir(parents=True)
     runner.write_text("#!/bin/sh\n")
     runner.chmod(0o755)
+    _opt_in_preflight(tmp_path)
 
     def readme_git(args, *_args, **_kwargs):
         output = "100755 blob abc\tscripts/ci/preflight.sh\n" if args[0] == "ls-tree" else "README.md\n"
@@ -663,6 +675,7 @@ def test_runtime_markdown_requires_local_verification(
     runner.parent.mkdir(parents=True)
     runner.write_text("#!/bin/sh\n")
     runner.chmod(0o755)
+    _opt_in_preflight(tmp_path)
 
     def runtime_markdown_git(args, *_args, **_kwargs):
         output = (
@@ -680,6 +693,7 @@ def test_runtime_markdown_requires_local_verification(
 def test_base_configured_runner_removal_requires_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    _opt_in_preflight(tmp_path)
     monkeypatch.setattr(
         "fno.pr._preflight._git",
         lambda *_args, **_kwargs: type(
