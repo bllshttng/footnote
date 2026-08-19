@@ -8856,7 +8856,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         .unwrap();
         assert!(
             !no_live_worker(&home),
-            "a live worker socket pins the daemon regardless of its row's status"
+            "a live worker socket pins the daemon regardless of what its row says"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }
