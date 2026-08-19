@@ -181,6 +181,22 @@ def collect_transcript_evidence(
                 "count": 1,
             })
             continue
+        if identity.harness == "codex":
+            # resolve_transcript_path resolves a real file for codex too, but
+            # the parser below reads Claude Code's own JSONL shape - codex
+            # writes a different on-disk shape (fno.agents.discover), so
+            # every line would fail silently and read as a healthy
+            # zero-evidence row instead of a harness this instrument cannot
+            # see. Refusing here replaces that silent no-op with a named one.
+            # gemini/opencode never reach this point: resolve_transcript_path
+            # already returns no path for them, which refuses upstream as
+            # transcript_unreadable.
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "transcript_shape_unsupported",
+                "count": 1,
+            })
+            continue
         try:
             path = transcript_path_for(identity)
             if path is None:

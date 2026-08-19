@@ -712,6 +712,15 @@ def _read_terminal(path: Path) -> HandoffResult | None:
         return None
 
 
+def _read_last_phase(path: Path) -> str | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    phase = data.get("phase")
+    return phase if isinstance(phase, str) else None
+
+
 def _journal(path: Path, *, phase: str, request: HandoffRequest, attempt: str,
              result: HandoffResult | None = None, **details: object) -> None:
     if phase not in _PHASES:
@@ -834,7 +843,9 @@ def run_outage_handoff(
     archive: ArchiveReceipt | None = None
     spawned: SpawnReceipt | None = None
     counts: dict[str, int] = {}
-    source_dead = False
+    source_dead = _read_last_phase(path) in {
+        "source_stopped", "prepared", "successor_spawned",
+    }
     active_phase = "observed"
     try:
         terminal = _read_terminal(path)
@@ -940,4 +951,7 @@ def run_outage_handoff(
             successor_row_id=spawned.row_id if spawned else None,
         )
     finally:
-        deps.release_dispatch(dispatch_key, lease_holder)
+        try:
+            deps.release_dispatch(dispatch_key, lease_holder)
+        except Exception:  # noqa: BLE001 - a stale lease release must not mask the transaction result
+            pass

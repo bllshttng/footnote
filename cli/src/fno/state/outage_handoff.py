@@ -196,7 +196,10 @@ def _restore_target_manifest(
 ) -> bool:
     """Restore identical bytes without replacing a concurrently-created file."""
     state_path = Path(worktree).resolve() / ".fno" / "target-state.md"
-    content = archive_path.read_bytes()
+    try:
+        content = archive_path.read_bytes()
+    except OSError:
+        return False
     if hashlib.sha256(content).hexdigest() != content_hash:
         return False
     try:

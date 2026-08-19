@@ -3050,6 +3050,22 @@ def cmd_watchdog(
         typer.echo(
             f"terminal harness rows: {payload.get('terminal_harness_rows', 0)}"
         )
+        outage_counts = (payload.get("provider_outages") or {}).get("counts") or {}
+        blind_spots = {
+            reason: outage_counts[reason]
+            for reason in ("unknown_route_identity", "transcript_shape_unsupported")
+            if outage_counts.get(reason)
+        }
+        if blind_spots:
+            # Loud, not silent: these rows are outside what the provider-outage
+            # instrument can measure at all, not rows it measured and cleared.
+            named = " ".join(f"{k}={v}" for k, v in sorted(blind_spots.items()))
+            typer.echo(
+                f"provider-outage coverage gap ({named}): route identity "
+                f"missing on daemon-managed rows, or a transcript shape this "
+                f"instrument does not parse - filed as follow-up work, not "
+                f"measured this sweep"
+            )
         return
 
     lanes = "all" if apply_all else "wake"

@@ -240,6 +240,7 @@ def verdicts(
     node_state_for: Callable[[str], Optional[dict]],
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
+    provider_outages: Optional[dict[str, Any]] = None,
 ) -> list[Verdict]:
     """One verdict per row, in table precedence (ghost > reap > reroute >
     wake > leave). Each basis string names the measurement that decided it, so
@@ -283,6 +284,15 @@ def verdicts(
         mine = 1 if _still_in_the_tree(row) else 0
         return max(0, occupants[row.cwd] - mine)
 
+    # A row only earns REROUTE by appearing in an already-quorum-confirmed
+    # breaker (_breakers() in provider_outage.py refuses to emit one below
+    # policy.quorum distinct rows) - never from this row's own 429 alone.
+    quorum_row_ids = frozenset(
+        row_id
+        for breaker in (provider_outages or {}).get("breakers") or []
+        for row_id in breaker.get("row_ids") or []
+    )
+
     out: list[Verdict] = []
     for row in rows:
         out.append(
@@ -294,6 +304,7 @@ def verdicts(
                 now_s=now_s,
                 quiet_after_s=quiet_after_s,
                 cotenants=_cotenants(row),
+                in_quorum_breaker=row.row_id in quorum_row_ids,
             )
         )
     return out
@@ -531,6 +542,7 @@ def _verdict_one(
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
     cotenants: int = 0,
+    in_quorum_breaker: bool = False,
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
@@ -598,6 +610,13 @@ def _verdict_one(
         and facts is not None
         and facts.last_event_epoch is not None
     ):
+        if in_quorum_breaker:
+            return Verdict(
+                row.row_id, row.name, row.state, REROUTE,
+                "429 terminal for this session; provider quorum already "
+                "confirmed by a separate breaker row",
+                "redispatch",
+            )
         return Verdict(
             row.row_id, row.name, row.state, LEAVE,
             "429 terminal for this session; waiting for positive provider quorum",
@@ -1137,8 +1156,21 @@ def supervise_provider_handoffs(
     journal_root: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
     """Run at most one proved cross-provider transaction per source row."""
-    if not handoff_armed(settings) or provider_outages.get("instrument") != "measured":
+    if not handoff_armed(settings):
         return []
+    instrument = provider_outages.get("instrument")
+    if instrument != "measured":
+        # Armed but blind: a config that wants handoff got no evidence to act
+        # on this tick, for reasons that can be transient (a lock timeout, a
+        # torn journal write) as easily as durable. Returning [] here reads
+        # identically to "measured, nothing broken" - one named outcome tells
+        # the difference apart instead of both going quiet the same way.
+        return [{
+            "phase": "refused",
+            "reason": "provider_outage_instrument_unmeasured",
+            "detail": f"instrument={instrument!r}; no handoff evidence this tick",
+            "count": 1,
+        }]
     from fno.agents.outage_handoff import (
         HandoffRequest,
         production_handoff_dependencies,
@@ -1173,76 +1205,86 @@ def supervise_provider_handoffs(
                     "account": str(breaker.get("account") or ""),
                 })
                 continue
-            candidate = (
-                production_handoff_candidate(
-                    breaker, row, now_s, settings=settings
+            try:
+                candidate = (
+                    production_handoff_candidate(
+                        breaker, row, now_s, settings=settings
+                    )
+                    if candidate_for is production_handoff_candidate
+                    else candidate_for(breaker, row, now_s)
                 )
-                if candidate_for is production_handoff_candidate
-                else candidate_for(breaker, row, now_s)
-            )
-            selected = select_healthy_destination(
-                [candidate] if candidate is not None else [],
-                broken_provider=broken_provider,
-                now_s=now_s,
-                policy=policy,
-            )
-            if selected is None or not selected.model:
+                selected = select_healthy_destination(
+                    [candidate] if candidate is not None else [],
+                    broken_provider=broken_provider,
+                    now_s=now_s,
+                    policy=policy,
+                )
+                if selected is None or not selected.model:
+                    outcomes.append({
+                        "phase": "refused", "reason": "no_fresh_destination_canary",
+                        "source_row_id": row.row_id, "node": row.node, "count": 1,
+                        "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                        "provider": broken_provider,
+                        "account": str(breaker.get("account") or ""),
+                    })
+                    continue
+                request = HandoffRequest(
+                    node=row.node,
+                    outage_epoch=str(breaker.get("outage_epoch") or ""),
+                    source_row_id=row.row_id,
+                    destination_harness=str(selected.harness),
+                    destination_provider=str(selected.provider),
+                    destination_model=selected.model,
+                    destination_account=str(selected.record_id),
+                    source_provider=broken_provider,
+                    source_account=str(breaker.get("account") or ""),
+                    evidence_fingerprints=tuple(
+                        str(item) for item in (breaker.get("fingerprints") or [])
+                    ),
+                    destination_account_env=selected.account_env or {},
+                    quorum_evidence_count=len(breaker.get("fingerprints") or []),
+                )
+                result = handoff_fn(
+                    request, deps=deps_factory(), journal_root=Path(root)
+                )
+                outcome = result.to_dict()
+                outcome.update({
+                    "provider": selected.provider,
+                    "account": selected.record_id,
+                    "source_provider": broken_provider,
+                    "source_account": str(breaker.get("account") or ""),
+                    "count": max(1, sum(result.counts.values())),
+                })
+                outcomes.append(outcome)
+                contended = (
+                    result.failed_phase == "observed"
+                    and result.counts.get("lease_contention", 0) > 0
+                )
+                if (
+                    result.phase in {"committed", "parked"}
+                    and not result.replayed
+                    and not contended
+                ):
+                    decision_fn(
+                        subject=row.node,
+                        decision=(
+                            f"provider outage handoff {result.phase} for "
+                            f"{broken_provider} to {selected.provider}"
+                        ),
+                        decided_by="provider-outage-supervisor",
+                        authority_source="daemon-automation",
+                        rationale=result.reason or "terminal provider-outage transaction",
+                        source="daemon",
+                    )
+            except Exception as exc:  # noqa: BLE001 - one row's crash must not stall its siblings
                 outcomes.append({
-                    "phase": "refused", "reason": "no_fresh_destination_canary",
+                    "phase": "refused", "reason": "handoff_supervision_crashed",
                     "source_row_id": row.row_id, "node": row.node, "count": 1,
                     "outage_epoch": str(breaker.get("outage_epoch") or ""),
                     "provider": broken_provider,
                     "account": str(breaker.get("account") or ""),
+                    "detail": f"{type(exc).__name__}: {exc}",
                 })
-                continue
-            request = HandoffRequest(
-                node=row.node,
-                outage_epoch=str(breaker.get("outage_epoch") or ""),
-                source_row_id=row.row_id,
-                destination_harness=str(selected.harness),
-                destination_provider=str(selected.provider),
-                destination_model=selected.model,
-                destination_account=str(selected.record_id),
-                source_provider=broken_provider,
-                source_account=str(breaker.get("account") or ""),
-                evidence_fingerprints=tuple(
-                    str(item) for item in (breaker.get("fingerprints") or [])
-                ),
-                destination_account_env=selected.account_env or {},
-                quorum_evidence_count=len(breaker.get("fingerprints") or []),
-            )
-            result = handoff_fn(
-                request, deps=deps_factory(), journal_root=Path(root)
-            )
-            outcome = result.to_dict()
-            outcome.update({
-                "provider": selected.provider,
-                "account": selected.record_id,
-                "source_provider": broken_provider,
-                "source_account": str(breaker.get("account") or ""),
-                "count": max(1, sum(result.counts.values())),
-            })
-            outcomes.append(outcome)
-            contended = (
-                result.failed_phase == "observed"
-                and result.counts.get("lease_contention", 0) > 0
-            )
-            if (
-                result.phase in {"committed", "parked"}
-                and not result.replayed
-                and not contended
-            ):
-                decision_fn(
-                    subject=row.node,
-                    decision=(
-                        f"provider outage handoff {result.phase} for "
-                        f"{broken_provider} to {selected.provider}"
-                    ),
-                    decided_by="provider-outage-supervisor",
-                    authority_source="daemon-automation",
-                    rationale=result.reason or "terminal provider-outage transaction",
-                    source="daemon",
-                )
     return outcomes
 
 
@@ -1463,7 +1505,10 @@ def production_handoff_candidate(
             )
             if proof is not None:
                 return RouteCandidate(**{**candidate.__dict__, "canary": proof})
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a crash here must not masquerade as "no candidate"
+        logging.getLogger(__name__).warning(
+            "watchdog: candidate discovery crashed for %s: %s", row.row_id, exc
+        )
         return None
     return None
 
@@ -1614,6 +1659,7 @@ def run_sweep(
         node_state_for=lambda node: graph_fn().get(node),
         now_s=now_s,
         quiet_after_s=quiet_after_s,
+        provider_outages=provider_outages,
     )
     counts: dict[str, int] = {}
     for v in vs:

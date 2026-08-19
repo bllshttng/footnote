@@ -376,7 +376,12 @@ def tick() -> None:
                 _fleet_candidates = run_recovery_sweep(
                     settings.recovery,
                     emit=emit_recovery,
-                    provider_failover=(settings.recovery.watchdog == "off"),
+                    # Legacy failover stands down only for "handoff", where the
+                    # provider-outage supervisor owns the transaction instead.
+                    # "report" and "wake" still need it: neither mode arms the
+                    # supervisor, so gating this on "off" alone would silently
+                    # drop the old safety net the moment either is turned on.
+                    provider_failover=(settings.recovery.watchdog != "handoff"),
                 )
                 _fleet_swept = True
                 typer.echo(f"recovery sweep: candidates={_fleet_candidates}")

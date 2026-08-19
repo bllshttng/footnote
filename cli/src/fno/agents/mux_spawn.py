@@ -2284,7 +2284,10 @@ def dispatch_spawn_bounded_pane(
             **spawn_kwargs,
         )
     finally:
-        release_claim(key, holder, strict=True, root=root)
+        try:
+            release_claim(key, holder, strict=True, root=root)
+        except Exception:  # noqa: BLE001 - a stale lease release must not mask the spawn result
+            pass
 
 
 def dispatch_spawn_pane(
