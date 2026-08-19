@@ -615,9 +615,15 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     try:
         from fno.paths import graph_json
         from fno.graph.store import locked_mutate_graph
+        from fno.tracker import active_backend_name
 
         path = graph_json()
-        if not path.exists():
+        external = active_backend_name() != "graph"
+        # The graph-mode close path below needs the file; the external path
+        # does not and correctly has no local graph.json to check - a bare
+        # `not path.exists(): return` here would silently no-op every
+        # external-backend close on a project that never used graph mode.
+        if not external and not path.exists():
             return
         pr_url = ""
         view = _gh(
@@ -640,9 +646,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         if not nid:
             return  # no node linked to this PR - nothing to close
 
-        from fno.tracker import active_backend_name
-
-        if active_backend_name() != "graph":
+        if external:
             # External selection: the backfill below writes the local graph and
             # the reconcile verb is tracker-owned (it refuses under external
             # selection), so both halves target the wrong store. Backfill the
