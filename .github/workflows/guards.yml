@@ -211,9 +211,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash scripts/ci/check-autonomy-registry.sh
 
-      # From codex-bootstrap-check.yml.
+      # From codex-bootstrap-check.yml. Its own job carried an isolated
+      # 15-minute timeout; folded into one job with ten other guards, an
+      # unbounded stall here would exhaust the shared job budget and take
+      # all eleven down together instead of just this one (PR 933's own
+      # 15-minute apt stall is the exact shape). A per-step cap on these
+      # three keeps that failure bounded to itself.
       - name: Setup prerequisites
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         # jq ships on ubuntu-latest; apt runs only as an image-drift
         # fallback (an unconditional `apt-get update` once stalled 15
         # minutes on an unreachable mirror - PR 933).
@@ -223,10 +229,12 @@ jobs:
 
       - name: Run Codex setup (no package setup)
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/setup.sh --provider codex --skip-package-setup
 
       - name: Run doctor checks
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/doctor.sh
 
       # From mail-inject-callers.yml.

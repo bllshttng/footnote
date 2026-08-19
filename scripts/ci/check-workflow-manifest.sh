@@ -34,20 +34,29 @@ trap 'rm -f "$LIVE" "$LISTED"' EXIT
 (cd "$WORKFLOWS_DIR" && ls -1 -- *.yml) | sort -u > "$LIVE"
 grep -vE '^[[:space:]]*(#|$)' "$MANIFEST" | sort -u > "$LISTED"
 
-MISSING="$(comm -13 "$LIVE" "$LISTED" || true)"
-UNLISTED="$(comm -23 "$LIVE" "$LISTED" || true)"
+# A `while read` loop, not `mapfile` (bash 4+ only) - this script is meant
+# to run unmodified on stock macOS bash (3.2), same reason `ls`, not GNU
+# `find -printf`, is used above.
+MISSING=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && MISSING+=("$line")
+done < <(comm -13 "$LIVE" "$LISTED")
+UNLISTED=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && UNLISTED+=("$line")
+done < <(comm -23 "$LIVE" "$LISTED")
 
-if [[ -z "$MISSING" && -z "$UNLISTED" ]]; then
+if [[ "${#MISSING[@]}" -eq 0 && "${#UNLISTED[@]}" -eq 0 ]]; then
   echo "check-workflow-manifest: ok ($(wc -l < "$LISTED" | tr -d ' ') workflow file(s) match the manifest)"
   exit 0
 fi
 
-if [[ -n "$MISSING" ]]; then
+if [[ "${#MISSING[@]}" -gt 0 ]]; then
   echo "check-workflow-manifest: manifest lists workflow(s) that no longer exist:" >&2
   printf '  %s\n' "${MISSING[@]}" >&2
   echo "  Remove the stale line(s) from scripts/ci/workflow-manifest.txt, or restore the file." >&2
 fi
-if [[ -n "$UNLISTED" ]]; then
+if [[ "${#UNLISTED[@]}" -gt 0 ]]; then
   echo "check-workflow-manifest: workflow(s) present but not in the manifest:" >&2
   printf '  %s\n' "${UNLISTED[@]}" >&2
   echo "  Add each to scripts/ci/workflow-manifest.txt in the same PR that added the file." >&2
