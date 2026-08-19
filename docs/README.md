@@ -26,6 +26,7 @@ The repo root [`README.md`](../README.md) is the quickstart. This index maps the
 - [guides/worktrees.md](guides/worktrees.md) - isolate each feature in its own worktree
 - [guides/utilities.md](guides/utilities.md) - debug, code review
 - [guides/reading-shipped-plans.md](guides/reading-shipped-plans.md) - the completion-stamp format
+- [recording/README.md](recording/README.md) - exact runs and capture rules for tutorial recordings
 
 ## Configuration
 
