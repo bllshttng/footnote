@@ -66,6 +66,23 @@ def _no_revert_fetch(monkeypatch):
     monkeypatch.setattr(rec, "list_merged_pr_branches", lambda **kw: [])
 
 
+@pytest.fixture(autouse=True)
+def _no_closure_fetch(monkeypatch):
+    """Keep reconcile hermetic: never shell `gh pr view` for closure-trailer
+    auto-discovery (x-59a6) from a test that does not explicitly stub it. A
+    test exercising the auto-bind path overrides this via its own
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", ...), which
+    wins because it runs later against the same monkeypatch instance."""
+    import fno.pr.closure as closure_mod
+
+    def _no_trailer(pr_number, **kw):
+        return closure_mod.PrClosureContext(
+            number=pr_number, body="", url=None, state="MERGED", merged_at=None,
+        )
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _no_trailer)
+
+
 def _stub_query(state_by_number: dict[int, str]):
     """Return a query stub mapping pr_number -> state string."""
 
@@ -340,6 +357,38 @@ def test_reverse_map_one_gh_call_per_repo(live_cwd):
     records = scan_merge_drift(entries, list_merged=_once)
     assert calls["n"] == 1
     assert {r.node_id for r in records} == {"ab-m1", "ab-m2"}
+
+
+def test_reverse_map_budget_defers_remaining_repos_on_a_slow_gh(tmp_path, monkeypatch, capsys):
+    """A wall-clock budget bounds the per-repo gh fan-out (round-9 review fix).
+
+    A --pr-number reconcile now scopes reverse-map to every open ref-less node
+    graph-wide (round 7), so a multi-repo graph can fan out to several repos'
+    worth of gh calls on a single merge - the same unbounded-serial-latency
+    risk cli.py's auto-discovery loop already guards against, applied here.
+    """
+    cwd_a = tmp_path / "repo-a"
+    cwd_b = tmp_path / "repo-b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+
+    calls: list[str] = []
+
+    def _spy(**kw):
+        calls.append(kw["cwd"])
+        return []
+
+    clock = iter([0.0, 1.0, 61.0])
+    monkeypatch.setattr(rec.time, "monotonic", lambda: next(clock))
+
+    entries = [_node("ab-budget-a", cwd=str(cwd_a)), _node("ab-budget-b", cwd=str(cwd_b))]
+    records = scan_merge_drift(entries, list_merged=_spy)
+
+    assert calls == [str(cwd_a)]  # only the first repo's gh call ran
+    assert records == []
+    err = capsys.readouterr().err
+    assert "reverse-map: stopped at its 60s budget" in err
+    assert "ab-budget-b" in err
 
 
 # ---------------------------------------------------------------------------
@@ -1056,3 +1105,598 @@ def test_reconcile_real_stamp_marks_never_shipped_plan_done(cli_env, monkeypatch
     assert "status: done" in text  # graduate flipped shipped->done (1 url >= 1)
     assert "shipped_at:" in text
     assert "pull/800" in text
+
+
+# ---------------------------------------------------------------------------
+# --pr-number closure binding (x-59a6)
+# ---------------------------------------------------------------------------
+
+def _stub_closure_ctx(body: str, *, number: int = 900, url: str | None = None,
+                       state: str = "MERGED"):
+    from fno.pr.closure import PrClosureContext
+
+    return PrClosureContext(
+        number=number,
+        body=body,
+        url=url or f"https://github.com/test-owner/test-repo/pull/{number}",
+        state=state,
+        merged_at="2026-08-18T00:00:00Z" if state == "MERGED" else None,
+    )
+
+
+def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monkeypatch):
+    """Review fix (x-59a6): a --pr-number call must scan only what THAT PR
+    could touch, never the whole graph. An unrelated node with its own
+    already-merged PR (no trailer claim, no shared pr_number) must stay
+    untouched by a --pr-number call, even though a bare sweep right after
+    would close it - proving the call is genuinely scoped, not just capped."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-500001"),  # claimed by this PR's trailer
+        _node("ab-500002", pr_number=811,
+              pr_url="https://github.com/test-owner/test-repo/pull/811"),  # unrelated, already merged
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-500001\n", number=810,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED", 811: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-500001"}  # the claimed node only
+
+    entries = _read_entries(graph_path)
+    unrelated = next(e for e in entries if e["id"] == "ab-500002")
+    assert unrelated["completed_at"] is None  # untouched by the scoped call
+
+    # A bare sweep right after DOES catch it - proving the PR-scoped call was
+    # scoped, not simply broken.
+    result2 = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result2.exit_code == 0, result2.output
+    payload2 = json.loads(result2.output)
+    assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
+
+
+def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
+    """AC3-HP + AC4-HP: one merged PR's trailer names two open nodes -> both
+    refs bind and both nodes close in one invocation, even though only one
+    was ever individually stamped at creation."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, sentinel_dir = cli_env
+    _make_graph(graph_path, [_node("ab-100001"), _node("ab-100002")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Fixes both.\n\nBacklog-Closure: ab-100001 ab-100002\n", number=900,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({900: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "900", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_claims"] == ["ab-100001", "ab-100002"]
+    assert set(payload["closure_bound"]) == {"ab-100001", "ab-100002"}
+    assert payload["closure_refused"] is None
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100001", "ab-100002"}
+
+    entries = _read_entries(graph_path)
+    for nid in ("ab-100001", "ab-100002"):
+        n = next(e for e in entries if e["id"] == nid)
+        assert n["pr_number"] == 900
+        assert n["completed_at"] is not None
+        assert (sentinel_dir / f"{nid}.json").exists()
+
+
+def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, monkeypatch):
+    """Review fix (x-59a6): --dry-run must not silently omit the trailer-only
+    node from its preview - a real run right after would close both, so the
+    preview an operator trusts before running for real must match."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100020"), _node("ab-100021")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100020 ab-100021\n", number=907,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({907: "MERGED"}))
+
+    before = graph_path.read_bytes()
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "907", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert set(payload["closure_bound"]) == {"ab-100020", "ab-100021"}
+    # The trailer-only node (never individually stamped) must show up as a
+    # would-close candidate, matching what a real run right after would do.
+    candidate_ids = {c["node_id"] for c in payload["candidates"]}
+    assert "ab-100021" in candidate_ids
+
+    # --dry-run leaves the graph byte-identical.
+    assert graph_path.read_bytes() == before
+
+
+def test_reconcile_pr_number_idempotent_rerun(cli_env, monkeypatch):
+    """AC4-EDGE: a second run against the same merged trailer reports the same
+    claims, zero new bindings, and zero new closes without error."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100003"), _node("ab-100004")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100003 ab-100004\n", number=901,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({901: "MERGED"}))
+
+    first = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "901", "--json"])
+    assert first.exit_code == 0, first.output
+    assert set(json.loads(first.output)["closure_bound"]) == {"ab-100003", "ab-100004"}
+
+    second = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "901", "--json"])
+    assert second.exit_code == 0, second.output
+    payload2 = json.loads(second.output)
+    assert payload2["closure_claims"] == ["ab-100003", "ab-100004"]
+    assert payload2["closure_bound"] == []  # already bound: nothing NEW
+    assert payload2["closed"] == []  # already closed: no new closes
+    assert payload2["closure_refused"] is None
+
+
+def test_reconcile_pr_number_scan_scope_ignores_a_cross_repo_number_collision(
+    cli_env, monkeypatch,
+):
+    """Review fix (x-59a6): _pr_touch_ids's bare pr_number match must be
+    repo-scoped like every other PR-matching path in this module - a
+    different project's node carrying the SAME pr_number by coincidence
+    must never be pulled into this PR's scan scope."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-700001"),  # this PR's own claimed node
+        # Coincidentally shares pr_number=810 but belongs to a DIFFERENT repo.
+        _node("ab-700002", pr_number=810,
+              pr_url="https://github.com/other-owner/other-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-700001\n", number=810,
+            url="https://github.com/test-owner/test-repo/pull/810",
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--pr-number", "810", "--repo", "test-owner/test-repo", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-700001"}
+    other = next(e for e in _read_entries(graph_path) if e["id"] == "ab-700002")
+    assert other["completed_at"] is None  # untouched: a different repo's node
+
+
+def test_reconcile_refuses_node_and_pr_number_together(cli_env):
+    """Round-6/7 review fix: --node + --pr-number is refused rather than
+    silently mis-scoped - --pr-number's own bind step would bind every
+    trailer-claimed node unconditional on --node, but the scan/close scope
+    would collapse to just --node, stranding the other claims stamped but
+    never closed."""
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-900001")])
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--node", "ab-900001", "--pr-number", "1"],
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_path, monkeypatch):
+    """Round-7 review fix: a --pr-number call must still reach a node with NO
+    PR ref at all (session died before the pr_number stamp landed) via the
+    reverse branch-name map, exactly as _reconcile_merged_pr_node's own
+    docstring claims - not just the trailer-claimed node this PR names."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-100050"),  # claimed by PR 269's trailer
+        _node("ab-rmap2", cwd=str(tmp_path)),  # ref-less; only its branch name ties it to PR 268
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100050\n", number=269,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({269: "MERGED"}))
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{
+            "number": 268, "url": "https://github.com/o/r/pull/268",
+            "headRefName": "feature/ab-rmap2", "mergedAt": "2026-07-08T00:00:00Z",
+        }],
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "269", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100050", "ab-rmap2"}
+
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rmap2")
+    assert node["pr_number"] == 268  # reverse-map backfilled its own recovered ref
+
+
+def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_unresolvable(
+    cli_env, monkeypatch,
+):
+    """Round-6 review fix: when this PR's own repo can't be resolved (no
+    --repo, unparseable pr_url), _pr_touch_ids must NOT wildcard-match every
+    bare-number ref into scope - it must refuse the number-based match
+    entirely, exactly like _find_pr_node_id already does when its own slug
+    is unresolvable. Failing open here would let an unrelated cross-repo
+    node sharing this PR's number get pulled into scope and closed."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        # cwd set so the primary claim's own post-bind forward-scan re-query
+        # (which needs SOME repo context) still succeeds via the cwd
+        # fallback, isolating this test to _pr_touch_ids's own scoping
+        # behavior rather than the separate no-repo-context refusal in
+        # scan_merge_drift.
+        _node("ab-800001", cwd=str(graph_path.parent)),  # this PR's own claimed node
+        # Shares pr_number=810 by coincidence; a different repo's node.
+        _node("ab-800002", pr_number=810,
+              pr_url="https://github.com/other-owner/other-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-800001\n", number=810, url="not-a-url",
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-800001"}
+    other = next(e for e in _read_entries(graph_path) if e["id"] == "ab-800002")
+    assert other["completed_at"] is None  # untouched: our_repo was unresolvable
+
+
+def test_reconcile_pr_number_warns_when_repo_unresolved_and_scope_goes_empty(
+    cli_env, monkeypatch,
+):
+    """Round-11 review fix: when this PR's own repo can't be resolved AND
+    there is no trailer claim and no open ref-less node to fall back on,
+    _pr_touch_ids returns an EMPTY scope, so the ordinary ref-stamped,
+    no-trailer close silently sees nothing - the exact case
+    test_reconcile_pr_number_state_blip_with_no_trailer_never_reads_refused
+    covers WITH a resolvable repo. A caller invoking this command directly
+    (no --repo, unparseable pr_ctx.url) must see a warning on stderr, not
+    silence - the same condition leg_stamp already warns about on its own
+    call site, now covered here too."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-810001", pr_number=810,
+              pr_url="https://github.com/test-owner/test-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=810, url="not-a-url"),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810"])
+    assert result.exit_code == 0, result.output
+    assert "could not resolve this repo's slug" in result.output
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-810001")
+    assert node["completed_at"] is None  # scope went empty: ordinary close deferred
+
+
+def test_reconcile_pr_number_state_blip_with_no_trailer_never_reads_refused(cli_env, monkeypatch):
+    """Round-8 review fix: a state-read blip on the SEPARATE closure-context
+    fetch (fetch_pr_closure_context) must not report closure_refused when the
+    PR body carries no trailer at all - there is nothing to bind either way,
+    and the node still closes fine via the ordinary ref-based scan below,
+    which reads the PR's merge state independently. Flagging that as a
+    refusal read a fully successful run as failed."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-950001", pr_number=930)])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=930, state="OPEN"),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({930: "MERGED"}))
+
+    result = runner.invoke(
+        app,
+        ["backlog", "reconcile", "--pr-number", "930", "--repo", "test-owner/test-repo", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_refused"] is None
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-950001"}
+
+
+def test_reconcile_pr_number_refuses_binding_an_unmerged_pr(cli_env, monkeypatch):
+    """Review fix (x-59a6): a --pr-number call must never bind a trailer
+    claim before the PR is actually merged - an OPEN PR could still be
+    abandoned or closed unmerged, leaving a claimed node holding a dead ref."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-600001")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-600001\n", number=930, state="OPEN",
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "930", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_bound"] == []
+    assert payload["closure_refused"] is not None and "not merged" in payload["closure_refused"]
+    assert payload["closed"] == []
+    n = next(e for e in _read_entries(graph_path) if e["id"] == "ab-600001")
+    assert n["pr_number"] is None
+
+
+def test_reconcile_pr_number_refuses_unknown_claim_mutates_nothing(cli_env, monkeypatch):
+    """AC3-ERR: an unknown claim refuses the whole binding; no claimed node
+    mutates or closes."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100005")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100005 ab-999999\n", number=902,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({902: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "902", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_claims"] == ["ab-100005", "ab-999999"]
+    assert payload["closure_bound"] == []
+    assert payload["closure_refused"] is not None and "ab-999999" in payload["closure_refused"]
+    assert payload["closed"] == []
+    # ab-100005 was never bound to a PR ref (AC3-ERR: no claimed node mutates),
+    # so the drift scan below has nothing to query either.
+    n = next(e for e in _read_entries(graph_path) if e["id"] == "ab-100005")
+    assert n["pr_number"] is None
+    assert n["completed_at"] is None
+
+
+def test_reconcile_auto_binds_closure_claims_for_a_ui_merge(cli_env, monkeypatch):
+    """The third close path (x-59a6): an operator merging directly in the
+    GitHub UI never tells any of our verbs a PR number. The bare sweep (no
+    --pr-number, no --node - exactly what SessionStart auto-fires) must still
+    discover the merged PR through its normal forward scan and bind the
+    OTHER node its trailer names, not just the one already stamped."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, sentinel_dir = cli_env
+    _make_graph(graph_path, [
+        _node("ab-100010", pr_number=905,
+              pr_url="https://github.com/test-owner/test-repo/pull/905"),  # stamped at creation
+        _node("ab-100011"),  # named only in the trailer; never individually stamped
+    ])
+
+    def _query_905(number, repo=None, cwd=None):
+        # A real gh query's returned url is the PR's actual canonical url, so
+        # it agrees with whatever the node already has stamped - a real url
+        # never disagrees with itself the way a careless stub could.
+        return PrMergeState(
+            number=number, state="MERGED",
+            url="https://github.com/test-owner/test-repo/pull/905",
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query_905)
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100010 ab-100011\n", number=905,
+        ),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100010", "ab-100011"}
+
+    entries = _read_entries(graph_path)
+    for nid in ("ab-100010", "ab-100011"):
+        n = next(e for e in entries if e["id"] == nid)
+        assert n["completed_at"] is not None
+        assert (sentinel_dir / f"{nid}.json").exists()
+
+
+def test_reconcile_auto_discovery_scopes_repo_to_the_discovered_record_not_the_flag(
+    cli_env, monkeypatch,
+):
+    """Review fix (x-59a6): auto-discovery (bare-sweep only - a --pr-number
+    call is scoped to its own PR and never runs this leg) must scope each
+    discovered PR's query to THAT record's own repo, never one borrowed from
+    another discovered record - the graph is cross-project, and the
+    discovery loop's own comment says so; the code must actually do it."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-300001", pr_number=910,
+              pr_url="https://github.com/test-owner/test-repo/pull/910"),
+        _node("ab-300002", pr_number=911,
+              pr_url="https://github.com/other-owner/other-repo/pull/911"),
+    ])
+
+    def _query(number, repo=None, cwd=None):
+        urls = {
+            910: "https://github.com/test-owner/test-repo/pull/910",
+            911: "https://github.com/other-owner/other-repo/pull/911",
+        }
+        return PrMergeState(
+            number=number, state="MERGED", url=urls[number],
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query)
+
+    fetch_calls: list[tuple[int, str | None]] = []
+    real_ctx = _stub_closure_ctx
+
+    def _tracking_fetch(pr_number, *, repo=None, cwd=None):
+        fetch_calls.append((pr_number, repo))
+        return real_ctx("", number=pr_number, url=(
+            "https://github.com/test-owner/test-repo/pull/910" if pr_number == 910
+            else "https://github.com/other-owner/other-repo/pull/911"
+        ))
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert (910, "test-owner/test-repo") in fetch_calls
+    assert (911, "other-owner/other-repo") in fetch_calls
+
+
+def test_reconcile_auto_discovery_skips_when_repo_unresolvable(cli_env, monkeypatch):
+    """Review fix (x-59a6): a discovered record with no parseable url and no
+    resolvable cwd must be SKIPPED, never guessed at via the caller's global
+    --repo (a same-numbered PR can exist in an unrelated repo, and a fresh
+    node has nothing to cross-repo-refuse against)."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-400001", pr_number=910,
+              pr_url="https://github.com/test-owner/test-repo/pull/910"),
+        # Its stored pr_url parses fine (so the forward scan attempts a
+        # query), but the query result itself returns no url and no cwd -
+        # the record ends up with neither signal to scope a repo from.
+        _node("ab-400002", pr_number=925,
+              pr_url="https://github.com/test-owner/test-repo/pull/925"),
+    ])
+
+    def _query(number, repo=None, cwd=None):
+        if number == 925:
+            return PrMergeState(number=925, state="MERGED", url=None, merged_at="2026-08-18T00:00:00Z")
+        return PrMergeState(
+            number=number, state="MERGED",
+            url="https://github.com/test-owner/test-repo/pull/910",
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query)
+
+    fetch_calls: list[int] = []
+
+    def _tracking_fetch(pr_number, *, repo=None, cwd=None):
+        fetch_calls.append(pr_number)
+        return _stub_closure_ctx("", number=pr_number,
+                                  url="https://github.com/test-owner/test-repo/pull/910")
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
+
+    # Bare sweep: auto-discovery (where this skip logic lives) only runs on
+    # a full, unscoped sweep - a --pr-number call is scoped to its own PR.
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    assert 925 not in fetch_calls  # unresolvable repo -> skipped, never queried
+
+
+def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch):
+    """Operator verification (x-59a6): a multi-node feature where one PR
+    merges and another does not - the epic must report EXACTLY which sibling
+    ship is still outstanding, not just stay silently open."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-e00001"),  # the epic; no PR of its own
+        _node("ab-e00002", parent="ab-e00001"),  # ships in PR 903 (merges)
+        _node("ab-e00003", parent="ab-e00001", pr_number=904,
+              pr_url="https://github.com/test-owner/test-repo/pull/904"),  # PR 904 (still open)
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-e00002\n", number=903,
+        ),
+    )
+    # PR 903 (this run's claim) is merged; PR 904 (the sibling's own ref, from
+    # the forward scan) is still open.
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({903: "MERGED", 904: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "903", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    # The claimed sibling closed...
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-e00002"}
+    # ...but the epic is not done, and the report names EXACTLY the
+    # outstanding ship - not a bare silence about the epic.
+    assert payload["epics_waiting"] == [
+        {"epic": "ab-e00001", "outstanding": ["ab-e00003"]}
+    ]
+    entries = _read_entries(graph_path)
+    epic = next(e for e in entries if e["id"] == "ab-e00001")
+    assert epic["completed_at"] is None
+
+
+def test_reconcile_epics_waiting_ignores_a_superseded_sibling(cli_env, monkeypatch):
+    """Review fix (x-59a6): a sibling resolved via supersession (not a merge)
+    must not be reported as an outstanding ship - it is closed, just through
+    a different path than completed_at."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-e10001"),  # the epic
+        _node("ab-e10002", parent="ab-e10001"),  # ships in this PR
+        _node("ab-e10003", parent="ab-e10001", superseded_by="ab-e10002"),  # resolved, not merged
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-e10002\n", number=906,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({906: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "906", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-e10002"}
+    assert payload["epics_waiting"] == []

@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 import json
 import os
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -444,3 +444,54 @@ def ritual(
         autonomous = True
     rc = _ritual.run_ritual(pr_number, autonomous)
     raise typer.Exit(code=rc)
+
+
+@pr_app.command(
+    "closure-trailer",
+    help=(
+        "Print the exact `Backlog-Closure:` trailer for NODE plus its "
+        "contained_in descendants. Compose it into a PR body before "
+        "`gh pr create` so every node the PR ships gets bound at merge, not "
+        "just the one stamped by --pr-number. Prints nothing (exit 0) when "
+        "NODE is unresolvable or nothing well-formed remains, so a caller "
+        "can append the output to a body unconditionally."
+    ),
+)
+def closure_trailer(
+    node: str = typer.Argument(..., help="Node id to render the trailer for."),
+    extra: List[str] = typer.Option(
+        [], "--extra",
+        help="Additional genuinely-shipped node ids beyond NODE and its "
+             "contained_in descendants (repeatable).",
+    ),
+) -> None:
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+    from fno.pr.closure import render_pr_closure_trailer
+    from fno.tracker import active_backend_name
+
+    from fno.graph._constants import is_wellformed_node_id
+
+    if active_backend_name() != "graph":
+        # graph.json is not the delivery record of truth under an external
+        # tracker backend - nothing to render from, matching this command's
+        # own contract (prints nothing, exit 0, on any unresolvable input).
+        return
+
+    try:
+        entries = read_graph(graph_json())
+    except Exception:
+        return
+    # render_pr_closure_trailer silently drops a malformed id with no other
+    # signal - a bare-hex or slug typo in --extra would otherwise ship with
+    # the trailer one node short and no one the wiser (round-7 review fix).
+    dropped = [e for e in extra if not is_wellformed_node_id(e)]
+    if dropped:
+        typer.echo(
+            f"warning: dropping malformed --extra id(s) from the trailer: "
+            f"{', '.join(dropped)} (need the full <prefix>-<hex> form)",
+            err=True,
+        )
+    line = render_pr_closure_trailer(entries, node, extra_ids=list(extra))
+    if line:
+        typer.echo(line)

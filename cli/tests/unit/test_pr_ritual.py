@@ -26,7 +26,7 @@ class FakeRunner:
                  spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
                  reconcile_held=None, reconcile_candidates=None,
                  reconcile_contained=None, reconcile_errors=(),
-                 reconcile_sync_outcome=None):
+                 reconcile_sync_outcome=None, reconcile_closure_refused=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
@@ -36,6 +36,7 @@ class FakeRunner:
         self._contained = reconcile_contained or ()
         self._errors = reconcile_errors
         self._sync_outcome = reconcile_sync_outcome
+        self._closure_refused = reconcile_closure_refused
         self._claim_rc = claim_rc
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
@@ -71,6 +72,8 @@ class FakeRunner:
                 payload["contained_errors"] = list(self._errors)
             if self._sync_outcome:
                 payload["sync_catchup"] = {"outcome": self._sync_outcome}
+            if self._closure_refused:
+                payload["closure_refused"] = self._closure_refused
             return Result(0, json.dumps(payload), "")
         if sub == "backlog" and "find" in argv:
             import json
@@ -278,11 +281,49 @@ def test_reconcile_held_open_reads_deferred_never_ok(tmp_path, capsys):
     assert "step=reconcile status=ok" not in out
 
 
+def test_reconcile_closure_refused_reads_deferred_never_ok(tmp_path, capsys):
+    """Round-7 review fix: leg_stamp ignored `closure_refused` entirely, so a
+    flaky gh query during trailer binding (no other drift found) read as a
+    clean "no-drift" run - masking a real closure failure that a --json call
+    site already had the answer for in its own response body."""
+    r = _bare(tmp_path, FakeRunner(reconcile_closure_refused="could not query PR #7: timeout"))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=deferred" in out
+    assert "closure binding refused: could not query PR #7: timeout" in out
+    assert "step=reconcile status=ok" not in out
+
+
 def test_reconcile_closed_still_reads_ok(tmp_path, capsys):
     r = _bare(tmp_path, FakeRunner(reconcile_closed=["x-1"], reconcile_candidates=["x-1"]))
     r.leg_stamp()
     out = capsys.readouterr().out
     assert "step=reconcile status=ok detail=closed=1" in out
+
+
+def test_leg_stamp_scopes_reconcile_to_pr_number(tmp_path, capsys):
+    """x-59a6 AC4-HP: leg_stamp routes through plural (--pr-number) reconcile
+    rather than the old bare full sweep, so a multi-node PR's trailer claims
+    get bound here, not just whichever node happens to already carry a ref."""
+    r = _bare(tmp_path, FakeRunner(reconcile_closed=["x-a1", "x-a2"]), pr=42)
+    r.leg_stamp()
+    sub = _argv_sub(r.runner.calls, "backlog")
+    assert sub is not None and "reconcile" in sub
+    assert "--pr-number" in sub and "42" in sub
+
+
+def test_leg_advance_never_keys_off_a_single_closed_id(tmp_path):
+    """x-59a6: --closed keys advance's own dependents check off ONE id, and
+    leg_stamp's reconcile already dispatched dependents for every node it
+    closed - passing node_ids[0] here would silently drop the 2nd+ closed
+    node's dependents from this leg's (redundant) coverage."""
+    r = _bare(tmp_path, FakeRunner(), node_ids=["x-b1", "x-b2"])
+    captured: dict = {}
+    r._stream = lambda step, argv, timeout: captured.update(step=step, argv=argv)
+    r.leg_advance()
+    assert captured["step"] == "advance"
+    assert "advance" in captured["argv"]
+    assert "--closed" not in captured["argv"]
 
 
 def test_reconcile_no_drift_is_distinguishable_from_a_held_close(tmp_path, capsys):

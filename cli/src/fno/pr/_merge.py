@@ -586,7 +586,13 @@ def _find_pr_node_id(
             if num != pr_number:
                 continue
             node_slug = repo_slug_from_url((u or "").strip())
-            if node_slug is None or node_slug == our_slug:
+            # Case-insensitive, matching cli.py's _pr_touch_ids and
+            # closure.py's bind_closure_claims - a GitHub owner/repo slug is
+            # itself case-insensitive, and the two other repo-match sites
+            # already lowercase; leaving this one exact-case let the same
+            # real repo match one path and refuse another (round-10 review
+            # fix).
+            if node_slug is None or node_slug.lower() == our_slug.lower():
                 matches.append(nid)
             break
     uniq = list(dict.fromkeys(matches))
@@ -594,27 +600,41 @@ def _find_pr_node_id(
 
 
 def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
-    """Close the just-merged PR's backlog node synchronously (baked into merge).
+    """Close every node the just-merged PR closes, synchronously (x-59a6).
 
     ``_run_post_merge_followups`` only drops a ``.triage-pending`` sentinel for a
     later stop-hook / ritual to consume; a standalone ``fno pr merge`` from a
     worktree or bg session never fires that hook, so the node stays open - the
     exact gap that made ``fno pr merge`` no better than ``gh pr merge``. Close it
-    here so the merge always closes its own loop, with no memory/workaround:
+    here so the merge always closes its own loop, with no memory/workaround.
 
-      1. Resolve THIS PR's node by number, else url (a url-only / off-convention
-         link is invisible to bare reconcile).
-      2. Stamp ``pr_number`` on it (idempotent) so the canonical link exists for
-         this and every later pass - reconcile's forward scan keys on it.
-      3. Run ``fno backlog reconcile --node <id>`` (mark done, stamp the plan,
-         drop the retro sentinel) - the full, tested close path, reused not
-         duplicated.
+    Delegates entirely to ``fno backlog reconcile --pr-number --repo`` (the
+    same plural mode the post-merge ritual uses): it binds every node this
+    PR's exact ``Backlog-Closure`` trailer names, THEN runs the existing
+    forward scan (which also finds a node stamped at creation the old
+    ``_find_pr_node_id`` match used to backfill by hand) plus the reverse
+    branch-name map. A single-node PR with no trailer at all still closes via
+    that forward scan exactly as before - this call site no longer resolves
+    or stamps a node itself, so a PR naming several nodes closes all of them,
+    not just the one this process happens to find first.
 
-    Best-effort: any failure is a non-fatal stderr note; never blocks the merge.
+    Repo scoping is mandatory: without SOME resolvable repo the call is
+    refused rather than risking a same-numbered PR in a different repository.
+    The PR's own url is tried first; a cwd guess (this function's own
+    checkout, already known to be the one that just merged) is the fallback,
+    not a first resort - low-risk here specifically because the call runs in
+    the checkout that owns the merge, unlike a bare-number scan elsewhere in
+    this feature that refuses a cwd guess outright. Best-effort: any failure
+    is a non-fatal stderr note; never blocks the merge.
+
+    Before delegating, backfills ``pr_number`` onto a node this PR's URL
+    already matches but that has no ``pr_number`` yet (a partial stamp, or an
+    off-convention branch name) - ``_find_pr_node_id`` used to catch this case
+    directly; the delegated forward scan needs an int ``pr_number`` to find
+    the node at all, so without this backfill a url-only node can never close.
     """
     try:
         from fno.paths import graph_json
-        from fno.graph.store import locked_mutate_graph
         from fno.tracker import active_backend_name
 
         path = graph_json()
@@ -632,26 +652,24 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         )
         if view.ok:
             pr_url = view.stdout.strip()
-        # PR links are footnote-owned sidecar data: the resolver scan runs over
-        # the sidecar projection so it works on any tracker backend. The rows
-        # carry exactly the fields _find_pr_node_id/node_pr_refs consume.
-        from fno.tracker import sidecar as sidecar_store
-
-        rows = [
-            {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url,
-             "additional_prs": sc.additional_prs}
-            for nid, sc in sidecar_store.load_all().items()
-        ]
-        nid = _find_pr_node_id(rows, pr_number, pr_url)
-        if not nid:
-            return  # no node linked to this PR - nothing to close
 
         if external:
-            # External selection: the backfill below writes the local graph and
-            # the reconcile verb is tracker-owned (it refuses under external
-            # selection), so both halves target the wrong store. Backfill the
-            # SIDECAR's primary link instead, then close through the shared
+            # External selection has no Backlog-Closure trailer concept of its
+            # own yet (that is graph-only, x-59a6) - resolve the ONE node this
+            # PR's ref matches via the tracker-agnostic sidecar projection,
+            # backfill its primary link, and close through the shared
             # external terminal: same gates, sidecar rollups, one close.
+            from fno.tracker import sidecar as sidecar_store
+
+            rows = [
+                {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url,
+                 "additional_prs": sc.additional_prs}
+                for nid, sc in sidecar_store.load_all().items()
+            ]
+            nid = _find_pr_node_id(rows, pr_number, pr_url)
+            if not nid:
+                return  # no node linked to this PR - nothing to close
+
             from fno.graph.cli import _done_via_seam
 
             sc = sidecar_store.load(nid)
@@ -663,43 +681,71 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
             _done_via_seam(nid, skip_stamp=False, force=False, reason=None)
             return
 
-        def _mut(entries: List[dict]) -> List[dict]:
-            for e in entries:
-                if e.get("id") == nid:
-                    # Backfill the PRIMARY link ONLY when it is ABSENT. A node
-                    # that matched via an `additional_prs` entry already has a
-                    # DIFFERENT primary pr_number; overwriting it (while keeping
-                    # its old primary url) would corrupt the number<->url pair and
-                    # break node_pr_refs (codex P2). The url-less node this fix
-                    # targets has no primary number, so it is still backfilled.
-                    if not isinstance(e.get("pr_number"), int):
-                        e["pr_number"] = pr_number
-                        if pr_url and not (e.get("pr_url") or "").strip():
-                            e["pr_url"] = pr_url
-                    break
-            return entries
+        if pr_url:
+            from fno.graph.store import locked_mutate_graph, read_graph
 
-        locked_mutate_graph(path, _mut)
+            matched_id = _find_pr_node_id(read_graph(path), pr_number, pr_url)
+            if matched_id:
+                def _backfill(entries: List[dict], _id=matched_id) -> List[dict]:
+                    for e in entries:
+                        if e.get("id") != _id:
+                            continue
+                        if not isinstance(e.get("pr_number"), int):
+                            e["pr_number"] = pr_number
+                            e["pr_url"] = pr_url
+                        break
+                    return entries
+
+                locked_mutate_graph(path, _backfill)
+
+        from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
+
+        repo = repo_slug_from_url(pr_url) or resolve_current_repo_slug(cwd or os.getcwd())
+        if not repo:
+            print(
+                f"fno pr merge: could not resolve a repo for PR #{pr_number} - "
+                "refusing to reconcile without repo scoping (post-merge node "
+                "close skipped; a later full sweep still catches it)",
+                file=sys.stderr,
+            )
+            return
 
         from fno import _subprocess_util
 
         res = run(
-            [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile", "--node", nid],
+            [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
+             "--pr-number", str(pr_number), "--repo", repo, "--json"],
             cwd=cwd or os.getcwd(),
         )
         if not res.ok:
             # A non-zero reconcile (gh query down, evidence refused) leaves the
-            # node OPEN - the exact gap this closes. run() returns rather than
-            # raises, so surface it explicitly instead of a silent success.
+            # node(s) OPEN - the exact gap this closes. run() returns rather
+            # than raises, so surface it explicitly instead of a silent success.
             print(
-                f"fno pr merge: node reconcile for PR #{pr_number} (node {nid}) "
-                f"failed: {(res.stderr or res.stdout or '').strip()[:200]}",
+                f"fno pr merge: reconcile for PR #{pr_number} failed: "
+                f"{(res.stderr or res.stdout or '').strip()[:200]}",
                 file=sys.stderr,
             )
+        else:
+            # reconcile exits 0 even when the trailer-claimed nodes never got
+            # bound (only an unresolvable PR query exits non-zero) - the same
+            # closure_refused field leg_stamp checks via this identical --json
+            # call. Without this, a refused bind read as a clean, silent
+            # success (round-11 review fix, x-59a6).
+            try:
+                obj = json.loads(res.stdout or "{}")
+            except json.JSONDecodeError:
+                obj = {}
+            closure_refused = obj.get("closure_refused")
+            if closure_refused:
+                print(
+                    f"fno pr merge: reconcile for PR #{pr_number} bound nothing: "
+                    f"{closure_refused}",
+                    file=sys.stderr,
+                )
     except (Exception, SystemExit):
         # Never block the merge outcome on the node-close (mirrors
-        # _sync_graph_merge_status: SystemExit covers locked_mutate_graph's
-        # sys.exit on a corrupt graph).
+        # _sync_graph_merge_status: SystemExit covers a corrupt-graph exit).
         print(
             f"fno pr merge: post-merge node reconcile for PR #{pr_number} "
             "skipped (non-fatal)",

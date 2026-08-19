@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
 import typer
 
@@ -8608,6 +8608,22 @@ def cmd_reconcile(
         "--json", "-J",
         help="Emit structured JSON instead of a human summary.",
     ),
+    pr_number: Optional[int] = typer.Option(
+        None,
+        "--pr-number",
+        help="Bind every node named in this merged PR's exact Backlog-Closure "
+        "trailer to the PR (filling an absent primary or appending to "
+        "additional_prs) BEFORE the drift scan below runs, so a PR naming "
+        "several nodes closes all of them in this one invocation rather than "
+        "only the one node stamped at creation. All-or-nothing: an "
+        "unknown, malformed, or cross-repo claim binds nothing.",
+    ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help="owner/repo scoping --pr-number's gh query and cross-repo claim "
+        "check. Resolved from the checkout's origin remote when omitted.",
+    ),
 ) -> None:
     """Close open backlog nodes whose PR has merged outside the ship gate.
 
@@ -8632,14 +8648,317 @@ def cmd_reconcile(
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
+        node_is_open,
         resolve_promise_evidence,
         scan_merge_drift,
         write_retro_sentinel,
     )
     from fno.paths import retro_pending_dir
 
+    # --node + --pr-number together is refused rather than silently
+    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
+    # PR's trailer claims, unconditional on --node, but the scan/close scope
+    # would then collapse to the single --node id - leaving newly-bound
+    # sibling claims stamped with a live PR ref but never closed until some
+    # later, unrelated sweep happens to revisit them (round-6/7 review,
+    # flagged twice with no caller ever exercising this combination). Loud
+    # refusal beats a latent gap a future caller could silently trip.
+    if node is not None and pr_number is not None:
+        raise typer.BadParameter(
+            "--node and --pr-number are mutually exclusive: --pr-number "
+            "already scopes the scan to every node its own trailer claims, "
+            "which --node cannot narrow without silently stranding the "
+            "other claimed nodes stamped-but-unclosed. Run them separately."
+        )
+
+    # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
+    # only shape allowed to touch the whole graph: revert detection, the
+    # stranded-epic self-heal, and an unbounded forward/reverse scan. A
+    # `--pr-number` call names one specific PR and must stay bounded to it
+    # (x-59a6 review fix - it used to fall through to a full sweep on every
+    # merge, since it left `node` at None just like the truly-bare case).
+    _full_sweep = node is None and pr_number is None
+
+    def _pr_touch_ids(
+        _entries: list[dict], _pr_number: int, _claims: list[str], _our_repo: Optional[str],
+    ) -> set[str]:
+        """Every node id ``_pr_number`` could possibly close: the trailer's
+        own claims, any node already carrying ``_pr_number`` as a ref
+        (stamped at creation, before this feature existed), plus every OPEN
+        node with NO PR ref at all. Pure in-memory walk - no I/O - so scoping
+        the scan to this set costs nothing extra.
+
+        The last group exists because ``scan_merge_drift`` passes this exact
+        scope straight through to ``reverse_map_unstamped`` (its reverse
+        branch-name-map pass), which is what closes a node whose session
+        died before the pr_number stamp landed. Omitting ref-less nodes here
+        would silently zero out that entire pass on every ``--pr-number``
+        call - the node's own branch names it, but a scope with nothing in
+        it matches nothing. Including them costs nothing extra either: that
+        pass makes its own gh call per node's cwd regardless of scope size,
+        and is already repo-scoped by construction (one cwd's repo per call).
+
+        The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
+        would pull in a same-numbered PR belonging to a different repo's
+        node. Scoped by repo like every other PR-matching path in this
+        module - a ref with no parseable url is still accepted as
+        best-effort, but an unresolvable OUR OWN repo refuses every
+        number-based match rather than wildcarding it in, matching
+        ``_find_pr_node_id``'s actual stance (it returns ``None`` outright
+        when its own slug is unresolvable, rather than treating that as a
+        pass for every candidate).
+        """
+        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
+        ids = set(_claims)
+        for _e in _entries:
+            _rid = _e.get("id")
+            if isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e):
+                ids.add(_rid)
+        if _our_repo is None:
+            return ids
+        for _e in _entries:
+            _nid = _e.get("id")
+            if not isinstance(_nid, str):
+                continue
+            for _num, _url in node_pr_refs(_e):
+                if _num != _pr_number:
+                    continue
+                _ref_repo = repo_slug_from_url(_url)
+                if _ref_repo is None or _ref_repo.lower() == _our_repo.lower():
+                    ids.add(_nid)
+                break
+        return ids
+
+    def _bind_and_report(
+        _entries: list[dict], _pr_number: int, _pr_url: Optional[str],
+        _claims: list[str], _repo: Optional[str],
+    ) -> tuple[Optional[str], list[str]]:
+        """Bind ``_claims`` to ``_pr_number`` against ``_entries``.
+
+        Persists via ``locked_mutate_graph`` unless ``dry_run``, in which case
+        it mutates ``_entries`` in place ONLY (``bind_closure_claims`` writes
+        through node dict references, never a copy) so the caller's own
+        forward-scan preview reflects the bind without ever touching disk -
+        the same trailer-only node a real run would close, not just the one
+        already stamped. Returns (refusal, bound_ids).
+        """
+        from fno.pr.closure import bind_closure_claims
+
+        if dry_run:
+            result = bind_closure_claims(
+                _entries, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+            )
+            return (result.refusal, list(result.bound_ids))
+
+        _box: dict = {"refusal": None, "bound": []}
+
+        def _mutator(entries2):
+            result = bind_closure_claims(
+                entries2, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+            )
+            if result.outcome == "refused":
+                _box["refusal"] = result.refusal
+            else:
+                _box["bound"] = list(result.bound_ids)
+            return entries2
+
+        locked_mutate_graph(_graph_path(), _mutator)
+        return (_box["refusal"], _box["bound"])
+
+    # --pr-number: bind every exact Backlog-Closure claim on this PR to its
+    # node BEFORE the scan below, so the forward scan (which needs a PR ref to
+    # query) can see a node that was named in the body but never individually
+    # stamped at creation. Reuses the unchanged scan/close pipeline that
+    # follows - this only makes the newly-bound nodes visible to it.
+    closure_claims: list[str] = []
+    closure_bound: list[str] = []
+    closure_refused: Optional[str] = None
     entries = read_graph(_graph_path())
-    records = scan_merge_drift(entries, node_id=node)
+    if pr_number is not None:
+        from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
+
+        try:
+            pr_ctx = fetch_pr_closure_context(pr_number, repo=repo)
+        except ClosureQueryError as exc:
+            closure_refused = f"could not query PR #{pr_number}: {exc}"
+            pr_ctx = None
+            if not json_out:
+                typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
+
+        # A plain `if pr_ctx is not None:` (not try/except/else) so mypy can
+        # narrow pr_ctx to non-None for the rest of this block - it cannot
+        # narrow across a reassignment to None in a sibling `except`.
+        if pr_ctx is not None and pr_ctx.state != "MERGED":
+            # A binding is a MERGE-time close signal, never a promise on
+            # an OPEN or CLOSED-unmerged PR - the caller could later
+            # abandon or close it unmerged, leaving a claimed node
+            # holding a dead ref. The three real callers (the ritual,
+            # fno pr merge, the bare sweep) only ever reach this with an
+            # already-merged PR; this guards a direct manual
+            # `--pr-number` invocation against the same premature bind.
+            #
+            # Only worth refusing (and reporting) when the body actually
+            # names a trailer: a state-read blip on a PR with NO trailer
+            # at all has nothing to bind either way, and the node this
+            # run is closing almost always closes fine via the ordinary
+            # ref-based scan below - flagging that as a refusal read a
+            # fully successful run as failed (round-8 review fix).
+            if parse_closure_trailer(pr_ctx.body):
+                closure_refused = (
+                    f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+                )
+                if not json_out:
+                    typer.echo(
+                        f"warning: reconcile --pr-number: {closure_refused}", err=True,
+                    )
+            pr_ctx = None
+
+        if pr_ctx is not None:
+            closure_claims = parse_closure_trailer(pr_ctx.body)
+            if closure_claims:
+                closure_refused, closure_bound = _bind_and_report(
+                    entries, pr_number, pr_ctx.url, closure_claims, repo,
+                )
+                if not dry_run:
+                    entries = read_graph(_graph_path())  # real bind just persisted
+                if closure_refused and not json_out:
+                    typer.echo(
+                        f"warning: reconcile --pr-number {pr_number}: refused "
+                        f"binding: {closure_refused}",
+                        err=True,
+                    )
+                elif closure_bound and not json_out:
+                    typer.echo(
+                        f"reconcile --pr-number {pr_number}: bound "
+                        f"{', '.join(closure_bound)}",
+                        err=True,
+                    )
+
+    # A --pr-number call scans only what THIS PR could touch - its own
+    # stamped ref plus every exact trailer claim - never the whole graph
+    # (x-59a6 review fix: this used to fall through to an unscoped scan on
+    # every merge, since `node` stays None for a --pr-number-only call, the
+    # same shape as a truly bare sweep). An explicit --node still wins.
+    _scan_scope: Optional[Union[str, set[str]]]
+    if node is not None:
+        _scan_scope = node
+    elif pr_number is not None:
+        from fno.graph._reconcile import repo_slug_from_url as _repo_slug_from_url
+
+        _our_repo = repo or (
+            _repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None
+        )
+        if _our_repo is None and not json_out:
+            # _pr_touch_ids refuses to repo-scope a bare-number ref match
+            # when it cannot resolve OUR OWN repo (avoiding a false cross-repo
+            # collision), so the scan below can silently see only trailer
+            # claims and open ref-less nodes - the ordinary ref-stamped,
+            # no-trailer close can go dark with nothing on stderr to say so.
+            # Same condition leg_stamp already warns about before it calls
+            # this same command with an explicit --repo; surface it here too
+            # for a caller (a bare `fno backlog reconcile --pr-number`) that
+            # never resolves one itself (round-11 review fix, x-59a6).
+            typer.echo(
+                f"warning: reconcile --pr-number {pr_number}: could not resolve "
+                "this repo's slug; scoping to exact trailer claims and open "
+                "ref-less nodes only, skipping any ref-stamped bare-number match",
+                err=True,
+            )
+        _scan_scope = _pr_touch_ids(entries, pr_number, closure_claims, _our_repo)
+    else:
+        _scan_scope = None
+    records = scan_merge_drift(entries, node_id=_scan_scope)
+
+    # Auto-bind closure claims for every OTHER merged PR this sweep just
+    # discovered on its own (x-59a6). --pr-number above covers the two paths
+    # that already KNOW the PR number (the post-merge ritual, `fno pr
+    # merge`); a THIRD path merges with no caller ever naming a number at
+    # all - an operator merging in the GitHub UI, or a king's automation -
+    # and is caught only later by this bare sweep's own forward/reverse scan.
+    # Full sweep only: a --pr-number call is scoped to its own PR above, and
+    # discovering totally unrelated merged PRs is this bare sweep's job (it
+    # auto-fires often), not a side effect of every single merge event.
+    if _full_sweep:
+        from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
+        from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
+
+        # One record per discovered PR (not just the number): each record
+        # already carries the pr_url/cwd this scan resolved it through, and
+        # the graph is CROSS-PROJECT, so a single global `--repo` would
+        # mis-scope a record belonging to a different project's repo.
+        discovered: dict = {}
+        for r in records:
+            if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
+                discovered[r.pr_number] = r
+        # Bounded two ways, not because more discovery is wrong, but because
+        # each entry costs one sequential `gh pr view` (up to
+        # GH_QUERY_TIMEOUT_S each) - an unbounded loop on a backlog with many
+        # stale closeable records turns every SessionStart sweep into a
+        # serial gh-latency tax. A COUNT cap alone still lets a degraded gh
+        # (network blip, auth stall) burn up to count*GH_QUERY_TIMEOUT_S -
+        # 20*30s = 10 minutes - turning a hook that used to fail fast into
+        # one that hangs. A wall-clock budget bounds that regardless of the
+        # count cap. A later sweep (SessionStart auto-fires often) picks up
+        # whatever this run dropped either way.
+        import time as _time
+
+        _MAX_AUTO_DISCOVER = 20
+        _AUTO_DISCOVER_BUDGET_S = 60.0
+        _deadline = _time.monotonic() + _AUTO_DISCOVER_BUDGET_S
+        _dropped = list(discovered.items())[_MAX_AUTO_DISCOVER:]
+        if _dropped and not json_out:
+            typer.echo(
+                f"reconcile: auto-discovery capped at {_MAX_AUTO_DISCOVER}; "
+                f"deferred {len(_dropped)} PR(s) to a later sweep: "
+                f"{', '.join(str(n) for n, _ in _dropped)}",
+                err=True,
+            )
+        auto_bound_any = False
+        for _pr_num, _rec in list(discovered.items())[:_MAX_AUTO_DISCOVER]:
+            if _time.monotonic() >= _deadline:
+                if not json_out:
+                    typer.echo(
+                        f"reconcile: auto-discovery stopped at its "
+                        f"{_AUTO_DISCOVER_BUDGET_S:.0f}s budget (gh is slow or "
+                        "degraded); the rest defers to a later sweep",
+                        err=True,
+                    )
+                break
+            # The record's OWN url or cwd resolves the repo to scope this query
+            # and bind to - the graph is CROSS-PROJECT, so a --repo passed for
+            # the --pr-number leg above belongs to a DIFFERENT project and must
+            # never scope an unrelated discovered PR. Neither resolving: skip
+            # rather than guess, since a same-numbered PR can exist in the wrong
+            # repo and a fresh (no-existing-ref) node would bind to it blind.
+            _repo_for_pr = (
+                repo_slug_from_url(_rec.pr_url)
+                or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
+            )
+            if _repo_for_pr is None:
+                continue
+            try:
+                _ctx = fetch_pr_closure_context(_pr_num, repo=_repo_for_pr, cwd=_rec.cwd)
+            except ClosureQueryError:
+                continue  # best-effort discovery: the forward scan already has this PR's state
+            _claims = parse_closure_trailer(_ctx.body)
+            if not _claims:
+                continue
+            closure_claims = sorted(set(closure_claims) | set(_claims))
+            _refusal, _bound = _bind_and_report(entries, _pr_num, _ctx.url, _claims, _repo_for_pr)
+            if _bound:
+                closure_bound.extend(_bound)
+                auto_bound_any = True
+            elif _refusal and not json_out:
+                typer.echo(
+                    f"warning: reconcile: auto-discovered PR #{_pr_num} refused "
+                    f"binding: {_refusal}",
+                    err=True,
+                )
+        if auto_bound_any:
+            if not dry_run:
+                entries = read_graph(_graph_path())  # real binds just persisted
+            records = scan_merge_drift(entries, node_id=node)
 
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
@@ -8691,18 +9010,22 @@ def cmd_reconcile(
     # `reconcile --node <id>` must not close/dispatch unrelated epics (codex P2),
     # so the global sweep is suppressed there (the targeted node's own cascade
     # still fires).
-    strandable = _strandable_epic_ids(entries) if node is None else set()
+    strandable = _strandable_epic_ids(entries) if _full_sweep else set()
     # Same self-heal role for contained nodes whose unit already shipped
     # (x-e957): neither the merge-time cascade nor scan_merge_drift can reach
     # them, so without this leg a back-filled `contained_in` on an
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
-    strandable_contained = _strandable_contained_ids(entries) if node is None else set()
+    strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
 
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
     contained_errors: list[dict] = []
+    # Set below only on the dry-run simulate branch; epics_waiting reuses it
+    # (x-59a6 review fix) so its "still open" read agrees with the same
+    # preview `candidates`/`healed_epics` already report as would-close.
+    _sim: Optional[list[dict]] = None
 
     if not dry_run and (closeable or strandable or strandable_contained):
         # Apply every close in ONE locked mutation rather than locking once
@@ -8838,7 +9161,7 @@ def cmd_reconcile(
             # owner never appears in `closeable`. Runs BEFORE the epic sweep so
             # an epic waiting on one of these sees it done in the same pass.
             # Full reconcile only, matching _sweep_close_done_epics.
-            if node is None:
+            if _full_sweep:
                 # Guarded for the same reason the merge-time cascade is: this
                 # leg is a self-heal for a state that predates the invariant,
                 # and letting it raise would abort the whole sweep - taking
@@ -9089,7 +9412,7 @@ def cmd_reconcile(
                         "error": str(_sc_exc)[:200],
                     })
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
-        if node is None:
+        if _full_sweep:
             try:
                 _sim_contained.extend(_sweep_close_stranded_contained(_sim))
             except Exception as _ss_exc:  # noqa: BLE001 - preview never crashes
@@ -9112,7 +9435,7 @@ def cmd_reconcile(
     # node's `reverted` flag so survival math stops counting it. Strictly
     # non-fatal; misses fall back to `fno backlog update --reverted`.
     reverted_stamped: list[dict] = []
-    if node is None:
+    if _full_sweep:
         try:
             from fno.graph._reconcile import (
                 ReconcileError,
@@ -9206,9 +9529,62 @@ def cmd_reconcile(
         if not json_out:
             typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
 
+    # x-59a6: for a multi-node feature where this run's --pr-number closure
+    # claims land under a still-open parent epic, name exactly which sibling
+    # ship(s) keep it open - not just that the epic did not close. Without
+    # this, a PR that ships one of two required nodes reads as silent
+    # (`closed=[thisone]`) rather than naming the outstanding one, and an
+    # operator cannot tell "genuinely unfinished" from "closure never fired"
+    # for the epic itself. Read-only: never mutates.
+    epics_waiting: list[dict] = []
+    if closure_claims:
+        # On a dry run, `_sim` (when built) already carries the SIMULATED
+        # close - `entries` only carries the bind, not completed_at - so
+        # reading `entries` here would report a just-claimed node as still
+        # outstanding even though `candidates`/`healed_epics` say it would
+        # close. Prefer `_sim`; `entries` is the correct fallback when
+        # nothing was simulated (e.g. the claim refused, so nothing closes).
+        if dry_run:
+            _ew_entries = _sim if _sim is not None else entries
+        else:
+            _ew_entries = read_graph(_graph_path())
+        _ew_epics: set = set()
+        for _cid in closure_claims:
+            _cn = _find_node(_ew_entries, _cid)
+            _pid = _cn.get("parent") if _cn else None
+            if isinstance(_pid, str):
+                _ew_epics.add(_pid)
+        for _eid in sorted(_ew_epics):
+            _epic = _find_node(_ew_entries, _eid)
+            if _epic is None or not node_is_open(_epic):
+                continue  # unknown, or already closed/superseded - nothing outstanding
+            _outstanding = sorted(
+                e["id"] for e in _ew_entries
+                if isinstance(e, dict) and e.get("parent") == _eid and node_is_open(e)
+            )
+            if _outstanding:
+                epics_waiting.append({"epic": _eid, "outstanding": _outstanding})
+                if not json_out:
+                    typer.echo(
+                        f"{_eid} still open, waiting on: {', '.join(_outstanding)}",
+                        err=True,
+                    )
+
     if json_out:
         payload = {
             "dry_run": dry_run,
+            # --pr-number closure binding (x-59a6), reported separately from
+            # `closed` below: zero closes must never masquerade as zero claims.
+            # `closure_claims` is every id the trailer named; `closure_bound` is
+            # the subset newly bound THIS run (already-bound/already-done ids are
+            # claimed but not counted here); `closure_refused` names the reason
+            # the WHOLE binding was refused, or null.
+            "closure_claims": closure_claims,
+            "closure_bound": closure_bound,
+            "closure_refused": closure_refused,
+            # Parent epics of this run's closure claims that are still open,
+            # each naming its still-open sibling children exactly (x-59a6).
+            "epics_waiting": epics_waiting,
             "candidates": [
                 {
                     "node_id": r.node_id,
@@ -9266,6 +9642,7 @@ def cmd_reconcile(
         and not contained_closed
         and not reverted_stamped
         and not promise_unmet
+        and not closure_claims
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return

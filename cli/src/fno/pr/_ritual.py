@@ -383,8 +383,29 @@ class Ritual:
         self.ctx.owns_claim = False
 
     def leg_stamp(self) -> None:
-        """Step 2: close the merged node, reconcile plan status, stamp ship."""
-        argv = ["backlog", "reconcile", "--json"]
+        """Step 2: close the merged node(s), reconcile plan status, stamp ship."""
+        # --pr-number (x-59a6): bind every node this PR's exact Backlog-Closure
+        # trailer names to the PR BEFORE the drift scan the rest of reconcile
+        # already ran unconditionally - a PR naming several nodes (only one of
+        # which ever got individually stamped at creation) now closes all of
+        # them here, not just the primary. --repo is passed explicitly when
+        # resolvable so a same-numbered PR in another repo can never be
+        # mismatched; reconcile's own repo scoping still fails closed on a
+        # bare-number match when this resolution comes up empty (never left
+        # to cwd inference to guess).
+        argv = ["backlog", "reconcile", "--pr-number", str(self.ctx.pr), "--json"]
+        from fno.graph._reconcile import resolve_current_repo_slug
+
+        repo = resolve_current_repo_slug(str(self.canon))
+        if repo:
+            argv += ["--repo", repo]
+        else:
+            typer.echo(
+                f"warning: could not resolve this repo's slug for PR #{self.ctx.pr}; "
+                "reconcile will scope to exact trailer claims only, skipping any "
+                "bare-number backfill match",
+                err=True,
+            )
         try:
             r = self._sh(argv)
         except subprocess.TimeoutExpired:
@@ -404,6 +425,7 @@ class Ritual:
                 errs = len(obj.get("contained_errors") or [])
                 sync_obj = obj.get("sync_catchup") or {}
                 sync_outcome = sync_obj.get("outcome") if isinstance(sync_obj, dict) else None
+                closure_refused = obj.get("closure_refused")
                 if held:
                     # Held open, not clean: the PR merged but the promise gate
                     # refused the close (x-40be). status=ok detail=closed=0
@@ -415,6 +437,15 @@ class Ritual:
                         "reconcile",
                         _DEFERRED,
                         f"closed={len(closed)} held_open={len(held)}: {ids}{more}",
+                    )
+                elif closure_refused:
+                    # The trailer-claimed nodes (if any) never got bound - a
+                    # flaky gh query, cross-repo mismatch, or unmerged PR
+                    # refusal. Never silently readable as "no-drift": that
+                    # would mask a real closure failure until some later
+                    # unrelated sweep happens to rediscover it (round-7 review).
+                    self._emit(
+                        "reconcile", _DEFERRED, f"closure binding refused: {closure_refused}",
                     )
                 elif errs or sync_outcome == "failed":
                     # reconcile exits 0 here (only unresolvable PRs exit 4), so
@@ -457,9 +488,13 @@ class Ritual:
     def leg_advance(self) -> None:
         """Step 3b: merge-triggered next dispatch, bounded + progress (x-0d66)."""
         argv = ["backlog", "advance", "-J", "--verbose"]
-        # --closed is race-ordering provenance only; pass it when a node resolved.
-        if self.ctx.node_ids:
-            argv += ["--closed", str(self.ctx.node_ids[0])]
+        # x-59a6: no --closed here. `leg_stamp`'s reconcile call already ran
+        # `_advance`/`advance_dependents` per CLOSED RECORD for every node this
+        # PR's trailer bound, not only the first - `--closed` takes a SINGLE
+        # id, so passing `self.ctx.node_ids[0]` on a multi-node PR would key
+        # this leg's own dependents check off one node and silently miss the
+        # others' dependents. This leg is a plain next-selection pass; the
+        # per-node dependents dispatch already happened at close time.
         if self.ctx.lane_project:
             argv += ["--project", self.ctx.lane_project]
         self._stream("advance", argv, _ADVANCE_TIMEOUT_S)

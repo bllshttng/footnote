@@ -17,6 +17,7 @@ internal-refs.yml
 merge-coverage-audit.yml
 nightly-release-tag.yml
 pitfalls.yml
+pr-node-closure.yml
 provider-smoke.yml
 release-binaries.yml
 release-wheels.yml

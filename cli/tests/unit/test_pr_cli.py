@@ -139,6 +139,25 @@ def test_pr_merge_forwards_legacy_invoker_flag(monkeypatch):
     assert captured["argv"] == ["--invoker=target", "42"]
 
 
+def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_path):
+    """Round-7 review fix: render_closure_trailer silently drops a malformed
+    --extra id with no other signal - the CLI layer must warn rather than
+    ship the trailer one node short with no operator visibility."""
+    from fno import paths
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+
+    result = runner.invoke(
+        app, ["pr", "closure-trailer", "x-1111", "--extra", "not-an-id"],
+    )
+    assert result.exit_code == 0
+    assert "warning: dropping malformed --extra id(s)" in result.output
+    assert "not-an-id" in result.output
+    assert "Backlog-Closure: x-1111" in result.output
+
+
 def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):
     from fno import paths
 

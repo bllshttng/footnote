@@ -199,15 +199,29 @@ For each item line under that heading, in order:
 
 **Report** each action as `item -> <id>` (and any `warn:` lines) so the dispatcher transcript shows exactly what was filed. Then continue to step 5 with the rewritten body.
 
+### 4.6 Add the exact Backlog-Closure trailer
+
+**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever. The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
+
+Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph:
+
+```bash
+if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
+  CLOSURE_TRAILER=$(fno pr closure-trailer "$NODE_ID")
+fi
+```
+
+When `$NODE_ID` is empty or unresolvable, `fno pr closure-trailer` prints nothing (not an error), so `$CLOSURE_TRAILER` is safe to append unconditionally. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
+
+Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
+
 ### 5. Create PR
 
 ```bash
 # Build title from branch name or primary commit
 TITLE="[type]: [description based on commits]"
 
-gh pr create \
-  --title "$TITLE" \
-  --body "$(cat <<'EOF'
+BODY="$(cat <<'EOF'
 ## Summary
 
 [2-4 bullets derived from commit messages]
@@ -225,9 +239,32 @@ gh pr create \
 [{TEAM}-XXX](https://linear.app/{workspace}/issue/{TEAM}-XXX) (only if Linear configured and ticket exists in commits)
 EOF
 )"
+# The quoted heredoc above is a literal template (bracket placeholders, no
+# expansion) - $CLOSURE_TRAILER never belongs inside it. Append it as its own
+# paragraph afterward, with a real (unquoted) variable expansion instead.
+if [[ -n "${CLOSURE_TRAILER:-}" ]]; then
+  BODY="${BODY}
+
+${CLOSURE_TRAILER}"
+fi
+
+gh pr create \
+  --title "$TITLE" \
+  --body "$BODY"
 ```
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
+
+**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as step 4.5. A mismatch here means the body `gh pr create` actually wrote differs from what was composed, e.g. a body-length or style gate rewrote it. Merge-time binding then misses a claim silently.
+
+```bash
+if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
+  ACTUAL_BODY=$(gh pr view "$PR_NUMBER" --json body -q .body)
+  if ! printf '%s' "$ACTUAL_BODY" | grep -qF "$CLOSURE_TRAILER"; then
+    echo "warn: PR #$PR_NUMBER body does not contain the composed Backlog-Closure trailer verbatim - merge-time closure may miss a claim" >&2
+  fi
+fi
+```
 
 ### 5.5 Link the PR to the backlog node
 

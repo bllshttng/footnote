@@ -10,27 +10,22 @@ class HoldLookupError(RuntimeError):
     """The merge path could not prove whether its bound plan is held."""
 
 
-def _pr_url(pr_number: int, cwd: str) -> str:
-    from fno.pr import _merge
-    from fno.pr._proc import ToolMissing
-
-    try:
-        result = _merge._gh(
-            ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
-            cwd,
-        )
-    except ToolMissing as exc:
-        raise HoldLookupError("gh CLI is unavailable") from exc
-    if not result.ok or not result.stdout.strip():
-        raise HoldLookupError("PR URL is unreadable; cannot scope the hold lookup")
-    return result.stdout.strip()
-
-
 def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
-    """Return the held/invalid plan ancestry for a PR, or None when unheld."""
+    """Return the held/invalid plan ancestry for a PR, or None when unheld.
+
+    Checks BOTH the ref-stamped node (``_find_pr_node_id``) and every node
+    named on the PR's exact ``Backlog-Closure`` trailer - a trailer-only
+    claim (a node never individually stamped at creation) was invisible to
+    the ref-based match alone, so a held node named only on the trailer
+    passed this gate and closed post-merge via ``bind_closure_claims``,
+    which performs no hold check of its own (round-10 review fix).
+    """
     from fno.graph.store import read_graph
     from fno.paths import graph_json
+    from fno.pr import _merge
     from fno.pr._merge import _find_pr_node_id
+    from fno.pr._proc import ToolMissing
+    from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
     from fno.tracker import active_backend_name
 
     if active_backend_name() != "graph":
@@ -43,30 +38,87 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         entries = read_graph(graph_json())
     except Exception as exc:  # noqa: BLE001 - hold reads fail closed
         raise HoldLookupError(f"backlog graph is unreadable: {exc}") from exc
-    from fno.graph._reconcile import node_pr_refs
 
-    if not any(
-        number == pr_number
-        for entry in entries
-        if isinstance(entry, dict)
-        for number, _url in node_pr_refs(entry)
-    ):
-        return None
-    url = _pr_url(pr_number, cwd)
-    node_id = _find_pr_node_id(entries, pr_number, url)
-    if node_id is None:
-        # No graph-bound delivery means there is no Footnote plan hold to read.
-        # A same-number node in another repo is deliberately not a match.
-        return None
     by_id = {
         entry.get("id"): entry
         for entry in entries
         if isinstance(entry, dict) and entry.get("id")
     }
-    node = by_id.get(node_id)
-    if not isinstance(node, dict):
-        raise HoldLookupError(f"graph node {node_id} disappeared during hold lookup")
-    return dispatch_hold_verdict(node, by_id)
+    if not by_id:
+        # Nothing in the graph could possibly be held - a ref match or a
+        # trailer claim can only ever name an id this graph carries, and
+        # by_id is what candidate_ids gets checked against below. Skip the PR
+        # fetch entirely rather than paying a gh call (and a fail-closed trip
+        # on its failure) for a lookup whose answer is always None.
+        return None
+
+    from fno.graph._reconcile import node_pr_refs
+
+    stamped = any(
+        number == pr_number
+        for entry in entries
+        if isinstance(entry, dict)
+        for number, _url in node_pr_refs(entry)
+    )
+
+    def _gh_runner(cmd, *, cwd=None, timeout=None, **_ignored):
+        # Route through fno.pr._merge.run - the SAME swappable seam every
+        # other gh call in the merge path uses - rather than
+        # fetch_pr_closure_context's own default subprocess.run. That default
+        # bypasses every test fixture's FakeGH mock (which only ever
+        # monkeypatches `_merge.run`), so it shelled to the REAL gh binary in
+        # dozens of unrelated tests; round-10's fail-open-when-unstamped path
+        # masked that by silently swallowing the resulting failure, and
+        # round-11's fail-closed fix turned that masked bug into a hard
+        # failure across the suite (round-11 review fix, self-caught).
+        try:
+            result = _merge.run(cmd, cwd=cwd, timeout=timeout)
+        except ToolMissing as exc:
+            raise FileNotFoundError(str(exc)) from exc
+        return result
+
+    try:
+        pr_ctx = fetch_pr_closure_context(pr_number, cwd=cwd, runner=_gh_runner)
+    except ClosureQueryError as exc:
+        # Fail closed unconditionally, matching the graph-read handler above
+        # and this module's own stated policy ("hold reads fail closed") - a
+        # transient gh blip must never read as "nothing to check" for a
+        # trailer-only claimed node (round-11 review fix: an earlier version
+        # returned None here when nothing was ref-stamped, silently skipping
+        # the hold check for exactly the trailer-only case round-10 added
+        # this lookup to catch, just reachable via gh flakiness instead of a
+        # design gap).
+        raise HoldLookupError(f"PR body is unreadable; cannot scope the hold lookup: {exc}") from exc
+
+    ref_node_id: Optional[str] = None
+    if stamped:
+        ref_node_id = _find_pr_node_id(entries, pr_number, pr_ctx.url or "")
+
+    candidate_ids: list[str] = []
+    if ref_node_id is not None:
+        candidate_ids.append(ref_node_id)
+    for claimed in parse_closure_trailer(pr_ctx.body):
+        if claimed not in candidate_ids:
+            candidate_ids.append(claimed)
+
+    if not candidate_ids:
+        # No graph-bound delivery of either kind means there is no Footnote
+        # plan hold to read. A same-number node in another repo is
+        # deliberately not a match.
+        return None
+
+    for node_id in candidate_ids:
+        node = by_id.get(node_id)
+        if not isinstance(node, dict):
+            if node_id == ref_node_id:
+                raise HoldLookupError(f"graph node {node_id} disappeared during hold lookup")
+            # A trailer can name an id this graph slice does not carry (a
+            # typo, or another project's node) - nothing to hold-check.
+            continue
+        verdict = dispatch_hold_verdict(node, by_id)
+        if verdict is not None:
+            return verdict
+    return None
 
 
 def merge_hold_reason(pr_number: int, cwd: str) -> Optional[str]:
