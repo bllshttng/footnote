@@ -1237,10 +1237,20 @@ PYEOF
     _MULTI_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
     _MULTI_PID_FLAGS=""
     [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
+    _MULTI_HANDOVER_FLAGS=""
+    [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+      _MULTI_HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
     _MULTI_OK=1
     for _mnode in $_GUARD_MATCHES; do
+      # The handover flag belongs here too. `fno agents spawn --node X` takes a
+      # claim on X, and a payload naming X plus a second id lands on THIS loop,
+      # not the single-node block. Without it the acquire on X collides with the
+      # claim taken for this very worker, the all-or-nothing rollback below
+      # releases the sibling, and the session ends up holding nothing - a
+      # two-node payload back to zero claims, which is the defect being fixed.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:${_mnode}" \
             --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
+            $_MULTI_HANDOVER_FLAGS \
             --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
         _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
       else

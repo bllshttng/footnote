@@ -193,11 +193,15 @@ if [[ -n "$NODE" ]]; then
         # could not prove the holder dead, so nobody is building this node and
         # nobody will until an operator intervenes. Exiting 0 here told a caller
         # reading the exit code that the launch worked (x-05be).
-        fail "suspect worker claim holds node:$NODE ($holder); no worker launched
-$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null)"
+        # The remedy goes to STDERR, never inside the receipt: `fail` renders
+        # `result=failed reason="..."` and this file's contract is ONE line on
+        # stdout. A newline inside the quoted reason breaks every caller that
+        # parses that line.
+        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
+        fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
       else
-        fail "family-2 guard blocked node:$NODE; no worker launched
-$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null)"
+        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
+        fail "family-2 guard blocked node:$NODE; no worker launched"
       fi
       exit 0 ;;
     corrupted)

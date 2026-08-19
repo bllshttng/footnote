@@ -350,7 +350,7 @@ def acquire_claim(
         # enough (recurse vs. raise vs. continue on timeout) that it was
         # judged a separate, larger refactor rather than folded into this
         # PR's mutex-consolidation and reap-hardening scope.
-        recovery_lock = path.with_name(path.name + ".recovery.d")
+        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
         try:
@@ -389,7 +389,7 @@ def acquire_claim(
     # actually moves, one no-ops), and both successfully create the new lock
     # in the gap between archive-and-create.
     if not _existing_is_live(existing):
-        recovery_lock = path.with_name(path.name + ".recovery.d")
+        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
         try:
@@ -473,6 +473,8 @@ def _rebound_claim(
     ttl_ms: Optional[int],
     *,
     new_holder: Optional[str] = None,
+    new_reason: Optional[str] = None,
+    new_harness: Optional[str] = None,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
@@ -487,6 +489,13 @@ def _rebound_claim(
     dispatch handover passes it: the spawn side and the worker side of one
     launch are genuinely different names for one piece of work. Its caller
     proved the prior holder first; see :func:`compare_and_rebind`.
+
+    ``new_reason`` and ``new_harness`` travel with it. A handover changes WHO
+    owns the claim, so keeping the spawner's reason and harness tag would leave
+    the claim describing the wrong owner - and the init hook passes a PROVEN
+    harness precisely so a session that inherited a foreign marker does not
+    mislabel its claim. Both default to None, which preserves the existing
+    value, so every same-holder rebind is unchanged.
     """
     acquired = now_ms()
     if ttl_ms is not None:
@@ -504,8 +513,8 @@ def _rebound_claim(
         pid=new_pid,
         host=socket.gethostname(),
         machine_id=machine_id() or None,
-        reason=existing.reason,
-        harness=existing.harness,
+        reason=new_reason if new_reason is not None else existing.reason,
+        harness=new_harness if new_harness is not None else existing.harness,
         metadata=existing.metadata,
     )
 
@@ -515,6 +524,8 @@ def compare_and_rebind(
     expected_holder: str,
     *,
     new_holder: Optional[str] = None,
+    new_reason: Optional[str] = None,
+    new_harness: Optional[str] = None,
     new_pid: Optional[int] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
@@ -570,7 +581,7 @@ def compare_and_rebind(
     _validate_inputs(key, expected_holder, ttl_ms)
     path = claim_path(key, root=root)
     npid = new_pid if new_pid is not None else os.getpid()
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
@@ -619,10 +630,43 @@ def compare_and_rebind(
             )
 
         state = classify(existing)
+        if state == ClaimState.LIVE and new_holder and new_holder != existing.holder:
+            # A HANDOVER, and a live prior pid does not refuse it. The
+            # concurrent-writer rule below protects one symbolic owner from two
+            # of its own processes, which is a different situation: here the
+            # caller named a DIFFERENT prior holder exactly, and that holder
+            # exists only to be handed over.
+            #
+            # A live prior pid is in fact the NORMAL case on the blocking
+            # substrates. `fno agents spawn --substrate headless` (and `--once`)
+            # stays in dispatch_spawn for the worker's whole run, so the spawner
+            # is still alive when the worker reaches `fno target init`. Refusing
+            # there left the worker unclaimed for the full lease, which is the
+            # free-read this whole change exists to close, reintroduced on the
+            # one substrate that blocks.
+            rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=new_holder,
+                new_reason=new_reason, new_harness=new_harness,
+            )
+            _atomic_replace(path, serialize_claim(rebound))
+            if emit:
+                emit_claim_rebound(
+                    rebound,
+                    previous_pid=existing.pid,
+                    previous_state=state.value,
+                    mode="handover",
+                    fno_id=fno_id,
+                    harness=harness_tag,
+                    harness_session_id=harness_session_id,
+                )
+            return rebound, "handover"
         if state == ClaimState.LIVE:
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
-                rebound = _rebound_claim(existing, npid, ttl_ms, new_holder=new_holder)
+                rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=new_holder,
+                new_reason=new_reason, new_harness=new_harness,
+            )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
                     emit_claim_rebound(
@@ -656,7 +700,10 @@ def compare_and_rebind(
             )
 
         # Local same-holder, prior PID dead: the resume rebind.
-        rebound = _rebound_claim(existing, npid, ttl_ms, new_holder=new_holder)
+        rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=new_holder,
+                new_reason=new_reason, new_harness=new_harness,
+            )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
             emit_claim_rebound(
@@ -673,6 +720,13 @@ def compare_and_rebind(
         if acquired_lock:
             release_dir_mutex(recovery_lock, recovery_token)
 
+
+#: Suffix of the per-claim recovery mutex directory. One definition: this
+#: string was written out at six call sites, and a seventh (the dispatch
+#: guard's targeted recovery) is what made the duplication worth collapsing.
+#: A caller that spells it differently takes a DIFFERENT lock and silently
+#: serializes against nobody.
+RECOVERY_LOCK_SUFFIX = ".recovery.d"
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
@@ -859,7 +913,7 @@ def refresh_claim(
     # (cheap, uncontended) instead. Without the lock, _atomic_replace happily
     # recreates `path` even if reap already archived it in the gap between a
     # read and this write - silently resurrecting a claim GC just removed.
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
@@ -1080,7 +1134,7 @@ def force_release_claim(
     # raising, preserving its "always succeeds" administrative-override
     # contract - the exposure narrows from "always racy" to "racy only past
     # a 5s timeout under sustained contention" instead of closing to zero.
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
@@ -1322,7 +1376,7 @@ def reap_dead_claims(
                 # cadence and blocking here would stall the whole sweep; a
                 # live owner (no steal) means a real recovery is in flight,
                 # left for the next sweep.
-                recovery_lock = entry.with_name(entry.name + ".recovery.d")
+                recovery_lock = entry.with_name(entry.name + RECOVERY_LOCK_SUFFIX)
                 recovery_token = acquire_dir_mutex(recovery_lock, 0)
                 if recovery_token is None:
                     # A live, in-age holder - genuine contention, not a

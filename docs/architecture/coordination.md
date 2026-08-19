@@ -260,15 +260,21 @@ The store also failed in the opposite direction. When nobody was building, it sa
 
 | Claim | Holder | Can it come back under a new pid? | Proof of death |
 |---|---|---|---|
-| `node:<id>` | a session | yes, the daemon respawns it | pid dead AND the roster scanned rows and found none on this node |
-| `dispatch:<id>` | `spawn-cli:<pid>` | no, it launches and exits | pid dead on this machine |
+| `node:<id>` | a session | yes, the daemon respawns it | pid dead AND the holder's own roster row found, reading terminal |
+| `dispatch:<id>` | `spawn-cli:<pid>` | no, but its TTL is the boot window | expiry in a sweep, dead pid at the guard about to launch |
 | any, expired TTL | any | n/a | the clock, from any host |
 
 An **expired TTL** is a wall-clock fact and needs no same-machine proof. Requiring one is what made the store fill forever. This machine wrote `BB16s-MBP`, `BB16s-MacBook-Pro.local` and a tailnet name within one hour. Rows predating the `machine_id` field carry only that moving name, so nothing satisfies their same-machine proof.
 
 **`machine_id` is authoritative whenever present** and every new same-machine proof keys on it through `is_same_machine`, never on a hostname compare. The hostname fallback exists only for pre-`machine_id` rows, and reproducing it exactly is deliberate: those classify no worse than they did before the field existed.
 
-A **`node:` claim is reaped only on a positive finding**. All four must hold. Same machine, pid dead or reused, the roster join actually ran, and it scanned rows with none on this node. A join that cannot run yields unknown, and **unknown KEEPS the claim**. Reaping on a probe that returned nothing archives a live worker's claim, which is two sessions in one worktree and a duplicate PR.
+A **`node:` claim is reaped only on a positive finding, and that finding is the HOLDER**. The probe resolves the claim's own holder session id. It requires that row to exist in the roster and to read terminal. Everything else answers unknown, and **unknown KEEPS the claim**.
+
+The asymmetry is the whole safety argument. An earlier version asked whether any row resolved to the node, read the empty answer as abandonment, and defended it with a scanned-row count. A row count validates the INSTRUMENT, never the TARGET. `fleet_rows` enumerates `claude agents --json --all` and drops interactive rows. A codex worker, an opencode worker, and any hand-started session are invisible to it by construction. A forty-row scan that cannot represent the holder reads as forty rows of proof.
+
+The roster's coverage gap now costs a missed reap instead of a wrongly archived claim. That is the correct direction to fail. An unreaped claim expires on its own, and a wrongly reaped one hands a live worker's node to a second worker.
+
+A `dispatch:` reservation looks like it never needed SUSPECT's protection, since nothing respawns under `spawn-cli:<pid>`. But its TTL is the BOOT WINDOW. It outlives its spawner on purpose, so a second dispatcher does not launch onto a node whose worker has not reached `fno target init`. A sweep must not reap it, and only expiry frees it there. The spawn guard clears it instead, re-probing its own reservation key at the moment it is about to launch. That is safe because the node claim now covers the same window.
 
 The one exception is a **launch window**. A claim held under `spawn-handover:<worker>` is exempt from the probe. Between the spawn and the worker's first `fno target init` there is no worktree manifest and no ledger row. So the roster cannot see that worker BY CONSTRUCTION. Nothing is stranded by the exemption: that claim is TTL-bound, and an expired claim is provably dead on its own.
 

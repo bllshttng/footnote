@@ -712,10 +712,16 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
 # ---------------------------------------------------------------------------
 
 
-class TestOneShotKeysNeedNoRespawnProtection:
-    """SUSPECT protects a slot whose holder might come back under a new pid.
-    `spawn-cli:<pid>` launches a worker and exits, so it cannot, and a queued
-    spawn that never got a slot wedged its node for the whole TTL.
+class TestTheSweepNeverReapsAnUnexpiredDispatchReservation:
+    """A dead-pid `dispatch:` claim inside its TTL LOOKS like a pure wedge, and
+    the sweep must still keep it.
+
+    That TTL is the boot window. It outlives its spawner on purpose, so a second
+    dispatcher does not launch onto a node whose worker has not yet reached `fno
+    target init`. A background sweep reaping it collapses the dedup window, and
+    it also voids the `dispatch:think:<node>:<reason>` tokens, which have no
+    node claim behind them at all. The wedge is cleared at the spawn guard
+    instead, where the caller is the next dispatcher rather than a sweep.
     """
 
     def _suspect(self, key):
@@ -725,15 +731,29 @@ class TestOneShotKeysNeedNoRespawnProtection:
             host=socket.gethostname(),
         )
 
-    def test_a_dead_dispatch_reservation_is_reapable_inside_its_ttl(self):
-        assert is_provably_dead(self._suspect("dispatch:x-05be")) is True
+    def test_a_dead_dispatch_reservation_is_kept_inside_its_ttl(self):
+        provably_dead, bucket = classify_for_sweep(self._suspect("dispatch:x-05be"))
+        assert (provably_dead, bucket) == (False, "suspect")
 
-    def test_a_nested_dispatch_key_is_covered_too(self):
-        assert is_provably_dead(self._suspect("dispatch:think:x-18ac:birth")) is True
+    def test_a_nested_dispatch_token_is_kept_too(self):
+        """`dispatch:think:<node>:<reason>` is a dedup token with no node claim
+        behind it, so reaping it early re-runs the work it deduplicated."""
+        provably_dead, bucket = classify_for_sweep(
+            self._suspect("dispatch:think:x-18ac:birth")
+        )
+        assert (provably_dead, bucket) == (False, "suspect")
 
-    def test_a_node_key_is_deliberately_not_one_shot(self):
-        """Its holder is a session, which CAN respawn. Shortcutting here would
-        archive a live respawned worker inside its first stop cycle."""
+    def test_an_expired_dispatch_reservation_is_still_reapable(self):
+        """Expiry frees them on schedule, which is the whole recovery path the
+        sweep is allowed to take."""
+        claim = Claim(
+            key="dispatch:x-old", holder="spawn-cli:1",
+            acquired_at=now_ms() - 240_000, expires_at=now_ms() - 60_000,
+            pid=_dead_pid(), host=socket.gethostname(),
+        )
+        assert is_provably_dead(claim) is True
+
+    def test_a_node_key_is_kept_too(self):
         provably_dead, bucket = classify_for_sweep(self._suspect("node:x-05be"))
         assert (provably_dead, bucket) == (False, "suspect")
 
@@ -801,8 +821,8 @@ class TestAbandonmentProbe:
         assert claim_status("node:x-gone", root=tmp_path)["state"] == "suspect"
 
     def test_the_probe_is_never_asked_about_a_non_node_key(self, tmp_path):
-        """No other key family has a roster to consult, and a dispatch: claim
-        is already settled by the one-shot predicate."""
+        """No other key family has a roster to consult. The reservation is kept
+        because its TTL is the boot window, not because the probe said so."""
         def _boom(_claim):
             raise AssertionError("probe asked about a non-node key")
 
@@ -813,7 +833,8 @@ class TestAbandonmentProbe:
         summary = reap_dead_claims(
             roots=[tmp_path], apply=False, abandonment_probe=_boom
         )
-        assert summary["would_reap"] == 1
+        assert summary["would_reap"] == 0
+        assert summary["kept_suspect"] == 1
 
     def test_the_probe_is_never_asked_about_a_live_claim(self, tmp_path):
         def _boom(_claim):
@@ -861,31 +882,70 @@ class TestCliProbeWiring:
         assert "would reap 0" in r.output
         assert "suspect (roster not consulted)" in r.output
 
-    def test_a_scanned_roster_with_nobody_on_the_node_reaps(self, tmp_path, monkeypatch):
+    def test_the_holder_found_and_finished_reaps(self, tmp_path, monkeypatch):
+        """Abandonment is proven by FINDING the holder and seeing it stopped."""
         from fno.agents.watchdog import Row
 
         acquire_claim(
-            key="node:x-abandoned", holder="target-session:s", ttl_ms=3_600_000,
+            key="node:x-abandoned", holder="target-session:sid-gone", ttl_ms=3_600_000,
             pid=_dead_pid(), root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
-            rows=[Row(row_id="a", name="t-other", state="working", node="x-else", cwd="")],
+            rows=[Row(row_id="sid-gone", name="t-gone", state="done", node="x-abandoned", cwd="")],
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 1" in r.output
 
-    def test_a_scanned_roster_with_the_worker_on_it_keeps(self, tmp_path, monkeypatch):
+    def test_the_holder_found_and_working_keeps(self, tmp_path, monkeypatch):
         from fno.agents.watchdog import Row
 
         acquire_claim(
-            key="node:x-busy2", holder="target-session:s", ttl_ms=3_600_000,
+            key="node:x-busy2", holder="target-session:sid-busy", ttl_ms=3_600_000,
             pid=_dead_pid(), root=tmp_path,
         )
         self._fake_roster(
             monkeypatch,
-            rows=[Row(row_id="a", name="t-busy2", state="working", node="x-busy2", cwd="")],
+            rows=[Row(row_id="sid-busy", name="t-busy2", state="working", node="x-busy2", cwd="")],
         )
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 0" in r.output
         assert "suspect (worker alive)" in r.output
+
+    def test_a_holder_absent_from_the_roster_is_never_reaped(self, tmp_path, monkeypatch):
+        """THE P1 REGRESSION GUARD. fleet_rows enumerates claude rows only and
+        drops interactive ones, so a codex worker, an opencode worker and any
+        hand-started session are invisible to it BY CONSTRUCTION. Reading that
+        absence as abandonment archives a live worker's claim. A row count
+        validates the instrument, never the target."""
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-codex", holder="target-session:sid-codex", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        # Forty rows scanned, none of them able to represent this holder.
+        self._fake_roster(
+            monkeypatch,
+            rows=[
+                Row(row_id=f"other-{i}", name=f"t-{i}", state="working", node=f"x-{i}", cwd="")
+                for i in range(40)
+            ],
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "suspect (roster not consulted)" in r.output
+
+    def test_an_unparseable_holder_is_never_reaped(self, tmp_path, monkeypatch):
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-odd", holder="some-foreign-holder-shape", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(
+            monkeypatch,
+            rows=[Row(row_id="a", name="t-a", state="done", node="x-odd", cwd="")],
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output

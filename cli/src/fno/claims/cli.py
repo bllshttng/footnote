@@ -257,6 +257,12 @@ def acquire(
                 key,
                 handover_from,
                 new_holder=holder,
+                # The claim changes OWNER, so it must stop describing the
+                # spawner. The init hook passes a PROVEN harness precisely so a
+                # session that inherited a foreign marker does not mislabel its
+                # claim, and silently keeping the spawner's tag would defeat it.
+                new_reason=reason or None,
+                new_harness=harness,
                 new_pid=pid,
                 ttl_ms=_parse_ttl(ttl),
                 root=_node_aware_root(key),
@@ -715,20 +721,32 @@ class RosterReading(NamedTuple):
     run, and ``reason`` says why. ``rows_scanned`` is the positive marker - a
     scan of forty rows finding nobody is a different answer from a read that
     failed, and rendering both the same way is how this defect would survive its
-    own fix. ``workers_by_node`` maps a resolved node id to the rows on it.
+    own fix. ``workers_by_node`` maps a resolved node id to the rows on it, and
+    ``rows_by_session`` maps a session id to its own row.
 
     Taken ONCE and passed down. The read shells out to the harness, so a sweep
     over sixty claims that took its own reading each time would pay sixty
     subprocesses to answer one question.
+
+    WHAT THIS READING CANNOT SEE, and it decides how the probe below is allowed
+    to use it. ``fleet_rows`` enumerates ``claude agents --json --all`` and drops
+    ``kind == "interactive"``. So a codex or opencode worker, and any
+    hand-started session, has NO row here by construction. An empty
+    ``workers_on`` therefore means "not in this reading", never "nobody is
+    working that node".
     """
 
     consulted: bool
     rows_scanned: int
     workers_by_node: dict
     reason: str = ""
+    rows_by_session: dict = {}
 
     def workers_on(self, node_id: str) -> list:
         return self.workers_by_node.get(node_id, [])
+
+    def row_for_session(self, session_id: str):
+        return self.rows_by_session.get(session_id)
 
 
 def read_roster(timeout: float = 10.0) -> RosterReading:
@@ -757,15 +775,22 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
         rows, warnings = fleet_rows(timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
         return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
-    if not rows and warnings:
+    if warnings:
+        # ANY warning means the enumeration is incomplete, not just an empty
+        # one. fleet_rows warns on dropped session-id-less rows and on a roster
+        # probe approaching its budget, and both return a PARTIAL list. Treating
+        # a truncated scan as authoritative is the same absence-as-evidence
+        # move this cross-check exists to delete, one layer up.
         return RosterReading(False, 0, {}, warnings[0])
     index: dict = {}
+    by_session: dict = {}
     for r in rows:
+        entry = {"name": r.name, "state": r.state, "cwd": r.cwd}
         if r.node:
-            index.setdefault(r.node, []).append(
-                {"name": r.name, "state": r.state, "cwd": r.cwd}
-            )
-    return RosterReading(True, len(rows), index)
+            index.setdefault(r.node, []).append(entry)
+        if r.row_id:
+            by_session[str(r.row_id)] = entry
+    return RosterReading(True, len(rows), index, "", by_session)
 
 
 def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
@@ -827,6 +852,15 @@ def _roster_verdict_line(info: dict) -> str:
 def status(
     key: str = typer.Argument(...),
     json_output: bool = typer.Option(False, "--json", "-J"),
+    roster: bool = typer.Option(
+        True,
+        "--roster/--no-roster",
+        help=(
+            "Cross-check the fleet roster before calling a node: key free "
+            "(default on). --no-roster is for a hot-path caller that only "
+            "reads the claim record, e.g. the claim heartbeat."
+        ),
+    ),
 ) -> None:
     """Inspect a single claim. Exit code reflects state for scripting.
 
@@ -841,10 +875,17 @@ def status(
 
     Callers parsing the JSON keep reading ``state``; the roster fields are
     additive and only appear when the cross-check applies.
+
+    ``--no-roster`` exists for one shape of caller: a hot path that reads only
+    the claim record. ``hooks/claim-heartbeat.sh`` runs on tool calls and reads
+    ``.holder`` alone, and the cross-check's whole cost lands on exactly the
+    branch it hits when a claim has lapsed. Paying a harness subprocess there to
+    compute a field it discards would tax every tool call to answer a question
+    it never asked.
     """
     info = claim_status(key=key, root=_node_aware_root(key))
     node_id = key[len("node:"):] if key.startswith("node:") else ""
-    crosschecked = bool(node_id) and info.get("state") in _UNHELD_STATES
+    crosschecked = roster and bool(node_id) and info.get("state") in _UNHELD_STATES
     if crosschecked:
         info.update(_roster_crosscheck(node_id))
     if json_output:
@@ -982,38 +1023,54 @@ def list_cmd(
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
 
+#: Roster row states that mean the session finished its turn. A row in any
+#: other state is still in play. ``done`` is NOT terminal for the session (it is
+#: resumable), but it IS the positive marker that this worker stopped working,
+#: which is the only thing abandonment needs to know.
+_TERMINAL_ROW_STATES = frozenset({"done"})
+
+
 def _abandonment_probe(reading: Optional[RosterReading] = None):
     """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
 
-    Returns a callable answering ``True`` (proven abandoned), ``False`` (a live
-    worker is on the node) or ``None`` (the join could not run, so the claim is
-    kept). One roster READING is taken lazily and shared across every claim in
-    the sweep: the read shells out to the harness, so taking it per claim would
-    pay one subprocess per lockfile to answer one question.
+    Returns a callable answering ``True`` (proven abandoned), ``False`` (the
+    holder is still working) or ``None`` (unproven, so the claim is kept). One
+    roster READING is taken lazily and shared across every claim in the sweep.
 
-    Abandonment needs all four conditions true, and the caller already proved
-    the first two (same machine by machine_id, pid dead or reused) before this
-    runs. The two this adds are both positive: the join actually ran, and it
-    scanned at least one row. A probe that read zero rows because the roster
-    read failed proves nothing, and reaping on it would archive a live worker's
-    claim - x-ba4b's disaster from the other side.
+    ABANDONMENT IS PROVEN BY FINDING THE HOLDER, NEVER BY FAILING TO FIND IT.
+    The probe resolves the claim's own holder session id and requires its roster
+    row to exist and read terminal. An absent row answers ``None``.
+
+    That asymmetry is the whole safety argument, and an earlier version of this
+    function got it wrong in the exact way the third pitfalls entry describes.
+    It asked "does any row resolve to this node", read the empty answer as
+    abandonment, and defended it with a scanned-row count. But a row count
+    validates the INSTRUMENT, never the TARGET. ``fleet_rows`` enumerates
+    ``claude agents --json --all`` and drops interactive rows, so a codex worker,
+    an opencode worker, and any hand-started session are invisible to it BY
+    CONSTRUCTION. A forty-row scan that cannot represent the holder at all would
+    have read as forty rows of proof, and reaping on it archives a live worker's
+    claim - x-ba4b's disaster from the other side, which the
+    ``reaped_a_live_worker`` kill criterion exists to stop.
+
+    So the roster's coverage gap now costs a missed reap rather than a wrongly
+    archived claim. That is the correct direction to fail: an unreaped claim
+    expires on its own TTL, and a wrongly reaped one hands a live worker's node
+    to a second worker.
     """
     cache: dict = {}
 
     def _probe(claim) -> Optional[bool]:
         if claim.holder.startswith(HANDOVER_HOLDER_PREFIX):
-            # A launch window, not an abandoned session. The probe's whole
-            # premise is that a node claim has a roster-visible counterpart, and
-            # between spawn and `target init` that is false BY CONSTRUCTION: the
-            # worker's node identity comes from a worktree manifest or a ledger
-            # row, and neither exists yet. Answering from the roster here would
-            # read every in-flight launch as abandoned and clear the claim out
-            # from under the worker it was taken for.
-            #
-            # Nothing is stranded by declining. The handover claim is TTL-bound
-            # to the launch gap, so a spawn that dies leaves a claim that EXPIRES
-            # and an expired claim is provably dead on its own, host and roster
-            # irrelevant.
+            # A launch window, not an abandoned session. Between spawn and
+            # `target init` the worker has no worktree manifest and no ledger
+            # row, so the roster cannot resolve it to the node BY CONSTRUCTION.
+            # Nothing is stranded by declining: the handover claim is TTL-bound,
+            # and an expired claim is provably dead on its own.
+            return None
+        session_id = _holder_session_id(claim.holder)
+        if not session_id:
+            # A holder shape this lane cannot parse names no session to look up.
             return None
         if "reading" not in cache:
             cache["reading"] = (
@@ -1022,11 +1079,29 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
                 else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
             )
         seen: RosterReading = cache["reading"]
-        if not seen.consulted or seen.rows_scanned == 0:
+        if not seen.consulted:
             return None
-        return not seen.workers_on(claim.key[len("node:"):])
+        row = seen.row_for_session(session_id)
+        if row is None:
+            # Not found is not gone. See the docstring.
+            return None
+        return row.get("state") in _TERMINAL_ROW_STATES
 
     return _probe
+
+
+def _holder_session_id(holder: str) -> Optional[str]:
+    """The session id inside a claim holder, via the canonical parser.
+
+    One holder vocabulary, owned by ``fno.agents.truth_status``. A foreign
+    holder shape returns None and condemns nothing.
+    """
+    try:
+        from fno.agents.truth_status import _session_from_holder
+
+        return _session_from_holder(holder)
+    except Exception:  # noqa: BLE001 - an unparseable holder proves nothing
+        return None
 
 
 @cli.command(name="reap")

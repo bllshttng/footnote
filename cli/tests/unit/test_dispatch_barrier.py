@@ -180,6 +180,13 @@ def _row(name, state, node):
     return Row(row_id=name, name=name, state=state, node=node, cwd="")
 
 
+def _row_for(session_id, name, state, node):
+    """A row keyed on a SESSION id, so a claim holder can resolve to it."""
+    from fno.agents.watchdog import Row
+
+    return Row(row_id=session_id, name=name, state=state, node=node, cwd="")
+
+
 def test_a_dead_spawners_reservation_blocks_nothing(monkeypatch, tmp_path):
     """x-05be case 8. A queued spawn that never got a slot left a reservation
     that refused the relaunch for its whole TTL. spawn-cli:<pid> launches and
@@ -222,14 +229,34 @@ def test_an_abandoned_node_claim_is_cleared_and_the_node_dispatches(
     from fno.claims.core import acquire_claim, claim_status
 
     acquire_claim(
-        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+        "node:N", "target-session:sid-dead", ttl_ms=3_600_000,
+        pid=_dead_pid(), root=tmp_path,
     )
     assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
-    _fake_roster(monkeypatch, rows=[_row("t-elsewhere", "working", "x-other")])
+    # The holder's OWN row, found and finished. Abandonment is proven by finding
+    # the holder, never by failing to find it.
+    _fake_roster(monkeypatch, rows=[_row_for("sid-dead", "t-dead", "done", "N")])
 
     verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert verdict["verdict"] == "dispatchable", verdict
     assert exit_code == 0
+
+
+def test_a_holder_absent_from_the_roster_never_clears(monkeypatch, tmp_path):
+    """The P1 regression guard at the dispatch site. A codex or opencode worker
+    has no row in `claude agents --json`, so its absence proves nothing."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:sid-codex", ttl_ms=3_600_000,
+        pid=_dead_pid(), root=tmp_path,
+    )
+    _fake_roster(monkeypatch, rows=[_row("t-someone-else", "working", "x-other")])
+
+    verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "already-running"
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
 
 
 def test_a_live_worker_on_the_node_is_never_cleared(monkeypatch, tmp_path):
@@ -239,10 +266,12 @@ def test_a_live_worker_on_the_node_is_never_cleared(monkeypatch, tmp_path):
     from fno.claims.core import acquire_claim, claim_status
 
     acquire_claim(
-        "node:N", "target-session:respawned", ttl_ms=3_600_000,
+        "node:N", "target-session:sid-respawned", ttl_ms=3_600_000,
         pid=_dead_pid(), root=tmp_path,
     )
-    _fake_roster(monkeypatch, rows=[_row("t-N-worker", "working", "N")])
+    _fake_roster(
+        monkeypatch, rows=[_row_for("sid-respawned", "t-N-worker", "working", "N")]
+    )
 
     verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert verdict["verdict"] == "already-running"
@@ -411,3 +440,77 @@ def test_a_launch_window_claim_is_never_probed_as_abandoned(monkeypatch, tmp_pat
     verdict, _exit = _spawn_guard_decision("N", "spawn-cli:2", ttl="3m")
     assert verdict["verdict"] == "already-running"
     assert claim_status("node:N", root=tmp_path)["holder"] == "spawn-handover:t-N"
+
+
+def test_a_handover_succeeds_even_while_the_spawner_is_still_alive(monkeypatch, tmp_path):
+    """`--substrate headless` and `--once` block in dispatch_spawn for the
+    worker's whole run, so the spawn-side pid is LIVE when the worker inits.
+    Refusing there left the worker unclaimed for the full lease, which is the
+    free read this change exists to close, on the one substrate that blocks."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.cli import cli as claims_cli
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "spawn-handover:t-N", ttl_ms=900_000,
+        pid=os.getpid(), root=tmp_path,
+    )
+    assert claim_status("node:N", root=tmp_path)["state"] == "live"
+
+    r = runner.invoke(
+        claims_cli,
+        [
+            "acquire", "node:N",
+            "--holder", "target-session:sid-h",
+            "--ttl", "2h",
+            "--pid", str(os.getpid()),
+            "--handover-from", "spawn-handover:t-N",
+            "--reason", "target dispatch",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    info = claim_status("node:N", root=tmp_path)
+    assert info["holder"] == "target-session:sid-h"
+    assert info["reason"] == "target dispatch"
+
+
+def test_a_live_claim_still_refuses_a_same_holder_concurrent_writer(monkeypatch, tmp_path):
+    """The handover relaxation must not weaken the concurrent-writer rule it
+    sits beside: two processes of ONE symbolic owner still refuse."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.core import RebindRefused, acquire_claim, compare_and_rebind
+
+    acquire_claim(
+        "node:N", "target-session:same", ttl_ms=900_000,
+        pid=os.getpid(), root=tmp_path,
+    )
+    try:
+        compare_and_rebind(
+            "node:N", "target-session:same", new_pid=os.getpid() + 1,
+            ttl_ms=900_000, root=tmp_path,
+        )
+    except RebindRefused as exc:
+        assert "concurrent writer" in str(exc)
+    else:
+        raise AssertionError("a live same-holder claim must refuse a second pid")
+
+
+def test_a_no_reserve_probe_performs_no_recovery(monkeypatch, tmp_path):
+    """dispatch-node.sh probes once per node across a whole batch. A probe that
+    archives claims and emits events is a side effect nobody expects."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:sid-dead", ttl_ms=3_600_000,
+        pid=_dead_pid(), root=tmp_path,
+    )
+    _fake_roster(monkeypatch, rows=[_row_for("sid-dead", "t-dead", "done", "N")])
+
+    verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", no_reserve=True)
+    assert verdict["verdict"] == "already-running"
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"

@@ -105,28 +105,64 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
     about. This never sweeps: a dispatch deciding to prune the whole store as a
     side effect is a blast radius nobody asked for.
     """
-    from fno.claims.core import force_release_claim, sweep_verdict
+    from fno.claims.core import (
+        RECOVERY_LOCK_SUFFIX,
+        force_release_claim,
+        sweep_verdict,
+    )
     from fno.claims.io import claim_path, claims_root_for, read_claim_file
+    from fno.claims.staleness import classify, is_live, now_ms
+    from fno.claims.types import ClaimState
+    from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
+    path = claim_path(key, root=claims_root_for(key))
+    # Take the SAME per-key recovery mutex the reaper holds while it re-verifies
+    # and archives, and re-read INSIDE it. Reading, deciding, and releasing
+    # outside the lock is a TOCTOU window: force_release_claim drops a claim
+    # whatever its holder, so a worker that respawns and re-acquires between the
+    # read and the release loses a claim it legitimately owns. timeout_s=0
+    # because a dispatch must not block on a peer mid-recovery; losing the race
+    # just leaves the refusal standing, which is the safe direction.
+    lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
+    token = acquire_dir_mutex(lock, 0)
+    if token is None:
+        return None, "contended"
     try:
-        claim = read_claim_file(claim_path(key, root=claims_root_for(key)))
-    except Exception:  # noqa: BLE001 - unreadable is unproven, never reclaimable
-        return None, "unreadable"
-    try:
-        provably_dead, bucket = sweep_verdict(claim, abandonment_probe=probe)
-    except Exception:  # noqa: BLE001 - a probe blowing up must not clear a claim
-        return None, "unprobed"
-    if not provably_dead:
-        return None, bucket
-    try:
-        force_release_claim(
-            key=key,
-            reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
-            root=claims_root_for(key),
-        )
-    except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
-        return None, "release-failed"
-    return claim.holder, ""
+        try:
+            claim = read_claim_file(path)
+        except Exception:  # noqa: BLE001 - unreadable is unproven
+            return None, "unreadable"
+        if key.startswith("dispatch:"):
+            # The reservation's own predicate, deliberately NOT in the shared
+            # sweep classifier. `spawn-cli:<pid>` launches a worker and exits, so
+            # a dead pid means no launch is in flight from that process. A
+            # background sweep must not act on that (the TTL is the boot window,
+            # see staleness.classify_for_sweep), but THIS caller is the next
+            # dispatcher, standing at the moment of launch, and the node claim it
+            # already holds covers the window the reservation was protecting.
+            from fno.claims.hostid import is_same_machine
+
+            if not is_same_machine(claim.host, claim.machine_id) or is_live(claim):
+                return None, _HOLDER_ALIVE if is_live(claim) else "offhost"
+            provably_dead, bucket = True, ""
+        else:
+            try:
+                provably_dead, bucket = sweep_verdict(claim, abandonment_probe=probe)
+            except Exception:  # noqa: BLE001 - a probe blowing up clears nothing
+                return None, "unprobed"
+        if not provably_dead:
+            return None, bucket
+        try:
+            force_release_claim(
+                key=key,
+                reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
+                root=claims_root_for(key),
+            )
+        except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
+            return None, "release-failed"
+        return claim.holder, ""
+    finally:
+        release_dir_mutex(lock, token)
 
 
 def _spawn_guard_decision(
@@ -143,8 +179,12 @@ def _spawn_guard_decision(
     ``handover_holder``, when given, also takes the ``node:<id>`` claim under
     that holder for the launch window, so the node reads as worked from the
     moment it is dispatched rather than from whenever the worker reaches its
-    own ``fno target init``. Probes omit it: `--no-reserve` returns before this
-    and takes nothing.
+    own ``fno target init``.
+
+    ``no_reserve`` makes this a pure PROBE: it takes no reservation, no node
+    claim, and performs no recovery. Every mutation in this function is gated on
+    it, so a batch sweep that probes each node one at a time changes nothing
+    until it actually launches.
     """
     from fno.claims.cli import _parse_ttl
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, claim_status
@@ -197,7 +237,16 @@ def _spawn_guard_decision(
         # a batch sweep must keep going. A SUSPECT one is a wedge - dead pid,
         # unexpired TTL - and nobody will build the node until it clears. Only
         # the wedge is worth trying to recover, and only on a positive finding.
-        if state == "suspect":
+        if state == "suspect" and not no_reserve:
+            # A --no-reserve call is a PROBE. It takes no reservation, so it
+            # must take no recovery either: dispatch-node.sh probes once per
+            # node across a whole batch, and a probe that archives claims and
+            # emits events is a side effect nobody reading "probe" expects.
+            #
+            # Nothing is lost by waiting. Both shell callers probe and then
+            # invoke the real `fno agents spawn`, which runs this guard again
+            # WITH a reservation, and the recovery happens there - at the moment
+            # of launch, by the caller that is about to launch.
             from fno.claims.cli import _abandonment_probe
 
             prior, _bucket = _reclaim_if_provably_dead(

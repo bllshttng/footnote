@@ -123,33 +123,6 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
 
 
-#: Key families whose holder is a single process that launches something and
-#: exits. Nothing respawns under that holder, so SUSPECT protects nothing there.
-_ONE_SHOT_KEY_PREFIXES = ("dispatch:",)
-
-
-def is_one_shot_key(key: str) -> bool:
-    """Is KEY held by a process that cannot come back under a new pid?
-
-    SUSPECT (a dead pid inside an unexpired TTL) exists because a `node:` claim
-    is held by a SESSION, and a session genuinely can be respawned by the daemon
-    under a new pid - x-ba4b measured the disaster when one was treated as free.
-
-    A `dispatch:<id>` reservation is different in kind. Its holder is
-    `spawn-cli:<pid>`, one process that launches a worker and exits, so there is
-    no respawn to protect and the rationale is structurally inapplicable. The
-    generic rule applied it anyway, and a queued spawn that never got a slot
-    left a reservation that refused the relaunch with `reason=reservation-held`
-    for its whole TTL, recoverable only by hand (x-05be).
-
-    So a dead one-shot holder on this machine is a provable death needing no
-    further evidence. A `node:` key is deliberately absent: its liveness needs
-    the roster probe, and a shortcut here would archive a live respawned
-    worker's claim inside its first stop cycle.
-    """
-    return key.startswith(_ONE_SHOT_KEY_PREFIXES)
-
-
 def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, str]:
     """Classify one claim for GC: can its holder be PROVEN dead from this host?
 
@@ -200,11 +173,20 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     state = classify(claim, now=now)
     if state is ClaimState.STALE:
         return True, ""
-    if state is ClaimState.SUSPECT and same_machine and is_one_shot_key(claim.key):
-        # SUSPECT protects a slot whose holder might come back under a new pid.
-        # A one-shot holder cannot, so the protection buys nothing and costs a
-        # permanent wedge. See is_one_shot_key.
-        return True, ""
+    # NO one-shot arm here, and the omission is deliberate. A `dispatch:<id>`
+    # holder is `spawn-cli:<pid>`, one process that launches and exits, so a
+    # dead pid inside its TTL looks like a pure wedge. But that TTL IS the
+    # boot window: it is documented to outlive its spawner precisely so a
+    # second dispatcher does not launch onto a node whose worker has not
+    # reached `fno target init` yet. A background sweep reaping it collapses
+    # the dedup window and re-dispatches into the gap, and it also voids the
+    # `dispatch:think:<node>:<reason>` tokens, which have no node claim behind
+    # them at all. Expiry still frees these on schedule through the arm above.
+    #
+    # The wedge is cleared where it is actually observed instead: the spawn
+    # guard re-probes its OWN reservation key at the moment it is about to
+    # launch. See `_reclaim_if_provably_dead` in `fno.agents.cli`, which can
+    # take that step safely because the node claim now covers the launch window.
     return False, "suspect" if state is ClaimState.SUSPECT else "live"
 
 

@@ -185,7 +185,11 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 
 # Holder gate: refresh ONLY our own claim. A different holder (or no live claim)
 # stamps and returns so we do not re-probe on every tool call.
-HOLDER="$(fno claim status "node:$NODE_ID" --json 2>/dev/null | jq -r '.holder // empty' 2>/dev/null)"
+# --no-roster: this runs on tool calls and reads .holder ONLY. The roster
+# cross-check shells out to the harness, and it fires on exactly the branch this
+# gate hits when a claim has lapsed, so leaving it on would tax every tool call
+# to compute a field discarded on the next line.
+HOLDER="$(fno claim status "node:$NODE_ID" --json --no-roster 2>/dev/null | jq -r '.holder // empty' 2>/dev/null)"
 if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then
   touch "$STAMP" 2>/dev/null || true
   exit 0
