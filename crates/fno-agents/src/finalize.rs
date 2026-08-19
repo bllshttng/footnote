@@ -2120,11 +2120,9 @@ fn dispatch_hold_refusal(cwd: &Path, number: u64) -> Option<String> {
         .current_dir(cwd)
         .output()
     {
-        Ok(output) => classify_dispatch_hold_probe(
-            output.status.success(),
-            &output.stdout,
-            &output.stderr,
-        ),
+        Ok(output) => {
+            classify_dispatch_hold_probe(output.status.success(), &output.stdout, &output.stderr)
+        }
         Err(error) => Some(format!(
             "dispatch hold check unavailable ({error}); refusing to assume unheld"
         )),

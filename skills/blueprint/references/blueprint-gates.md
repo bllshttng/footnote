@@ -4,7 +4,7 @@ Read a gate only when its trigger fires. The dispatch table in SKILL.md ("## Gat
 
 ## Plan-level dispatch hold
 
-When the plan must not start or merge until named evidence exists, author one `dispatch_hold` mapping in frontmatter with non-blank `reason`, `release_when`, and `set_by` strings plus an ISO `review_on` date. Presence is the hold; `review_on` only prompts a review and never releases automatically. Every autonomous selector, named target start, sanctioned merge, direct merge veto, remediation merge, and native auto-merge arm reads the same declaration and fails closed when it is malformed or unreadable. Lift the hold by removing the mapping after the setter or an authorized operator confirms `release_when`; never copy it into graph status or a private dispatcher file.
+When named evidence must exist before work starts or merges, author one `dispatch_hold` mapping in frontmatter. Add non-blank `reason`, `release_when`, and `set_by` strings. Add an ISO `review_on` date. The mapping's presence is the hold. The review date prompts review and never releases work. Every dispatcher and merger reads the same declaration. If the declaration is malformed or unreadable, the action fails closed. After an authorized operator confirms `release_when`, remove the mapping to lift the hold. Never copy the hold into graph status or a private dispatcher file.
 
 ## Plan Claims Ingestion (MANDATORY when input is a node id)
 
