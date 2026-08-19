@@ -799,6 +799,64 @@ def _backfill_codex_session_id(
     return None
 
 
+#: The rollout-fd probe above stays cheap because it is a local process-tree
+#: walk. The daemon oracle below costs a subprocess plus a websocket round
+#: trip, so the binding loop's caller rate-limits it to this interval even
+#: though the loop itself ticks every ``_BINDING_POLL_S`` (0.75s, x-e336).
+_CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
+
+
+def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
+    """Session ids the app-server daemon reports as loaded for ``cwd``.
+
+    None means the daemon could not answer (missing binary, dead socket,
+    timeout, malformed reply) - distinct from an empty set, which means it
+    answered and this cwd currently has zero loaded threads. The correlation
+    in :func:`_codex_daemon_bind` needs that distinction: an unreachable
+    daemon must leave the fd oracle deciding alone, never manufacture a false
+    "nothing new here" (x-e336).
+    """
+    from fno.agents.discover import _codex_daemon_threads_raw
+
+    threads = _codex_daemon_threads_raw()
+    if threads is None:
+        return None
+    ids: set[str] = set()
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        sid = thread.get("session_id")
+        if isinstance(sid, str) and sid and thread.get("cwd") == str(cwd):
+            ids.add(sid)
+    return ids
+
+
+def _codex_daemon_bind(cwd: Path, baseline_ids: set[str]) -> Optional[str]:
+    """Bind a codex pane through the app-server daemon it delegates to.
+
+    Codex 0.148's TUI hands session ownership to a detached ``codex
+    app-server --remote-control`` daemon, which holds the rollout fd the
+    process-tree probe above expects to find in the pane's own tree - so that
+    probe returns 0/20 binds under measurement (x-e336). This oracle asks the
+    daemon directly instead, via the already-wired
+    :func:`fno.agents.discover._discover_from_codex_daemon` RPC.
+
+    Accepts only when exactly ONE session id is new for this cwd since the
+    pre-spawn baseline - the same stability gate :func:`_codex_session_id_for_pid`
+    applies to a same-cwd sibling and the comment at line ~3160 states for the
+    no-pid fallback: binding this row to a healthy stranger is worse than
+    leaving it unbound, so two-or-more new ids keeps polling rather than
+    guesses.
+    """
+    loaded = _codex_session_ids_loaded(cwd)
+    if loaded is None:
+        return None
+    new_ids = loaded - baseline_ids
+    if len(new_ids) == 1:
+        return next(iter(new_ids))
+    return None
+
+
 def pane_passthrough_tokens(
     passthrough: Optional[Sequence[str]],
     emitted: Sequence[str],
@@ -950,6 +1008,7 @@ def build_pane_argv(
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = [*identity, "-C", str(cwd)]
+        bypass_posture = permission_mode == "yolo" if permission_mode else yolo
         if permission_mode:
             argv += permission_pane_tokens("codex", permission_mode)
         else:
@@ -958,13 +1017,19 @@ def build_pane_argv(
                 if yolo
                 else ["--sandbox", "workspace-write"]
             )
+        if bypass_posture:
+            # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
+            # whenever a hook is new or changed, and the approvals bypass
+            # above does not clear it. `submit_keys` is unsupported for
+            # codex, so fno cannot answer the modal by keystroke - this flag
+            # is the only lever (x-e336). Sandboxed postures never opt in.
+            argv += ["--dangerously-bypass-hook-trust"]
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.
         from fno.agents.harnesses.codex import git_writable_args, plan_writable_args
 
-        bounded = (permission_mode != "yolo") if permission_mode else not yolo
-        if bounded:
+        if not bypass_posture:
             argv += git_writable_args(cwd)
             argv += plan_writable_args(cwd)
         if model:
@@ -2491,6 +2556,13 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+        # Same reasoning as the spawn-clock stamp below, snapshotted first: a
+        # sibling pane starting during the lock-wait or argv-build above would
+        # otherwise widen the daemon oracle's candidate set (x-e336). Gated to
+        # codex only - every other provider pays nothing for this probe.
+        codex_daemon_baseline_ids: Optional[set[str]] = None
+        if provider == "codex":
+            codex_daemon_baseline_ids = _codex_session_ids_loaded(cwd)
         # Stamp the spawn clock immediately before the pane runs, not at function
         # entry. A sibling pane starting a same-cwd session during the lock-wait
         # or argv-build above would otherwise clear the since_ms lower bound and
@@ -2675,18 +2747,36 @@ def dispatch_spawn_pane(
                 binding_window_s = binding_caps["timeout_ms"] / 1000
                 if _BINDING_WINDOW_ENV in os.environ:
                     binding_window_s = _binding_window_s()
-                binding = _await_pane_binding(
-                    {"session": session, "pane_id": pane_id},
+                # Two oracles, tried in order. The fd probe stays first and
+                # stays cheap: still correct for any build that owns its
+                # rollout, and for `codex exec`. The daemon probe is a
+                # subprocess plus a websocket round trip, so it is
+                # rate-limited to _CODEX_DAEMON_PROBE_INTERVAL_S even though
+                # this loop ticks every _BINDING_POLL_S (x-e336).
+                _daemon_probe_last_s = [0.0]
+
+                def _probe() -> Optional[str]:
                     # attempts=1: the binding loop owns the retry, because it
                     # also watches for the pane dying BETWEEN probes - which a
                     # bare retry loop cannot see, and which is the whole bug.
-                    lambda: _backfill_codex_session_id(
+                    sid = _backfill_codex_session_id(
                         cwd,
                         spawn_started_ms,
                         sessions_dir=codex_sessions_dir,
                         child_pid=_pid,
                         attempts=1,
-                    ),
+                    )
+                    if sid:
+                        return sid
+                    now_s = time.monotonic()
+                    if now_s - _daemon_probe_last_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
+                        return None
+                    _daemon_probe_last_s[0] = now_s
+                    return _codex_daemon_bind(cwd, codex_daemon_baseline_ids or set())
+
+                binding = _await_pane_binding(
+                    {"session": session, "pane_id": pane_id},
+                    _probe,
                     runner=runner,
                     window_s=binding_window_s,
                     label="codex",
@@ -2742,7 +2832,10 @@ def dispatch_spawn_pane(
                         raise DispatchAskError(
                             f"agent {name!r} required {provider} session binding "
                             f"({unbound_reason or 'not-captured'}); pane {pane_id} reaped, "
-                            "no registry row written",
+                            "no registry row written. Diagnose the lane with "
+                            "'fno doctor --codex-bind'; spawn with --substrate "
+                            "headless meanwhile (headless owns its own session "
+                            "and is unaffected)",
                             exit_code=1,
                         )
                     raise DispatchAskError(
@@ -3200,7 +3293,10 @@ def dispatch_spawn_pane(
                     raise DispatchAskError(
                         f"agent {name!r} required {provider} session binding "
                         f"({unbound_reason}); pane {pane_id} reaped, "
-                        "no registry row written",
+                        "no registry row written. Diagnose the lane with "
+                        "'fno doctor --codex-bind'; spawn with --substrate "
+                        "headless meanwhile (headless owns its own session "
+                        "and is unaffected)",
                         exit_code=1,
                     )
                 raise DispatchAskError(

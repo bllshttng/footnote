@@ -277,6 +277,7 @@ impl HarnessContract {
             if ![
                 "preassigned-or-session-start",
                 "rollout-fd",
+                "rollout-fd-or-daemon",
                 "preassigned",
                 "store-lookup",
                 "unsupported",
@@ -465,7 +466,7 @@ mod tests {
         assert_eq!(claude.stop_strategy, "claude-short-id");
         assert_eq!(codex.stop_strategy, "registry-noop");
         assert_eq!(codex.remove_strategy, "codex-session-index");
-        assert_eq!(codex.session_binding.strategy, "rollout-fd");
+        assert_eq!(codex.session_binding.strategy, "rollout-fd-or-daemon");
         assert!(codex.session_binding.required);
         assert_eq!(codex.session_binding.timeout_ms, 60_000);
     }

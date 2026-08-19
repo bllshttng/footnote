@@ -71,7 +71,7 @@ send_keys_enter_delay_ms = 0
 submit_keys = ["unsupported"]
 stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
-session_binding = { strategy = "rollout-fd", required = true, timeout_ms = 60000 }
+session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_ms = 60000 }
 
 [harness.codex.permission_response.allow_once]
 supported = true

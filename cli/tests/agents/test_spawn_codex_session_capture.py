@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.agents import mux_spawn
 from fno.agents.discover import codex_session_ids_started_in
 from fno.agents.mux_spawn import _backfill_codex_session_id
 
@@ -383,3 +384,58 @@ def test_rollout_scan_skips_files_older_than_since(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# The app-server daemon oracle (x-e336): codex 0.148 hands session ownership
+# to a detached `codex app-server --remote-control` daemon, which holds the
+# rollout fd the process-tree probe above expects to find in the pane's own
+# tree - measured live at 0/20 binds. This oracle asks the daemon directly.
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_bind_accepts_the_one_new_id_for_this_cwd(monkeypatch) -> None:
+    monkeypatch.setattr(
+        mux_spawn,
+        "_codex_session_ids_loaded",
+        lambda cwd: {SID_A, SID_B},
+    )
+    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), {SID_B}) == SID_A
+
+
+def test_daemon_bind_refuses_two_new_ids_as_ambiguous(monkeypatch) -> None:
+    monkeypatch.setattr(
+        mux_spawn,
+        "_codex_session_ids_loaded",
+        lambda cwd: {SID_A, SID_B},
+    )
+    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), set()) is None
+
+
+def test_daemon_bind_returns_none_when_daemon_is_unavailable(monkeypatch) -> None:
+    # None distinct from an empty set: the daemon could not answer, so the fd
+    # oracle alone must decide - a false "nothing new" would be worse than no
+    # answer at all.
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda cwd: None)
+    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), set()) is None
+
+
+def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
+    monkeypatch,
+) -> None:
+    from fno.agents import discover as _discover
+
+    monkeypatch.setattr(_discover, "_codex_daemon_threads_raw", lambda: None)
+    assert mux_spawn._codex_session_ids_loaded(Path("/w/proj")) is None
+
+    monkeypatch.setattr(
+        _discover,
+        "_codex_daemon_threads_raw",
+        lambda: [
+            {"session_id": SID_A, "cwd": "/w/proj"},
+            {"session_id": SID_B, "cwd": "/w/other"},
+        ],
+    )
+    assert mux_spawn._codex_session_ids_loaded(Path("/w/proj")) == {SID_A}
+    assert mux_spawn._codex_session_ids_loaded(Path("/w/other")) == {SID_B}
+    assert mux_spawn._codex_session_ids_loaded(Path("/w/nothing-here")) == set()
