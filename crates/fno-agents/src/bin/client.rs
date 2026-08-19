@@ -1593,6 +1593,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "--name",
         "--session-id",
         "--status",
+        "--progress",
         "--from-name",
         "--timeout",
         "--model",
@@ -1718,6 +1719,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             }
             "--status" => {
                 params.insert("status".into(), str_arg(&mut it, "--status")?);
+            }
+            "--progress" => {
+                params.insert("progress".into(), str_arg(&mut it, "--progress")?);
             }
             "--json" | "-J" => {
                 // Task 3.1: --json is a client-side rendering flag. We recognize it
@@ -2264,10 +2268,9 @@ fn format_success(
         }
         "list" => {
             let agents = &result["agents"];
-            let filters = result
-                .get("filters_applied")
-                .cloned()
-                .unwrap_or_else(|| json!({"cwd": null, "provider": null, "status": null}));
+            let filters = result.get("filters_applied").cloned().unwrap_or_else(
+                || json!({"cwd": null, "provider": null, "status": null, "progress": null}),
+            );
             // ab-098967b4: merge the P1 host-local live-session lane. The Rust
             // client owns the rendered surface, so it shells out to the Python
             // helper (which has psutil's cross-platform reuse-safe liveness) and
@@ -2277,6 +2280,7 @@ fn format_success(
                     filters.get("cwd").and_then(|v| v.as_str()),
                     filters.get("provider").and_then(|v| v.as_str()),
                     filters.get("status").and_then(|v| v.as_str()),
+                    filters.get("progress").and_then(|v| v.as_str()),
                 )
             } else {
                 Vec::new()
@@ -2363,6 +2367,7 @@ fn fetch_discovered_sessions(
     cwd_filter: Option<&str>,
     provider_filter: Option<&str>,
     status_filter: Option<&str>,
+    progress_filter: Option<&str>,
 ) -> Vec<Value> {
     use std::process::Command;
 
@@ -2399,6 +2404,7 @@ fn fetch_discovered_sessions(
         .cloned()
         .unwrap_or_default();
     retain_discovered_by_status(&mut rows, status_filter);
+    retain_discovered_by_progress(&mut rows, progress_filter);
     rows
 }
 
@@ -2416,6 +2422,12 @@ fn retain_discovered_by_status(rows: &mut Vec<Value>, status_filter: Option<&str
     // banner that says LIVE.
     if let Some(want) = status_filter {
         rows.retain(|r| r.get("status").and_then(Value::as_str) == Some(want));
+    }
+}
+
+fn retain_discovered_by_progress(rows: &mut Vec<Value>, progress_filter: Option<&str>) {
+    if let Some(want) = progress_filter {
+        rows.retain(|r| r.get("progress").and_then(Value::as_str) == Some(want));
     }
 }
 
@@ -2712,7 +2724,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 const CLIENT_VERB_USAGE: &[&str] = &[
     "spawn <name> --provider <p> [--substrate pane|bg|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
-    "list [--all]",
+    "list [--all] [--status <live|orphaned|unknown>] [--progress <advancing|awaiting-operator|parked|refused|unknown>]",
     "status",
     "restart",
     "reap [--json] [--dry-run]",
@@ -4329,6 +4341,14 @@ mod tests {
         assert_eq!(params["status"], Value::String("live".to_string()));
     }
 
+    #[test]
+    fn list_progress_flag_is_parsed() {
+        let args = vec!["--progress".to_string(), "parked".to_string()];
+        let (method, params) = build_request("list", &args).unwrap();
+        assert_eq!(method, "agent.list");
+        assert_eq!(params["progress"], Value::String("parked".to_string()));
+    }
+
     /// AC1-HP: list --cwd and --provider are forwarded to daemon params
     #[test]
     fn list_filter_flags_are_forwarded() {
@@ -4375,6 +4395,19 @@ mod tests {
         let mut unfiltered = all.clone();
         retain_discovered_by_status(&mut unfiltered, None);
         assert_eq!(unfiltered.len(), 3);
+    }
+
+    #[test]
+    fn discovered_rows_are_filtered_by_progress_independently() {
+        let mut rows = vec![
+            json!({"name": "active", "status": "live", "progress": "advancing"}),
+            json!({"name": "wedged", "status": "live", "progress": "unknown"}),
+            json!({"name": "done", "status": "unknown", "progress": "parked"}),
+        ];
+        retain_discovered_by_progress(&mut rows, Some("unknown"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "wedged");
+        assert_eq!(rows[0]["status"], "live");
     }
 
     /// AC1-HP: --json is NOT forwarded to daemon params (it is a client-side rendering flag)

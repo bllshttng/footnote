@@ -4048,7 +4048,7 @@ where
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Task 3.1: accept cwd/provider/status filters matching Python list_agents.
+    // Task 3.1: accept cwd/provider/status/progress filters matching Python list_agents.
     // Legacy project_root filter still accepted for backward compat.
     let filter_cwd = req
         .params
@@ -4063,6 +4063,11 @@ where
     let filter_status = req
         .params
         .get("status")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let filter_progress = req
+        .params
+        .get("progress")
         .and_then(|v| v.as_str())
         .map(String::from);
     let cwd_project = req
@@ -4081,6 +4086,20 @@ where
                 req.id,
                 ErrorCode::InvalidStatus,
                 format!("invalid --status '{st}' (expected: live | orphaned | unknown)"),
+            );
+        }
+    }
+    if let Some(ref progress) = filter_progress {
+        if !matches!(
+            progress.as_str(),
+            "advancing" | "awaiting-operator" | "parked" | "refused" | "unknown"
+        ) {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidStatus,
+                format!(
+                    "invalid --progress '{progress}' (expected: advancing | awaiting-operator | parked | refused | unknown)"
+                ),
             );
         }
     }
@@ -4182,9 +4201,14 @@ where
     let mut entries: Vec<Value> = classified
         .into_iter()
         .filter(
-            |(_e, rendered_status, _observed, _evidence, _progress, _progress_basis)| {
+            |(_e, rendered_status, _observed, _evidence, progress, _progress_basis)| {
                 if let Some(ref st) = filter_status {
                     if rendered_status != &st.as_str() {
+                        return false;
+                    }
+                }
+                if let Some(ref want) = filter_progress {
+                    if progress != want {
                         return false;
                     }
                 }
@@ -4368,6 +4392,7 @@ where
         "cwd": filter_cwd_norm,
         "provider": filter_provider,
         "status": filter_status,
+        "progress": filter_progress,
     });
     Response::ok(
         req.id,
@@ -10220,6 +10245,36 @@ done
         assert!(row["last_activity_age_s"].is_null());
         assert!(row["last_event_at"].is_null());
         assert!(row["last_message"].is_null());
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_progress_filter_is_independent_from_status() {
+        let home = short_home("listprogressfilter");
+        seed_stream_row(&home, "worker-progress", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+
+        let parked = Request::new(1, "agent.list", json!({"progress": "parked"}));
+        let response = handle_list_with_truth(&ctx, &parked, |_handle| {
+            probe_with_verdict("done", "reachable")
+        });
+        assert_eq!(
+            response.result().unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let advancing = Request::new(2, "agent.list", json!({"progress": "advancing"}));
+        let response = handle_list_with_truth(&ctx, &advancing, |_handle| {
+            probe_with_verdict("done", "reachable")
+        });
+        assert!(response.result().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         std::fs::remove_dir_all(home.root()).ok();
     }
