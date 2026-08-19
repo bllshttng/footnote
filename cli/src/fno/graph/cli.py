@@ -8685,7 +8685,7 @@ def cmd_reconcile(
         """Every node id ``_pr_number`` could possibly close: the trailer's
         own claims, any node already carrying ``_pr_number`` as a ref
         (stamped at creation, before this feature existed), plus every OPEN,
-        ref-less node in THIS REPO's own project.
+        ref-less node whose own ``cwd`` matches THIS repo's root.
 
         The last group exists because ``scan_merge_drift`` passes this exact
         scope straight through to ``reverse_map_unstamped`` (its reverse
@@ -8699,10 +8699,17 @@ def cmd_reconcile(
         call per DISTINCT node cwd in its scope (bounded by
         ``REVERSE_MAP_BUDGET_S``) - an unscoped sweep pays a gh call for
         every other project's ref-less nodes too, on every ordinary merge in
-        this repo. Scoped to ``resolve_project_id()`` (this checkout's own
-        project id, cheap and local - no gh call) below; an unresolvable
-        project id falls back to the old permissive whole-graph behavior
-        rather than a new refusal.
+        this repo. Scoped below by matching each candidate's own ``cwd``
+        against ``repo_root()`` (this checkout's own root, cheap and local -
+        no gh call) - never by comparing a resolved project-NAME string
+        against the node's stored ``project`` field: that field is written
+        by a completely different resolver (settings-based project
+        detection at intake) that can drift from an independently-derived
+        name, and a node created via ``fno backlog new`` before being
+        claimed by a plan legitimately carries ``project: null``, which a
+        name comparison would misread as "not this repo" even when its cwd
+        matches exactly. An unresolvable own root falls back to the old
+        permissive whole-graph behavior rather than a new refusal.
 
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
@@ -8714,20 +8721,27 @@ def cmd_reconcile(
         when its own slug is unresolvable, rather than treating that as a
         pass for every candidate).
         """
-        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
-        from fno.worktree_paths import resolve_project_id
+        import os
 
-        try:
-            _our_project = resolve_project_id()
-        except ValueError:
-            _our_project = None
+        from fno.graph._intake import repo_root
+        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
+        _our_root = os.path.normpath(repo_root())
+        _our_root_prefix = _our_root.rstrip(os.sep) + os.sep
+
+        def _cwd_in_our_repo(_e: dict) -> bool:
+            _raw_cwd = _e.get("cwd")
+            if not isinstance(_raw_cwd, str) or not _raw_cwd:
+                return False
+            _norm = os.path.normpath(os.path.expanduser(_raw_cwd))
+            return _norm == _our_root or _norm.startswith(_our_root_prefix)
 
         ids = set(_claims)
         for _e in _entries:
             _rid = _e.get("id")
             if not (isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e)):
                 continue
-            if _our_project is not None and _e.get("project") != _our_project:
+            if not _cwd_in_our_repo(_e):
                 continue
             ids.add(_rid)
         if _our_repo is None:

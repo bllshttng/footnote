@@ -1169,8 +1169,8 @@ def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypa
     project on the machine. A --pr-number call must not reverse-map another
     project's ref-less nodes into a gh fan-out that has nothing to do with
     the PR being closed - only this repo's own project."""
+    import fno.graph._intake as intake_mod
     import fno.pr.closure as closure_mod
-    import fno.worktree_paths as wtp
 
     graph_path, _ = cli_env
     mine_cwd = tmp_path / "mine"
@@ -1178,10 +1178,10 @@ def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypa
     mine_cwd.mkdir()
     other_cwd.mkdir()
     _make_graph(graph_path, [
-        _node("ab-mine", cwd=str(mine_cwd), project="fno"),
-        _node("ab-other", cwd=str(other_cwd), project="other-project"),
+        _node("ab-mine", cwd=str(mine_cwd)),
+        _node("ab-other", cwd=str(other_cwd)),
     ])
-    monkeypatch.setattr(wtp, "resolve_project_id", lambda *a, **kw: "fno")
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(mine_cwd))
     monkeypatch.setattr(
         closure_mod, "fetch_pr_closure_context",
         lambda pr_number, **kw: _stub_closure_ctx("", number=810),
@@ -1204,6 +1204,42 @@ def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypa
 
     assert str(mine_cwd) in queried_cwds
     assert str(other_cwd) not in queried_cwds
+
+
+def test_reconcile_pr_number_still_reverse_maps_a_node_with_null_project(
+    cli_env, monkeypatch, tmp_path,
+):
+    """x-2f24 review fix: a node created via `fno backlog new`, not yet
+    claimed by a plan, legitimately carries `project: null`. Matching on cwd
+    (never on a resolved project-name string) means a null `project` field
+    on the one ref-less node that DOES belong to this repo must not be
+    misread as "no node here" - it still reverse-maps."""
+    import fno.graph._intake as intake_mod
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-nullproj", cwd=str(tmp_path), project=None),
+    ])
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=811),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({811: "MERGED"}))
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{
+            "number": 268, "url": "https://github.com/o/r/pull/268",
+            "headRefName": "feature/ab-nullproj", "mergedAt": "2026-07-08T00:00:00Z",
+        }],
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "811", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-nullproj"}
 
 
 def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
@@ -1354,17 +1390,17 @@ def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_pat
     PR ref at all (session died before the pr_number stamp landed) via the
     reverse branch-name map, exactly as _reconcile_merged_pr_node's own
     docstring claims - not just the trailer-claimed node this PR names.
-    Its project must match this repo's own (x-2f24 scopes the reverse-map
-    sweep to resolve_project_id(), so an unscoped node would go dark)."""
+    Its cwd must match this repo's own root (x-2f24 scopes the reverse-map
+    sweep by cwd, so a node from another repo would go dark)."""
+    import fno.graph._intake as intake_mod
     import fno.pr.closure as closure_mod
-    import fno.worktree_paths as wtp
 
-    monkeypatch.setattr(wtp, "resolve_project_id", lambda *a, **kw: "fno")
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(tmp_path))
 
     graph_path, _ = cli_env
     _make_graph(graph_path, [
         _node("ab-100050"),  # claimed by PR 269's trailer
-        _node("ab-rmap2", cwd=str(tmp_path), project="fno"),  # ref-less; only its branch name ties it to PR 268
+        _node("ab-rmap2", cwd=str(tmp_path)),  # ref-less; only its branch name ties it to PR 268
     ])
     monkeypatch.setattr(
         closure_mod, "fetch_pr_closure_context",
