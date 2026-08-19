@@ -16,7 +16,10 @@ pub enum ClientError {
     Protocol(#[from] ProtocolError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("daemon did not come up within {0:?}")]
+    #[error(
+        "daemon did not come up within {0:?} of being started (a preceding wait \
+         on an incumbent is not counted here, so the wall time can be longer)"
+    )]
     DaemonStartTimeout(Duration),
     #[error(
         "a daemon holds the supervisor singleton lock but did not answer within \
@@ -186,6 +189,12 @@ pub async fn ensure_daemon(
     // that never got a single poll. Its `Gone` window is exactly where that
     // happens, since the outgoing daemon holds the flock for up to the
     // runtime's shutdown timeout past socket removal.
+    //
+    // The cost is an honest one: a verb that waits out an incumbent AND then
+    // starts a daemon can spend two budgets, so the worst case doubles to ~20s.
+    // Only the `Gone` path reaches it, which needs an incumbent that holds the
+    // lock and then releases it without ever binding. A start that gets no poll
+    // at all is worse than a slow one.
     let start = Instant::now();
 
     // The lock was free a moment ago, so no daemon is entitled to this socket.

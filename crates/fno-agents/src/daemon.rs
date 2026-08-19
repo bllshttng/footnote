@@ -1844,23 +1844,6 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 // Socket bind + perms + lazy-start race.
 // ---------------------------------------------------------------------------
 
-/// Bind the supervisor socket, resolving the lazy-start race and stale sockets.
-///
-/// - Acquires an exclusive `flock` on a sidecar lockfile BEFORE touching the
-///   socket at all. `try_lock()` is a positive marker (held or not), unlike a
-///   connect probe that reads "absent" for a daemon merely too busy to accept
-///   in time -- the failure mode that let every failed probe add a new
-///   supervisor instead of replacing the incumbent (x-ef7f). On contention,
-///   return [`DaemonError::AlreadyRunning`] immediately.
-/// - Once the lock is held, no other process can be mid-bind, so any existing
-///   socket file is unconditionally stale (a crash, or a prior holder that
-///   exited before cleanup) -- remove and bind.
-/// - Enforce dir 0700 / socket 0600 regardless of umask, fstat-verifying after
-///   (finding #6 Critical).
-///
-/// Returns the lock `File` alongside the listener: the caller must keep it
-/// alive for the whole process lifetime (dropping it, or process exit,
-/// releases the lock).
 /// How many times [`bind_supervisor_socket`] tries for the singleton lock
 /// before concluding an incumbent owns it, and how long it waits between
 /// tries. The product only has to exceed the microseconds a client's probe
@@ -1868,6 +1851,33 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 const LOCK_ACQUIRE_ATTEMPTS: usize = 6;
 const LOCK_ACQUIRE_RETRY: Duration = Duration::from_millis(25);
 
+/// How long the previous-build probe waits for an answer before treating the
+/// socket as unserved. Short on purpose: it runs while we hold the exclusive
+/// lock, so every millisecond here is a millisecond every client waits.
+const PREVIOUS_BUILD_PROBE: Duration = Duration::from_millis(250);
+
+/// Bind the supervisor socket, resolving the lazy-start race and stale sockets.
+///
+/// - Acquires an exclusive `flock` on a sidecar lockfile BEFORE touching the
+///   socket at all. `try_lock()` is a positive marker (held or not), unlike a
+///   connect probe that reads "absent" for a daemon merely too busy to accept
+///   in time -- the failure mode that let every failed probe add a new
+///   supervisor instead of replacing the incumbent (x-ef7f). On contention it
+///   retries briefly (see [`LOCK_ACQUIRE_ATTEMPTS`]), because a client's
+///   liveness probe takes the same lock for microseconds and conceding to that
+///   would let a read-only question kill a cold start. Only a holder that
+///   outlasts every retry yields [`DaemonError::AlreadyRunning`].
+/// - Once the lock is held, no LOCK-AWARE process can be mid-bind, so any
+///   existing socket file is stale to every same-build racer. One case escapes
+///   that: a daemon from a PREVIOUS build holds the socket and knows nothing
+///   about the lockfile, so a bounded connect probe runs before the unlink and
+///   defers to a listener that answers.
+/// - Enforce dir 0700 / socket 0600 regardless of umask, fstat-verifying after
+///   (finding #6 Critical).
+///
+/// Returns the lock `File` alongside the listener: the caller must keep it
+/// alive for the whole process lifetime (dropping it, or process exit,
+/// releases the lock).
 pub async fn bind_supervisor_socket(
     home: &AgentsHome,
 ) -> Result<(UnixListener, std::fs::File), DaemonError> {
@@ -1931,7 +1941,21 @@ pub async fn bind_supervisor_socket(
     // singleton, which is precisely the upgrade case: every same-build race is
     // already decided above, where a busy incumbent that would fail this probe
     // still holds the lock and this line is never reached.
-    if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+    //
+    // BOUNDED, and that bound is load-bearing. A blocking connect here is this
+    // whole defect in miniature: an old-build listener whose backlog is full
+    // leaves connect() hanging, and we hold the exclusive lock while it hangs,
+    // so every client verb reports a busy incumbent forever. A listener that
+    // cannot answer in 250ms is serving nobody, so a timeout falls through to
+    // the unlink. Deferring to it instead would leave the machine with no
+    // reachable daemon at all, which is strictly worse than displacing a
+    // process that is already unreachable.
+    let previous_build_serving =
+        tokio::time::timeout(PREVIOUS_BUILD_PROBE, tokio::net::UnixStream::connect(&sock))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false);
+    if previous_build_serving {
         return Err(DaemonError::AlreadyRunning(sock));
     }
     let _ = std::fs::remove_file(&sock);

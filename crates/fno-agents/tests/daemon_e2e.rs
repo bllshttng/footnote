@@ -482,10 +482,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         }));
     }
 
-    let outcome = restart
-        .await
-        .expect("restart task joins")
-        .expect("restart over a large roster succeeds");
+    let restart_result = restart.await;
 
     // A verb that races the teardown can legitimately lose its connection
     // mid-frame: the incumbent is being SIGTERMed underneath it. That shape is
@@ -494,14 +491,22 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let mut answered = 0;
     let mut failures = Vec::new();
     for v in verbs {
-        match v.await.expect("verb task joins") {
-            Ok(resp) if !resp.is_err() => answered += 1,
-            Ok(resp) => failures.push(format!("{:?}", resp.error())),
-            Err(e) => failures.push(format!("{e}")),
+        match v.await {
+            Ok(Ok(resp)) if !resp.is_err() => answered += 1,
+            Ok(Ok(resp)) => failures.push(format!("{:?}", resp.error())),
+            Ok(Err(e)) => failures.push(format!("{e}")),
+            Err(e) => failures.push(format!("task join failed: {e}")),
         }
     }
     let storm_took = storm_started.elapsed();
+    // Clear the process-wide seam BEFORE the first assertion. Every panic
+    // between the set and the clear leaks a 3s startup delay into every daemon
+    // a later test in this binary spawns, so nothing that can panic may sit in
+    // between -- which is why the joins above collect rather than expect.
     std::env::remove_var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS");
+    let outcome = restart_result
+        .expect("restart task joins")
+        .expect("restart over a large roster succeeds");
     for f in &failures {
         assert!(
             f.contains("connection closed"),
