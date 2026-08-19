@@ -1605,6 +1605,8 @@ def resolve_or_suggest(
     psutil_mod=None,
     truth_fn: Optional[Callable[[DiscoveredSession], dict]] = None,
     require_alive: bool = True,
+    registry_rows: Optional[list] = None,
+    discovery_cache: Optional[dict] = None,
 ) -> tuple[Optional[DiscoveredSession], list[str]]:
     """Resolve a send handle to a live session, or suggest the closest ones (US2).
 
@@ -1613,6 +1615,17 @@ def resolve_or_suggest(
     ``(None, [closest handles])`` for the AC2-ERR error message. One discovery
     scan serves both the match and the suggestions. No exclusion: the user
     named a specific live session, so even an adopted one resolves.
+
+    ``registry_rows`` and ``discovery_cache`` let a caller resolving MANY
+    handles pay the two expensive shared reads ONCE rather than once per
+    handle: the registry parse (74 ms measured) and the discovery scan (483 ms,
+    a psutil sweep of every process plus a glob of the transcript stores). Both
+    are passed only by ``truth --handles``. Leave them None and each call reads
+    for itself, exactly as before.
+
+    They are hoists, never second implementations. The tier-0 match, the
+    transcript lookup and the fallback all stay here, so a batch resolves a
+    handle through the same code a single call does.
     """
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
@@ -1632,7 +1645,14 @@ def resolve_or_suggest(
         return resolved.transcript_path
 
     if not require_alive:
-        registry_rows = _discover_from_registry(registry_path)
+        # A batch caller reads the registry ONCE and passes the rows in. Per
+        # handle this parse measured 74 ms of the ~160 ms a resolve costs, so a
+        # batch of forty paid it forty times for one unchanging file.
+        registry_rows = (
+            _discover_from_registry(registry_path)
+            if registry_rows is None
+            else registry_rows
+        )
         registry_full = [
             row
             for row in registry_rows
@@ -1712,20 +1732,36 @@ def resolve_or_suggest(
         "truth_fn": truth_fn,
         "classify_truth": require_alive,
     }
+
+    def scan(**extra):
+        """One discovery scan, shared across a batch when the caller supplies a
+        cache.
+
+        A NAME handle misses the registry fast path above, so it lands here -
+        and this scan sweeps every process on the box with psutil and globs the
+        transcript stores. Measured at 483 ms, and a batch of twelve ran it
+        twelve times for 5.8 of its 8.3 seconds. Cached, the batch pays it once.
+
+        A shared scan is also a more honest reading than N of them: every handle
+        in one batch is then answered against the SAME snapshot, instead of
+        twelve snapshots taken seconds apart.
+        """
+        if discovery_cache is None:
+            return discover_live_sessions(**discovery_kwargs, **extra)
+        key = tuple(sorted(extra.items()))
+        if key not in discovery_cache:
+            discovery_cache[key] = discover_live_sessions(**discovery_kwargs, **extra)
+        return discovery_cache[key]
+
     if not require_alive:
-        bare_sessions = discover_live_sessions(
-            **discovery_kwargs,
-            resolve_metadata=False,
-        )
+        bare_sessions = scan(resolve_metadata=False)
         bare_exact = _exact_address_matches(handle, bare_sessions)
         if len(bare_exact) == 1:
             return bare_exact[0], []
         if len(bare_exact) > 1:
             return None, sorted(session.session_id for session in bare_exact)
 
-    sessions = discover_live_sessions(
-        **discovery_kwargs,
-    )
+    sessions = scan()
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
     # Exact-match every address category BEFORE the retired-syntax rejection: a

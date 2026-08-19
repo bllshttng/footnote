@@ -937,6 +937,73 @@ def test_truth_batch_and_single_read_the_same_handle_identically(tmp_path, monke
     }
 
 
+def test_batch_resolver_runs_one_discovery_scan_for_every_handle(monkeypatch):
+    """The cost inside the cost, and the one that actually dominated.
+
+    A NAME handle misses the registry fast path in `resolve_or_suggest` and
+    falls through to `discover_live_sessions`, which sweeps every process on the
+    box with psutil and globs the transcript stores. Profiled on the live
+    roster: 483 ms a call, run once per handle, so twelve handles spent 5.8 of
+    their 8.3 seconds in it. One process is not cheap on its own -- it is cheap
+    once the per-handle reads inside it are hoisted. Twelve handles went from
+    5.72 s to 1.56 s, and the full 31-row roster answers in 3.94 s.
+    """
+    from fno.agents import cli as agents_cli
+    from fno.agents import discover as discover_mod
+
+    scans = []
+    registry_reads = []
+
+    def counting_discover(**kwargs):
+        scans.append(kwargs.get("resolve_metadata", True))
+        return []
+
+    def counting_registry(_path=None):
+        registry_reads.append(1)
+        return []
+
+    monkeypatch.setattr(discover_mod, "discover_live_sessions", counting_discover)
+    monkeypatch.setattr(discover_mod, "_discover_from_registry", counting_registry)
+
+    resolve = agents_cli._batch_resolver()
+    for handle in ["a", "b", "c", "d", "e"]:
+        resolve(handle)
+
+    # Two scan shapes exist on this path (bare, then full). Each is paid ONCE
+    # for the whole batch rather than once per handle.
+    assert len(scans) == 2, f"one scan per shape, got {scans}"
+    assert sorted(scans) == [False, True]
+    assert len(registry_reads) == 1, "the registry is read once for the batch"
+
+
+def test_batch_resolver_falls_back_when_the_hoisted_read_fails(monkeypatch):
+    """A hoist must never make a batch LESS able to resolve than a single call.
+
+    When the hoisted registry read raises, the resolver passes `registry_rows=None`
+    and `resolve_or_suggest` reads for itself, exactly as the single-handle path
+    does.
+    """
+    from fno.agents import cli as agents_cli
+    from fno.agents import discover as discover_mod
+
+    def boom(_path=None):
+        raise RuntimeError("unreadable registry")
+
+    seen = {}
+
+    def fake_resolve_or_suggest(handle, **kwargs):
+        seen.update(kwargs)
+        return None, []
+
+    monkeypatch.setattr(discover_mod, "_discover_from_registry", boom)
+    monkeypatch.setattr(discover_mod, "resolve_or_suggest", fake_resolve_or_suggest)
+
+    agents_cli._batch_resolver()("w1")
+
+    assert seen["registry_rows"] is None, "a failed hoist degrades to the per-call read"
+    assert seen["require_alive"] is False
+
+
 def test_truth_batch_refuses_both_a_positional_handle_and_handles():
     """Two spellings of one question. Exit 2 (usage), nothing on stdout."""
     from typer.testing import CliRunner

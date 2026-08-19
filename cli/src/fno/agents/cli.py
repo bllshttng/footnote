@@ -3337,20 +3337,64 @@ def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
     try:
         from fno.agents.registry import load_registry
 
-        resolved: set[str] = set()
-        for row in load_registry():
-            keys = ({row.name, row.harness_session_id, row.short_id} & wanted) - resolved
-            if not keys:
-                continue
-            falsifier = registry_falsifier(row)
-            for key in keys:
-                out[key] = falsifier
-            resolved |= keys
-            if resolved == wanted:
-                break
+        rows = list(load_registry())
     except Exception:  # noqa: BLE001 -- an unreadable registry falsifies nothing
         return out
+    # `registry_falsifier` stays OUTSIDE the except, as it was on the
+    # single-handle path. A falsifier that raises is a malfunction, and
+    # swallowing it here would report "no falsifier" - indistinguishable from a
+    # healthy row, which is the decorative-guard shape this docstring warns
+    # about.
+    resolved: set[str] = set()
+    for row in rows:
+        keys = ({row.name, row.harness_session_id, row.short_id} & wanted) - resolved
+        if not keys:
+            continue
+        falsifier = registry_falsifier(row)
+        for key in keys:
+            out[key] = falsifier
+        resolved |= keys
+        if resolved == wanted:
+            break
     return out
+
+
+def _batch_resolver():
+    """The ORDINARY resolver with its two expensive reads hoisted out of the
+    per-handle path.
+
+    ``resolve_or_suggest`` re-reads the registry (74 ms) on every call, and a
+    NAME handle misses the registry fast path and falls through to a full
+    discovery scan (483 ms of psutil sweep plus transcript globbing). Profiled
+    on the live roster, twelve handles spent 5.8 of 8.3 seconds running that
+    one scan twelve times. Hoisting both is what makes a batch actually cheap
+    rather than merely co-located in one process.
+
+    A hoist, never a second resolver. Every match stays inside
+    ``resolve_or_suggest``, so a batch resolves a handle through the same code
+    a single call does. Growing a second matcher here is the drift a Rust
+    reimplementation of the probe was rejected for.
+
+    Degrades to the per-call read if the hoisted one fails, so a batch is never
+    less able to resolve a handle than a single call is.
+    """
+    from fno.agents.discover import _discover_from_registry, resolve_or_suggest
+
+    try:
+        rows = _discover_from_registry(None)
+    except Exception:  # noqa: BLE001 -- fall back to the per-call read
+        rows = None
+    cache: dict = {}
+
+    def resolve(handle: str):
+        return resolve_or_suggest(
+            handle,
+            require_alive=False,
+            registry_rows=rows,
+            discovery_cache=cache,
+        )
+
+    return resolve
 
 
 def _registry_falsifier(handle: str) -> str | None:
@@ -3460,8 +3504,10 @@ def cmd_truth(
         # a roster ever outgrows that.
         names = [h.strip() for h in handles.split(",") if h.strip()]
         falsifiers = _registry_falsifiers(names)
+        resolver = _batch_resolver()
         answers = [
-            (name, resolve_session_truth(name), falsifiers[name]) for name in names
+            (name, resolve_session_truth(name, resolve=resolver), falsifiers[name])
+            for name in names
         ]
         if json_out:
             sys.stdout.write(

@@ -511,18 +511,42 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 /// constraint exists to prevent; batching removes the cost and keeps one
 /// reader.
 ///
-/// Same 5 s bound and the same one-silent-retry-on-crash rule the single probe
-/// documents. The retry now re-costs one cold start for the whole batch rather
-/// than one per row. An EMPTY slice returns an empty map without spawning
-/// anything.
+/// Bounded by [`family1_truth_batch_timeout`], and buying the same
+/// one-silent-retry-on-crash the single probe documents. The retry now re-costs
+/// one cold start for the whole batch rather than one per row. An EMPTY slice
+/// returns an empty map without spawning anything.
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
     family1_truth_batch_retrying(
         handles,
         family1_truth_batch_command,
-        Duration::from_secs(5),
+        family1_truth_batch_timeout(handles.len()),
     )
+}
+
+/// The batch's wall-clock bound, scaled to the work asked for.
+///
+/// The single probe's flat 5 s is a budget for ONE handle. Handing a batch of N
+/// the same budget is the defect this function exists to prevent: measured
+/// against the live roster, one handle's resolve costs 90-160 ms of real work
+/// (a registry read plus a transcript-store walk), so twelve real handles took
+/// 5.7 s and a flat 5 s killed the child mid-flight. The whole page then came
+/// back EMPTY - every row rendering null reachability and `no-transcript` - and
+/// the dormant gate stopped evicting, because its verdict needs a positive
+/// `done` reading it could no longer get. A batch that times out is strictly
+/// worse than the per-row probes it replaced, which each had their own 5 s.
+///
+/// 300 ms per handle is roughly double the measured cost, so an ordinary sweep
+/// finishes well inside it. The ceiling keeps one pathological transcript from
+/// wedging a sweep for minutes; the daemon runs this in `spawn_blocking`, off
+/// the select arm, so a long batch cannot starve `accept()` the way the inline
+/// probes once did.
+fn family1_truth_batch_timeout(handles: usize) -> Duration {
+    const BASE: Duration = Duration::from_secs(5);
+    const PER_HANDLE: Duration = Duration::from_millis(300);
+    const CEILING: Duration = Duration::from_secs(60);
+    std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
 }
 
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
@@ -567,6 +591,12 @@ fn family1_truth_batch_attempt(
                 crashed: true,
             }
         }
+        // A timeout is an ANSWER, not a crash, so it buys no retry - the same
+        // rule the single probe follows. Deliberate: with a bound that scales
+        // to the handle count, a timeout means a genuine malfunction rather
+        // than an underfunded batch, and retrying would double a wait already
+        // measured in tens of seconds. The bound is the fix for a slow batch;
+        // a retry never was.
         BoundedRun::NoOutput => {
             return TruthBatchAttempt {
                 probes: empty(),
@@ -4887,6 +4917,38 @@ mod tests {
         );
         assert_eq!(probes.len(), 1);
         assert!(!probes.contains_key("gone"));
+    }
+
+    #[test]
+    fn family1_truth_batch_timeout_scales_with_the_handles_asked_for() {
+        // The bug this pins: a batch of N handed the SINGLE handle's 5 s budget.
+        // Measured on the live roster, twelve real handles took 5.7 s, so a flat
+        // 5 s killed the child and the whole page came back empty - every row
+        // rendering null reachability, and the dormant gate unable to get the
+        // positive `done` reading an eviction needs. A timing-out batch is
+        // strictly worse than the per-row probes it replaced, which each had
+        // their own 5 s.
+        let one = family1_truth_batch_timeout(1);
+        let twelve = family1_truth_batch_timeout(12);
+        let forty = family1_truth_batch_timeout(40);
+
+        assert!(one >= Duration::from_secs(5), "never below the single budget");
+        assert!(twelve > one, "more handles must buy more time");
+        assert!(forty > twelve);
+
+        // Real measurements this must clear, with headroom: 12 handles in 1.6 s
+        // and the full 31-row roster in 3.9 s after the resolver hoists.
+        assert!(twelve >= Duration::from_secs(8), "12 handles took 1.6s measured");
+        assert!(forty >= Duration::from_secs(15), "31 handles took 3.9s measured");
+
+        // Capped, so one pathological transcript cannot wedge a sweep for
+        // minutes. The daemon runs this off the select arm, so the ceiling is
+        // about bounding a stuck probe, never about protecting `accept()`.
+        assert_eq!(
+            family1_truth_batch_timeout(10_000),
+            Duration::from_secs(60),
+            "the bound is capped, not unbounded"
+        );
     }
 
     #[test]
