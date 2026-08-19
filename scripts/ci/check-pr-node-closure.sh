@@ -78,19 +78,32 @@ fi
 # a stale earlier line, e.g. carried forward by a rebase, must not satisfy this).
 trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^Backlog-Closure:[[:space:]]*' | tail -1 || true)
 
+# Strip the label itself (everything through its own colon + any immediate
+# spaces/tabs), mirroring `_TRAILER_LINE_RE`'s `^Backlog-Closure:[ \t]*(.*)$`
+# capture group - the runtime parser (parse_closure_trailer) only ever
+# tokenizes THAT captured remainder, on whitespace and "," alone, never a
+# bare ":". Matching against the raw trailer_line (label prefix still
+# attached) let ANY colon in the line - including a stray one BETWEEN two
+# ids, e.g. "Backlog-Closure:x-59a6:x-1111" - read as a valid separator via
+# the leading-boundary group below, so the gate passed a trailer the real
+# parser tokenizes as one malformed run and binds zero ids from (round-10
+# review fix: reproduced live, gate passed / parser returned []).
+trailer_body=""
+if [[ "$trailer_line" =~ ^[^:]*:[[:space:]]*(.*)$ ]]; then
+  trailer_body="${BASH_REMATCH[1]}"
+fi
+
 missing=()
 for cand in "${candidates[@]}"; do
-  # The preceding boundary also accepts ":" and "," - the runtime parser
-  # (fno.pr.closure._TRAILER_LINE_RE, `[ \t]*` after the colon; parse_closure_trailer's
-  # `.replace(",", " ")` before splitting) accepts ZERO spaces after the
-  # colon and treats a comma as an equivalent separator with no space
-  # required either side. "Backlog-Closure:x-59a6,x-1111" binds both ids at
-  # merge time; without both chars in the LEADING alternation this gate
+  # The preceding boundary also accepts "," - the runtime parser's
+  # `.replace(",", " ")` before splitting treats a comma as an equivalent
+  # separator with no space required either side. "x-59a6,x-1111" binds both
+  # ids at merge time; without "," in the LEADING alternation this gate
   # reports the second id as missing even though it closes correctly
-  # (round-7 fixed the colon case, round-8 caught the comma one - trailer_line
-  # still carries the "Backlog-Closure:" prefix since grep returns the whole
-  # matched line, not a capture group).
-  if ! printf '%s' "$trailer_line" | grep -qE "(^|[[:space:]]|:|,)${cand}([[:space:]]|,|\$)"; then
+  # (round-8 fix). No ":" in this alternation - trailer_body already has the
+  # label's own colon stripped, so any colon reaching here is a real
+  # malformed token, not a separator.
+  if ! printf '%s' "$trailer_body" | grep -qE "(^|[[:space:]]|,)${cand}([[:space:]]|,|\$)"; then
     missing+=("$cand")
   fi
 done

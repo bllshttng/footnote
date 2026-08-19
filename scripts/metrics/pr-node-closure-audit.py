@@ -117,8 +117,14 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
     secondaries = seen_order[1:]
 
     trailer_matches = _TRAILER_RE.findall(body)
+    # `.replace(",", " ")` before splitting, mirroring the runtime parser
+    # (fno.pr.closure.parse_closure_trailer) - a comma-separated trailer with
+    # no space ("Backlog-Closure: x-cdef,x-59a6") binds both ids at merge
+    # time, but a bare `.split()` here treated "x-cdef,x-59a6" as one token
+    # (not in node_ids) and undercounted the audit's own close_claim bucket
+    # (round-10 review fix: reproduced live pre-fix).
     trailer_ids = (
-        {t for t in trailer_matches[-1].split() if t in node_ids}
+        {t for t in trailer_matches[-1].replace(",", " ").split() if t in node_ids}
         if trailer_matches
         else set()
     )

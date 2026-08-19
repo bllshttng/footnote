@@ -576,7 +576,13 @@ def _find_pr_node_id(
             if num != pr_number:
                 continue
             node_slug = repo_slug_from_url((u or "").strip())
-            if node_slug is None or node_slug == our_slug:
+            # Case-insensitive, matching cli.py's _pr_touch_ids and
+            # closure.py's bind_closure_claims - a GitHub owner/repo slug is
+            # itself case-insensitive, and the two other repo-match sites
+            # already lowercase; leaving this one exact-case let the same
+            # real repo match one path and refuse another (round-10 review
+            # fix).
+            if node_slug is None or node_slug.lower() == our_slug.lower():
                 matches.append(nid)
             break
     uniq = list(dict.fromkeys(matches))

@@ -10,27 +10,20 @@ class HoldLookupError(RuntimeError):
     """The merge path could not prove whether its bound plan is held."""
 
 
-def _pr_url(pr_number: int, cwd: str) -> str:
-    from fno.pr import _merge
-    from fno.pr._proc import ToolMissing
-
-    try:
-        result = _merge._gh(
-            ["pr", "view", str(pr_number), "--json", "url", "-q", ".url"],
-            cwd,
-        )
-    except ToolMissing as exc:
-        raise HoldLookupError("gh CLI is unavailable") from exc
-    if not result.ok or not result.stdout.strip():
-        raise HoldLookupError("PR URL is unreadable; cannot scope the hold lookup")
-    return result.stdout.strip()
-
-
 def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
-    """Return the held/invalid plan ancestry for a PR, or None when unheld."""
+    """Return the held/invalid plan ancestry for a PR, or None when unheld.
+
+    Checks BOTH the ref-stamped node (``_find_pr_node_id``) and every node
+    named on the PR's exact ``Backlog-Closure`` trailer - a trailer-only
+    claim (a node never individually stamped at creation) was invisible to
+    the ref-based match alone, so a held node named only on the trailer
+    passed this gate and closed post-merge via ``bind_closure_claims``,
+    which performs no hold check of its own (round-10 review fix).
+    """
     from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.pr._merge import _find_pr_node_id
+    from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
 
     try:
         entries = read_graph(graph_json())
@@ -38,28 +31,56 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         raise HoldLookupError(f"backlog graph is unreadable: {exc}") from exc
     from fno.graph._reconcile import node_pr_refs
 
-    if not any(
+    stamped = any(
         number == pr_number
         for entry in entries
         if isinstance(entry, dict)
         for number, _url in node_pr_refs(entry)
-    ):
+    )
+
+    try:
+        pr_ctx = fetch_pr_closure_context(pr_number, cwd=cwd)
+    except ClosureQueryError as exc:
+        if not stamped:
+            # Nothing ref-stamped and the trailer is unreadable: there is no
+            # claim of either kind to hold-check.
+            return None
+        raise HoldLookupError(f"PR body is unreadable; cannot scope the hold lookup: {exc}") from exc
+
+    ref_node_id: Optional[str] = None
+    if stamped:
+        ref_node_id = _find_pr_node_id(entries, pr_number, pr_ctx.url or "")
+
+    candidate_ids: list[str] = []
+    if ref_node_id is not None:
+        candidate_ids.append(ref_node_id)
+    for claimed in parse_closure_trailer(pr_ctx.body):
+        if claimed not in candidate_ids:
+            candidate_ids.append(claimed)
+
+    if not candidate_ids:
+        # No graph-bound delivery of either kind means there is no Footnote
+        # plan hold to read. A same-number node in another repo is
+        # deliberately not a match.
         return None
-    url = _pr_url(pr_number, cwd)
-    node_id = _find_pr_node_id(entries, pr_number, url)
-    if node_id is None:
-        # No graph-bound delivery means there is no Footnote plan hold to read.
-        # A same-number node in another repo is deliberately not a match.
-        return None
+
     by_id = {
         entry.get("id"): entry
         for entry in entries
         if isinstance(entry, dict) and entry.get("id")
     }
-    node = by_id.get(node_id)
-    if not isinstance(node, dict):
-        raise HoldLookupError(f"graph node {node_id} disappeared during hold lookup")
-    return dispatch_hold_verdict(node, by_id)
+    for node_id in candidate_ids:
+        node = by_id.get(node_id)
+        if not isinstance(node, dict):
+            if node_id == ref_node_id:
+                raise HoldLookupError(f"graph node {node_id} disappeared during hold lookup")
+            # A trailer can name an id this graph slice does not carry (a
+            # typo, or another project's node) - nothing to hold-check.
+            continue
+        verdict = dispatch_hold_verdict(node, by_id)
+        if verdict is not None:
+            return verdict
+    return None
 
 
 def merge_hold_reason(pr_number: int, cwd: str) -> Optional[str]:

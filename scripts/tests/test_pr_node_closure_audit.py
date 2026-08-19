@@ -96,6 +96,21 @@ def test_scan_pr_trailer_always_close_claim_regardless_of_prose():
     assert m.classification == "close_claim"
 
 
+def test_scan_pr_trailer_comma_with_no_space_still_close_claim():
+    # Round-10 review fix: the runtime binder tokenizes on "," same as
+    # whitespace (parse_closure_trailer's `.replace(",", " ")`), so a
+    # no-space comma-joined trailer binds both ids at merge time. The audit
+    # must classify the secondary as close_claim too, not undercount it.
+    body = (
+        "x-5b99 is the primary.\n"
+        "x-3a91 is mentioned in passing.\n"
+        "Backlog-Closure: x-5b99,x-3a91\n"
+    )
+    mentions = audit.scan_pr(901, body, NODE_IDS)
+    m = next(m for m in mentions if m.node_id == "x-3a91")
+    assert m.classification == "close_claim"
+
+
 def test_scan_pr_ignores_non_graph_ids():
     # A hex-shaped token that is NOT a real graph node (e.g. a carveout id
     # coincidentally matching the format) must never count as a mention.

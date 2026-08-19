@@ -83,4 +83,17 @@ run "Backlog-Closure:x-cdef,x-59a6" "feature/x-59a6" \
   && pass "no space after comma still passes" \
   || fail "no space after comma should still pass"
 
+# stray-internal-colon: a second id glued to the first with a bare ":" (no
+# comma, no space) is ONE malformed token to the runtime parser
+# (parse_closure_trailer tokenizes only on whitespace/",", so
+# "x-59a6:x-1111" never splits and is_wellformed_node_id rejects the whole
+# token - zero ids bound). The gate must fail this, not pass it via the
+# label's own colon being mistaken for a separator (round-10 review fix:
+# reproduced live pre-fix, where this passed the gate and bound nothing).
+if run "Backlog-Closure:x-59a6:x-1111" "feature/x-1111"; then
+  fail "stray internal colon should fail (parser binds zero ids from it)"
+else
+  pass "stray internal colon between ids fails"
+fi
+
 log "all scenarios passed"
