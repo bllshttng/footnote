@@ -221,7 +221,7 @@ no_docs = false
 max_iterations = 40
 
 [agents]
-# Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb (agents.profiles.<verb>.{provider,model,effort,substrate,permission_mode,route,account}), one rung above agents.defaults in precedence. The verb key is the seed's first token, /-stripped and fno:-namespace-stripped, lowercase (/fno:think and /think resolve alike). The overlay reaches every spawn carrying a slash-verb seed, including autonomous dispatch; an explicit flag always wins. No content-based inference; a table with no matching verb resolves exactly as agents.defaults.
+# Per-verb spawn-defaults overlay keyed by the seed's leading slash-verb. A profile may set scalar fields or a strict ordered lanes list whose links use {provider,model,effort,substrate,permission_mode,route,account,pane_group}. Lane fields sit one rung above profile scalars; explicit flags still win. Malformed lanes refuse at the spawn seam rather than billing an unintended vendor.
 profiles = {}
 # Ordered fallback chain per node size, consulted ONLY when a provider refuses and the account queue cannot answer (agents.fallback.<S|M|L|default> = a list of {harness,model,effort,substrate,permission_mode,route,account} links). The operator rule 'simple work to a claude sonnet bg thread, complex work to codex' written where a daemon can read it. Give every size more than one link: a claude weekly cap and a z.ai five-hour cap are different meters with different periods, and either can be the one that is down. A link whose own provider reads EXHAUSTED with an unexpired reset is SKIPPED; UNKNOWN is not exhausted and stays eligible. An all-exhausted chain returns empty rather than link zero, because routing into a known-capped provider is worse than holding. Unlike agents.profiles this block REFUSES a malformed value rather than degrading open: degrading open on the failover path spawns a worker at an unintended vendor and bills it.
 fallback = {}
@@ -239,6 +239,8 @@ dead_row_grace = 3600
 max_live = 3
 # Immediate-refusal concurrent live-worker caps keyed by model provider; unlisted providers are uncapped (default zai = 5).
 max_lanes = { zai = 5 }
+# Maximum panes placed in one named pane_group tab before a spawn creates the next numbered sibling tab (default 4).
+pane_group_max = 4
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
 min_free_gb = 4.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.

@@ -124,16 +124,29 @@ The stage table reaches **every** spawn that carries a slash-verb seed, includin
 `skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile.
 An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
 
-```yaml
-config:
-  agents:
-    profiles:
-      blueprint:
-        model: opus               # the think/blueprint stage on the primary model
-      target:
-        route: "zai/glm-5.3[1m]"  # the delivery stage on the routed vendor
-        effort: high
+```toml
+[agents]
+pane_group_max = 4
+
+[agents.profiles.blueprint]
+model = "opus"
+
+[[agents.profiles.target.lanes]]
+provider = "codex"
+effort = "high"
+substrate = "pane"
+permission_mode = "yolo"
+pane_group = "codex"
+
+[[agents.profiles.target.lanes]]
+provider = "claude"
+route = "zai/glm-5.3[1m]"
+substrate = "bg"
 ```
+
+When a profile has `lanes`, the live-worker count chooses the round-robin start and selection skips forward past a routed vendor already at `agents.max_lanes`. If every lane is capped, or the provider count is incomplete, the spawn refuses rather than billing an unintended lane. Substrate and `permission_mode` ride the lane because the Claude/GLM lane can use `bg`, while the Codex lane needs a pane plus a permission mode that can reach `~/.fno`.
+
+`pane_group` is injected as `fno agents spawn --tab <group>` on pane lanes. The spawn reuses the first `<group>`, `<group>-2`, ... tab below `pane_group_max`; when none has room it creates and names the next sibling. The read-then-act is intentionally not globally serialized, so concurrent spawns may briefly overfill a tab, but placement never changes the worker route.
 
 The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
 

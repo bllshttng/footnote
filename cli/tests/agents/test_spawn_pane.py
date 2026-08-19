@@ -50,6 +50,9 @@ class FakeRunner:
         read_returncode: int = 0,
         read_stderr: str = "",
         placement: Optional[dict] = None,
+        tabs_stdout: Optional[str] = None,
+        tabs_returncode: int = 0,
+        tabs_stderr: str = "",
         kill_returncode: int = 0,
         kill_stderr: str = "",
         kill_exception: Optional[Exception] = None,
@@ -65,6 +68,9 @@ class FakeRunner:
         self.read_returncode = read_returncode
         self.read_stderr = read_stderr
         self.placement = placement
+        self.tabs_stdout = tabs_stdout
+        self.tabs_returncode = tabs_returncode
+        self.tabs_stderr = tabs_stderr
         self.kill_calls: list[list[str]] = []
         self.kill_returncode = kill_returncode
         self.kill_stderr = kill_stderr
@@ -106,6 +112,12 @@ class FakeRunner:
                     [{"pane_id": 7, "squad_id": 1, "tab_id": 1, "cwd": "/w", "child_pid": 4242}]
                 )
             return subprocess.CompletedProcess(argv, 0, out, "")
+        if argv[1:4] == ["mux", "tab", "ls"]:
+            return subprocess.CompletedProcess(
+                argv, self.tabs_returncode, self.tabs_stdout or "[]", self.tabs_stderr
+            )
+        if argv[1:4] == ["mux", "tab", "rename"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[1:4] == ["mux", "pane", "wait"]:
             return subprocess.CompletedProcess(argv, self.wait_returncode, "", "")
         if argv[1:4] == ["mux", "pane", "read"]:
@@ -1838,7 +1850,70 @@ def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatc
         ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "-x", "left"],
     )
     assert res.exit_code == 2, res.output
-    assert "--split/-x, and --at apply only to --substrate pane" in res.output
+    assert "--split/-x, --at, and --tab apply only to --substrate pane" in res.output
+
+
+def test_cmd_spawn_tab_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    res = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "peer", "--harness", "claude", "--substrate", "bg", "--tab", "name:x"],
+    )
+    assert res.exit_code == 2, res.output
+    assert "--tab" in res.output and "--substrate pane" in res.output
+
+
+def test_pane_group_reuses_first_tab_with_room(tmp_path: Path, monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    tabs = json.dumps([{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3], "active": True}])
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=FakeRunner(tabs_stdout=tabs))
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    sep = run_call.index("--")
+    assert run_call[run_call.index("--tab") + 1] == "name:codex"
+    assert run_call.index("--tab") < sep
+    assert not [call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"]]
+
+
+def test_pane_group_overflow_creates_numbered_tab(tmp_path: Path, monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    tabs = json.dumps([{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3, 4], "active": True}])
+    panes = json.dumps([{"pane_id": 7, "squad_id": 1, "tab_id": 10, "cwd": "/w", "child_pid": 4242}])
+    _result, runner = _spawn(
+        monkeypatch,
+        tmp_path,
+        tab="codex",
+        runner=FakeRunner(tabs_stdout=tabs, ls_stdout=panes),
+    )
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert run_call[run_call.index("--tab") + 1] == "new"
+    rename = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"])
+    assert rename[rename.index("--tab") + 1] == "id:10"
+    assert rename[rename.index("--name") + 1] == "codex-2"
+
+
+def test_pane_group_first_spawn_bootstraps_missing_mux(tmp_path: Path, monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    panes = json.dumps([{"pane_id": 7, "squad_id": 1, "tab_id": 1, "cwd": "/w", "child_pid": 4242}])
+    runner = FakeRunner(
+        tabs_returncode=1,
+        tabs_stderr='fno mux: cannot reach session "main": No such file or directory (os error 2)',
+        ls_stdout=panes,
+    )
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=runner)
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert run_call[run_call.index("--tab") + 1] == "new"
+    rename = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"])
+    assert rename[rename.index("--name") + 1] == "codex"
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:

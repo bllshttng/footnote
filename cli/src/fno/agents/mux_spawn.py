@@ -1529,8 +1529,7 @@ def _run_mux(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         # The EFFECTIVE timeout, not the module default: the binding-loop probes
-        # pass a 2s bound, so naming 30s here would be a diagnostics lie in the
-        # one subsystem this change exists to make truthful.
+        # pass a 2s bound, so naming 30s here would be a diagnostics lie.
         effective = _MUX_SUBPROCESS_TIMEOUT_S if timeout is None else timeout
         raise DispatchAskError(
             f"fno mux did not answer within {effective}s ({' '.join(args[:3])}...)",
@@ -1538,6 +1537,119 @@ def _run_mux(
         ) from exc
 
 
+def _pane_group_max() -> int:
+    try:
+        from fno.config import load_settings
+
+        return max(1, int(load_settings().agents.pane_group_max))
+    except Exception:
+        return 4
+
+
+def _tab_scope_args(squad: Optional[str]) -> list[str]:
+    return ["--workspace", squad] if squad else []
+
+
+def _resolve_group_tab(
+    requested: str,
+    session: str,
+    squad: Optional[str],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[str, Optional[str]]:
+    """Return the pane-run selector and an optional post-create tab name."""
+    if (
+        requested in {"active", "new"}
+        or requested.startswith(("id:", "name:"))
+        or requested.isdigit()
+    ):
+        return requested, None
+
+    listed = _run_mux(
+        ["mux", "tab", "ls", "--session", session, *_tab_scope_args(squad), "--json"],
+        runner,
+    )
+    detail = (listed.stderr or listed.stdout or "no output").strip()
+    missing_server = (
+        listed.returncode == 1
+        and "cannot reach session" in detail
+        and "No such file or directory" in detail
+    )
+    if listed.returncode != 0 and not missing_server:
+        raise DispatchAskError(
+            f"cannot resolve pane group {requested!r}: mux tab ls failed: {detail}",
+            exit_code=1,
+        )
+    try:
+        rows = [] if missing_server else json.loads(listed.stdout or "[]")
+        if not isinstance(rows, list):
+            raise ValueError("tab list is not an array")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(
+            f"cannot resolve pane group {requested!r}: unparseable tab list",
+            exit_code=1,
+        ) from exc
+
+    by_name = {
+        row.get("name"): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+    max_panes = _pane_group_max()
+    suffix = 1
+    while True:
+        name = requested if suffix == 1 else f"{requested}-{suffix}"
+        row = by_name.get(name)
+        if row is None:
+            return "new", name
+        pane_ids = row.get("pane_ids")
+        if isinstance(pane_ids, list) and len(pane_ids) < max_panes:
+            return f"name:{name}", None
+        suffix += 1
+
+
+def _rename_spawned_group_tab(
+    session: str,
+    squad: Optional[str],
+    pane_id: int,
+    name: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    panes = _run_mux(
+        ["mux", "pane", "ls", "--session", session, "--json"], runner
+    )
+    try:
+        rows = json.loads(panes.stdout or "[]") if panes.returncode == 0 else []
+        row = next(
+            item
+            for item in rows
+            if isinstance(item, dict) and item.get("pane_id") == pane_id
+        )
+        tab_id = int(row["tab_id"])
+    except (StopIteration, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(
+            f"pane group {name!r} was created but pane {pane_id} has no resolvable tab id",
+            exit_code=1,
+        ) from exc
+    renamed = _run_mux(
+        [
+            "mux",
+            "tab",
+            "rename",
+            "--session",
+            session,
+            *_tab_scope_args(squad),
+            "--tab",
+            f"id:{tab_id}",
+            "--name",
+            name,
+        ],
+        runner,
+    )
+    if renamed.returncode != 0:
+        detail = (renamed.stderr or renamed.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"pane group tab rename to {name!r} failed: {detail}", exit_code=1
+        )
 def _reap_spawned_pane(
     session: str,
     pane_id: int,
@@ -2437,6 +2549,7 @@ def dispatch_spawn_pane(
     squad: Optional[str] = None,
     split: Optional[str] = None,
     at: Optional[str] = None,
+    tab: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
@@ -2611,6 +2724,12 @@ def dispatch_spawn_pane(
         effective_message = message
 
     session = resolve_mux_session(session)
+    tab_selector: Optional[str] = None
+    tab_name_after_create: Optional[str] = None
+    if tab:
+        tab_selector, tab_name_after_create = _resolve_group_tab(
+            tab, session, squad, runner
+        )
     # Resolve the monitor BEFORE the argv build. happy OWNS the claude session
     # id: claudeLocal() extracts `--session-id` out of the caller's argv and only
     # re-adds it on its `!hookSettingsPath` branch, which a normal `happy` launch
@@ -2731,6 +2850,8 @@ def dispatch_spawn_pane(
             placement_args += ["squad", squad]
         if split:
             placement_args += ["split", split]
+        if tab_selector:
+            placement_args += ["--tab", tab_selector]
         if at:
             # `--at current` (or a numeric anchor) rides the outer pane-run
             # transport before the `--` fence. Python forwards the token
@@ -2837,6 +2958,16 @@ def dispatch_spawn_pane(
                     f"{session}'",
                     exit_code=1,
                 ) from exc
+
+        if tab_name_after_create is not None:
+            try:
+                _rename_spawned_group_tab(
+                    session, squad, pane_id, tab_name_after_create, runner
+                )
+            except DispatchAskError as exc:
+                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                suffix = "pane reaped" if reaped else f"cleanup failed: {cleanup_detail}"
+                raise DispatchAskError(f"{exc}; {suffix}", exit_code=exc.exit_code) from exc
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
         from fno.agents.spawn_gate import _process_start_time

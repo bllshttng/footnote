@@ -461,6 +461,42 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
     assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
 
 
+def test_profile_lane_injects_pane_group(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {"lanes": [{
+            "provider": "codex",
+            "substrate": "pane",
+            "permission_mode": "yolo",
+            "pane_group": "codex",
+        }]}},
+    )
+    assert out[out.index("--tab") + 1] == "codex"
+    assert "agents.profiles.target.lanes[0].pane_group" in err.getvalue()
+
+
+def test_explicit_tab_wins_over_profile_pane_group(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    out = _inject(
+        ["spawn", "--name", "w", "--tab", "name:manual", "/fno:target x-1"],
+        profiles={"target": {"lanes": [{
+            "provider": "codex",
+            "substrate": "pane",
+            "permission_mode": "yolo",
+            "pane_group": "codex",
+        }]}},
+    )
+    assert out.count("--tab") == 1
+    assert out[out.index("--tab") + 1] == "name:manual"
+
+
 def test_ac4_err_incompatible_config_substrate_degrades_open():
     # bg on a codex-resolved spawn: no --substrate injected, warning names it.
     err = io.StringIO()

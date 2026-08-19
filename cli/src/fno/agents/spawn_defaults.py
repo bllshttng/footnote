@@ -1004,9 +1004,10 @@ def inject_spawn_defaults(
     cfg_permission, permission_rung = field("permission_mode")
     cfg_route, route_rung = field("route")
     cfg_account, account_rung = field("account")
+    cfg_pane_group, pane_group_rung = field("pane_group")
     if not (
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
-        or cfg_route or cfg_account
+        or cfg_route or cfg_account or cfg_pane_group
     ):
         _warn_model_vendor_mismatch(out, err, env)
         return out
@@ -1316,6 +1317,19 @@ def inject_spawn_defaults(
             print(
                 f"fno agents spawn: permission-mode skipped ({reason}); "
                 f"{permission_rung}.permission_mode = {cfg_permission!r} ignored",
+                file=err,
+            )
+
+    if cfg_pane_group and _flag_value(out[1:], "--tab") is None:
+        eff_substrate = explicit_substrate or injected_substrate or "pane"
+        if eff_substrate == "pane":
+            inject += ["--tab", cfg_pane_group]
+            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
+        else:
+            print(
+                f"fno agents spawn: pane group skipped (resolved substrate "
+                f"{eff_substrate!r} has no pane geometry); "
+                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
                 file=err,
             )
 
