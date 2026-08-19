@@ -5763,7 +5763,12 @@ def _build_live_snapshot(tracker=None) -> dict:
     from fno.tracker import sidecar as sidecar_store
 
     tracker = tracker or get_tracker()
-    candidates = tracker.list_open()
+    try:
+        candidates = tracker.list_open()
+    except Exception as exc:  # noqa: BLE001 - name the backend, fail closed like selection
+        raise _ExternalSelectionError(
+            f"tracker {tracker.name!r} list_open failed: {exc}"
+        ) from exc
     open_ids = {c.id for c in candidates}
 
     # Tombstones for closed dependencies referenced by open items. An
@@ -5833,7 +5838,11 @@ def cmd_status(
     from fno.graph._intake import detect_project
 
     if snapshot:
-        typer.echo(json.dumps(_build_live_snapshot(), indent=2))
+        try:
+            typer.echo(json.dumps(_build_live_snapshot(), indent=2))
+        except _ExternalSelectionError as exc:
+            typer.echo(f"backlog status --snapshot: {exc}", err=True)
+            raise typer.Exit(code=1)
         return
 
     entries = _display_entries("status.summary")

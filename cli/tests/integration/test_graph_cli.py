@@ -696,6 +696,28 @@ def test_snapshot_mode_is_bounded_to_the_open_set(tmp_path, monkeypatch):
     assert calls == ["EXT-done"], f"read() must only resolve open blockers, saw {calls}"
 
 
+def test_snapshot_mode_fails_closed_on_a_list_open_error(tmp_path, monkeypatch):
+    """A bad tracker row (e.g. a malformed rank) must not crash the whole
+    snapshot render with a raw traceback - it fails loud with a named
+    backend, the same AC6-ERR contract selection already gets."""
+
+    class _FailingTracker(_SnapshotFakeTracker):
+        def list_open(self):
+            raise RuntimeError("bad row")
+
+    monkeypatch.setattr("fno.tracker.get_tracker", lambda *a, **k: _FailingTracker())
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "absent.json")
+    import fno.tracker.sidecar as sidecar_store
+
+    monkeypatch.setattr(sidecar_store, "sidecar_path",
+                        lambda i: tmp_path / "sidecars" / f"{i}.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    r = _invoke("backlog", "status", "--snapshot")
+    assert r.exit_code == 1
+    assert "list_open failed" in r.stderr
+
+
 # --- validate ---
 
 # --- cost ---
