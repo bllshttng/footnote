@@ -2198,6 +2198,7 @@ fn read_pr_info(
     // argv byte-identical to the stop hook's branch-resolved form. The one
     // number-based call (`gh api .../pulls/<n>/comments`) already carries the
     // number the first read returned.
+    let sel: Vec<&str> = pr_selector.into_iter().collect();
     // Read 1: PR state + number + head OID + mergeability
     let Some(pr_json) = read_pr_view(gh_bin, cwd, pr_selector)? else {
         // No PR yet: world-state, not an error. done() is simply false, and
