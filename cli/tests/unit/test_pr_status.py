@@ -694,11 +694,26 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
     assert out["ready_blockers"] == ["ci_red"]
 
 
-def test_ready_is_false_on_a_conflicting_pr_even_with_green_ci(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "mergeable, expected_ready, expected_blocker",
+    [
+        pytest.param(
+            "CONFLICTING", False, "not_mergeable_conflicting", id="conflicting"
+        ),
+        pytest.param(
+            "UNKNOWN", False, "not_mergeable_unknown",
+            id="still-computing-a-null-from-github-maps-to-the-string-unknown",
+        ),
+        pytest.param("MERGEABLE", True, None, id="the-common-case-adds-no-blocker"),
+    ],
+)
+def test_ready_reflects_mergeable(
+    monkeypatch, capsys, mergeable, expected_ready, expected_blocker
+):
     """x-4271: PR 965 read verdict green / ready true / ready_blockers empty
     at mergeable=CONFLICTING, because `mergeable` never reached the ready
-    conjunction. A dirty merge state must block ready regardless of what the
-    (self-published, real-CI-free) check tally says."""
+    conjunction. A dirty or still-computing merge state must block ready
+    regardless of what the (self-published, real-CI-free) check tally says."""
     import json
 
     _green_fetch(monkeypatch)
@@ -708,7 +723,7 @@ def test_ready_is_false_on_a_conflicting_pr_even_with_green_ci(monkeypatch, caps
         lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-            "mergeable": "CONFLICTING",
+            "mergeable": mergeable,
         }, ""),
     )
     monkeypatch.setattr(
@@ -718,60 +733,11 @@ def test_ready_is_false_on_a_conflicting_pr_even_with_green_ci(monkeypatch, caps
     )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
-    assert out["ready"] is False
-    assert "not_mergeable_conflicting" in out["ready_blockers"]
-
-
-def test_ready_is_false_while_mergeable_is_still_computing(monkeypatch, capsys):
-    """Null `mergeable` from GitHub (still computing) maps to the string
-    'UNKNOWN' upstream - that must block ready too: null means still
-    computing, never fine (x-4271)."""
-    import json
-
-    _green_fetch(monkeypatch)
-    monkeypatch.setattr(
-        _status,
-        "_fetch",
-        lambda pr, cwd: ({
-            "state": "OPEN",
-            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-            "mergeable": "UNKNOWN",
-        }, ""),
-    )
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
-    )
-    _status.run_status("42")
-    out = json.loads(capsys.readouterr().out)
-    assert out["ready"] is False
-    assert "not_mergeable_unknown" in out["ready_blockers"]
-
-
-def test_ready_is_unaffected_when_mergeable_is_mergeable(monkeypatch, capsys):
-    """The common case: a genuinely mergeable PR adds no blocker."""
-    import json
-
-    _green_fetch(monkeypatch)
-    monkeypatch.setattr(
-        _status,
-        "_fetch",
-        lambda pr, cwd: ({
-            "state": "OPEN",
-            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-            "mergeable": "MERGEABLE",
-        }, ""),
-    )
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
-    )
-    _status.run_status("42")
-    out = json.loads(capsys.readouterr().out)
-    assert out["ready"] is True
-    assert out["ready_blockers"] == []
+    assert out["ready"] is expected_ready
+    if expected_blocker is None:
+        assert out["ready_blockers"] == []
+    else:
+        assert expected_blocker in out["ready_blockers"]
 
 
 def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys):

@@ -1005,6 +1005,39 @@ def test_checks_verdict_can_ignore_only_the_coverage_status(monkeypatch):
     assert head == "abc123"
 
 
+def test_checks_verdict_is_unknown_when_only_self_published_statuses_survive_the_strip(
+    monkeypatch,
+):
+    """x-4271 review finding: after `ignore_contexts` strips review-coverage,
+    a rollup whose only remaining signal is another self-published
+    StatusContext (stacked-base-guard) has zero real check-runs, same as a
+    conflicting PR that never got a workflow run. `verdict_for`'s
+    zero-real-check-run refusal must fire here too, not just green - a green
+    read off two self-published statuses is exactly PR 965's original bug,
+    replayed one level down inside the merge gate itself. `unknown` still
+    HOLDS rather than fails require_checks_pass (test_auto_merge_unsupported_
+    repo_holds_on_an_unreadable_rollup pins that generically for any cause),
+    so this closes a coverage gap, not a behavior change."""
+    rollup = {
+        "headRefOid": "abc123",
+        "statusCheckRollup": [
+            {"context": "fno/review-coverage", "state": "SUCCESS"},
+            {"context": "stacked-base-guard", "state": "SUCCESS"},
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_rest",
+        lambda pr, cwd=None, runner=None: (rollup, ""),
+    )
+
+    verdict, counts, head = _merge._checks_verdict(
+        42, "/repo", ignore_contexts=("fno/review-coverage",)
+    )
+    assert verdict == "unknown"
+    assert counts["total"] == 1
+    assert head == "abc123"
+
+
 def test_checks_verdict_keeps_other_failing_contexts(monkeypatch):
     rollup = {
         "headRefOid": "abc123",

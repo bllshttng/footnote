@@ -214,6 +214,14 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     if counts["pending"]:
         return ("pending", 2, counts)
     if not real_check_runs:
+        # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
+        # real CI still rides the legacy commit-status API (no GitHub Actions,
+        # no Checks-API app) would never clear this and would hold forever
+        # under `require_checks_pass` (unknown holds, never fails - see
+        # _merge.py's `_checks_verdict` caller). footnote's own workflows
+        # (guards.yml et al.) are all Actions/CheckRuns, so this repo never
+        # hits it; a fork that genuinely needs status-only CI as its sole
+        # signal should route around this via `require_checks_pass=false`.
         return ("unknown", 3, counts)
     return ("green", 0, counts)
 
