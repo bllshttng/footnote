@@ -454,9 +454,13 @@ queue_has_waiters() {
 }
 
 holder_status_line() {
-    # Augment a holder stamp with elapsed=. An unparsable started= reads as
-    # now, so an odd stamp prints elapsed=0m rather than aborting the status.
-    local line="$1" started now age_s age
+    # Augment a holder stamp with elapsed=, cpu=, and orphaned=. An unparsable
+    # started= reads as now, so an odd stamp prints elapsed=0m rather than
+    # aborting the status. cpu and parentage are what separate a healthy queue
+    # from a starved one: the 2026-08-18 incident read "queued" for over an
+    # hour while the holder sat at zero CPU with no launcher. One ps sweep per
+    # printed line; the line prints at most once a minute, never per poll.
+    local line="$1" started now age_s age pid cpu orphan=""
     started="$(printf '%s' "$line" | sed -n 's/.*started=\([^ ]*\).*/\1/p')"
     now="$(date +%s 2>/dev/null || echo 0)"
     age_s=$(( now - $(date -u -d "$started" +%s 2>/dev/null \
@@ -464,7 +468,17 @@ holder_status_line() {
         || echo "$now") ))
     (( age_s < 0 )) && age_s=0
     if (( age_s < 3600 )); then age="$((age_s / 60))m"; else age="$((age_s / 3600))h"; fi
-    echo "$line elapsed=$age"
+    pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+    # No readable pid means no measurable CPU: print ? rather than a 0 that
+    # reads as a measured zero-CPU (wedged) holder. holder_tree_cpu always
+    # succeeds, so there is no failure fallback to carry.
+    if [[ -n "$pid" ]]; then
+        cpu="cpu=$(holder_tree_cpu "$pid" 2>/dev/null)s"
+    else
+        cpu="cpu=?"
+    fi
+    holder_is_orphaned "$pid" && orphan=" orphaned=yes"
+    echo "$line elapsed=$age $cpu$orphan"
 }
 
 skip_hint() {
@@ -558,6 +572,18 @@ holder_pid_recycled() {
     (( stamp_age > proc_age + 60 ))
 }
 
+holder_is_orphaned() {
+    # A holder reparented to pid 1 has lost its launcher: in the incident
+    # shape the session that started it is gone and nothing will ever collect
+    # its result, so the 20m stall floor buys nothing for it. This alone never
+    # condemns: a detached holder that is computing still passes the CPU probe
+    # and keeps the lock. An unreadable ppid reads as NOT orphaned, so an
+    # unmeasurable holder is waited on rather than stolen.
+    local ppid
+    ppid="$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')"
+    [[ "$ppid" == "1" ]]
+}
+
 path_mtime_s() {
     # A path's mtime in epoch seconds; empty when stat cannot read it. GNU
     # first: GNU stat reads -f as --file-system, so a BSD-first spelling
@@ -615,7 +641,14 @@ holder_is_stalled() {
     age_s=$(( now - $(date -u -d "$started" +%s 2>/dev/null \
         || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null \
         || echo "$now") ))
-    (( age_s >= STALL_MIN_AGE )) || return 1
+    # The floor exists so a young holder is never condemned for a slow start.
+    # An orphan has no launcher left to finish for, so the floor buys nothing
+    # and costs the whole fleet twenty minutes. It still has to fail the CPU
+    # probe below (LD3): detached and computing is not the same as wedged.
+    if holder_is_orphaned "$pid"; then _STALL_ORPHANED=1; else _STALL_ORPHANED=0; fi
+    if (( age_s < STALL_MIN_AGE && _STALL_ORPHANED == 0 )); then
+        return 1
+    fi
     if [[ "$line" != "${_STALL_HOLDER:-}" ]]; then
         _STALL_HOLDER="$line"; _STALL_T="$now"; _STALL_CPU="$(holder_tree_cpu "$pid")"
         return 1
@@ -764,7 +797,13 @@ acquire_lock() {
                 if steal_dead_lock "$holder_line"; then
                     dequeue_ticket
                     signal_holder_tree "$holder_pid"
-                    echo "preflight: EXCEPTION - stole the lock from stalled holder pid=$holder_pid (alive but not computing; TERMed its tree; its run VOIDs)" >&2
+                    # Which condemnation fired: an orphan steal beats the age
+                    # floor, so "stalled" alone would describe a holder that
+                    # never aged out. _STALL_ORPHANED holds 0 or 1; a ${var:+}
+                    # expansion is wrong here because 0 is non-empty too.
+                    condemn=stalled
+                    (( ${_STALL_ORPHANED:-0} == 1 )) && condemn=orphaned
+                    echo "preflight: EXCEPTION - stole the lock from $condemn holder pid=$holder_pid (alive but not computing; TERMed its tree; its run VOIDs)" >&2
                     return 0
                 fi
             fi
