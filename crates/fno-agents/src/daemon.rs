@@ -3997,6 +3997,48 @@ async fn stamp_orphaned(
 ///   and A is NOT touched (the exchange did not complete).
 ///
 /// Errors: `AgentNotFound` (unknown `to`), `InvalidParams` (missing/oversized).
+/// A resolved registry row's identity, captured once and compared later to
+/// confirm the SAME row across a lock gap. `switchboard_identity_matches`
+/// and `handle_rm_with`'s retain both re-derived this comparison by hand
+/// (self-review finding: two implementations of one operation, each missing
+/// the field the other's calling context happened not to need); this is now
+/// the one shared core both build a [`RowIdentity`] for and call.
+///
+/// A field left `None` here is UNASSERTED, not required-absent: `session_id`
+/// in particular sits at `None` on a codex row until `late_bind_codex_sessions`
+/// binds it, so a `None` captured before that bind must not read as a
+/// mismatch against the SAME row's later `Some` (the finding #1 bug,
+/// generalized here to the one place it also existed).
+struct RowIdentity<'a> {
+    harness: Option<&'a str>,
+    name: Option<&'a str>,
+    short_id: &'a str,
+    session_id: Option<&'a str>,
+    created_at: &'a str,
+}
+
+fn row_identity_matches(entry: &RegistryEntry, expected: &RowIdentity) -> bool {
+    if let Some(harness) = expected.harness {
+        if entry.harness_name() != harness {
+            return false;
+        }
+    }
+    if let Some(name) = expected.name {
+        if entry.name != name {
+            return false;
+        }
+    }
+    if entry.short_id != expected.short_id {
+        return false;
+    }
+    if let Some(session_id) = expected.session_id {
+        if entry.harness_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+    }
+    entry.created_at == expected.created_at
+}
+
 fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool {
     let Some(expected) = identity.as_object() else {
         return false;
@@ -4015,10 +4057,16 @@ fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool
         Some(Value::String(value)) => Some(value.as_str()),
         _ => return false,
     };
-    entry.harness_name() == harness
-        && entry.harness_session_id.as_deref() == session_id
-        && entry.short_id == short_id
-        && entry.created_at == created_at
+    row_identity_matches(
+        entry,
+        &RowIdentity {
+            harness: Some(harness),
+            name: None,
+            short_id,
+            session_id,
+            created_at,
+        },
+    )
 }
 
 async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
@@ -5478,10 +5526,14 @@ async fn handle_rm_with(
             ),
         );
     }
-    // The stored enum is what fno last WROTE, not what is true: a session
-    // torn down by hand with `claude stop`/`claude rm`
-    // never updates it. A row absent from the roster is provably gone,
-    // whoever removed it. Anything less than proof keeps refusing.
+    // The stored enum is what fno last WROTE, not what is true: a claude
+    // session torn down by hand with `claude stop`/`claude rm` never
+    // updates it. A claude row absent from the `claude agents --json --all`
+    // roster is provably gone, whoever removed it. Anything less than proof
+    // keeps refusing. This reconciliation is claude-only (x-c6d5 tracks
+    // extending it to codex/opencode, self-review finding): `provably_gone`
+    // is unconditionally `false` for those harnesses, so they still hit the
+    // pre-fix stale-status refusal below with `--force` as the only escape.
     let provably_gone =
         claude_row_provably_absent(claude_agents.as_ref(), claude_row_id(&entry).as_deref());
     if entry.status == AgentStatus::Live && !force && !provably_gone {
@@ -5599,12 +5651,13 @@ async fn handle_rm_with(
     // row. Matching name alone would silently drop the NEW (possibly live)
     // row instead of the one this request actually resolved and tore down --
     // the same race `dispatch.py`'s `_recipient_identity_key` guards against,
-    // and `switchboard_identity_matches` (this file) guards for mail delivery.
-    // `created_at` is load-bearing, not decorative: a codex row's
-    // `harness_session_id` sits at `None` until `late_bind_codex_sessions`
-    // binds it, and `short_id` is deterministically derived from `name`, so a
-    // respawn under a just-freed name can otherwise reproduce every other
-    // field on the stale row while it waits on its own late-bind.
+    // and `row_identity_matches` (this file, shared with
+    // `switchboard_identity_matches`) guards for mail delivery. `created_at`
+    // is load-bearing, not decorative: a codex row's `harness_session_id`
+    // sits at `None` until `late_bind_codex_sessions` binds it, and
+    // `short_id` is deterministically derived from `name`, so a respawn
+    // under a just-freed name can otherwise reproduce every other field on
+    // the stale row while it waits on its own late-bind.
     let rm_short_id = entry.short_id.clone();
     let rm_session_id = entry.harness_session_id.clone();
     let rm_created_at = entry.created_at.clone();
@@ -5617,22 +5670,16 @@ async fn handle_rm_with(
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| {
-            // A `None` captured here means the harness session was unbound at
-            // resolution time, not that it must stay unbound: a concurrent
-            // late_bind_codex_sessions can persist `Some` on this SAME row
-            // before this write lands. Treating that as a mismatch (self-review
-            // finding) would read the very race name+short_id+created_at exist
-            // to survive as a reason to refuse the removal. Only a captured
-            // `Some` that disagrees with the current row is a real identity
-            // mismatch.
-            let session_matches = match &rm_session_id {
-                Some(sid) => e.harness_session_id.as_deref() == Some(sid.as_str()),
-                None => true,
-            };
-            !(e.name == rm_name
-                && e.short_id == rm_short_id
-                && session_matches
-                && e.created_at == rm_created_at)
+            !row_identity_matches(
+                e,
+                &RowIdentity {
+                    harness: None,
+                    name: Some(&rm_name),
+                    short_id: &rm_short_id,
+                    session_id: rm_session_id.as_deref(),
+                    created_at: &rm_created_at,
+                },
+            )
         });
         before - r.entries.len()
     })
@@ -7210,6 +7257,38 @@ mod tests {
         row.harness = Some("claude".into());
         row.harness_session_id = Some(session_id.into());
         row
+    }
+
+    #[test]
+    fn row_identity_matches_treats_a_none_session_capture_as_unasserted() {
+        // The one shared comparator both `handle_rm_with`'s retain and
+        // `switchboard_identity_matches` now call through (self-review
+        // finding #8): a session id captured as `None` (a codex row before
+        // `late_bind_codex_sessions` binds it) must not read as a mismatch
+        // against the SAME row's later `Some`.
+        let row = claude_rm_row("worker", "short1", "session-abc");
+        let unasserted = RowIdentity {
+            harness: None,
+            name: Some("worker"),
+            short_id: "short1",
+            session_id: None,
+            created_at: "2020-01-01T00:00:00Z",
+        };
+        assert!(row_identity_matches(&row, &unasserted));
+
+        // A captured `Some` that disagrees with the row IS a real mismatch.
+        let disagreeing = RowIdentity {
+            session_id: Some("some-other-session"),
+            ..unasserted
+        };
+        assert!(!row_identity_matches(&row, &disagreeing));
+
+        // A captured `Some` that agrees still matches.
+        let agreeing = RowIdentity {
+            session_id: Some("session-abc"),
+            ..unasserted
+        };
+        assert!(row_identity_matches(&row, &agreeing));
     }
 
     fn claude_row_then_absent(
