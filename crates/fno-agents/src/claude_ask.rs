@@ -314,30 +314,37 @@ impl TruthAttempt {
     }
 }
 
-fn family1_truth_attempt(
+/// The outcome of running one truth subprocess to a deadline, before any
+/// decoding. Shared by the single-handle attempt and the batch one so the
+/// spawn, the poll loop, and the WARN wording have exactly one implementation.
+enum BoundedRun {
+    /// Never started. `uv tool install --reinstall` replaces the `fno` console
+    /// script itself, not just the package tree, so that window shows up out
+    /// here as a bare ENOENT on spawn - the same "measured nothing" shape as an
+    /// import crash, and it buys the same single retry.
+    SpawnFailed,
+    /// Started, produced nothing usable (timed out, or the wait/collect
+    /// failed). Already warned; a second run would only repeat it.
+    NoOutput,
+    Output(std::process::Output),
+}
+
+fn run_truth_subprocess(
     mut command: std::process::Command,
     timeout: Duration,
-    handle: &str,
-    warn_on_crash: bool,
-) -> TruthAttempt {
+    label: &str,
+    warn_on_spawn_failure: bool,
+) -> BoundedRun {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            // `uv tool install --reinstall` replaces the `fno` console script
-            // itself, not just the package tree, so the window shows up out here
-            // as a bare ENOENT on spawn. That is the same "measured nothing"
-            // shape as an import crash and gets the same single retry, with the
-            // WARN held back for it.
-            if warn_on_crash {
-                eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
+            if warn_on_spawn_failure {
+                eprintln!("WARN: family-1 truth probe for {label} failed to start: {error}");
             }
-            return TruthAttempt {
-                probe: None,
-                crashed: true,
-            };
+            return BoundedRun::SpawnFailed;
         }
     };
     let deadline = Instant::now() + timeout;
@@ -350,28 +357,43 @@ fn family1_truth_attempt(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} timed out");
-                return TruthAttempt::answered(None);
+                eprintln!("WARN: family-1 truth probe for {label} timed out");
+                return BoundedRun::NoOutput;
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} wait failed: {error}");
-                return TruthAttempt::answered(None);
+                eprintln!("WARN: family-1 truth probe for {label} wait failed: {error}");
+                return BoundedRun::NoOutput;
             }
         }
     }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
+    match child.wait_with_output() {
+        Ok(output) => BoundedRun::Output(output),
         Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} output failed: {error}");
-            return TruthAttempt::answered(None);
+            eprintln!("WARN: family-1 truth probe for {label} output failed: {error}");
+            BoundedRun::NoOutput
         }
+    }
+}
+
+fn family1_truth_attempt(
+    command: std::process::Command,
+    timeout: Duration,
+    handle: &str,
+    warn_on_crash: bool,
+) -> TruthAttempt {
+    let output = match run_truth_subprocess(command, timeout, handle, warn_on_crash) {
+        BoundedRun::SpawnFailed => {
+            return TruthAttempt {
+                probe: None,
+                crashed: true,
+            }
+        }
+        BoundedRun::NoOutput => return TruthAttempt::answered(None),
+        BoundedRun::Output(output) => output,
     };
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
-    let state = parsed
-        .as_ref()
-        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     if !output.status.success() {
         // No parseable body at all means the process never reached the code
         // that writes one, so this run measured nothing about the session -
@@ -400,19 +422,15 @@ fn family1_truth_attempt(
         // standing to assert liveness, so this is monotone-lowering only,
         // exactly like `lower_state_with_verdict` above - it can report
         // done/stalled/unknown, never invent "still working".
-        let probe = match state.as_deref() {
-            Some(s @ ("done" | "stalled" | "unknown")) => {
-                Some(build_truth_probe(parsed.as_ref(), s))
-            }
-            _ => None,
-        };
+        let probe = parsed
+            .as_ref()
+            .and_then(parse_truth_payload)
+            .filter(|p| matches!(p.state.as_str(), "done" | "stalled" | "unknown"));
         return TruthAttempt { probe, crashed };
     }
-    TruthAttempt::answered(match state.as_deref() {
-        Some(s @ ("done" | "watching" | "your-move" | "working" | "stalled" | "unknown")) => {
-            Some(build_truth_probe(parsed.as_ref(), s))
-        }
-        _ => {
+    TruthAttempt::answered(match parsed.as_ref().and_then(parse_truth_payload) {
+        Some(probe) => Some(probe),
+        None => {
             eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
         }
@@ -443,6 +461,162 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// Decode ONE truth payload into a [`TruthProbe`]: the `{state, reachability,
+/// basis, ...}` object `_truth_payload` writes, whether it arrived alone or as
+/// one value of a `--handles` batch.
+///
+/// `None` when `state` is absent or is not one of the six the verb emits, which
+/// is the malformed-output case both entry points already refuse.
+///
+/// The single decoder is the point. Two of them is how a batch reading and a
+/// single reading of the same transcript start disagreeing about the same row.
+fn parse_truth_payload(value: &serde_json::Value) -> Option<TruthProbe> {
+    let state = value.get("state")?.as_str()?;
+    match state {
+        "done" | "watching" | "your-move" | "working" | "stalled" | "unknown" => {
+            Some(build_truth_probe(Some(value), state))
+        }
+        _ => None,
+    }
+}
+
+/// The batch spelling of [`family1_truth_command`]: N handles, ONE interpreter.
+///
+/// Batch mode always exits 0 Python-side (see `cmd_truth`'s `--handles` help),
+/// so the exit code carries no per-handle verdict here and the keyed object is
+/// the whole answer. A handle the batch could not resolve is present with
+/// `state: "unknown"` and its own `reason`.
+fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
+    let mut command = std::process::Command::new("fno");
+    command
+        .args(["agents", "truth", "--handles", &handles.join(","), "--json"])
+        .env("FNO_AGENTS_RUNTIME", "python");
+    command
+}
+
+/// [`family1_truth_probe`] for many handles at once: one child, one cold start.
+///
+/// The daemon probes every roster row on every sweep. Measured on the
+/// operator's box: 0.83 ms of real work per handle behind 780 ms of Python
+/// interpreter startup, a 940-to-1 ratio, so 24 rows cost 18.7 s as
+/// subprocesses and 19.9 ms in one process.
+///
+/// This is a BATCH and not a Rust reimplementation on purpose. [`TruthProbe`]'s
+/// own doc states the constraint: `state` and `observed_model` come from the
+/// SAME reader, so the Rust list emitter reports the identical reading the
+/// Python one does. A Rust port would grow the second transcript reader that
+/// constraint exists to prevent; batching removes the cost and keeps one
+/// reader.
+///
+/// Same 5 s bound and the same one-silent-retry-on-crash rule the single probe
+/// documents. The retry now re-costs one cold start for the whole batch rather
+/// than one per row. An EMPTY slice returns an empty map without spawning
+/// anything.
+pub fn family1_truth_probe_many(
+    handles: &[String],
+) -> std::collections::HashMap<String, TruthProbe> {
+    family1_truth_batch_retrying(
+        handles,
+        family1_truth_batch_command,
+        Duration::from_secs(5),
+    )
+}
+
+/// [`family1_truth_probe_many`] with the command built per attempt, so a test
+/// can count the spawns a given failure shape actually costs - and assert that
+/// an empty slice costs none. Mirrors [`family1_truth_probe_retrying`].
+fn family1_truth_batch_retrying(
+    handles: &[String],
+    mut command_for_attempt: impl FnMut(&[String]) -> std::process::Command,
+    timeout: Duration,
+) -> std::collections::HashMap<String, TruthProbe> {
+    if handles.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    // Warnings name the batch, not a row: no single handle owns the failure.
+    let label = format!("a batch of {} handles", handles.len());
+    let first = family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, false);
+    if !first.crashed {
+        return first.probes;
+    }
+    family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, true).probes
+}
+
+/// One batch run's outcome. `crashed` carries exactly the meaning
+/// [`TruthAttempt::crashed`] does: the run measured nothing, so a second is
+/// worth one try.
+struct TruthBatchAttempt {
+    probes: std::collections::HashMap<String, TruthProbe>,
+    crashed: bool,
+}
+
+fn family1_truth_batch_attempt(
+    command: std::process::Command,
+    timeout: Duration,
+    label: &str,
+    warn_on_crash: bool,
+) -> TruthBatchAttempt {
+    let empty = || std::collections::HashMap::new();
+    let output = match run_truth_subprocess(command, timeout, label, warn_on_crash) {
+        BoundedRun::SpawnFailed => {
+            return TruthBatchAttempt {
+                probes: empty(),
+                crashed: true,
+            }
+        }
+        BoundedRun::NoOutput => {
+            return TruthBatchAttempt {
+                probes: empty(),
+                crashed: false,
+            }
+        }
+        BoundedRun::Output(output) => output,
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    match parsed.as_ref().and_then(|value| value.as_object()) {
+        // The keyed object IS the answer. The exit code is deliberately not
+        // consulted: batch mode always exits 0, so it carries nothing a reader
+        // could act on, and every per-handle verdict rides its own entry.
+        Some(object) => TruthBatchAttempt {
+            probes: object
+                .iter()
+                .filter_map(|(handle, value)| {
+                    Some((handle.clone(), parse_truth_payload(value)?))
+                })
+                .collect(),
+            crashed: false,
+        },
+        // No keyed object and a non-zero exit: the process died before writing
+        // one, or this `fno` predates `--handles` and refused the usage. Both
+        // measured nothing, so both buy the one retry.
+        None if !output.status.success() => {
+            let detail = family1_truth_failure_detail(
+                &output.stdout,
+                &String::from_utf8_lossy(&output.stderr),
+            );
+            if warn_on_crash && !truth_failure_is_routine(&detail) {
+                eprintln!(
+                    "WARN: family-1 truth probe for {label} exited {}: {}",
+                    output.status, detail
+                );
+            }
+            TruthBatchAttempt {
+                probes: empty(),
+                crashed: true,
+            }
+        }
+        // Exited clean and wrote something that is not a keyed object. A real
+        // answer, just an unusable one; a retry would repeat it.
+        None => {
+            eprintln!("WARN: family-1 truth probe for {label} returned malformed output");
+            TruthBatchAttempt {
+                probes: empty(),
+                crashed: false,
+            }
+        }
     }
 }
 
@@ -4617,6 +4791,115 @@ mod tests {
             None,
             "a non-zero exit must never assert a live state"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // family1_truth_probe_many: N handles, ONE cold start (x-0d93)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn family1_truth_batch_decodes_every_handle_from_one_spawn() {
+        // The whole win: 24 rows used to cost 24 interpreter starts. One spawn
+        // must come back with every row's full payload, triple included -- a
+        // batch that dropped fields would render a poorer list row than the
+        // per-row path it replaces.
+        let spawns = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string(), "h2".to_string()],
+            |handles| {
+                spawns.set(spawns.get() + 1);
+                assert_eq!(handles.len(), 2);
+                sh("printf '{\"h1\":{\"state\":\"working\",\"reachability\":\"reachable\",\
+                    \"basis\":\"transcript\",\"last_activity_age_s\":12.5,\
+                    \"observed_model\":{\"kind\":\"observed\",\"model\":\"glm-5.3\"}},\
+                    \"h2\":{\"state\":\"done\",\"reachability\":\"reachable\",\
+                    \"basis\":\"transcript\"}}'")
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(spawns.get(), 1, "one batch, one process");
+        assert_eq!(probes.len(), 2);
+        let h1 = &probes["h1"];
+        assert_eq!(h1.state, "working");
+        assert_eq!(h1.reachability.as_deref(), Some("reachable"));
+        assert_eq!(h1.basis.as_deref(), Some("transcript"));
+        assert_eq!(h1.last_activity_age_s, Some(12.5));
+        assert_eq!(h1.observed_model["model"], "glm-5.3");
+        assert_eq!(probes["h2"].state, "done");
+    }
+
+    #[test]
+    fn family1_truth_batch_on_an_empty_slice_spawns_nothing() {
+        // A sweep with nothing to escalate must cost NO subprocess. A factory
+        // that panics is the only way to assert an absence of spawns without
+        // reading one.
+        let probes = family1_truth_batch_retrying(
+            &[],
+            |_| panic!("an empty batch must never spawn"),
+            Duration::from_secs(5),
+        );
+        assert!(probes.is_empty());
+    }
+
+    #[test]
+    fn family1_truth_batch_crash_is_retried_exactly_once_for_the_whole_batch() {
+        // The reinstall window costs the batch ONE extra cold start, not one
+        // per row -- the retry rule the single probe documents, priced per
+        // batch.
+        let attempts = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1 => sh("echo 'ModuleNotFoundError: fno.agents.cli' >&2; exit 1"),
+                    _ => sh("printf '{\"h1\":{\"state\":\"working\"}}'"),
+                }
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
+        assert_eq!(probes["h1"].state, "working");
+
+        // And it stops there: a persistently broken probe is loud, not looping.
+        let attempts = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| {
+                attempts.set(attempts.get() + 1);
+                sh("exit 1")
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(attempts.get(), 2);
+        assert!(probes.is_empty());
+    }
+
+    #[test]
+    fn family1_truth_batch_answers_only_for_the_handles_the_batch_resolved() {
+        // A handle the batch could not answer for is simply absent from the
+        // map, which every caller already treats as `None` -- the same reading
+        // the per-row path gave when its probe returned nothing.
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string(), "gone".to_string()],
+            |_| sh("printf '{\"h1\":{\"state\":\"working\"},\"gone\":{\"state\":\"nonsense\"}}'"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(probes.len(), 1);
+        assert!(!probes.contains_key("gone"));
+    }
+
+    #[test]
+    fn family1_truth_batch_command_asks_for_the_keyed_object() {
+        // Pins the wire call itself. The Python side keys `--handles` and emits
+        // the object only under `--json`; a batch command missing either would
+        // silently fall back to a single-handle read of a comma-joined string.
+        let command = family1_truth_batch_command(&["a".to_string(), "b".to_string()]);
+        let argv: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, ["agents", "truth", "--handles", "a,b", "--json"]);
     }
 
     #[test]
