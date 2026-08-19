@@ -330,6 +330,11 @@ class TestEventsMutex:
         repo = tmp_path / "repo"
         subdir = repo / "nested" / "source"
         subdir.mkdir(parents=True)
+        # This case is about the repo-root branch of project_events_json, so the
+        # FNO_EVENTS_PATH pin has to be out of the way. The hermetic sandbox sets
+        # it for the whole pytest process, and it is checked first by design.
+        # Its own coverage lives in test_events_journal_containment.py.
+        monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
         monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
         monkeypatch.chdir(subdir)
 

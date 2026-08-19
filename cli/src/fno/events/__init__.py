@@ -1264,9 +1264,9 @@ def append_event(
     validate(event)
 
     if events_path is None:
-        from fno.paths import resolve_repo_root
+        from fno.paths import project_events_json
 
-        events_path = resolve_repo_root() / ".fno" / "events.jsonl"
+        events_path = project_events_json()
     requested_path = Path(events_path)
     requested_path.parent.mkdir(parents=True, exist_ok=True)
     while True:

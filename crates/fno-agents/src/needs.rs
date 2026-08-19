@@ -44,6 +44,12 @@ const DECISION_STALE_FLOOR_SECS: u64 = 7 * 24 * 60 * 60;
 /// a stable string (`review_wedged` | `budget_stop`) the client maps to its own
 /// severity enum; the fold does not rank (the client owns the full 6-kind
 /// order, of which this leg populates two).
+///
+/// A kind the client does not map is dropped from the operator view by its
+/// `_ => continue` arm, which is how `mail_delivery_miss` stays out of the
+/// panel while still flowing into the journal for a wake consumer to read.
+/// Emitting a new kind here is therefore a quiet change on the operator
+/// surface, never a loud one: to SHOW a new kind, map it there too.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NeedItem {
     pub kind: String,
@@ -151,7 +157,11 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
     // accumulator and the session gate below would drop them. They get their own
     // per-recipient accumulator (latest (epoch, seq) wins) and render
     // squadless-live in the client.
-    let mut mail_escalations: HashMap<String, (u64, usize, NeedItem)> = HashMap::new();
+    // Keyed on (recipient, kind), not recipient alone. A standing question and a
+    // delivery miss to the same handle are different things, and the client
+    // renders one while dropping the other, so collapsing them would let a later
+    // miss erase an escalation a human still owes an answer to.
+    let mut mail_escalations: HashMap<(String, String), (u64, usize, NeedItem)> = HashMap::new();
     // operator_question / operator_question_closed, keyed by question_id (not
     // per-recipient-latest-wins like mail_escalation above): several distinct
     // decisions can be open on the operator at once, so every open question_id
@@ -224,7 +234,8 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
         // mail_escalation is folded before the session gate: it carries no
         // session_id (it is mail between agents), so the gate below would drop
-        // it. One NeedItem (kind mail_question) per recipient, latest wins.
+        // it. One NeedItem per (recipient, kind), latest of that pair wins; the
+        // kind comes from the row's reason.
         if kind == Some("mail_escalation") {
             let Some(recipient) = str_field(&v, "recipient") else {
                 continue;
@@ -232,21 +243,36 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             let reason = str_field(&v, "reason").unwrap_or("");
             let sender = str_field(&v, "sender").unwrap_or("");
             let summary = str_field(&v, "summary").unwrap_or("");
+            // A reachable-miss is an agent-to-agent DELIVERY failure: the
+            // recipient was reachable, the live inject missed, the durable copy
+            // is queued. It needs a retry or a wake, not an operator decision,
+            // so it gets its own kind and the client's `_ => continue` arm keeps
+            // it out of the needs panel by construction rather than by a filter
+            // someone can forget to apply. attended-miss stays a question:
+            // there the operator IS the attended recipient.
+            // Named need_kind, not kind: the enclosing `kind` is the EVENT
+            // type, and shadowing it here reads as the same thing twice.
+            let need_kind = if reason == "reachable-miss" {
+                "mail_delivery_miss"
+            } else {
+                "mail_question"
+            };
             let epoch = to_epoch_lenient(ts).unwrap_or(0);
             seq += 1;
             // Same (epoch, seq) ordering as the session accumulator: a cross-source
             // concat never lets an older line clobber a newer escalation.
+            let acc_key = (recipient.to_string(), need_kind.to_string());
             if mail_escalations
-                .get(recipient)
+                .get(&acc_key)
                 .is_none_or(|(e, s, _)| (epoch, seq) >= (*e, *s))
             {
                 mail_escalations.insert(
-                    recipient.to_string(),
+                    acc_key,
                     (
                         epoch,
                         seq,
                         NeedItem {
-                            kind: "mail_question".to_string(),
+                            kind: need_kind.to_string(),
                             // No target session; the recipient handle is the row's
                             // stable identity (id_key) and the roster join key.
                             session_id: recipient.to_string(),
@@ -342,9 +368,17 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         }
         items.push(item);
     }
+    // `kind` is part of the sort key because it is part of the mail accumulator's
+    // key: one recipient can now yield both a mail_question and a
+    // mail_delivery_miss, and for mail rows session_id IS the recipient, so those
+    // two tie on (ts, session_id). `sort_by` is stable, so a tie would fall back
+    // to push order, which comes from HashMap iteration and is randomized per
+    // process. That makes `needs --json` reorder run to run and anything
+    // diffing it flaky.
     items.sort_by(|a, b| {
         a.ts.cmp(&b.ts)
             .then_with(|| a.session_id.cmp(&b.session_id))
+            .then_with(|| a.kind.cmp(&b.kind))
     });
     items
 }
@@ -554,9 +588,16 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
         // Same reasoning for operator_question (no node claim behind a
         // question either) and for the aggregate carveout_stale/stale_claims
         // rows (no single node owns a pile of carve-outs or claims).
+        // mail_delivery_miss rides the same rule: the client drops it from the
+        // operator view, but it stays in the JSON for a wake consumer, and a
+        // node-keyed stamp would label it dead when nothing was ever claimed.
         if matches!(
             item.kind.as_str(),
-            "mail_question" | "operator_question" | "carveout_stale" | "stale_claims"
+            "mail_question"
+                | "mail_delivery_miss"
+                | "operator_question"
+                | "carveout_stale"
+                | "stale_claims"
         ) {
             item.live = true;
             continue;
@@ -977,6 +1018,145 @@ mod tests {
             items[0].evidence.contains("new"),
             "latest (epoch, seq) wins"
         );
+    }
+
+    #[test]
+    fn reachable_miss_folds_to_its_own_kind() {
+        // Measured 2026-08-17: three of twelve operator rows were the king's own
+        // outbound mail that missed a reachable recipient, sorted beside a real
+        // question. A miss needs a retry or a wake, not a human.
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "reachable-miss",
+            "web",
+            "019f48e1",
+            "ping",
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "mail_delivery_miss");
+    }
+
+    #[test]
+    fn question_and_reachable_miss_do_not_share_a_kind() {
+        // The question row is the positive control: a fold that stopped emitting
+        // anything at all would satisfy a bare "the miss is not a question"
+        // assertion and read as proof of a split that is not there.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "web",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T03:00:00Z",
+                "reachable-miss",
+                "sender",
+                "9a06",
+                "ping"
+            ),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 2, "one row per recipient, both present");
+        let mut kinds: Vec<&str> = items.iter().map(|i| i.kind.as_str()).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec!["mail_delivery_miss", "mail_question"]);
+    }
+
+    #[test]
+    fn a_later_delivery_miss_does_not_erase_a_standing_question() {
+        // The trap the kind split opens if the map stays keyed on recipient
+        // alone: latest-wins would replace the question row with a
+        // mail_delivery_miss, which the client drops, so an escalation the code
+        // itself calls a human's problem vanishes from the panel. A worker asks
+        // `ops` a question, then anyone else's send to `ops` misses, and the
+        // question is gone. The debounce is per (sender, recipient), so a
+        // second sender never suppresses the miss.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "ops",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T03:00:00Z",
+                "reachable-miss",
+                "web",
+                "ops",
+                "ping"
+            ),
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        let question = items
+            .iter()
+            .find(|i| i.kind == "mail_question")
+            .expect("the standing question survives a later delivery miss");
+        assert!(question.evidence.contains("which auth?"));
+        assert!(
+            items.iter().any(|i| i.kind == "mail_delivery_miss"),
+            "and the miss is still folded, under its own kind"
+        );
+    }
+
+    #[test]
+    fn one_recipient_two_kinds_sorts_deterministically() {
+        // Keying the mail accumulator on (recipient, kind) lets one handle yield
+        // two rows. For mail rows session_id IS the recipient, so with an equal
+        // ts they tie on both of the old sort keys, and a stable sort then falls
+        // back to push order, which comes from HashMap iteration and is
+        // randomized per process. Folding the same input repeatedly has to give
+        // one order, or `needs --json` reorders run to run.
+        let events = format!(
+            "{}\n{}\n",
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "question",
+                "etl",
+                "ops",
+                "which auth?"
+            ),
+            mail_escalation(
+                "2026-07-03T02:00:00Z",
+                "reachable-miss",
+                "web",
+                "ops",
+                "ping"
+            ),
+        );
+        let first: Vec<String> = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR)
+            .into_iter()
+            .map(|i| i.kind)
+            .collect();
+        assert_eq!(first.len(), 2, "both rows survive the fold");
+        for _ in 0..24 {
+            let again: Vec<String> = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR)
+                .into_iter()
+                .map(|i| i.kind)
+                .collect();
+            assert_eq!(again, first, "same input, same order");
+        }
+    }
+
+    #[test]
+    fn attended_miss_stays_a_question() {
+        // The operator IS the attended recipient, so an attended-miss is still a
+        // human's problem. Only the machine-to-machine miss moves.
+        let events = mail_escalation(
+            "2026-07-03T02:00:00Z",
+            "attended-miss",
+            "ops",
+            "claude-9a06",
+            "need you",
+        );
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "mail_question");
     }
 
     #[test]

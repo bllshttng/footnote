@@ -347,6 +347,24 @@ def neutralise(
     out["FNO_THINK_SPAWN"] = "0"  # never spawn a real /think worker
     out["FNO_SPAWN_GATE"] = "0"  # never queue behind the host's live workers
     out["FNO_E2E"] = "1"  # arm idle-exit so an orphaned mux server reaps itself
+    # The operator needs panel folds the checkout journal, and repo-root
+    # resolution cannot be sandboxed (see the FNO_REPO_ROOT note above), so an
+    # unpathed append_event under test lands a production-shaped row on a live
+    # operator surface. Six such fixture rows were measured in the panel on
+    # 2026-08-17. Pin the journal itself instead of teaching either reader to
+    # recognise test data.
+    #
+    # This env reaches the pytest, shell, and cargo trees, because all three come
+    # through this function, and all three writers read it: the resolver above,
+    # `scripts/lib/events.sh`, and `claim_events_path` in
+    # crates/fno-agents/src/claims.rs. That last one is not optional. Python and
+    # Rust share the claim journal AND its `.lock.d` mutex as a wire contract, so
+    # a pin only one side honored would split the writers onto different files
+    # and stop the mutex serialising them; the cross-impl merge gate catches it.
+    #
+    # Still outside the pin: the three loop-journal `ProjectJournalPath` sites in
+    # fno-agents, which build their path by hand and consult no var.
+    out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
 
     out.update(caches)
     out.update(_git_pins(sandbox))

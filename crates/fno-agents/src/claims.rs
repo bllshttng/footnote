@@ -709,11 +709,40 @@ fn emit_claim_event(events_dir: Option<&Path>, type_name: &str, data: Map<String
     }
 }
 
+/// The journal a claim audit event lands in.
+///
+/// Precedence mirrors `fno.paths.project_events_json` and `scripts/lib/events.sh`
+/// exactly: an explicitly named journal wins, then the `FNO_EVENTS_PATH` pin,
+/// then the repo root resolved from `cwd`.
+///
+/// Reading the pin here is not tidiness. Python and Rust share this journal AND
+/// its `.lock.d` mutex as a wire contract, so a pin only one side honors puts
+/// the two writers on different files and their mutex stops serialising them
+/// against each other. `cli/tests/integration/test_claims_cross_impl.py` is the
+/// merge gate that catches it: Rust acquires, Python reclaims, and the audit
+/// trail has to be one file.
 fn claim_events_path(events_dir: Option<&Path>, cwd: &Path) -> PathBuf {
-    events_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| crate::paths::worktree_repo_root(cwd))
-        .join(".fno/events.jsonl")
+    let pin = std::env::var("FNO_EVENTS_PATH").ok();
+    claim_events_path_with(events_dir, cwd, pin.as_deref())
+}
+
+/// The pure core of [`claim_events_path`], taking the pin as an argument.
+///
+/// Split out so a test can pin the precedence without mutating process env:
+/// Rust tests share one process and run threaded, so `set_var`/`remove_var`
+/// would race every other test in the binary.
+fn claim_events_path_with(events_dir: Option<&Path>, cwd: &Path, pin: Option<&str>) -> PathBuf {
+    if let Some(dir) = events_dir {
+        return dir.join(".fno/events.jsonl");
+    }
+    // Empty means unset, matching `if override:` in Python and `-n` in the
+    // shell. Deliberately NOT trimmed: neither of those trims, and three
+    // writers disagreeing about a whitespace pin is worse than all three
+    // treating it as a path.
+    if let Some(pinned) = pin.filter(|p| !p.is_empty()) {
+        return PathBuf::from(pinned);
+    }
+    crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl")
 }
 
 /// Age past which a mkdir mutex dir is a corpse left by a killed holder.
@@ -1710,9 +1739,37 @@ mod tests {
         let nested = td.path().join("crates/fno/src");
         std::fs::create_dir_all(&nested).unwrap();
 
+        // The pure core with no pin, so this asserts the root branch it is named
+        // for rather than whatever FNO_EVENTS_PATH the test harness has set.
         assert_eq!(
-            claim_events_path(None, &nested),
+            claim_events_path_with(None, &nested, None),
             td.path().canonicalize().unwrap().join(".fno/events.jsonl")
+        );
+    }
+
+    #[test]
+    fn claim_events_path_precedence_matches_the_other_two_writers() {
+        let td = TempDir::new().unwrap();
+        let cwd = td.path();
+        let pin = "/tmp/pinned-journal.jsonl";
+
+        // An explicitly named journal outranks the pin.
+        assert_eq!(
+            claim_events_path_with(Some(Path::new("/explicit")), cwd, Some(pin)),
+            PathBuf::from("/explicit/.fno/events.jsonl"),
+        );
+        // With no explicit journal, the pin wins over the resolved root. This is
+        // the leg that keeps Rust on the same file as the Python writer, which
+        // the cross-impl merge gate asserts end to end.
+        assert_eq!(
+            claim_events_path_with(None, cwd, Some(pin)),
+            PathBuf::from(pin),
+        );
+        // An empty pin is not a pin, which is what an exported-but-empty
+        // FNO_EVENTS_PATH looks like, and what the other two writers do.
+        assert_eq!(
+            claim_events_path_with(None, cwd, Some("")),
+            crate::paths::worktree_repo_root(cwd).join(".fno/events.jsonl"),
         );
     }
 

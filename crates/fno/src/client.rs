@@ -13962,6 +13962,42 @@ mod tests {
     }
 
     #[test]
+    fn mail_delivery_miss_leaves_the_operator_queue_and_a_question_stays() {
+        // The other half of the split: the fold now emits mail_delivery_miss for
+        // a reachable-miss, and this arm has to DROP it. Asserted against the
+        // rendered queue rather than the match arm, so it pins the destination
+        // (no operator row) and not merely the tag.
+        //
+        // The question row is the positive control. Without it a client that
+        // dropped every fold item would satisfy the absence half and read as
+        // proof of a split that is not there.
+        let mut view = two_pane_view();
+        let item = |kind: &str, name: &str| crate::needs_overlay::FoldItem {
+            kind: kind.into(),
+            session_id: name.into(),
+            node: None,
+            name: Some(name.into()),
+            title: None,
+            ts: "2026-07-03T02:00:00Z".into(),
+            evidence: format!("{kind}: sender -> {name}: ping"),
+            live: true,
+        };
+        view.needs_fold = Some(vec![
+            item("mail_delivery_miss", "019f48e1"),
+            item("mail_question", "web"),
+        ]);
+        let rows = view.needs_queue();
+        assert!(
+            rows.iter().any(|r| r.name == "web"),
+            "a real question still reaches the operator"
+        );
+        assert!(
+            !rows.iter().any(|r| r.name == "019f48e1"),
+            "a delivery miss is not an operator decision"
+        );
+    }
+
+    #[test]
     fn fold_search_input_swallows_multibyte_csi_without_leaking() {
         // gemini review (HIGH): a multi-byte CSI must be consumed whole, never
         // leak its param/final tail into the typed query.
