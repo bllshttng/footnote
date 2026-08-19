@@ -209,3 +209,29 @@ def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, cap
     assert "Use `fno pr info 930`" in err
     assert "stop retrying GraphQL until reset" in err
     assert "coverage reads that are GraphQL" in err
+
+
+def test_resolve_real_gh_returns_a_path_even_with_no_proxy_dir_to_skip(
+    tmp_path, monkeypatch
+):
+    """os.execve needs a path with a slash, never a bare command name.
+
+    The real gh being the FIRST match on PATH (no proxy entry ahead of it to
+    skip past) used to return the literal string "gh" instead of a resolved
+    path, and delegate()'s os.execve("gh", ...) fails with FileNotFoundError:
+    execve does not search PATH the way execvp does.
+    """
+    from fno.pr import _quota
+
+    real = tmp_path / "gh"
+    real.write_text("#!/bin/sh\necho real\n")
+    real.chmod(0o755)
+    monkeypatch.delenv("FNO_REAL_GH", raising=False)
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.setattr(_quota, "_proxy_dirs", lambda: set())
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    resolved = _quota.resolve_real_gh()
+
+    assert resolved == str(real.resolve())
+    assert os.sep in resolved
