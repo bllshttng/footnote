@@ -8,7 +8,7 @@ import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import filelock
 
@@ -19,6 +19,147 @@ OVERLOAD_PERSISTENCE_S = 2 * 60
 PANE_FRESHNESS_S = 2 * 60
 _JOURNAL_VERSION = 1
 _MAX_EVIDENCE = 512
+HEALTH_MARKER = "FNO_PROVIDER_" + "HEALTH_OK"
+_HEALTH_FRAGMENTS = ("FNO_", "PROVIDER_", "HEALTH_", "OK")
+
+
+@dataclass(frozen=True)
+class CanaryProof:
+    """One persisted provider response, separate from route policy."""
+
+    source: str
+    content: str
+    observed_at: float
+    persisted: bool
+    assistant_role: bool
+    pane_id: str | None = None
+    stopped: bool = True
+    holds_node_claim: bool = False
+
+
+@dataclass(frozen=True)
+class RouteCandidate:
+    """One explicit harness, vendor, account, and account-record destination."""
+
+    record_id: str | None
+    harness: str | None
+    provider: str | None
+    account: str | None
+    account_env: dict[str, str] | None
+    canary: CanaryProof | None
+    breaker_open: bool = False
+    runtime_exhausted: bool = False
+    harness_installed: bool = True
+    pane_supported: bool = True
+    pane_count: int = 0
+
+
+def _fresh_canary(proof: CanaryProof | None, now_s: float) -> bool:
+    if proof is None or not proof.persisted or not proof.stopped:
+        return False
+    if proof.holds_node_claim or proof.content.strip() != HEALTH_MARKER:
+        return False
+    age = now_s - proof.observed_at
+    if age < 0 or age > PANE_FRESHNESS_S:
+        return False
+    if proof.source == "transcript":
+        return proof.assistant_role
+    if proof.source == "pane":
+        return bool(proof.pane_id)
+    return False
+
+
+def select_healthy_destination(
+    candidates: Iterable[RouteCandidate], *, broken_provider: str,
+    now_s: float, pinned_record_id: str | None = None,
+) -> RouteCandidate | None:
+    """Return the first explicitly identified, positively proved candidate."""
+    for candidate in candidates:
+        if pinned_record_id is not None and candidate.record_id != pinned_record_id:
+            continue
+        if not all((candidate.record_id, candidate.harness, candidate.provider, candidate.account)):
+            continue
+        if candidate.provider == broken_provider:
+            continue
+        if (
+            candidate.breaker_open
+            or candidate.runtime_exhausted
+            or not candidate.harness_installed
+            or not candidate.pane_supported
+            or candidate.pane_count >= 4
+        ):
+            continue
+        if _fresh_canary(candidate.canary, now_s):
+            return candidate
+    return None
+
+
+def _node_claim_snapshot() -> set[str]:
+    from fno.claims.core import list_claims
+    from fno.claims.io import global_claims_root
+
+    return {
+        str(item.get("key"))
+        for item in list_claims(prefix="node:", root=global_claims_root())
+        if item.get("key")
+    }
+
+
+def run_health_canary(
+    destination: RouteCandidate,
+    *,
+    canary_cwd: Path,
+    node_cwd: Path,
+    now_s: float,
+    collect_proof: Callable[[Any], CanaryProof | None],
+    stop: Callable[[Any], bool],
+    spawn: Callable[..., Any] | None = None,
+    claim_snapshot: Callable[[], set[str]] = _node_claim_snapshot,
+) -> CanaryProof | None:
+    """Run, stop, and verify one neutral canary without entering node state."""
+    if destination.harness not in {"codex", "opencode", "agy"}:
+        return None
+    resolved_canary = canary_cwd.resolve()
+    resolved_node = node_cwd.resolve()
+    if resolved_canary == resolved_node or resolved_canary.is_relative_to(resolved_node):
+        return None
+    launcher = spawn
+    if launcher is None:
+        from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
+
+        launcher = dispatch_spawn_bounded_pane
+    prompt = (
+        "Reply with only the concatenation of these four fragments, with no "
+        f"spaces or punctuation: {' | '.join(_HEALTH_FRAGMENTS)}"
+    )
+    before_claims = claim_snapshot()
+    spawned = launcher(
+        name=f"provider-health-{os.getpid()}",
+        message=prompt,
+        provider=destination.harness,
+        cwd=resolved_canary,
+        account_env=destination.account_env,
+    )
+    proof: CanaryProof | None = None
+    stopped = False
+    try:
+        proof = collect_proof(spawned)
+    finally:
+        stopped = stop(spawned)
+    new_node_claim = bool(claim_snapshot() - before_claims)
+    if proof is None:
+        return None
+    verified = CanaryProof(
+        source=proof.source,
+        content=proof.content,
+        observed_at=proof.observed_at,
+        persisted=proof.persisted,
+        assistant_role=proof.assistant_role,
+        pane_id=proof.pane_id,
+        stopped=stopped,
+        holds_node_claim=new_node_claim,
+    )
+    return verified if _fresh_canary(verified, now_s) else None
 
 
 @dataclass(frozen=True)
@@ -85,10 +226,6 @@ def _validate(record: OutageEvidence, now_s: float, pane_freshness_s: float) -> 
         return "unknown_route_identity"
     if record.role != "assistant":
         return "not_assistant_api_record"
-    if record.raw_kind == "content" and record.raw_status is None:
-        return None
-    if record.raw_kind != "api_error" or not isinstance(record.raw_status, int):
-        return "not_assistant_api_record"
     if record.source == "pane":
         if not record.pane_id:
             return "unknown_pane_identity"
@@ -96,6 +233,10 @@ def _validate(record: OutageEvidence, now_s: float, pane_freshness_s: float) -> 
             return "pane_not_persisted"
         if record.snapshot_at > now_s or now_s - record.snapshot_at > pane_freshness_s:
             return "pane_snapshot_stale"
+    if record.raw_kind == "content" and record.raw_status is None:
+        return None
+    if record.raw_kind != "api_error" or not isinstance(record.raw_status, int):
+        return "not_assistant_api_record"
     return None
 
 

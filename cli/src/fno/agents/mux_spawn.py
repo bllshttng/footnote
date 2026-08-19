@@ -2176,6 +2176,97 @@ def _submit_spawn_seed(
     return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
 
 
+def _strict_json_list(
+    args: list[str],
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    *,
+    noun: str,
+) -> list[dict]:
+    proc = _run_mux(args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(f"{noun} failed: {detail or 'no output'}", exit_code=1)
+    try:
+        value = json.loads(proc.stdout or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1) from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise DispatchAskError(f"{noun} was unreadable", exit_code=1)
+    return value
+
+
+def _select_or_create_bounded_tab(
+    session: str,
+    workspace: str | None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> int:
+    args = ["mux", "tab", "ls", "--session", session, "--json"]
+    if workspace:
+        args += ["--workspace", workspace]
+    tabs = _strict_json_list(args, runner, noun="tab listing")
+    for tab in tabs:
+        tab_id = tab.get("tab_id")
+        pane_ids = tab.get("pane_ids")
+        if isinstance(tab_id, int) and isinstance(pane_ids, list) and len(pane_ids) < 4:
+            return tab_id
+    create_args = ["mux", "tab", "create", "--session", session, "--json"]
+    if workspace:
+        create_args += ["--workspace", workspace]
+    proc = _run_mux(create_args, runner)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise DispatchAskError(
+            f"tab creation failed: {detail or 'no output'}", exit_code=1
+        )
+    try:
+        created = json.loads(proc.stdout or "")
+        tab_id = created["tab_id"]
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise DispatchAskError("tab creation receipt was unreadable", exit_code=1) from exc
+    if not isinstance(tab_id, int):
+        raise DispatchAskError("tab creation receipt had no stable tab id", exit_code=1)
+    return tab_id
+
+
+def dispatch_spawn_bounded_pane(
+    *,
+    workspace: str | None = None,
+    placement_holder: str | None = None,
+    claims_root: Path | None = None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    **spawn_kwargs,
+) -> MuxSpawnResult:
+    """Place one canonical pane spawn while holding the mux placement lease."""
+    from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
+    from fno.claims.io import global_claims_root
+
+    session = resolve_mux_session(spawn_kwargs.pop("session", None))
+    holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
+    key = f"placement:{session}:{workspace or 'current'}"
+    root = claims_root or global_claims_root()
+    try:
+        acquire_claim(
+            key, holder, ttl_ms=60_000, root=root,
+            reason="bounded mux pane placement",
+        )
+    except CLAIM_UNAVAILABLE as exc:
+        live_holder = getattr(exc, "holder", "unknown")
+        raise DispatchAskError(
+            f"placement lease held by {live_holder}; no pane spawned", exit_code=2
+        ) from exc
+    try:
+        tab_id = _select_or_create_bounded_tab(session, workspace, runner)
+        return dispatch_spawn_pane(
+            session=session,
+            squad=workspace,
+            tab_id=f"id:{tab_id}",
+            runner=runner,
+            **spawn_kwargs,
+        )
+    finally:
+        release_claim(key, holder, strict=True, root=root)
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -2195,6 +2286,7 @@ def dispatch_spawn_pane(
     squad: Optional[str] = None,
     split: Optional[str] = None,
     at: Optional[str] = None,
+    tab_id: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
@@ -2346,6 +2438,13 @@ def dispatch_spawn_pane(
             f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
             exit_code=2,
         )
+    if tab_id is not None:
+        stable_tab = tab_id.strip()
+        if not stable_tab.startswith("id:") or not stable_tab[3:].isdigit():
+            raise DispatchAskError(
+                "--tab-id requires id:<stable-id>, not an ordinal or tab name",
+                exit_code=2,
+            )
 
     codex_route = None
     if provider == "codex" and role is not None:
@@ -2491,6 +2590,8 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+        if tab_id:
+            placement_args += ["--tab", tab_id.strip()]
         # Stamp the spawn clock immediately before the pane runs, not at function
         # entry. A sibling pane starting a same-cwd session during the lock-wait
         # or argv-build above would otherwise clear the since_ms lower bound and
@@ -2512,7 +2613,8 @@ def dispatch_spawn_pane(
         # (anchor/direction/fallback); Python never synthesizes those from the
         # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
         exact = bool(at)
-        if exact:
+        json_receipt = bool(at or tab_id)
+        if json_receipt:
             run_args.append("--json")
         run_args += ["--", *wrapped]
         # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
@@ -2556,7 +2658,7 @@ def dispatch_spawn_pane(
                 "there is no daemon-PTY fallback)",
                 exit_code=1,
             )
-        elif exact:
+        elif json_receipt:
             try:
                 payload = json.loads((proc.stdout or "").strip().splitlines()[-1])
                 pane_id = int(payload["pane_id"])
@@ -2582,6 +2684,34 @@ def dispatch_spawn_pane(
                 ) from exc
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
+        if tab_id:
+            expected_tab_id = int(tab_id[3:])
+            try:
+                listed = _strict_json_list(
+                    ["mux", "pane", "ls", "--session", session, "--json"],
+                    runner,
+                    noun="pane listing",
+                )
+                in_tab = [
+                    item for item in listed
+                    if isinstance(item, dict) and item.get("tab_id") == expected_tab_id
+                ]
+                placed = any(item.get("pane_id") == pane_id for item in in_tab)
+                if not placed or len(in_tab) > 4:
+                    reason = "wrong tab" if not placed else "fifth pane"
+                    raise DispatchAskError(
+                        f"bounded placement verification failed: {reason}", exit_code=1
+                    )
+            except DispatchAskError as exc:
+                reaped, detail = _reap_spawned_pane(session, pane_id, runner)
+                if reaped:
+                    raise DispatchAskError(
+                        f"{exc}; pane {pane_id} reaped, no registry row written",
+                        exit_code=1,
+                    ) from exc
+                raise DispatchAskError(
+                    f"{exc}; exact cleanup failed: {detail}", exit_code=1
+                ) from exc
         from fno.agents.spawn_gate import _process_start_time
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None

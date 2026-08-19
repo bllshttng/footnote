@@ -712,6 +712,14 @@ def cmd_spawn(
             "and --substrate pane."
         ),
     ),
+    tab_id: str | None = typer.Option(
+        None,
+        "--tab-id",
+        help=(
+            "Stable mux tab selector in id:<stable-id> form. Ordinal tab indexes "
+            "are refused. Pane substrate only."
+        ),
+    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -990,14 +998,14 @@ def cmd_spawn(
     # x-3e38 pane placement: squad/split name mux geometry, which only the
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = squad is not None or split is not None or at is not None
+    placement_requested = any(value is not None for value in (squad, split, at, tab_id))
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
     if placement_requested and (substrate != "pane" or once):
         print(
             "--workspace/-s, --split/-x, and --at apply only to --substrate pane "
-            "(bg/headless have no pane geometry)",
+            "(bg/headless have no pane geometry); --tab-id is pane-only too",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -1007,6 +1015,14 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    if tab_id is not None:
+        stable_tab = tab_id.strip()
+        if not stable_tab.startswith("id:") or not stable_tab[3:].isdigit():
+            print(
+                "--tab-id requires id:<stable-id>, not an ordinal or tab name",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     if at is not None:
         # `--at current` is the exact-anchor spelling: the mux CLI resolves the
         # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
@@ -1443,6 +1459,7 @@ def cmd_spawn(
                     squad=squad,
                     split=split,
                     at=at,
+                    tab_id=tab_id,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     provenance=prov_env,

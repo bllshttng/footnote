@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fno.agents.provider_outage import OutageEvidence, fold_provider_outages, measure_and_persist
+import pytest
+
+from fno.agents.provider_outage import (
+    CanaryProof,
+    OutageEvidence,
+    RouteCandidate,
+    fold_provider_outages,
+    measure_and_persist,
+    run_health_canary,
+    select_healthy_destination,
+)
 
 
 NOW = datetime(2026, 8, 18, 18, 0, tzinfo=timezone.utc).timestamp()
@@ -143,6 +154,21 @@ def test_ac3_529_successful_assistant_content_resets_the_sequence():
     assert report["sessions"]["row-1"]["consecutive"] == 2
 
 
+def test_ac3_529_unpersisted_pane_content_cannot_reset_the_sequence():
+    report, _ = _fold([
+        _record("row-1", NOW - 240, "API Error: 529 Overloaded", status=529),
+        _record("row-1", NOW - 180, "API Error: 529 Overloaded", status=529),
+        _record(
+            "row-1", NOW - 120, "request succeeded", status=None, kind="content",
+            source="pane", pane_id="pane-1", persisted=False, snapshot_at=NOW - 120,
+        ),
+        _record("row-1", NOW - 60, "API Error: 529 Overloaded", status=529),
+        _record("row-1", NOW - 1, "API Error: 529 Overloaded", status=529),
+    ])
+    assert report["sessions"]["row-1"]["state"] == "session_persistent"
+    assert report["counts"]["refused"] == 1
+
+
 def test_ac3_529_two_persistent_sessions_open_breaker():
     records = []
     for row_id, offset in (("row-1", 0), ("row-2", 20)):
@@ -168,3 +194,200 @@ def test_ac1_det_persisted_pane_snapshot_is_durable_before_it_votes(tmp_path):
     stored = json.loads(journal.read_text(encoding="utf-8"))
     assert stored["pane_snapshots"][0]["pane_id"] == "pane-1"
     assert stored["pane_snapshots"][0]["fingerprint"]
+
+
+def test_ac5_hlth_route_selection_excludes_every_candidate_on_broken_provider():
+    proof = CanaryProof(
+        source="transcript", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW - 1,
+        persisted=True, assistant_role=True,
+    )
+    candidates = [
+        RouteCandidate(
+            record_id="other-account", harness="opencode", provider="zai",
+            account="acct-b", account_env={}, canary=proof,
+        ),
+        RouteCandidate(
+            record_id="openai-account", harness="codex", provider="openai",
+            account="acct-c", account_env={"OPENAI_API_KEY": "test"}, canary=proof,
+        ),
+    ]
+
+    selected = select_healthy_destination(
+        candidates, broken_provider="zai", now_s=NOW,
+    )
+
+    assert selected == candidates[1]
+    assert selected.harness == "codex"
+    assert selected.provider == "openai"
+    assert selected.account == "acct-c"
+    assert selected.record_id == "openai-account"
+
+
+def test_ac5_hlth_missing_route_identity_is_unknown_and_ineligible():
+    proof = CanaryProof(
+        source="transcript", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW,
+        persisted=True, assistant_role=True,
+    )
+    candidates = [
+        RouteCandidate(
+            record_id="a", harness="codex", provider=None, account="acct",
+            account_env={}, canary=proof,
+        ),
+        RouteCandidate(
+            record_id="b", harness="codex", provider="openai", account=None,
+            account_env={}, canary=proof,
+        ),
+    ]
+    assert select_healthy_destination(candidates, broken_provider="zai", now_s=NOW) is None
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        None,
+        CanaryProof(
+            source="transcript", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW - 121, persisted=True, assistant_role=True,
+        ),
+        CanaryProof(
+            source="transcript", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW - 1, persisted=True, assistant_role=False,
+        ),
+        CanaryProof(
+            source="pane", content="prompt: FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW - 1, persisted=True, assistant_role=False,
+            pane_id="pane-1",
+        ),
+    ],
+)
+def test_ac5_hlth_absent_stale_or_prompt_echo_marker_is_not_health(proof):
+    candidate = RouteCandidate(
+        record_id="a", harness="codex", provider="openai", account="acct",
+        account_env={}, canary=proof,
+    )
+    assert select_healthy_destination([candidate], broken_provider="zai", now_s=NOW) is None
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        CanaryProof(
+            source="transcript", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW - 1, persisted=True, assistant_role=True,
+        ),
+        CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW - 1,
+            persisted=True, assistant_role=False, pane_id="pane-agy",
+        ),
+    ],
+)
+def test_ac5_hlth_exact_fresh_transcript_or_persisted_agy_pane_marker_is_health(proof):
+    candidate = RouteCandidate(
+        record_id="a", harness="agy", provider="google", account="acct",
+        account_env={}, canary=proof,
+    )
+    assert select_healthy_destination(
+        [candidate], broken_provider="zai", now_s=NOW,
+    ) == candidate
+
+
+def test_ac5_hlth_preserves_order_pin_and_filters_capability_runtime_and_breaker():
+    proof = CanaryProof(
+        source="transcript", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW,
+        persisted=True, assistant_role=True,
+    )
+
+    def candidate(record_id, **changes):
+        values = {
+            "record_id": record_id, "harness": "codex", "provider": "openai",
+            "account": record_id, "account_env": {}, "canary": proof,
+        }
+        values.update(changes)
+        return RouteCandidate(**values)
+
+    candidates = [
+        candidate("breaker", breaker_open=True),
+        candidate("runtime", runtime_exhausted=True),
+        candidate("missing", harness_installed=False),
+        candidate("substrate", pane_supported=False),
+        candidate("full", pane_count=4),
+        candidate("first"),
+        candidate("second"),
+    ]
+    assert select_healthy_destination(
+        candidates, broken_provider="zai", now_s=NOW,
+    ) == candidates[5]
+    assert select_healthy_destination(
+        candidates, broken_provider="zai", now_s=NOW, pinned_record_id="second",
+    ) == candidates[6]
+    assert select_healthy_destination(
+        candidates, broken_provider="zai", now_s=NOW, pinned_record_id="missing-pin",
+    ) is None
+
+
+def test_ac5_hlth_canary_uses_canonical_spawn_outside_node_then_stops(tmp_path: Path):
+    node_cwd = tmp_path / "node"
+    canary_cwd = tmp_path / "neutral"
+    node_cwd.mkdir()
+    canary_cwd.mkdir()
+    candidate = RouteCandidate(
+        record_id="a", harness="agy", provider="google", account="acct",
+        account_env={"GOOGLE_API_KEY": "test"}, canary=None,
+    )
+    calls = []
+    stopped = []
+    snapshots = iter([{"node:existing"}, {"node:existing"}])
+
+    def spawn(**kwargs):
+        calls.append(kwargs)
+        return {"pane_id": 7}
+
+    proof = run_health_canary(
+        candidate,
+        canary_cwd=canary_cwd,
+        node_cwd=node_cwd,
+        now_s=NOW,
+        spawn=spawn,
+        collect_proof=lambda _spawned: CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW - 1,
+            persisted=True, assistant_role=False, pane_id="7", stopped=False,
+        ),
+        stop=lambda spawned: stopped.append(spawned) is None,
+        claim_snapshot=lambda: next(snapshots),
+    )
+
+    assert proof is not None and proof.stopped is True
+    assert calls[0]["provider"] == "agy"
+    assert calls[0]["cwd"] == canary_cwd
+    assert "node" not in calls[0] and "provenance" not in calls[0]
+    assert "FNO_PROVIDER_HEALTH_OK" not in calls[0]["message"]
+    assert stopped == [{"pane_id": 7}]
+
+
+def test_ac5_hlth_canary_refuses_failed_stop_new_claim_or_node_worktree(tmp_path: Path):
+    candidate = RouteCandidate(
+        record_id="a", harness="codex", provider="openai", account="acct",
+        account_env={}, canary=None,
+    )
+    fresh = CanaryProof(
+        source="transcript", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW,
+        persisted=True, assistant_role=True,
+    )
+    def spawn(**_kwargs):
+        return object()
+    assert run_health_canary(
+        candidate, canary_cwd=tmp_path, node_cwd=tmp_path / "node", now_s=NOW,
+        spawn=spawn, collect_proof=lambda _spawned: fresh, stop=lambda _spawned: False,
+        claim_snapshot=lambda: set(),
+    ) is None
+    snapshots = iter([set(), {"node:new"}])
+    assert run_health_canary(
+        candidate, canary_cwd=tmp_path, node_cwd=tmp_path / "node", now_s=NOW,
+        spawn=spawn, collect_proof=lambda _spawned: fresh, stop=lambda _spawned: True,
+        claim_snapshot=lambda: next(snapshots),
+    ) is None
+    assert run_health_canary(
+        candidate, canary_cwd=tmp_path / "node" / "inside", node_cwd=tmp_path / "node",
+        now_s=NOW, spawn=spawn, collect_proof=lambda _spawned: fresh,
+        stop=lambda _spawned: True, claim_snapshot=lambda: set(),
+    ) is None

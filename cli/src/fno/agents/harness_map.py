@@ -304,11 +304,16 @@ def normalize_command(command: str, harness: str) -> str:
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
         # The single rule renders every verb - no per-verb allowlist (AC4-EDGE).
         prefix = caps.get("slash_prefix", "")
+        verb = (
+            cmd[len("/fno:") :]
+            if harness == "agy" and cmd.startswith("/fno:")
+            else cmd[1:]
+        )
         # Idempotent over the builtin rung: the resolve seam re-normalizes the
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if prefix and cmd.startswith("/" + prefix):
             return cmd
-        return "/" + prefix + cmd[1:]
+        return "/" + prefix + verb
     return cmd
 
 

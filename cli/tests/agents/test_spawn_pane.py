@@ -49,6 +49,8 @@ class FakeRunner:
         read_returncode: int = 0,
         read_stderr: str = "",
         placement: Optional[dict] = None,
+        tab_stdout: str = "[]",
+        tab_create_stdout: str = '{"tab_id": 12}',
         kill_returncode: int = 0,
         kill_stderr: str = "",
         kill_exception: Optional[Exception] = None,
@@ -64,6 +66,8 @@ class FakeRunner:
         self.read_returncode = read_returncode
         self.read_stderr = read_stderr
         self.placement = placement
+        self.tab_stdout = tab_stdout
+        self.tab_create_stdout = tab_create_stdout
         self.kill_calls: list[list[str]] = []
         self.kill_returncode = kill_returncode
         self.kill_stderr = kill_stderr
@@ -87,6 +91,10 @@ class FakeRunner:
         # live-only row every non-opencode test already expects.
         if argv[:2] == ["opencode", "db"]:
             return subprocess.CompletedProcess(argv, 0, self.db_stdout, "")
+        if argv[1:4] == ["mux", "tab", "ls"]:
+            return subprocess.CompletedProcess(argv, 0, self.tab_stdout, "")
+        if argv[1:4] == ["mux", "tab", "create"]:
+            return subprocess.CompletedProcess(argv, 0, self.tab_create_stdout, "")
         if argv[1:4] == ["mux", "pane", "run"]:
             if "--json" in argv:
                 payload = {"pane_id": 7}
@@ -1648,6 +1656,204 @@ def test_placement_omitted_leaves_pane_run_argv_unchanged(
     run_call = runner.calls[0]
     sep = run_call.index("--")
     assert "squad" not in run_call[:sep] and "split" not in run_call[:sep]
+
+
+def test_stable_tab_id_rides_outer_pane_run_before_separator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = FakeRunner(
+        ls_stdout=json.dumps([
+            {"pane_id": 7, "squad_id": 1, "tab_id": 12, "cwd": "/w", "child_pid": 4242}
+        ])
+    )
+    _result, runner = _spawn(monkeypatch, tmp_path, tab_id="id:12", runner=runner)
+    run_call = runner.calls[0]
+    sep = run_call.index("--")
+    outer = run_call[:sep]
+    assert outer[outer.index("--tab") + 1] == "id:12"
+    assert "--tab" not in run_call[sep + 1 :]
+
+
+def test_stable_tab_id_refuses_ordinal_before_spawn(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="stable-id"):
+        _spawn(monkeypatch, tmp_path, tab_id="2", runner=runner)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("existing_count", [0, 1, 2, 3])
+def test_bounded_placement_selects_existing_tab_below_four(
+    tmp_path: Path, monkeypatch, existing_count: int
+) -> None:
+    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
+
+    use_tmpdir(monkeypatch, tmp_path)
+    existing = list(range(20, 20 + existing_count))
+    post_panes = [
+        {"pane_id": pane, "squad_id": 1, "tab_id": 12, "cwd": "/w", "child_pid": 4000 + pane}
+        for pane in existing
+    ] + [{"pane_id": 7, "squad_id": 1, "tab_id": 12, "cwd": str(tmp_path), "child_pid": 4242}]
+    runner = FakeRunner(
+        tab_stdout=json.dumps([{"tab_id": 12, "pane_ids": existing}]),
+        ls_stdout=json.dumps(post_panes),
+    )
+    harness = "claude"
+
+    dispatch_spawn_bounded_pane(
+        name=f"bounded-{existing_count}", message="hello", provider=harness,
+        cwd=tmp_path, placement_holder=f"test:{existing_count}",
+        claims_root=tmp_path, runner=runner,
+    )
+
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert run_call[run_call.index("--tab") + 1] == "id:12"
+    assert not any(call[1:4] == ["mux", "tab", "create"] for call in runner.calls)
+
+
+def test_bounded_placement_excludes_four_pane_tab(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
+
+    use_tmpdir(monkeypatch, tmp_path)
+    runner = FakeRunner(
+        tab_stdout=json.dumps([
+            {"tab_id": 12, "pane_ids": [1, 2, 3, 4]},
+            {"tab_id": 13, "pane_ids": [5]},
+        ]),
+        ls_stdout=json.dumps([
+            {"pane_id": 5, "squad_id": 1, "tab_id": 13, "cwd": "/w", "child_pid": 4005},
+            {"pane_id": 7, "squad_id": 1, "tab_id": 13, "cwd": str(tmp_path), "child_pid": 4242},
+        ]),
+    )
+    harness = "claude"
+    dispatch_spawn_bounded_pane(
+        name="bounded-open", message="hello", provider=harness, cwd=tmp_path,
+        placement_holder="test:open", claims_root=tmp_path, runner=runner,
+    )
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert run_call[run_call.index("--tab") + 1] == "id:13"
+
+
+def test_bounded_placement_creates_tab_when_every_tab_is_full(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import dispatch_spawn_bounded_pane
+
+    use_tmpdir(monkeypatch, tmp_path)
+    runner = FakeRunner(
+        tab_stdout=json.dumps([{"tab_id": 12, "pane_ids": [1, 2, 3, 4]}]),
+        tab_create_stdout=json.dumps({"tab_id": 14}),
+        ls_stdout=json.dumps([
+            {"pane_id": 8, "squad_id": 1, "tab_id": 14, "cwd": "/w", "child_pid": 4200},
+            {"pane_id": 7, "squad_id": 1, "tab_id": 14, "cwd": str(tmp_path), "child_pid": 4242},
+        ]),
+    )
+    harness = "claude"
+    dispatch_spawn_bounded_pane(
+        name="bounded-new", message="hello", provider=harness, cwd=tmp_path,
+        placement_holder="test:new", claims_root=tmp_path, runner=runner,
+    )
+    assert any(call[1:4] == ["mux", "tab", "create"] for call in runner.calls)
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert run_call[run_call.index("--tab") + 1] == "id:14"
+
+
+def test_bounded_placement_lease_loser_spawns_nothing(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_bounded_pane
+    from fno.claims.core import acquire_claim
+
+    use_tmpdir(monkeypatch, tmp_path)
+    acquire_claim("placement:main:current", "other-holder", root=tmp_path)
+    runner = FakeRunner()
+    harness = "claude"
+    with pytest.raises(DispatchAskError, match="other-holder"):
+        dispatch_spawn_bounded_pane(
+            name="loser", message="hello", provider=harness, cwd=tmp_path,
+            placement_holder="loser-holder", claims_root=tmp_path, runner=runner,
+        )
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("listing", "reason"),
+    [
+        ([{"pane_id": 7, "squad_id": 1, "tab_id": 13}], "wrong tab"),
+        ([{"pane_id": pane, "squad_id": 1, "tab_id": 12} for pane in range(3, 8)], "fifth pane"),
+    ],
+)
+def test_bounded_post_spawn_failure_reaps_pane_and_writes_no_row(
+    tmp_path: Path, monkeypatch, listing: list[dict], reason: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(ls_stdout=json.dumps(listing))
+    with pytest.raises(DispatchAskError, match=reason):
+        _spawn(monkeypatch, tmp_path, tab_id="id:12", runner=runner)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+@pytest.mark.parametrize(
+    ("harness", "expected"),
+    [
+        ("codex", "$fno:target build it"),
+        ("opencode", "/fno:target build it"),
+        ("agy", "/target build it"),
+    ],
+)
+def test_target_command_normalizes_from_plugin_spelling_for_every_harness(
+    harness: str, expected: str
+) -> None:
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/fno:target build it", harness) == expected
+
+
+def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=1, child_pid=None, session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "claude", "--tab-id", "id:12"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["tab_id"] == "id:12"
+
+
+def test_cmd_spawn_refuses_ordinal_tab_id_before_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn, "dispatch_spawn_pane",
+        lambda **_kwargs: pytest.fail("dispatch must not run"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "claude", "--tab-id", "12"],
+    )
+    assert result.exit_code == 2
+    assert "id:<stable-id>" in result.output
 
 
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
