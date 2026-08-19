@@ -887,11 +887,71 @@ def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     assert "the schema will not accept" in res.output
 
 
-def test_authority_source_is_stated_never_inferred(
-    root: Path, tmp_graph: Path, index: Path
+def test_resolve_agent_identity_defaults_decider_and_authority(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["decided_by"] == harness_identity.canonical_handle(session_id)
+    assert decision["authority_source"] == "agent"
+
+
+def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["decided_by"] == "operator"
+    assert decision["authority_source"] == "operator"
+
+
+def test_decided_by_override_keeps_resolved_agent_authority(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Reading --decided-by as a beastmode grant writes wrong provenance into
     the field a reader months later trusts."""
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(
+            "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
+        ),
+    )
+
     runner.invoke(
         decide_app,
         ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
@@ -899,7 +959,8 @@ def test_authority_source_is_stated_never_inferred(
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
     )
-    assert payload["decisions"][0]["authority_source"] == "operator"
+    assert payload["decisions"][0]["decided_by"] == "J.N. Choi"
+    assert payload["decisions"][0]["authority_source"] == "agent"
 
     runner.invoke(
         decide_app,

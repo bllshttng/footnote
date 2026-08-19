@@ -57,13 +57,13 @@ def record(
     decided_by: Optional[str] = typer.Option(
         None,
         "--decided-by",
-        help="Who decided. Defaults to the operator; name the agent under a beastmode grant.",
+        help="Who decided. Omit to use the current agent handle, or the operator outside a session.",
     ),
     authority: Optional[str] = typer.Option(
         None,
         "--authority",
-        help="How the decider was entitled to decide: 'operator' (default) or "
-        "'beastmode'. Pass it when an agent decided under a grant.",
+        help="How the decider was entitled to decide: 'operator', 'agent', or "
+        "'beastmode'. Omit to resolve it from the current session.",
     ),
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
@@ -82,11 +82,11 @@ def record(
             decision=decision,
             subject=subject,
             question_id=question_id,
-            decided_by=decided_by or "operator",
+            decided_by=decided_by,
             # Stated, never inferred. Reading `--decided-by "J.N. Choi"` as a
             # beastmode grant writes wrong provenance into the one field a
             # reader months later trusts to say how a ruling was entitled.
-            authority_source=authority or "operator",
+            authority_source=authority,
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,

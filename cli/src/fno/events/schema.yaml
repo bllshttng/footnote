@@ -2247,10 +2247,10 @@ event_types:
           description: "Optional. What was on the table, so a later reader sees what was rejected."
         decided_by:
           type: string
-          description: "Optional. The operator, or the agent that decided under a beastmode grant."
+          description: "Optional. The operator name or canonical agent handle; omitted values resolve from ambient session identity."
         authority_source:
           type: string
-          description: "Optional. How the decider was entitled to decide: operator, beastmode, etc."
+          description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."
         rationale:
           type: string
           description: "Optional. One line: the reason, not a restatement."

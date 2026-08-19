@@ -58,12 +58,30 @@ def mint_decision_id() -> str:
     return f"d-{secrets.token_hex(4)}"
 
 
+def _resolve_decider(
+    decided_by: str | None, authority_source: str | None
+) -> tuple[str, str]:
+    """Resolve omitted provenance from the ambient harness identity."""
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    agent = (
+        canonical_handle(ident.session_id)
+        if ident.session_id and ident.harness
+        else None
+    )
+    return (
+        decided_by or agent or "operator",
+        authority_source or ("agent" if agent else "operator"),
+    )
+
+
 def record_decision(
     *,
     decision: str,
     subject: str | None = None,
-    decided_by: str = "operator",
-    authority_source: str = "operator",
+    decided_by: str | None = None,
+    authority_source: str | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -87,6 +105,8 @@ def record_decision(
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
+
+    decided_by, authority_source = _resolve_decider(decided_by, authority_source)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
