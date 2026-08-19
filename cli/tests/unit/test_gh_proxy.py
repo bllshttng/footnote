@@ -187,6 +187,30 @@ def test_delegate_replaces_proxy_to_preserve_tty(monkeypatch):
     }
 
 
+def test_main_refuses_to_run_when_reentry_marker_is_set(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gh", "api", "rate_limit"])
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    with pytest.raises(SystemExit, match="1"):
+        gh_proxy.main()
+    assert "re-entered itself" in capsys.readouterr().err
+
+
+def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatch):
+    seen = {}
+
+    def execve(path, argv, env):
+        seen["env"] = env
+        raise RuntimeError("exec sentinel")
+
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", execve)
+    monkeypatch.setattr(
+        "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
+    )
+    with pytest.raises(RuntimeError, match="exec sentinel"):
+        delegate("/real/gh", ["auth", "status"])
+    assert seen["env"]["FNO_GH_PROXY_DEPTH"] == "1"
+
+
 def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["gh", "pr", "view", "930", "--json", "reviews"])
     monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", lambda: "/real/gh")

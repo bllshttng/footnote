@@ -8,6 +8,11 @@ from typing import Sequence
 
 from fno.pr import _quota
 
+# os.execve replaces the process image on delegate: no child appears, so a
+# generation marker in the environ is the only way this program can tell it
+# is its own successor when resolve_real_gh mistakenly hands back the proxy.
+_REENTRY_ENV = "FNO_GH_PROXY_DEPTH"
+
 
 class Action(str, Enum):
     DELEGATE = "delegate"
@@ -55,10 +60,19 @@ def classify(args: Sequence[str]) -> Action:
 
 def delegate(real: str, args: Sequence[str]) -> None:
     """Replace the proxy so untouched gh commands keep TTY and streaming semantics."""
-    os.execve(real, [real, *args], _quota.delegate_environment())
+    env = _quota.delegate_environment()
+    env[_REENTRY_ENV] = "1"
+    os.execve(real, [real, *args], env)
 
 
 def main() -> None:
+    if os.environ.get(_REENTRY_ENV):
+        print(
+            "gh proxy: re-entered itself - resolve_real_gh() returned the proxy "
+            "shim instead of a real gh binary; refusing to loop",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     args = sys.argv[1:]
     action = classify(args)
     real = _quota.resolve_real_gh()
