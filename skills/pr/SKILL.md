@@ -123,10 +123,10 @@ Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the
 
 Dispatch with the Task/Agent tool:
 
-- subagent type: **pr-creator** (the bundled agent at `skills/pr/agents/pr-creator.md`). Declare the `pr-create` role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override) so the model is resolved through `config.model_routing.roles.pr-create`; unconfigured, it runs on the invoking harness's primary model. No tier or model literal is hardcoded. On a runtime that resolves subagents by name, use that name; otherwise dispatch a general worker with the `skills/pr/agents/pr-creator.md` prompt and the same role declaration.
+- subagent type: **pr-creator**, bundled at `agents/pr-creator.md`. Declare the `pr-create` role at the spawn boundary. Use `fno agents spawn --role pr-create`, or omit a model override. The configured route selects the model. Without one, use the invoking harness's primary model. Never hardcode a tier or model. If the runtime resolves subagents by name, use that name. Otherwise dispatch a general worker with the bundled prompt and the same role.
 - Pass ONLY the gathered context the worker needs - the current branch, the base branch, a one-line summary of the change, and the no-merge / auto-merge posture. Do NOT pass the full session transcript: the worker's context is small and a fork would blow it.
 
-`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `skills/pr/agents/pr-creator.md` is the same flow rewritten as the pr-create role subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
+`references/create.md` is the canonical create flow and bundled copy of the standalone skill. `agents/pr-creator.md` adapts that flow for the role subagent. The router dispatches the agent through the Task/Agent tool. It never reaches a create skill through a runtime skill call.
 
 ### 2c. Parse the worker's RESULT line (no false success)
 
