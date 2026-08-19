@@ -533,6 +533,12 @@ def _run_codex(
     else:
         spawn_env = None
 
+    from fno.setup.github_cli import worker_environment
+
+    proxy_env = worker_environment(spawn_env or os.environ)
+    if spawn_env is not None or proxy_env != dict(os.environ):
+        spawn_env = proxy_env
+
     try:
         try:
             proc = _subprocess_popen(

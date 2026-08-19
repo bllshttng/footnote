@@ -449,6 +449,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         lambda pr, cwd: ({
             "state": "OPEN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "headRefOid": "h" * 40,
         }, ""),
     )
     # Stub the review read (no gh) so the frozen contract is deterministic.
@@ -470,6 +471,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out == {
         "pr": "42",
+        "head": "h" * 40,
         "verdict": "green",
         "settled": True,
         "green": True,
@@ -1016,6 +1018,10 @@ def _fake_runner(*, reviews, threads, view_ok=True, graphql_ok=True):
     """Dispatch gh calls: `pr view` -> reviews+url, `api graphql` -> threads."""
 
     def runner(cmd, *, cwd=None, timeout=None, **_):
+        if "rate_limit" in cmd:
+            return Result(0, _json.dumps(
+                {"resources": {"graphql": {"remaining": 5000, "reset": 1787072400}}}
+            ), "")
         if "graphql" in cmd:
             if not graphql_ok:
                 return Result(1, "", "boom")
@@ -1096,7 +1102,7 @@ def _fake_runner_with_quota(*, remaining, reviews=None, threads=None):
     def runner(cmd, *, cwd=None, timeout=None, **_):
         if "rate_limit" in cmd:
             return Result(0, _json.dumps(
-                {"resources": {"graphql": {"remaining": remaining}}}
+                {"resources": {"graphql": {"remaining": remaining, "reset": 1787072400}}}
             ), "")
         if "graphql" in cmd:
             calls["graphql"] += 1
@@ -1176,6 +1182,10 @@ def test_graphql_failure_degrades_to_unknown():
 def test_graphql_errors_envelope_degrades_to_unknown():
     """A GraphQL error envelope (rc=0, `errors` set) is unavailable, not empty."""
     def runner(cmd, *, cwd=None, timeout=None, **_):
+        if "rate_limit" in cmd:
+            return Result(0, _json.dumps(
+                {"resources": {"graphql": {"remaining": 5000, "reset": 1787072400}}}
+            ), "")
         if "graphql" in cmd:
             return Result(0, _json.dumps({"errors": [{"message": "nope"}]}), "")
         return Result(0, _json.dumps({"url": _URL, "reviews": []}), "")

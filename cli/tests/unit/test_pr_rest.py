@@ -14,7 +14,13 @@ import json
 from fno.pr import _rest, _status
 from fno.pr._proc import Result
 
-_PULLS = {"state": "open", "merged": False, "head": {"sha": "abc123def"}}
+_PULLS = {
+    "html_url": "https://github.com/Owner/Repo/pull/42",
+    "state": "open",
+    "merged": False,
+    "head": {"sha": "abc123def", "ref": "feature/test"},
+    "base": {"ref": "main"},
+}
 _GH_URL = "git@github.com:Owner/Repo.git"
 
 
@@ -64,6 +70,135 @@ def test_settledness_reader_issues_no_graphql_call():
     assert any("check-runs" in c[-1] for c in calls)
     assert any(c[-1].endswith("/status") for c in calls)
     assert any(c[:2] == ["git", "remote"] for c in calls)
+
+
+def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
+    calls: list[list[str]] = []
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "mergeable": True,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls, calls=calls)
+    )
+    assert reason == ""
+    assert info == {
+        "pr": 42,
+        "url": "https://github.com/Owner/Repo/pull/42",
+        "state": "OPEN",
+        "head_sha": "abc123def",
+        "head_ref": "feature/rest-info",
+        "base_ref": "main",
+        "mergeable": "MERGEABLE",
+        "merged_at": None,
+    }
+    assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
+
+
+def test_pr_info_preserves_unknown_mergeability():
+    pulls = {
+        "html_url": "https://github.com/Owner/Repo/pull/42",
+        "state": "open",
+        "merged": False,
+        "mergeable": None,
+        "head": {"sha": "abc123def", "ref": "feature/rest-info"},
+        "base": {"ref": "main"},
+    }
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info["mergeable"] == "UNKNOWN"
+
+
+def test_pr_info_rejects_malformed_head_shape():
+    info, reason = _rest.fetch_pr_info_rest(
+        "42",
+        repo="Owner/Repo",
+        runner=_runner(pulls={"state": "open", "head": [], "base": {"ref": "main"}}),
+    )
+    assert info is None
+    assert "malformed head/base" in reason
+
+
+def test_pr_info_allows_missing_html_url_without_losing_metadata():
+    pulls = dict(_PULLS)
+    pulls.pop("html_url")
+    info, reason = _rest.fetch_pr_info_rest(
+        "42", repo="Owner/Repo", runner=_runner(pulls=pulls)
+    )
+    assert reason == ""
+    assert info is not None
+    assert info["url"] is None
+    assert info["head_sha"] == "abc123def"
+
+
+def test_rest_reader_rejects_malformed_check_runs():
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "remote"]:
+            return Result(0, _GH_URL, "")
+        if "/pulls/" in cmd[-1]:
+            return Result(0, json.dumps(_PULLS), "")
+        if "check-runs" in cmd[-1]:
+            return Result(0, '{"check_runs":{}}', "")
+        return Result(0, '{"statuses":[]}', "")
+
+    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
+    assert payload is None
+    assert "malformed check_runs" in reason
+
+
+def test_rest_reader_fails_closed_when_legacy_status_read_fails_with_green_check_runs():
+    r = _runner(
+        check_runs=[_cr("ci", "completed", "success")],
+        fail=lambda cmd: "legacy status unavailable" if cmd[-1].endswith("/status") else None,
+    )
+    payload, reason = _rest.fetch_pr_rest("42", runner=r)
+    assert payload is None
+    assert reason == "legacy status unavailable"
+
+
+def test_rest_reader_rejects_malformed_statuses():
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "remote"]:
+            return Result(0, _GH_URL, "")
+        if "/pulls/" in cmd[-1]:
+            return Result(0, json.dumps(_PULLS), "")
+        if "check-runs" in cmd[-1]:
+            return Result(0, '{"check_runs":[{"name":"ci"}]}', "")
+        return Result(0, '{"statuses":{}}', "")
+
+    payload, reason = _rest.fetch_pr_rest("42", runner=runner)
+    assert payload is None
+    assert "malformed statuses" in reason
+
+
+def test_current_pr_number_uses_rest_not_gh_pr_view():
+    calls: list[list[str]] = []
+
+    def runner(cmd, cwd=None):
+        calls.append(list(cmd))
+        if cmd[:3] == ["git", "branch", "--show-current"]:
+            return Result(0, "feature/rest-info\n", "")
+        if cmd[:2] == ["gh", "api"]:
+            return Result(0, '[{"number":930}]', "")
+        return Result(1, "", "unexpected")
+
+    number, reason = _rest.resolve_current_pr_number_rest(
+        repo="Owner/Repo", runner=runner
+    )
+    assert (number, reason) == (930, "")
+    assert calls == [
+        ["git", "branch", "--show-current"],
+        [
+            "gh", "api",
+            "repos/Owner/Repo/pulls?state=all&head=Owner:feature/rest-info&per_page=2",
+        ],
+    ]
 
 
 def test_rest_green_maps_to_rollup_green():
@@ -134,7 +269,16 @@ def test_rest_primary_limit_reason_names_core_bucket():
 
 
 def test_rest_merged_state_maps():
-    r = _runner(pulls={"state": "closed", "merged": True, "head": {"sha": "s"}})
+    r = _runner(
+        pulls={
+            "html_url": "https://github.com/Owner/Repo/pull/42",
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-08-18T00:00:00Z",
+            "head": {"sha": "s", "ref": "feature/test"},
+            "base": {"ref": "main"},
+        }
+    )
     pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
     assert pr_json["state"] == "MERGED"
 

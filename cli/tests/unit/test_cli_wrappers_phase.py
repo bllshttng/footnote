@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
@@ -20,6 +21,13 @@ from fno import phase as phase_module
 runner = CliRunner()
 
 _FAKE_BIN = Path("/fake/bin/fno-agents")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_worker_proxy(monkeypatch):
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment", lambda base: dict(base)
+    )
 
 
 class _StubResult:

@@ -46,6 +46,15 @@ assert_deny() {
     fi
 }
 
+assert_no_decision() {
+    local desc="$1" result="$2"
+    if [[ -z "$result" ]]; then
+        pass "$desc"
+    else
+        fail "$desc (expected no hook decision, got: $result)"
+    fi
+}
+
 # ---- sandbox setup ----
 
 TMP=$(mktemp -d)
@@ -128,6 +137,36 @@ assert_deny "regression 1: git commit --no-verify -> deny" "$result"
 
 result=$(run_hook "git push origin main")
 assert_deny "regression 2: git push origin main -> deny" "$result"
+
+result=$(run_hook "gh pr view 930 --json headRefOid,mergeable")
+assert_deny "GraphQL reserve: direct PR metadata read denied" "$result"
+
+result=$(run_hook "cd /tmp && GH_TOKEN=x gh pr checks 930")
+assert_deny "GraphQL reserve: compound wrapped checks read denied" "$result"
+
+result=$(run_hook "bash -c 'gh api graphql -f query=x'")
+assert_deny "GraphQL reserve: shell-wrapped raw query denied" "$result"
+
+result=$(run_hook "gh api -X POST graphql -f query=x")
+assert_deny "GraphQL reserve: api method-before-endpoint denied" "$result"
+
+result=$(run_hook "gh api --hostname github.com graphql -f query=x")
+assert_deny "GraphQL reserve: api hostname-before-endpoint denied" "$result"
+
+result=$(run_hook '$FNO_REAL_GH api graphql -f query=x')
+assert_deny "GraphQL reserve: raw delegate variable denied" "$result"
+
+result=$(run_hook "gh -R owner/repo pr view 930 --json=state")
+assert_deny "GraphQL reserve: repo-global view denied" "$result"
+
+result=$(run_hook "gh --repo=owner/repo pr list --state open")
+assert_deny "GraphQL reserve: repo-global list denied" "$result"
+
+result=$(run_hook "gh pr -R owner/repo view 930")
+assert_deny "GraphQL reserve: inherited repo flag denied" "$result"
+
+result=$(run_hook "gh api repos/o/r/pulls/930")
+assert_no_decision "GraphQL reserve: REST read remains outside this hook" "$result"
 
 # ---- Case 5: megawalk-state.md does NOT authorize a merge -> denied ----
 # Megawalk orchestrates target subagents; only target's own target-state.md

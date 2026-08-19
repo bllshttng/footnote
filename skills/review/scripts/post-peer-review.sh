@@ -69,8 +69,8 @@ main() {
 
   # Resolve the current head sha so the marker + inline commit_id pin to HEAD.
   local head_sha
-  head_sha="$(GH_TOKEN="$tok" gh pr view "$pr" --json headRefOid -q .headRefOid)" \
-    || die "gh pr view failed for PR #$pr (gate stays unmet)"
+  head_sha="$(GH_TOKEN="$tok" fno pr info "$pr" | jq -er .head_sha)" \
+    || die "fno pr info failed for PR #$pr (gate stays unmet)"
   local marker; marker="$(head_marker "$provider" "$head_sha")"
 
   # Anti-gaming (codex P1 on #205): the peer MUST post under an account distinct
@@ -80,8 +80,8 @@ main() {
   local my_login pr_author
   my_login="$(GH_TOKEN="$tok" gh api user -q .login 2>/dev/null)" \
     || die "cannot resolve the peer identity from \$$token_env (gh api user failed); a peer must post under a verifiable distinct account"
-  pr_author="$(GH_TOKEN="$tok" gh pr view "$pr" --json author -q .author.login 2>/dev/null)" \
-    || die "gh pr view (author) failed for PR #$pr (gate stays unmet)"
+  pr_author="$(GH_TOKEN="$tok" gh api "repos/{owner}/{repo}/pulls/$pr" -q .user.login 2>/dev/null)" \
+    || die "REST PR-author read failed for PR #$pr (gate stays unmet)"
   # GitHub logins are case-insensitive: normalize both before comparing so a
   # cased alias (Fno-Peer-Bot vs fno-peer-bot) can't sneak a self-review past
   # the anti-gaming check (codex P2 on #205). tr for Bash 3.2 (no ${v,,}).

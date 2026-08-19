@@ -423,6 +423,11 @@ def headless_create(
             spawn_env, _ = compose_worker_credentials(
                 account_env, route_env, spawn_env
             )
+    from fno.setup.github_cli import worker_environment
+
+    proxy_env = worker_environment(spawn_env or os.environ)
+    if spawn_env is not None or proxy_env != dict(os.environ):
+        spawn_env = proxy_env
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -606,6 +611,10 @@ def bg_create(
         from fno.agents.account_env import compose_worker_credentials
 
         spawn_env, _ = compose_worker_credentials(account_env, route, spawn_env)
+
+    from fno.setup.github_cli import worker_environment
+
+    spawn_env = worker_environment(spawn_env)
 
     start = time.monotonic()
     try:

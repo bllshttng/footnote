@@ -139,7 +139,7 @@ SCOPE_BASE="$MERGE_BASE"
 SCOPE_REASON="first-round"
 
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)
-PR_NUMBER=$(gh pr view --json number --jq .number 2>/dev/null || true)
+PR_NUMBER=$(fno pr info 2>/dev/null | jq -r '.pr // empty')
 PRIOR_HEAD=""
 if [ -n "$NODE_ID" ] && [ -n "$PR_NUMBER" ]; then
   PRIOR_HEAD=$(fno review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
@@ -261,7 +261,8 @@ bash scripts/scan-antipatterns.sh .
 Before generating the report, re-verify the PR is still eligible:
 ```bash
 # Re-check PR state (may have changed during review)
-gh pr view --json state,isDraft --jq '{state: .state, isDraft: .isDraft}'
+PR_NUMBER=$(fno pr info | jq -er .pr)
+gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '{state: (.state | ascii_upcase), isDraft: .draft}'
 ```
 - If PR is now closed/merged → skip posting, report locally only
 - If PR is now a draft → skip posting, report locally only
@@ -318,8 +319,9 @@ Resolve the reviewed head before dispatch and retain it as `REVIEWED_HEAD`; reso
 
 ```bash
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
-PR_NUMBER=$(gh pr view --json number --jq .number)
-CURRENT_HEAD=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+PR_INFO=$(fno pr info)
+PR_NUMBER=$(printf '%s' "$PR_INFO" | jq -er .pr)
+CURRENT_HEAD=$(printf '%s' "$PR_INFO" | jq -er .head_sha)
 ROUND_ID="${REVIEWED_HEAD:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fno review --publish-sigma "$REPORT_FILE" \
   --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \

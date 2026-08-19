@@ -136,6 +136,23 @@ def cli_hooks_codex_cmd(
     )
 
 
+@app.command("github-cli")
+def github_cli_cmd() -> None:
+    """Install or refresh the `gh` proxy used by Footnote workers."""
+    from fno.setup.github_cli import ensure_proxy
+
+    try:
+        result = ensure_proxy()
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        typer.echo(f"github-cli error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    action = "installed" if result.changed else "verified"
+    backup = f" backup={result.backup}" if result.backup else ""
+    typer.echo(
+        f"github-cli {action}: proxy={result.proxy} delegate={result.delegate}{backup}"
+    )
+
+
 def _install_cli_hooks(
     *,
     codex: bool,

@@ -11,6 +11,8 @@ with either check deleted.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fno.pr import _base_lineage
@@ -64,21 +66,40 @@ class FakeRun:
         if cmd[0] == "git" and self.git_missing:
             raise ToolMissing("git")
         if cmd[0] == "gh":
-            if cmd[1:3] == ["repo", "view"]:
+            endpoint = cmd[-1]
+            if cmd[1] == "api" and endpoint == "repos/owner/repo":
                 if self.default_fails:
                     return Result(1, "", "gh: api error")
-                return Result(0, self.default + "\n", "")
-            if cmd[1:3] == ["pr", "view"]:
+                return Result(0, json.dumps({"default_branch": self.default}), "")
+            if (
+                cmd[1] == "api"
+                and endpoint.startswith("repos/owner/repo/pulls/")
+                and "?" not in endpoint
+            ):
                 if self.base_fails:
                     return Result(1, "", "gh: api error")
-                return Result(0, self.base + "\n", "")
-            if cmd[1:3] == ["pr", "list"]:
+                return Result(0, json.dumps({"base": {"ref": self.base}}), "")
+            if cmd[1] == "api" and "pulls?state=all" in endpoint:
+                if self.base_fails:
+                    return Result(1, "", "gh: api error")
+                return Result(0, json.dumps([{"base": {"ref": self.base}}]), "")
+            if cmd[1] == "api" and "pulls?state=closed" in endpoint:
                 if self.list_fails:
                     return Result(1, "", "gh: api error")
                 if not self.merged_pr:
-                    return Result(0, "null null\n", "")
-                return Result(0, f"{self.merged_pr} {self.merged_head}\n", "")
+                    return Result(0, "[]", "")
+                return Result(
+                    0,
+                    json.dumps([{
+                        "number": int(self.merged_pr),
+                        "merged_at": "2026-08-10T18:05:58Z",
+                        "head": {"sha": self.merged_head},
+                    }]),
+                    "",
+                )
         if cmd[0] == "git":
+            if cmd[1:4] == ["remote", "get-url", "origin"]:
+                return Result(0, "git@github.com:Owner/Repo.git\n", "")
             if cmd[1] == "fetch":
                 gone = self.base_fetch_fails and f"refs/heads/{self.base}:" in cmd[-1]
                 return Result(1 if (self.fetch_fails or gone) else 0, "", "")
@@ -123,7 +144,7 @@ def test_base_is_default_branch_is_ok_without_probing(patch_run):
     verdict, _ = _base_lineage.lineage_verdict(805, "/repo")
     assert verdict == "ok"
     assert not any(c[1:3] == ["pr", "list"] for c in fake.calls)
-    assert not any(c[0] == "git" for c in fake.calls)
+    assert not any(c[0] == "git" and c[1] != "remote" for c in fake.calls)
 
 
 def test_merged_pr_on_unmoved_base_refuses(patch_run):
@@ -177,6 +198,26 @@ def test_healthy_stack_passes(patch_run):
     patch_run(FakeRun(merged_pr="", contained=False))
     verdict, _ = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "ok"
+
+
+def test_lineage_github_reads_never_use_graphql(patch_run):
+    fake = patch_run(FakeRun(merged_pr="", contained=False))
+    verdict, _ = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "ok"
+    graphql = [
+        call for call in fake.calls
+        if call[0] == "gh" and len(call) > 2 and call[1:3] in (
+            ["repo", "view"], ["pr", "view"], ["pr", "list"]
+        )
+    ]
+    assert graphql == []
+
+
+def test_branch_name_selector_keeps_rest_lineage_support(patch_run):
+    fake = patch_run(FakeRun(base="main"))
+    verdict, _ = _base_lineage.lineage_verdict("feature/stack", "/repo")
+    assert verdict == "ok"
+    assert any("pulls?state=all" in call[-1] for call in fake.calls if call[0] == "gh")
 
 
 def test_deleted_base_branch_still_refuses(patch_run):
@@ -314,7 +355,7 @@ def test_missing_git_degrades_to_unknown_not_a_traceback(patch_run):
     patch_run(FakeRun(git_missing=True))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "unknown"
-    assert "ancestry probe" in why
+    assert "origin remote" in why
 
 
 def test_cli_exit_codes(patch_run, monkeypatch):

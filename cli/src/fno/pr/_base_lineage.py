@@ -65,11 +65,14 @@ has not verified anything.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import Optional, Tuple
+from urllib.parse import quote
 
 from fno.pr._proc import run
+from fno.pr._ritual import _parse_origin_slug
 
 OK = 0
 REFUSED_STALE = 3
@@ -104,27 +107,47 @@ def _probe(args: list, cwd: str):
         return None
 
 
-def _default_branch(cwd: str) -> Optional[str]:
-    res = _probe(
-        ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
-        cwd,
-    )
+def _repo_slug(cwd: str) -> Optional[str]:
+    res = _probe(["git", "remote", "get-url", "origin"], cwd)
     if res is None or not res.ok:
         return None
-    return res.stdout.strip() or None
+    return _parse_origin_slug(res.stdout.strip())
 
 
-def _base_ref(pr_number, cwd: str) -> Optional[str]:
-    res = _probe(
-        ["gh", "pr", "view", str(pr_number), "--json", "baseRefName", "-q", ".baseRefName"],
-        cwd,
-    )
+def _default_branch(slug: str, cwd: str) -> Optional[str]:
+    res = _probe(["gh", "api", f"repos/{slug}"], cwd)
     if res is None or not res.ok:
         return None
-    return res.stdout.strip() or None
+    try:
+        value = json.loads(res.stdout).get("default_branch")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
 
 
-def _merged_pr_for_head(base: str, cwd: str) -> tuple:
+def _base_ref(pr_number, slug: str, cwd: str) -> Optional[str]:
+    selector = str(pr_number).rstrip("/").rsplit("/", 1)[-1]
+    if selector.isdigit():
+        endpoint = f"repos/{slug}/pulls/{selector}"
+    else:
+        owner = slug.split("/", 1)[0]
+        head = quote(f"{owner}:{str(pr_number)}", safe="")
+        endpoint = f"repos/{slug}/pulls?state=all&head={head}&per_page=2"
+    res = _probe(["gh", "api", endpoint], cwd)
+    if res is None or not res.ok:
+        return None
+    try:
+        payload = json.loads(res.stdout)
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        base = payload.get("base") if isinstance(payload, dict) else None
+        value = base.get("ref") if isinstance(base, dict) else None
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _merged_pr_for_head(base: str, slug: str, cwd: str) -> tuple:
     """``(pr_number, head_oid)`` of the newest MERGED PR whose head is ``base``.
 
     ``(0, "")`` when none exists, ``(_PROBE_FAILED, "")`` on a probe error. The
@@ -135,32 +158,39 @@ def _merged_pr_for_head(base: str, cwd: str) -> tuple:
     historical fact, not a statement about the branch as it stands now. See
     :func:`lineage_verdict` for why the caller compares it to the live tip.
     """
-    res = _probe(
-        [
-            "gh", "pr", "list", "--head", base, "--state", "merged",
-            "--limit", "1", "--json", "number,headRefOid",
-            "-q", '.[0] | "\\(.number) \\(.headRefOid)"',
-        ],
-        cwd,
-    )
-    if res is None or not res.ok:
-        return (_PROBE_FAILED, "")
-    out = res.stdout.strip()
-    if not out or out.startswith("null"):
-        return (0, "")
-    parts = out.split()
-    try:
-        number = int(parts[0])
-    except (ValueError, IndexError):
-        return (_PROBE_FAILED, "")
-    head = parts[1] if len(parts) > 1 else ""
-    if not head or head == "null":
-        # A merged PR with no readable head oid leaves (i) UNEVALUATED, not
-        # clean: without the oid the caller cannot compare it to the live tip,
-        # and returning the number alone would fall through to `ok` - a green
-        # answer nobody computed, the exact defect this module guards.
-        return (_PROBE_FAILED, "")
-    return (number, head)
+    owner = slug.split("/", 1)[0]
+    encoded_head = quote(f"{owner}:{base}", safe="")
+    for page in range(1, 11):
+        endpoint = (
+            f"repos/{slug}/pulls?state=closed&head={encoded_head}"
+            f"&per_page=100&page={page}"
+        )
+        res = _probe(["gh", "api", endpoint], cwd)
+        if res is None or not res.ok:
+            return (_PROBE_FAILED, "")
+        try:
+            rows = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            return (_PROBE_FAILED, "")
+        if not isinstance(rows, list):
+            return (_PROBE_FAILED, "")
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("merged_at"):
+                continue
+            number = row.get("number")
+            head = row.get("head")
+            oid = head.get("sha") if isinstance(head, dict) else None
+            if (
+                not isinstance(number, int)
+                or not isinstance(oid, str)
+                or not oid
+                or oid == "null"
+            ):
+                return (_PROBE_FAILED, "")
+            return (number, oid)
+        if len(rows) < 100:
+            return (0, "")
+    return (_PROBE_FAILED, "")
 
 
 def _fetch_ref(ref: str, cwd: str) -> bool:
@@ -255,18 +285,22 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     the other - the ordering that would otherwise let a gh hiccup on the first
     probe hide the answer the second already had.
     """
-    default = _default_branch(cwd)
-    if default is None:
-        return ("unknown", "could not read the repository default branch (gh repo view failed)")
+    slug = _repo_slug(cwd)
+    if slug is None:
+        return ("unknown", "could not resolve owner/repo from the origin remote")
 
-    base = _base_ref(pr_number, cwd)
+    default = _default_branch(slug, cwd)
+    if default is None:
+        return ("unknown", "could not read the repository default branch (REST read failed)")
+
+    base = _base_ref(pr_number, slug, cwd)
     if base is None:
-        return ("unknown", f"could not read the base ref of PR #{pr_number} (gh pr view failed)")
+        return ("unknown", f"could not read the base ref of PR #{pr_number} (REST read failed)")
 
     if base == default:
         return ("ok", f"base is the default branch ({default})")
 
-    merged, merged_head = _merged_pr_for_head(base, cwd)
+    merged, merged_head = _merged_pr_for_head(base, slug, cwd)
     fetched, base_current, base_gone = _fetch_refs(base, default, cwd)
     git_ok = fetched and base_current
     base_tip = _rev(f"origin/{base}", cwd) if git_ok else ""

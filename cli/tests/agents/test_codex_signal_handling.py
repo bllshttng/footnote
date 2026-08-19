@@ -13,6 +13,7 @@ ACs covered:
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -149,7 +150,7 @@ def test_wait_with_grace_killpg_terminates_subshells_after_turn_completed(
     function escalates SIGTERM->SIGKILL within ~12s.
     """
     from fno.agents.harnesses import codex as codex_mod
-    from fno.agents.harnesses.codex import CodexResult, CodexInvocationError
+    from fno.agents.harnesses.codex import CodexInvocationError
 
     monkeypatch.setenv("FAKE_CODEX_MODE", "complete-then-hang")
     monkeypatch.setenv("FAKE_HANG_SECS", "60")
@@ -213,6 +214,8 @@ def test_create_sigint_mid_stream_propagates_and_releases_child(
     # to the test runner does not affect pytest itself.
     script = tmp_path / "driver.py"
     output_path = tmp_path / "output.jsonl"
+    ready_fifo = tmp_path / "codex-ready.fifo"
+    os.mkfifo(ready_fifo)
     script.write_text(
         f"""
 import os, signal, sys
@@ -239,6 +242,8 @@ sys.exit(0)
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["FAKE_READY_FIFO"] = str(ready_fifo)
+    ready_fd = os.open(ready_fifo, os.O_RDWR | os.O_NONBLOCK)
     proc = subprocess.Popen(
         [sys.executable, str(script)],
         env=env,
@@ -246,8 +251,9 @@ sys.exit(0)
         stderr=subprocess.PIPE,
     )
     try:
-        # Let the driver enter the read loop and capture session_id.
-        time.sleep(1.0)
+        readable, _, _ = select.select([ready_fd], [], [], 10.0)
+        assert readable, "fake codex did not enter its read loop within 10s"
+        assert os.read(ready_fd, 32).startswith(b"ready")
         # SIGINT the driver; it forwards to the codex child via
         # _run_codex's KeyboardInterrupt branch.
         proc.send_signal(signal.SIGINT)
@@ -261,6 +267,7 @@ sys.exit(0)
                 f" stdout={stdout!r} stderr={stderr!r}"
             )
     finally:
+        os.close(ready_fd)
         if proc.poll() is None:
             proc.kill()
 

@@ -1338,6 +1338,51 @@ def _find_git_segments(segments):
     return out
 
 
+def _strip_gh_global_opts(argv):
+    """Return gh argv with repo/host-wide options removed before the verb."""
+    def strip(tokens):
+        while tokens:
+            token = tokens[0]
+            if token in {"-R", "--repo", "--hostname"}:
+                if len(tokens) < 2:
+                    return []
+                tokens = tokens[2:]
+            elif ((token.startswith("-R") and token != "-R")
+                  or token.startswith("--repo=") or token.startswith("--hostname=")):
+                tokens = tokens[1:]
+            else:
+                break
+        return tokens
+
+    command = strip(list(argv[1:]))
+    if command[:1] == ["pr"]:
+        command = ["pr", *strip(command[1:])]
+    return [argv[0], *command]
+
+
+def _find_graphql_pr_reads(segments):
+    """Return classified direct GraphQL `gh` reads in command positions."""
+    out = []
+    for seg in segments:
+        argv = _effective_argv(seg)
+        if not argv:
+            continue
+        executable = argv[0].rsplit("/", 1)[-1].lower()
+        if executable not in {"gh", "$fno_real_gh", "${fno_real_gh}"}:
+            continue
+        argv = _strip_gh_global_opts(argv)
+        lowered = [token.lower() for token in argv]
+        if len(argv) >= 3 and lowered[1:3] == ["pr", "list"]:
+            out.append(("list", "<n>"))
+        elif len(argv) >= 3 and lowered[1:3] in (["pr", "checks"], ["pr", "status"]):
+            out.append(("status", next((v for v in argv[3:] if v.isdigit()), "<n>")))
+        elif len(argv) >= 3 and lowered[1:3] == ["pr", "view"]:
+            out.append(("info", next((v for v in argv[3:] if v.isdigit()), "<n>")))
+        elif len(argv) >= 3 and lowered[1] == "api" and "graphql" in lowered[2:]:
+            out.append(("graphql", "<n>"))
+    return out
+
+
 def _emit(decision, reason):
     """Print a PreToolUse permission decision as JSON."""
     print(json.dumps({
@@ -1682,6 +1727,45 @@ def main():
         segments = _command_segments(command)
     except ValueError:
         segments = None
+
+    if segments is not None:
+        graphql_reads = _find_graphql_pr_reads(segments)
+    else:
+        graphql_reads = []
+        gh_prefix = r"\bgh\s+(?:(?:-R|--repo|--hostname)(?:=|\s+)?\S+\s+)*pr\s+"
+        if re.search(gh_prefix + r"(?:checks|status)\b", command, re.IGNORECASE):
+            graphql_reads.append(("status", "<n>"))
+        if re.search(gh_prefix + r"list\b", command, re.IGNORECASE):
+            graphql_reads.append(("list", "<n>"))
+        if re.search(gh_prefix + r"view\b", command, re.IGNORECASE):
+            graphql_reads.append(("info", "<n>"))
+        if re.search(r"\bgh\s+api\s+graphql\b", command, re.IGNORECASE):
+            graphql_reads.append(("graphql", "<n>"))
+    if graphql_reads:
+        kind, pr = graphql_reads[0]
+        if kind == "info":
+            reason = (
+                f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability; "
+                "stop retrying `gh pr view --json` this quota window."
+            )
+        elif kind == "list":
+            reason = (
+                "[fno GraphQL reserve] use `fno pr list` for a REST-backed listing; "
+                "stop retrying `gh pr list` this quota window."
+            )
+        elif kind == "status":
+            reason = (
+                f"[fno GraphQL reserve] use `fno pr status {pr}` for CI. Its CI read is REST; "
+                "optional review-thread and coverage reads inside it remain GraphQL."
+            )
+        else:
+            reason = (
+                "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
+                "through `fno pr graphql-exec --purpose discretionary -- ...` and stop "
+                "retrying until the quota reset."
+            )
+        _emit("deny", reason)
+        sys.exit(0)
 
     # ==========================================
     # gh pr create - always allowed (ad-hoc dev is legit; the merge gate is

@@ -346,9 +346,21 @@ def _apply_rollup(
 
 
 def _gh_query(pr_number, **kwargs):
-    """Query gh for PR merge state. Injectable test seam, mirroring graph.cli."""
-    from fno.graph._reconcile import query_pr_merge_state
-    return query_pr_merge_state(pr_number, **kwargs)
+    """Query REST for PR merge state. Injectable test seam, mirroring graph.cli."""
+    from fno.graph._reconcile import PrMergeState, ReconcileError
+    from fno.pr._rest import fetch_pr_info_rest
+
+    info, reason = fetch_pr_info_rest(
+        str(pr_number), cwd=kwargs.get("cwd"), repo=kwargs.get("repo")
+    )
+    if info is None:
+        raise ReconcileError(reason)
+    return PrMergeState(
+        number=info["pr"],
+        state=info["state"],
+        url=info["url"],
+        merged_at=info["merged_at"],
+    )
 
 
 def done_command(

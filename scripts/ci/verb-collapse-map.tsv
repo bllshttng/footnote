@@ -250,6 +250,9 @@ pr coverage-publish	T1	pr coverage-publish	0
 pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
+pr graphql-exec	T1	pr graphql-exec	1
+pr info	T1	pr info	10
+pr list	T1	pr list	3
 pr logs	T1	pr logs	1
 pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distinct operation
 pr next-receipt-generation	T1	pr next-receipt-generation	0
@@ -287,6 +290,7 @@ scoreboard	KEEP	scoreboard	13	single-leaf group
 setup cli-hooks	T1	setup cli-hooks	8
 setup cli-hooks-codex	T1	setup cli-hooks-codex	4
 setup codex-plugin	T1	setup codex-plugin	10
+setup github-cli	T1	setup github-cli	0
 setup migrate-config	T1	setup migrate-config	1
 setup migrate-paths	T1	setup migrate-paths	8
 setup plan	T1	setup plan	7

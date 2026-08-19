@@ -13,7 +13,7 @@ import sys
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno import plan as plan_module
+from fno.plan import cli as plan_cli_module
 
 runner = CliRunner()
 
@@ -77,7 +77,7 @@ def test_plan_stamp_forwards_args_verbatim(tmp_path, monkeypatch):
         captured["cmd"] = list(cmd)
         return _StubResult()
 
-    monkeypatch.setattr(plan_module.cli.subprocess, "run", _stub_run)
+    monkeypatch.setattr(plan_cli_module.subprocess, "run", _stub_run)
 
     result = runner.invoke(
         app,
@@ -115,7 +115,7 @@ def test_plan_graduate_forwards_args_verbatim(tmp_path, monkeypatch):
         captured["cmd"] = list(cmd)
         return _StubResult()
 
-    monkeypatch.setattr(plan_module.cli.subprocess, "run", _stub_run)
+    monkeypatch.setattr(plan_cli_module.subprocess, "run", _stub_run)
 
     result = runner.invoke(
         app, ["plan", "graduate", "--plan-path", "/tmp/some-plan.md"],
@@ -138,7 +138,7 @@ def test_plan_set_expected_forwards_args_verbatim(tmp_path, monkeypatch):
         captured["cmd"] = list(cmd)
         return _StubResult()
 
-    monkeypatch.setattr(plan_module.cli.subprocess, "run", _stub_run)
+    monkeypatch.setattr(plan_cli_module.subprocess, "run", _stub_run)
 
     result = runner.invoke(
         app,

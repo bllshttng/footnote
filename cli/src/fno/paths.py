@@ -432,6 +432,16 @@ def state_dir() -> Path:
     return _resolve(settings.state_dir)
 
 
+def graphql_quota_lock() -> Path:
+    """Config-independent machine lock held from quota probe through command."""
+    return locks_dir() / "github-graphql-quota.lock"
+
+
+def github_cli_proxy_dir() -> Path:
+    """Installed worker-only `gh` proxy directory."""
+    return state_dir() / "bin" / "github-cli"
+
+
 def locks_dir() -> Path:
     """Advisory-lock sidecar directory (``~/.fno/locks``).
 

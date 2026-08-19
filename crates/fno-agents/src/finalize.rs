@@ -1778,17 +1778,23 @@ fn valid_project_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
 }
 
-/// Best-effort PR URL for the current HEAD/branch via `gh`.
-fn gh_pr_url(cwd: &Path) -> Option<String> {
-    let out = Command::new("gh")
-        .args(["pr", "view", "--json", "url", "-q", ".url"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+/// Best-effort PR metadata for the current HEAD/branch through the REST reader.
+fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
+    let mut command = Command::new("fno");
+    command.args(["pr", "info"]);
+    if let Some(number) = number {
+        command.arg(number.to_string());
+    }
+    let out = command.current_dir(cwd).output().ok()?;
     if !out.status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// Best-effort PR URL for the current HEAD/branch through REST.
+fn gh_pr_url(cwd: &Path) -> Option<String> {
+    let url = pr_info(cwd, None)?.get("url")?.as_str()?.trim().to_string();
     if url.is_empty() {
         None
     } else {
@@ -1800,22 +1806,15 @@ fn gh_pr_url(cwd: &Path) -> Option<String> {
 /// stamp (x-280d). Returns None when gh fails/rate-limits, no PR exists, or the
 /// JSON is malformed - all of which the caller treats as "nothing to stamp".
 pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
-    let out = Command::new("gh")
-        .args(["pr", "view", "--json", "number,url"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_pr_ref(&out.stdout)
+    let payload = pr_info(cwd, None)?;
+    parse_pr_ref(&serde_json::to_vec(&payload).ok()?)
 }
 
-/// Pure parse of `gh pr view --json number,url` stdout. Split from the shell-out
-/// so the malformed/missing-field cases are unit-testable without gh.
+/// Pure parse of REST `fno pr info` output, with the legacy GraphQL field kept
+/// for callers carrying cached payloads.
 fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
     let v: Value = serde_json::from_slice(stdout).ok()?;
-    let number = v.get("number")?.as_u64()?;
+    let number = v.get("pr").or_else(|| v.get("number"))?.as_u64()?;
     let url = v.get("url")?.as_str()?.trim().to_string();
     if url.is_empty() {
         None
@@ -1910,7 +1909,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     // not exist yet.
     let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
-    let output = match Command::new("gh")
+    let output = match Command::new("fno-gh-coverage")
         .args([
             "pr",
             "view",
@@ -2188,23 +2187,14 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
             // arm. That is success-shaped (the merge the arm existed to cause
             // has happened), so name it as such instead of logging a false
             // failure an operator would chase.
-            let state = Command::new("gh")
-                .args([
-                    "pr",
-                    "view",
-                    number.to_string().as_str(),
-                    "--json",
-                    "state",
-                    "-q",
-                    ".state",
-                ])
-                .current_dir(cwd)
-                .output();
-            let merged = state
-                .ok()
-                .filter(|s| s.status.success())
-                .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
-                .is_some_and(|s| s == "MERGED");
+            let merged = pr_info(cwd, Some(number))
+                .and_then(|payload| {
+                    payload
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|state| state == "MERGED");
             if merged {
                 eprintln!(
                     "finalize: PR {number} already merged (another path landed it); \
@@ -2841,6 +2831,11 @@ mod tests {
         // Valid: number + url.
         assert_eq!(
             parse_pr_ref(br#"{"number": 358, "url": "https://x/pull/358"}"#),
+            Some((358, "https://x/pull/358".to_string()))
+        );
+        // REST `fno pr info` names the same field `pr`.
+        assert_eq!(
+            parse_pr_ref(br#"{"pr": 358, "url": "https://x/pull/358"}"#),
             Some((358, "https://x/pull/358".to_string()))
         );
         // Malformed JSON -> None (treated as "no PR", not a crash). AC1-ERR.

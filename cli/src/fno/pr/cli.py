@@ -33,6 +33,10 @@ class VerifyKind(str, enum.Enum):
     reviews = "reviews"
 
 
+class GraphqlPurpose(str, enum.Enum):
+    discretionary = "discretionary"
+
+
 @pr_app.command(
     "merge",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -125,6 +129,74 @@ def coverage_publish(
         )
     )
     raise typer.Exit(code=0 if posted else 1)
+
+
+@pr_app.command(
+    "info",
+    help=(
+        "Read PR state, URL, head SHA, refs, and mergeability through one REST request. "
+        "Prints JSON; exit 4 when the REST instrument cannot answer."
+    ),
+)
+def info(
+    pr_number: Optional[int] = typer.Argument(None, help="GitHub PR number; defaults to current branch"),
+    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+) -> None:
+    from fno.pr import _rest
+
+    if pr_number is None:
+        pr_number, reason = _rest.resolve_current_pr_number_rest(cwd=os.getcwd(), repo=repo)
+        if pr_number is None:
+            typer.echo(json.dumps({"pr": None, "error": reason}, separators=(",", ":")))
+            raise typer.Exit(code=4)
+    payload, reason = _rest.fetch_pr_info_rest(str(pr_number), cwd=os.getcwd(), repo=repo)
+    if payload is None:
+        typer.echo(json.dumps({"pr": pr_number, "error": reason}, separators=(",", ":")))
+        raise typer.Exit(code=4)
+    typer.echo(json.dumps(payload, separators=(",", ":")))
+
+
+@pr_app.command(
+    "list",
+    help="List PR number, state, title, head ref, and URL through REST.",
+)
+def list_cmd(
+    state: str = typer.Option("open", "--state", help="open, closed, or all"),
+    repo: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo; defaults to origin"),
+) -> None:
+    from fno.pr import _rest
+
+    if state not in {"open", "closed", "all"}:
+        typer.echo(json.dumps({"error": "--state must be open, closed, or all"}))
+        raise typer.Exit(code=2)
+    slug = repo or _rest._repo_slug(os.getcwd())
+    if not slug:
+        typer.echo(json.dumps({"error": "could not resolve owner/repo"}))
+        raise typer.Exit(code=4)
+    rows, reason = _rest.list_prs_rest(slug, state=state, cwd=os.getcwd(), details=True)
+    if rows is None:
+        typer.echo(json.dumps({"error": reason}, separators=(",", ":")))
+        raise typer.Exit(code=4)
+    typer.echo(json.dumps(rows, separators=(",", ":")))
+
+
+@pr_app.command(
+    "graphql-exec",
+    hidden=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def graphql_exec(
+    ctx: typer.Context,
+    purpose: GraphqlPurpose = typer.Option(..., "--purpose"),
+) -> None:
+    from fno.pr import _quota
+
+    result = _quota.execute_graphql(purpose.value, list(ctx.args))
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, err=True)
+    raise typer.Exit(code=result.returncode)
 
 
 @pr_app.command(

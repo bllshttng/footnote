@@ -211,7 +211,7 @@ Wiring `blocked_by` *after* linking loses that race and stampedes a wave that wa
 fno backlog epic status <epic>          # children: status, worker, PR
 fno backlog get <id>                    # one node in full
 fno agents top                          # who is actually running right now
-gh pr list --state open --json number,title,headRefName
+fno pr list --state open
 ```
 
 Read the epic's plan doc too.
@@ -219,9 +219,10 @@ You are looking for three things: what landed since the last pass, what is runni
 A node claiming to be ready with no plan, and a blocked node whose blocker merged, are both worth a second look.
 
 **`done` does not mean merged. Cross-check the wave gate yourself.**
-`done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged.
 
-This is not cosmetic. It is the wave gate. A stale `done` means the whole tail behind it is waiting on a merge nobody performed. Run `fno pr status <n>` on every child whose PR number you are treating as landed, and reconcile before you plan a single edge.
+`done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged. This is not cosmetic. It is the wave gate. A stale `done` means the whole tail behind it is waiting on a merge nobody performed.
+
+Run `fno pr info <n>` for state, head, and mergeability, and run `fno pr status <n>` for CI on every child whose PR number you are treating as landed. Reconcile before you plan a single edge.
 
 Do not hand-read `gh pr view --json statusCheckRollup`: it retains superseded runs and reports them as `FAILURE`, so a green PR reads red. `fno pr status` keeps only the latest run per check name, and its `ready_blockers` names which gate holds. For per-check truth outside fno, use `gh run list --workflow=<wf> --branch <br>`.
 
