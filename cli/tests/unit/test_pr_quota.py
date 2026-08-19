@@ -184,6 +184,49 @@ def test_preserved_wrapper_cannot_resolve_back_to_quota_proxy(tmp_path, monkeypa
     assert '"login":"ok"' in result.stdout
 
 
+def test_resolve_real_gh_rejects_a_shim_by_content_not_just_directory(tmp_path, monkeypatch):
+    # A relocated shim keeps its parent out of proxy_dirs but still execs the
+    # proxy - directory identity alone would hand this back as "real".
+    shim_dir = tmp_path / "relocated"
+    real_dir = tmp_path / "real"
+    for directory in (shim_dir, real_dir):
+        directory.mkdir()
+    shim = shim_dir / "gh"
+    shim.write_text("#!/bin/sh\nexec fno-gh-proxy \"$@\"\n")
+    shim.chmod(0o755)
+    real = real_dir / "gh"
+    real.write_text("#!/bin/sh\necho real\n")
+    real.chmod(0o755)
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "no-such-proxy-dir")
+    monkeypatch.delenv("FNO_REAL_GH", raising=False)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{real_dir}")
+    assert _quota.resolve_real_gh() == str(real.resolve())
+
+
+def test_resolve_real_gh_rejects_a_configured_shim_by_content(tmp_path, monkeypatch):
+    shim = tmp_path / "gh"
+    shim.write_text("#!/bin/sh\nexec fno-gh-proxy \"$@\"\n")
+    shim.chmod(0o755)
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "no-such-proxy-dir")
+    monkeypatch.setenv("FNO_REAL_GH", str(shim))
+    monkeypatch.setenv("PATH", "")
+    assert _quota.resolve_real_gh() is None
+
+
+def test_proxy_dirs_fails_closed_instead_of_reporting_no_proxy(monkeypatch):
+    def broken():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", broken)
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    try:
+        _quota._proxy_dirs()
+    except RuntimeError as exc:
+        assert "config load failed" in str(exc)
+    else:
+        raise AssertionError("_proxy_dirs() swallowed the lookup failure")
+
+
 def test_delegate_environment_strips_fallback_proxy_from_env(monkeypatch, tmp_path):
     fallback = tmp_path / "fallback"
     real = tmp_path / "real"

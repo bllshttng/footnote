@@ -14,6 +14,22 @@ from fno.pr._proc import Result, run
 GRAPHQL_RESERVE = 200
 REFUSED = 75
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
+_SHIM_MARKER = b"fno-gh-proxy"
+_SHIM_HEAD_BYTES = 256
+
+
+def _is_proxy_shim(path: Path) -> bool:
+    """Read a candidate's own content: directory identity alone can lie.
+
+    A relocated or symlinked shim keeps ``exec fno-gh-proxy $@`` in its body
+    even when its parent directory is absent from ``_proxy_dirs()``.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_SHIM_HEAD_BYTES)
+    except OSError:
+        return False
+    return _SHIM_MARKER in head
 
 
 def quota_lock_path() -> Path:
@@ -21,14 +37,18 @@ def quota_lock_path() -> Path:
 
 
 def _proxy_dirs() -> set[str]:
+    """The set of directories this proxy could be installed in.
+
+    An empty result means two different things - "there is no proxy" and "I
+    could not find out" - and callers read it as the first. Swallowing the
+    lookup failure used to make that ambiguity, so a proxy that cannot
+    identify itself now raises instead of silently reporting "no proxy".
+    """
     paths = set()
     inherited = os.environ.get(_PROXY_DIR_ENV)
     if inherited:
         paths.add(str(Path(inherited).resolve()))
-    try:
-        paths.add(str(github_cli_proxy_dir().resolve()))
-    except Exception:
-        pass
+    paths.add(str(github_cli_proxy_dir().resolve()))
     return paths
 
 
@@ -54,6 +74,7 @@ def resolve_real_gh() -> Optional[str]:
             candidate.is_file()
             and os.access(candidate, os.X_OK)
             and str(candidate.parent.resolve()) not in proxy_dirs
+            and not _is_proxy_shim(candidate)
         ):
             return str(candidate.resolve())
     skipped_proxy = False
@@ -63,7 +84,7 @@ def resolve_real_gh() -> Optional[str]:
         candidate = Path(directory) / "gh"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        if str(candidate.parent.resolve()) in proxy_dirs:
+        if str(candidate.parent.resolve()) in proxy_dirs or _is_proxy_shim(candidate):
             skipped_proxy = True
             continue
         return str(candidate.resolve()) if skipped_proxy else "gh"
