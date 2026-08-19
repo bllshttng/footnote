@@ -8040,6 +8040,42 @@ def cmd_reconcile(
     )
     from fno.paths import retro_pending_dir
 
+    def _bind_and_report(
+        _entries: list[dict], _pr_number: int, _pr_url: Optional[str],
+        _claims: list[str], _repo: Optional[str],
+    ) -> tuple[Optional[str], list[str]]:
+        """Bind ``_claims`` to ``_pr_number`` against ``_entries``.
+
+        Persists via ``locked_mutate_graph`` unless ``dry_run``, in which case
+        it mutates ``_entries`` in place ONLY (``bind_closure_claims`` writes
+        through node dict references, never a copy) so the caller's own
+        forward-scan preview reflects the bind without ever touching disk -
+        the same trailer-only node a real run would close, not just the one
+        already stamped. Returns (refusal, bound_ids).
+        """
+        from fno.pr.closure import bind_closure_claims
+
+        if dry_run:
+            result = bind_closure_claims(
+                _entries, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+            )
+            return (result.refusal, list(result.bound_ids))
+
+        _box: dict = {"refusal": None, "bound": []}
+
+        def _mutator(entries2):
+            result = bind_closure_claims(
+                entries2, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+            )
+            if result.outcome == "refused":
+                _box["refusal"] = result.refusal
+            else:
+                _box["bound"] = list(result.bound_ids)
+            return entries2
+
+        locked_mutate_graph(_graph_path(), _mutator)
+        return (_box["refusal"], _box["bound"])
+
     # --pr-number: bind every exact Backlog-Closure claim on this PR to its
     # node BEFORE the scan below, so the forward scan (which needs a PR ref to
     # query) can see a node that was named in the body but never individually
@@ -8048,13 +8084,9 @@ def cmd_reconcile(
     closure_claims: list[str] = []
     closure_bound: list[str] = []
     closure_refused: Optional[str] = None
+    entries = read_graph(_graph_path())
     if pr_number is not None:
-        from fno.pr.closure import (
-            ClosureQueryError,
-            bind_closure_claims,
-            fetch_pr_closure_context,
-            parse_closure_trailer,
-        )
+        from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
 
         try:
             pr_ctx = fetch_pr_closure_context(pr_number, repo=repo)
@@ -8064,27 +8096,12 @@ def cmd_reconcile(
                 typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
         else:
             closure_claims = parse_closure_trailer(pr_ctx.body)
-            if closure_claims and not dry_run:
-                _refusal_box: list = [None]
-                _bound_box: list = []
-
-                def _closure_mutator(entries2):
-                    result = bind_closure_claims(
-                        entries2,
-                        closure_claims,
-                        pr_number=pr_number,
-                        pr_url=pr_ctx.url,
-                        repo=repo,
-                    )
-                    if result.outcome == "refused":
-                        _refusal_box[0] = result.refusal
-                    else:
-                        _bound_box.extend(result.bound_ids)
-                    return entries2
-
-                locked_mutate_graph(_graph_path(), _closure_mutator)
-                closure_refused = _refusal_box[0]
-                closure_bound = _bound_box
+            if closure_claims:
+                closure_refused, closure_bound = _bind_and_report(
+                    entries, pr_number, pr_ctx.url, closure_claims, repo,
+                )
+                if not dry_run:
+                    entries = read_graph(_graph_path())  # real bind just persisted
                 if closure_refused and not json_out:
                     typer.echo(
                         f"warning: reconcile --pr-number {pr_number}: refused "
@@ -8098,7 +8115,6 @@ def cmd_reconcile(
                         err=True,
                     )
 
-    entries = read_graph(_graph_path())
     records = scan_merge_drift(entries, node_id=node)
 
     # Auto-bind closure claims for every OTHER merged PR this sweep just
@@ -8112,67 +8128,70 @@ def cmd_reconcile(
     # still close just the one node this scan happens to find first. Bind
     # every closeable record's PR (skipping the one --pr-number already
     # bound, to avoid a redundant gh call), then re-scan ONCE so newly-bound
-    # siblings are picked up in this same invocation. Skipped entirely on
-    # --dry-run (must mutate nothing) - --pr-number's own bind above is
-    # already skipped there for the same reason.
-    if not dry_run:
-        from fno.pr.closure import (
-            ClosureQueryError,
-            bind_closure_claims,
-            fetch_pr_closure_context,
-            parse_closure_trailer,
+    # siblings are picked up in this same invocation. Runs read-only under
+    # --dry-run too (via `_bind_and_report`), so the preview names the same
+    # nodes a real run would close, not just the one already stamped.
+    from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
+    from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
+
+    # One record per discovered PR (not just the number): each record
+    # already carries the pr_url/cwd this scan resolved it through, and
+    # the graph is CROSS-PROJECT, so a single global `--repo` would
+    # mis-scope a record belonging to a different project's repo.
+    discovered: dict = {}
+    for r in records:
+        if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
+            discovered[r.pr_number] = r
+    # Bounded, not because more discovery is wrong, but because each entry
+    # costs one sequential `gh pr view` (up to GH_QUERY_TIMEOUT_S each) - an
+    # unbounded loop on a backlog with many stale closeable records turns
+    # every SessionStart sweep into a serial gh-latency tax. A later sweep
+    # (SessionStart auto-fires often) picks up whatever this run dropped.
+    _MAX_AUTO_DISCOVER = 20
+    _dropped = list(discovered.items())[_MAX_AUTO_DISCOVER:]
+    if _dropped and not json_out:
+        typer.echo(
+            f"reconcile: auto-discovery capped at {_MAX_AUTO_DISCOVER}; "
+            f"deferred {len(_dropped)} PR(s) to a later sweep: "
+            f"{', '.join(str(n) for n, _ in _dropped)}",
+            err=True,
         )
-        from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
-
-        # One record per discovered PR (not just the number): each record
-        # already carries the pr_url/cwd this scan resolved it through, and
-        # the graph is CROSS-PROJECT, so a single global `--repo` would
-        # mis-scope a record belonging to a different project's repo.
-        discovered: dict = {}
-        for r in records:
-            if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
-                discovered[r.pr_number] = r
-        auto_bound_any = False
-        for _pr_num, _rec in discovered.items():
-            # The record's OWN url wins over the caller's global --repo: the
-            # graph is cross-project, so a --repo passed for the --pr-number
-            # leg above would otherwise mis-scope an unrelated discovered PR.
-            _repo_for_pr = (
-                repo_slug_from_url(_rec.pr_url)
-                or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
-                or repo
+    auto_bound_any = False
+    for _pr_num, _rec in list(discovered.items())[:_MAX_AUTO_DISCOVER]:
+        # The record's OWN url or cwd resolves the repo to scope this query
+        # and bind to - the graph is CROSS-PROJECT, so a --repo passed for
+        # the --pr-number leg above belongs to a DIFFERENT project and must
+        # never scope an unrelated discovered PR. Neither resolving: skip
+        # rather than guess, since a same-numbered PR can exist in the wrong
+        # repo and a fresh (no-existing-ref) node would bind to it blind.
+        _repo_for_pr = (
+            repo_slug_from_url(_rec.pr_url)
+            or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
+        )
+        if _repo_for_pr is None:
+            continue
+        try:
+            _ctx = fetch_pr_closure_context(_pr_num, repo=_repo_for_pr, cwd=_rec.cwd)
+        except ClosureQueryError:
+            continue  # best-effort discovery: the forward scan already has this PR's state
+        _claims = parse_closure_trailer(_ctx.body)
+        if not _claims:
+            continue
+        closure_claims = sorted(set(closure_claims) | set(_claims))
+        _refusal, _bound = _bind_and_report(entries, _pr_num, _ctx.url, _claims, _repo_for_pr)
+        if _bound:
+            closure_bound.extend(_bound)
+            auto_bound_any = True
+        elif _refusal and not json_out:
+            typer.echo(
+                f"warning: reconcile: auto-discovered PR #{_pr_num} refused "
+                f"binding: {_refusal}",
+                err=True,
             )
-            try:
-                _ctx = fetch_pr_closure_context(_pr_num, repo=_repo_for_pr, cwd=_rec.cwd)
-            except ClosureQueryError:
-                continue  # best-effort discovery: the forward scan already has this PR's state
-            _claims = parse_closure_trailer(_ctx.body)
-            if not _claims:
-                continue
-            closure_claims = sorted(set(closure_claims) | set(_claims))
-
-            def _auto_closure_mutator(
-                entries2, _pr_num=_pr_num, _ctx=_ctx, _claims=_claims, _repo_for_pr=_repo_for_pr,
-            ):
-                result = bind_closure_claims(
-                    entries2, _claims, pr_number=_pr_num, pr_url=_ctx.url, repo=_repo_for_pr,
-                )
-                if result.outcome == "bound" and result.bound_ids:
-                    closure_bound.extend(result.bound_ids)
-                    nonlocal auto_bound_any
-                    auto_bound_any = True
-                elif result.outcome == "refused" and not json_out:
-                    typer.echo(
-                        f"warning: reconcile: auto-discovered PR #{_pr_num} refused "
-                        f"binding: {result.refusal}",
-                        err=True,
-                    )
-                return entries2
-
-            locked_mutate_graph(_graph_path(), _auto_closure_mutator)
-        if auto_bound_any:
-            entries = read_graph(_graph_path())
-            records = scan_merge_drift(entries, node_id=node)
+    if auto_bound_any:
+        if not dry_run:
+            entries = read_graph(_graph_path())  # real binds just persisted
+        records = scan_merge_drift(entries, node_id=node)
 
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]

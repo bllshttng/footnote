@@ -1122,6 +1122,37 @@ def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
         assert (sentinel_dir / f"{nid}.json").exists()
 
 
+def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, monkeypatch):
+    """Review fix (x-59a6): --dry-run must not silently omit the trailer-only
+    node from its preview - a real run right after would close both, so the
+    preview an operator trusts before running for real must match."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-100020"), _node("ab-100021")])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100020 ab-100021\n", number=907,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({907: "MERGED"}))
+
+    before = graph_path.read_bytes()
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "907", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["dry_run"] is True
+    assert set(payload["closure_bound"]) == {"ab-100020", "ab-100021"}
+    # The trailer-only node (never individually stamped) must show up as a
+    # would-close candidate, matching what a real run right after would do.
+    candidate_ids = {c["node_id"] for c in payload["candidates"]}
+    assert "ab-100021" in candidate_ids
+
+    # --dry-run leaves the graph byte-identical.
+    assert graph_path.read_bytes() == before
+
+
 def test_reconcile_pr_number_idempotent_rerun(cli_env, monkeypatch):
     """AC4-EDGE: a second run against the same merged trailer reports the same
     claims, zero new bindings, and zero new closes without error."""
@@ -1273,6 +1304,49 @@ def test_reconcile_auto_discovery_scopes_repo_to_the_discovered_record_not_the_f
 
     discovered_calls = [c for c in fetch_calls if c[0] == 911]
     assert discovered_calls == [(911, "other-owner/other-repo")]
+
+
+def test_reconcile_auto_discovery_skips_when_repo_unresolvable(cli_env, monkeypatch):
+    """Review fix (x-59a6): a discovered record with no parseable url and no
+    resolvable cwd must be SKIPPED, never guessed at via the caller's global
+    --repo (a same-numbered PR can exist in an unrelated repo, and a fresh
+    node has nothing to cross-repo-refuse against)."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-400001", pr_number=910,
+              pr_url="https://github.com/test-owner/test-repo/pull/910"),
+        # Its stored pr_url parses fine (so the forward scan attempts a
+        # query), but the query result itself returns no url and no cwd -
+        # the record ends up with neither signal to scope a repo from.
+        _node("ab-400002", pr_number=925,
+              pr_url="https://github.com/test-owner/test-repo/pull/925"),
+    ])
+
+    def _query(number, repo=None, cwd=None):
+        if number == 925:
+            return PrMergeState(number=925, state="MERGED", url=None, merged_at="2026-08-18T00:00:00Z")
+        return PrMergeState(
+            number=number, state="MERGED",
+            url="https://github.com/test-owner/test-repo/pull/910",
+            merged_at="2026-08-18T00:00:00Z",
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", _query)
+
+    fetch_calls: list[int] = []
+
+    def _tracking_fetch(pr_number, *, repo=None, cwd=None):
+        fetch_calls.append(pr_number)
+        return _stub_closure_ctx("", number=pr_number,
+                                  url="https://github.com/test-owner/test-repo/pull/910")
+
+    monkeypatch.setattr(closure_mod, "fetch_pr_closure_context", _tracking_fetch)
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "910", "--json"])
+    assert result.exit_code == 0, result.output
+    assert 925 not in fetch_calls  # unresolvable repo -> skipped, never queried
 
 
 def test_reconcile_pr_number_epic_reports_outstanding_ship(cli_env, monkeypatch):
