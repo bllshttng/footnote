@@ -10312,7 +10312,14 @@ async fn handle_stdin(
         // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
         // (sideline_row_at -> None) falls through and forwards to the inner app,
         // so pane right-click behavior is untouched (AC3-EDGE).
-        if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) {
+        // (x-7683) The WHOLE right-press block is blocked while any overlay is
+        // up - not just the pane path: most overlays never intercepted the
+        // mouse, open_row_menu clears only peek, and the key router checks
+        // row_menu ahead of every overlay, so any menu opening under one
+        // (rename's Enter would run a menu action) hijacks its typing. The
+        // press falls through to the pane forward below, exactly as it did
+        // before menus existed.
+        if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) && !view.overlay_open() {
             // (x-92d3 5.1) A tab cell opens the tab menu, resolved through the
             // same tab_cell_at the drag pickup uses. Checked first to mirror
             // the left-press ordering; the strip and the sideline own disjoint
@@ -10347,13 +10354,8 @@ async fn handle_stdin(
             // row menu - the same menu its sideline row opens - so a pane is a
             // menu-bearing surface too. Same swallow-only-when-opened rule: an
             // agent-less pane falls through to the forward below, keeping the
-            // inner app's own right-click (AC3-EDGE). Blocked while ANY
-            // overlay is up: most overlays never intercepted the mouse (a
-            // pane press fell through to the pane, and still does), and
-            // open_row_menu clears only peek - a menu opening under rename
-            // would steal the overlay's keys, since the key router checks
-            // row_menu first.
-            if !view.overlay_open() && view.open_pane_menu(rep.row, rep.col) {
+            // inner app's own right-click (AC3-EDGE).
+            if view.open_pane_menu(rep.row, rep.col) {
                 continue;
             }
         }
@@ -20165,6 +20167,25 @@ mod tests {
         super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
         assert!(v.row_menu.is_none(), "the backlog header has no menu");
         assert!(v.notice.is_some(), "but m says why, never silence");
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_on_a_sideline_row_under_rename_opens_nothing() {
+        // The overlay guard covers every right-press path, not just panes: a
+        // menu opening over the rename overlay would steal its keys (the key
+        // router checks row_menu first), so rename Enter could run a menu
+        // action instead of submitting the name.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.rename = Some((super::RenameTarget::Squad(1), "na".into()));
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        // Right-press on the agent row itself (screen row 1, sideline col).
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;6;2M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.row_menu.is_none(), "no row menu under an open overlay");
+        assert!(v.rename.is_some(), "rename survives untouched");
     }
 
     #[tokio::test]
