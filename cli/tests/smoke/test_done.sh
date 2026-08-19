@@ -57,6 +57,10 @@ cat > "$TMP/bin/gh" <<'SH'
 for arg in "$@"; do
   if [[ "$arg" == "nameWithOwner" ]]; then echo "smoke/repo"; exit 0; fi
 done
+if [[ " $* " == *" api repos/"*"/pulls/99 "* ]]; then
+  printf '{"number":99,"state":"closed","merged":true,"html_url":"https://github.com/smoke/repo/pull/99","merged_at":"2026-04-22T18:00:00Z","head":{"sha":"deadbeef","ref":"feature/smoke"},"base":{"ref":"main"}}\n'
+  exit 0
+fi
 printf '{"number":99,"state":"MERGED","url":"https://github.com/smoke/repo/pull/99","mergedAt":"2026-04-22T18:00:00Z","mergeCommit":{"oid":"deadbeef"}}\n'
 SH
 chmod +x "$TMP/bin/gh"
