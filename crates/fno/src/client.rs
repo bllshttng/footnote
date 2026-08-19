@@ -3039,22 +3039,11 @@ impl View {
     /// clears only peek - a menu opening under rename would steal the
     /// overlay's keys, since the key router checks row_menu first.
     fn overlay_open(&self) -> bool {
-        self.keys_modal.is_some()
-            || self.row_menu.is_some()
-            || self.aux.is_some()
-            || self.connections.is_some()
-            || self.confirm.is_some()
-            || self.move_pick.is_some()
-            || self.attach_place.is_some()
-            || self.create.is_some()
-            || self.rename.is_some()
-            || self.recruit.is_some()
-            || self.search.is_some()
+        self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
             || self.nav.is_some()
             || self.peek.is_some()
-            || self.peek_input.is_some()
             || self.digest.is_some()
     }
 
@@ -10171,6 +10160,14 @@ async fn handle_stdin(
                                         view.clear_peek();
                                         view.row_menu = Some(menu);
                                         view.row_menu_esc.clear();
+                                    } else {
+                                        // The held tab closed mid-hold (e.g. a
+                                        // co-attached client or server-driven
+                                        // layout change) - say so rather than
+                                        // let the hold end in silence, mirroring
+                                        // the row arm's "no menu on the held
+                                        // row" notice.
+                                        view.set_notice("no menu on the held tab".into());
                                     }
                                 }
                                 view.refresh_hover_affordances(rep.row, rep.col);
