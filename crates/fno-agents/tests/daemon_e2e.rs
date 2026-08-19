@@ -87,12 +87,20 @@ fn wait_for_lines(path: &Path, minimum: usize, budget: Duration) -> usize {
     }
 }
 
-fn daemon_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    GUARD
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn daemon_e2e_guard() -> std::fs::File {
+    static LOCK_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let path = LOCK_PATH.get_or_init(|| {
+        std::env::temp_dir().join(format!("fno-daemon-e2e-{}.lock", std::process::id()))
+    });
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .expect("daemon e2e lock opens");
+    file.lock().expect("daemon e2e lock acquired");
+    file
 }
 
 fn seed_live_probe_rows(home: &AgentsHome, count: usize) {
