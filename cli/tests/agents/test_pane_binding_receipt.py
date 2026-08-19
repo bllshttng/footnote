@@ -26,6 +26,7 @@ import pytest
 from fno.agents import mux_spawn
 from fno.agents.mux_spawn import (
     MuxSpawnResult,
+    _await_interactive_readiness,
     _await_pane_binding,
     _backfill_codex_session_id,
     _write_pane_death_log,
@@ -303,7 +304,11 @@ def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
     [
         # The codex branches name their reason precisely and it survives.
         ("codex", "pane-died-before-binding", "pane-died-before-binding"),
-        ("codex", "binding-window-expired", "binding-window-expired"),
+        (
+            "codex",
+            "binding-window-expired",
+            "binding-window-expired: pane is live; fno agents reconcile will backfill its session id",
+        ),
         ("codex", "no-child-pid-to-correlate", "no-child-pid-to-correlate"),
         # Every OTHER unbound route - an opencode backfill miss, a happy-claude
         # row - names none, and must still not emit a null.
@@ -392,6 +397,138 @@ def test_the_doubt_field_defaults_to_no_claim() -> None:
 
     default = next(f for f in fields(MuxSpawnResult) if f.name == "bound").default
     assert default is None
+
+
+def test_seed_field_defaults_to_no_seed_and_carries_submission() -> None:
+    """A missing seed and an unconfirmed seed must never share a receipt."""
+    from dataclasses import fields
+
+    default = next(f for f in fields(MuxSpawnResult) if f.name == "seed").default
+    assert default is None
+    result = MuxSpawnResult(
+        name="w",
+        provider="agy",
+        session="main",
+        pane_id=81,
+        child_pid=4242,
+        session_uuid=None,
+        seed="submitted",
+    )
+    assert result.seed == "submitted"
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex", "agy"])
+def test_shared_readiness_submits_a_preloaded_seed(harness: str) -> None:
+    """Every pane harness reaches the same text-then-submit gate."""
+    calls: list[list[str]] = []
+
+    def run(argv, **_kw):
+        calls.append(argv)
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "seed text")
+        if verb == "send":
+            return _proc(0)
+        raise AssertionError(argv)
+
+    state, detail, source = _await_interactive_readiness(
+        "main", 81, run, harness=harness, seed="seed text"
+    )
+    assert state == "seeded"
+    assert detail == ""
+    assert source == "preloaded"
+    send = next(call for call in calls if call[3] == "send")
+    assert "--submit" in send
+    assert send[send.index("--text") + 1] == ""
+
+
+def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "idle composer")
+        if verb == "send":
+            return _proc(17, stdout="")
+        raise AssertionError(argv)
+
+    state, detail, source = _await_interactive_readiness(
+        "main", 81, run, harness="agy", seed="seed text"
+    )
+    assert state == "ready"
+    assert detail == "text delivered, submission unconfirmed"
+    assert source == "delivered"
+
+
+def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
+    reads = iter(
+        [
+            "Do you trust the authors of files in this folder?",
+            "Antigravity CLI\n>\n",
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def run(argv, **_kw):
+        calls.append(argv)
+        if argv[3] == "wait":
+            return _proc(WAIT_ALIVE)
+        if argv[3] == "read":
+            return _proc(0, next(reads))
+        if argv[3] == "send":
+            return _proc(0)
+        raise AssertionError(argv)
+
+    state, detail, source = _await_interactive_readiness(
+        "main", 81, run, harness="agy", seed="seed text"
+    )
+    assert state == "seeded"
+    assert detail == ""
+    assert source == "trust-cleared"
+    sends = [call for call in calls if call[3] == "send"]
+    assert len(sends) == 2
+    assert sends[0][sends[0].index("--text") + 1] == ""
+    assert sends[1][sends[1].index("--text") + 1] == "seed text"
+    assert all("--submit" in call for call in sends)
+
+
+def test_shared_readiness_waits_for_a_slow_first_paint() -> None:
+    reads = iter(["", "Antigravity CLI\n>\n"])
+
+    def run(argv, **_kw):
+        if argv[3] == "wait":
+            return _proc(WAIT_ALIVE)
+        if argv[3] == "read":
+            return _proc(0, next(reads))
+        if argv[3] == "send":
+            return _proc(0)
+        raise AssertionError(argv)
+
+    state, detail, source = _await_interactive_readiness(
+        "main", 81, run, harness="agy", seed="seed text"
+    )
+    assert (state, detail, source) == ("seeded", "", "delivered")
+
+
+def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
+    def run(argv, **_kw):
+        if argv[3] == "wait":
+            return _proc(WAIT_ALIVE)
+        if argv[3] == "read":
+            return _proc(0, "Do you trust the contents of this project?")
+        if argv[3] == "send":
+            return _proc(0)
+        raise AssertionError(argv)
+
+    state, detail, source = _await_interactive_readiness(
+        "main", 81, run, harness="agy", seed="seed text"
+    )
+    assert state == "failed"
+    assert "trust gate did not clear" in detail
+    assert source == "trust-cleared"
 
 
 # ---------------------------------------------------------------------------

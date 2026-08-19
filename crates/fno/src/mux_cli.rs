@@ -1824,6 +1824,14 @@ pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not 
 pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
 pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
+pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
+
+// Keep these aligned with fno-agents mail_inject: the same PTY paste needs the
+// same settle and retry cadence whether it arrived through mail or pane send.
+const CR_SETTLE_MS: u64 = 800;
+const CR_RESUBMIT_EVERY: u32 = 8;
+const SUBMIT_CONFIRM_ATTEMPTS: u32 = 40;
+const SUBMIT_CONFIRM_INTERVAL_MS: u64 = 250;
 
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
@@ -1972,6 +1980,9 @@ enum PaneCmd {
         /// swallowing bytes an external sender would miscall delivered. Default
         /// off: the raw channel is the writer-claim holder's own.
         guarded: bool,
+        /// Submit the pasted text with a separate wire-level carriage return,
+        /// then require a positive changed-frame marker before returning zero.
+        submit: bool,
     },
     Wait {
         pane: u64,
@@ -2188,6 +2199,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut text = None;
     let mut stdin = false;
     let mut guarded = false;
+    let mut submit = false;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2226,6 +2238,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--text" => text = Some(flag_value(args, &mut i, "--text")?),
             "--stdin" => stdin = true,
             "--guarded" => guarded = true,
+            "--submit" => submit = true,
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -2293,6 +2306,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 pane,
                 source,
                 guarded,
+                submit,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -3618,6 +3632,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             pane,
             source,
             guarded,
+            submit,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -3630,6 +3645,9 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
                     buf
                 }
             };
+            if submit {
+                return submit_pane(sock, session, pane, bytes, guarded, json);
+            }
             (
                 ControlVerb::PaneSend {
                     pane,
@@ -4227,6 +4245,88 @@ fn control_roundtrip(
     verb: ControlVerb,
 ) -> Result<ServerMsg, ControlError> {
     control_roundtrip_with_timeouts(sock, session, verb, CONTROL_TIMEOUT, CONTROL_REPLY_DEADLINE)
+}
+
+fn positive_post_submit_marker(before_cr: &str, after_cr: &str) -> bool {
+    !after_cr.trim().is_empty() && after_cr != before_cr
+}
+
+fn pane_text(sock: &Path, session: &str, pane: u64) -> Result<String, ControlError> {
+    match control_roundtrip(
+        sock,
+        session,
+        ControlVerb::PaneRead {
+            pane,
+            lines: None,
+            block: None,
+        },
+    )? {
+        ServerMsg::PaneText { text, .. } => Ok(text),
+        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
+        other => Err(ControlError::Fatal(format!(
+            "unexpected pane read reply while confirming submit: {other:?}"
+        ))),
+    }
+}
+
+fn send_pane_bytes(
+    sock: &Path,
+    session: &str,
+    pane: u64,
+    bytes: Vec<u8>,
+    guarded: bool,
+) -> Result<(), ControlError> {
+    match control_roundtrip(
+        sock,
+        session,
+        ControlVerb::PaneSend {
+            pane,
+            bytes,
+            guarded,
+        },
+    )? {
+        ServerMsg::Ok => Ok(()),
+        ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
+        other => Err(ControlError::Fatal(format!(
+            "unexpected pane send reply while submitting: {other:?}"
+        ))),
+    }
+}
+
+fn submit_pane(
+    sock: &Path,
+    session: &str,
+    pane: u64,
+    bytes: Vec<u8>,
+    guarded: bool,
+    json: bool,
+) -> i32 {
+    if let Err(e) = send_pane_bytes(sock, session, pane, bytes, guarded) {
+        eprintln!("fno mux pane: {e}");
+        return match e {
+            ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
+            ControlError::Fatal(_) => EXIT_ERROR,
+        };
+    }
+    std::thread::sleep(Duration::from_millis(CR_SETTLE_MS));
+    let baseline = pane_text(sock, session, pane).ok();
+    if let Err(e) = send_pane_bytes(sock, session, pane, vec![b'\r'], false) {
+        eprintln!("fno mux pane: text delivered, submission unconfirmed: {e}");
+        return EXIT_SUBMIT_UNCONFIRMED;
+    }
+    for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
+        if let (Some(before), Ok(after)) = (baseline.as_deref(), pane_text(sock, session, pane)) {
+            if positive_post_submit_marker(before, &after) {
+                return render_reply(ServerMsg::Ok, json, false, None);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(SUBMIT_CONFIRM_INTERVAL_MS));
+        if (attempt + 1) % CR_RESUBMIT_EVERY == 0 {
+            let _ = send_pane_bytes(sock, session, pane, vec![b'\r'], false);
+        }
+    }
+    eprintln!("fno mux pane: text delivered, submission unconfirmed");
+    EXIT_SUBMIT_UNCONFIRMED
 }
 
 /// `fno mux block pipe --from <pane> --to <pane> [--block last|<seq>] [--json]
@@ -5473,6 +5573,7 @@ mod tests {
                 pane: 2,
                 source: SendSource::Text("hi\r".into()),
                 guarded: false,
+                submit: false,
             }
         );
         assert_eq!(
@@ -5481,6 +5582,7 @@ mod tests {
                 pane: 2,
                 source: SendSource::Stdin,
                 guarded: false,
+                submit: false,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -5492,11 +5594,32 @@ mod tests {
                 pane: 2,
                 source: SendSource::Stdin,
                 guarded: true,
+                submit: false,
+            }
+        );
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--text", "hi", "--submit"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("hi".into()),
+                guarded: false,
+                submit: true,
             }
         );
         // Neither / both are usage errors.
         assert!(parse_pane_args(&os(&["send", "2"])).is_err());
         assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+    }
+
+    #[test]
+    fn submit_confirmation_requires_a_positive_changed_frame() {
+        assert!(!positive_post_submit_marker("", ""));
+        assert!(!positive_post_submit_marker("seed", ""));
+        assert!(!positive_post_submit_marker("seed", "seed"));
+        assert!(positive_post_submit_marker("seed", "working\n"));
+        assert_ne!(EXIT_SUBMIT_UNCONFIRMED, EXIT_OK);
     }
 
     #[test]

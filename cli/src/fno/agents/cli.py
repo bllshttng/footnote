@@ -1473,7 +1473,14 @@ def cmd_spawn(
                 # worker reached its provider; `status` alone could not, so a
                 # pane about to bind and one already dead read identically.
                 "bound": pane_result.bound,
+                # Independent delivery fact. Null means no seed was requested;
+                # unconfirmed is printed before the command exits non-zero.
+                "seed": pane_result.seed,
             }
+            if pane_result.seed_source is not None:
+                receipt_obj["seed_source"] = pane_result.seed_source
+            if pane_result.fno_id is not None:
+                receipt_obj["fno_id"] = pane_result.fno_id
             if pane_result.bound is False:
                 # `is False`, not falsy: `bound` is tri-state and None means this
                 # harness binds no session at all (gemini, agy), which is not a
@@ -1537,6 +1544,8 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
+            if pane_result.seed == "unconfirmed":
+                raise typer.Exit(code=22)
             return
         if substrate == "headless":
             once = True

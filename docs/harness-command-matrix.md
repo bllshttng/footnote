@@ -24,6 +24,8 @@ The pane substrate (the default) is the great equalizer: all five harnesses can 
 
 Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt includes `status: live`, `session_id`, and the derived eight-character `short_id`. If binding expires, fno reaps the pane and exits nonzero. It does not return an unaddressable `status: spawning` receipt.
 
+agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
+
 ## Machine-readable interactive capabilities
 
 Run `fno dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
@@ -33,7 +35,7 @@ Run `fno dispatch capabilities <h> --json` to read one harness without dispatch 
 | claude | `permission_prompt`: `1` once, `2` always, `3` deny | `live_prompt_box` | separate Enter after 800 ms | `claude attach <short_id>` | `claude stop <short_id>` | `claude rm <short_id>` |
 | codex | `approval_prompt`: `1` once, `2` always, `3` deny | `idle_prompt` | **unsupported until a successful pane-submit fixture is pinned** | `codex resume <thread_id>`. Headless: `codex exec resume <thread_id>` | registry no-op | remove the thread from `session_index.jsonl` |
 | gemini | unsupported | unsupported (deprecated lane) | unsupported | `gemini --resume <id>` | registry no-op | registry only |
-| agy | unsupported | unsupported (manifest is not live-pinned) | unsupported | unsupported on the interactive CLI | registry no-op | registry only |
+| agy | unsupported | trust prompt cleared by submit | separate submit after readiness | unsupported on the interactive CLI | registry no-op | registry only |
 | opencode | Known picker map: `Enter`, `Right Enter`, `Right Right Enter`. Automatic use requires a fingerprinted picker. | unsupported | unsupported | `opencode --session <ses_id>` | registry no-op | registry only |
 
 `ready` means that the configured manifest rule matched. A painted pane with no positive rule stays `live`. Claude and Codex use different readiness rules.
@@ -64,9 +66,9 @@ Retired creation verbs (each prints a pointer and exits non-zero, never a silent
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
 | `ask <name> <msg>` | id-bearing rows | id-bearing rows | id-bearing rows | no | no | Continue a registered session. A mux follow-up requires a pinned submit contract. Claude has one. Codex does not. Unsupported panes receive no bytes. |
-| `fno mail send <name> "<text>"` | yes | daemon or durable | yes | durable | durable | Send asynchronously. Confirmed live delivery skips the bus. Unsupported or unconfirmed panes use the durable queue. Codex daemon injection remains supported. |
+| `fno mail send <name> "<text>"` | yes | daemon or durable | yes | mux pane | mux pane | Send asynchronously. Confirmed live delivery skips the bus. Unsupported or unconfirmed panes use the durable queue. |
 | `watch <name>` | yes | no | no | no | no | Observe a held stream-json thread's turns in real time. claude-only transport. |
-| `peek <name>` | yes | yes | status events only | status events only | status events only | Read-only: recent transcript + status from disk. Never spawns anything, works on suspended and exited rows. The transcript-fallback arm supports claude and codex only; a gemini/agy/opencode row with no normalized status event exits 1 (`ObserveUnsupported`). The observe twin of `fno mail send`. |
+| `peek <name>` | yes | yes | mux scrollback or status | mux scrollback or status | mux scrollback or status | Read-only. Pane rows use mux scrollback. Paneless rows use transcript or normalized status events. |
 | `attach <name>` | yes | no | no | no | no | Re-exec your terminal into the running session's own TUI (`claude attach <short_id>`). Requires the session to be **live**. |
 | `resume <name> [--print-command] [--message/-m]` | yes (live only) | yes | yes | no | yes | Re-exec the harness's resume CLI in the agent's recorded cwd. A **live** claude row no longer exec's `claude attach <short_id>` directly; it wakes the session headlessly (pty-backed, route-settings-restored) and verifies it moved, since `claude attach` run non-interactively just prints "Attaching..." and exits. `--print-command` still prints the old `claude attach <short_id>` snippet for a human to run by hand. A **dead/exited** claude row is a genuine relaunch (`claude --resume <uuid>`), which still execs. Not the same door as `spawn --resume`. `--message`/`-m` is the text delivered on wake. |
 | `logs <name>` | yes | yes | yes | yes | yes | Tail or follow the agent's log output (reads `log_path`). |
@@ -147,11 +149,11 @@ Retired verbs print these pointers and exit non-zero, so scripts fail loud rathe
 
 ## Submitting a pane send
 
-`fno mux pane send <pane> --text <s>` writes bytes into the pane's PTY. It does not promise submission. A newline or carriage return in the paste can become composer text. A separate carriage return can be ignored during harness startup. A zero exit proves only that the pane transport accepted the bytes.
+`fno mux pane send <pane> --text <s>` writes bytes into the composer. It does not submit. This default remains the staging contract for `fno mux block pipe`.
 
-Do not script a guessed `\n`, `\r`, or Tab sequence. If the contract supports submission, use its `send_keys_enter_delay_ms` and `submit_keys` values. The internal delivery path automates the pinned Claude recipe. Codex pane submission is `unsupported` after live attempts left text at `tab to queue message`.
+When delivery is intended, add `--submit`. The verb settles, sends a separate carriage return, and requires changed output. Unconfirmed text exits 22.
 
-If a harness is unsupported, focus the pane and submit in its TUI. Alternatively, use `fno mail send` and accept the durable receipt. Use pane reads only for diagnostics. Screen text is not positive submission evidence.
+The internal delivery path uses this primitive. Agy seeds are submitted after trust and composer readiness. A carriage return inside pasted text is not Enter.
 
 ## Pointing the operator at a pane
 

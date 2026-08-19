@@ -184,6 +184,9 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
         bound = True
         pane_alive = True
         unbound_reason = None
+        seed = "submitted"
+        seed_source = "delivered"
+        fno_id = "abcd1234"
         log_path = ""
         recovered = False
         readiness = "ready"

@@ -87,6 +87,39 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     assert "provider" not in receipt
     assert "model" not in receipt
     assert receipt["harness_source"] == "builtin-default"
+    assert receipt["seed"] is None
+
+
+def test_unconfirmed_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
+    _stub_pane_path(monkeypatch)
+    from fno.agents import mux_spawn
+    from fno.agents.cli import agents_app
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: mux_spawn.MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="sess-1",
+            pane_id=7,
+            child_pid=42,
+            session_uuid=None,
+            seed="unconfirmed",
+            seed_source="delivered",
+            fno_id=kwargs["name"],
+        ),
+    )
+
+    result = runner.invoke(
+        agents_app, ["spawn", "--name", "w1", "hello", "--node", "x-test"]
+    )
+
+    assert result.exit_code == 22
+    receipt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert receipt["seed"] == "unconfirmed"
+    assert receipt["seed_source"] == "delivered"
+    assert receipt["fno_id"] == "w1"
 
 
 def test_spawn_infers_claude_from_harness(monkeypatch, runner):

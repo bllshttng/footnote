@@ -867,10 +867,9 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # Bare interactive session: no -i without a message.
     assert "-i" not in build_pane_argv("gemini", "", tmp_path, False, None)
 
-    # x-8f7f US1: agy is never-prompt, stateless (no --session-id), message as
-    # trailing positional; never `-p` (that is agy's headless/print form).
+    # agy is never-prompt and stateless. The seed is delivered after readiness.
     agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
-    assert agy == ["agy", "--dangerously-skip-permissions", "task"]
+    assert agy == ["agy", "--dangerously-skip-permissions"]
     assert "-p" not in agy and "--session-id" not in agy
     assert build_pane_argv("agy", "", tmp_path, False, None) == [
         "agy",
@@ -3273,9 +3272,9 @@ def test_ac1_passthrough_splices_into_every_pane_arm(tmp_path: Path) -> None:
     argv = build_pane_argv("codex", "task", tmp_path, False, None, passthrough=tok)
     fence = argv.index("--")
     assert argv[fence - 3 : fence] == tok
-    # agy: before the trailing positional seed.
+    # agy: the seed is delivered after readiness, so passthrough owns the tail.
     argv = build_pane_argv("agy", "task", tmp_path, False, None, passthrough=tok)
-    assert argv[-4:-1] == tok and argv[-1] == "task"
+    assert argv[-3:] == tok and "task" not in argv
     # gemini: before the -i <message> pair.
     argv = build_pane_argv("gemini", "task", tmp_path, False, None, passthrough=tok)
     i = argv.index("-i")

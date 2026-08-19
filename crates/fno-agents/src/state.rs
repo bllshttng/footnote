@@ -544,8 +544,9 @@ pub struct RegistryEntry {
     /// adopted orphan was working, so the revived session is linked to its node.
     /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
     /// every row that did not come from a target manifest. Identity-adjacent
-    /// linkage, never read for liveness or ownership (those stay with the live
-    /// claim and the manifest). Same X3 passthrough as `route_settings_path`.
+    /// linkage, or the stable pane identity for a harness without a session id;
+    /// never read for liveness or ownership. Same X3 passthrough as
+    /// `route_settings_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fno_id: Option<String>,
     /// Mail delivery policy (x-e21e, v14): `Some("bus-only")` means mail to

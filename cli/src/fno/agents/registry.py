@@ -170,9 +170,10 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # silently coming back on the default account. Same additive-optional shape and
 # same forward-compat rationale as v11: asdict emits the key on every written
 # row, so a pre-v12 reader must reject the store rather than TypeError on it.
-# v13 (x-0358): additive `fno_id` - the target run id of an adopted /target
-# orphan, linking a revived session to its node. Set by the Rust adopt verb from
-# the matched target manifest; None otherwise. Same additive-optional shape and
+# v13 (x-0358): additive `fno_id` - a durable fno identity independent of the
+# harness session id. Adopted target orphans carry the target run id; pane rows
+# carry the bound harness id or their unique registry name when the harness has
+# no session id. Same additive-optional shape and
 # forward-compat rationale as v12.
 # v14 (x-e21e): additive `delivery_policy` - a recipient's mail delivery
 # policy ("bus-only": never prompt-line inject, always durable bus). Same
@@ -379,11 +380,11 @@ class AgentEntry:
     # Rust's RegistryEntry mirrors it as additive-optional passthrough, or the
     # daemon would drop a Python-stamped path on its next read-modify-write.
     route_settings_path: Optional[str] = None
-    # v13 (x-0358): the fno_id of the /target session an adopted orphan was
-    # working, set by the Rust adopt verb from the matched target manifest. None
-    # for every row not adopted from a target manifest. Identity-adjacent
-    # linkage only; never read for liveness or ownership. Rust mirrors it as
-    # additive-optional passthrough so the daemon's read-modify-write keeps it.
+    # v13 (x-0358): durable fno identity. Adopted target orphans carry their
+    # target run id; pane rows carry the bound harness id, or the unique registry
+    # name when the harness exposes none. Identity-adjacent only; never a
+    # liveness or ownership claim. Rust mirrors it as additive-optional
+    # passthrough so the daemon's read-modify-write keeps it.
     fno_id: Optional[str] = None
     # v14 (x-e21e): this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
     # mail to this session never prompt-line injects and always takes the

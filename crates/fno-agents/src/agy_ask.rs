@@ -642,6 +642,7 @@ pub fn dispatch_agy_once(
 
     // spawn allows an empty initial message; default it to "hello" (Python parity).
     let effective_message = if message.is_empty() { "hello" } else { message };
+    ensure_agy_folder_trusted(cwd);
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);

@@ -143,6 +143,9 @@ class MuxSpawnResult:
     recovered: bool = False
     readiness: Optional[str] = None
     readiness_rule: Optional[str] = None
+    seed: Optional[str] = None
+    seed_source: Optional[str] = None
+    fno_id: Optional[str] = None
 
 
 def _fno_bin() -> str:
@@ -1015,11 +1018,9 @@ def build_pane_argv(
         # so an unattended pane can't wedge on its first approval. agy is
         # stateless (no session id, no JSON envelope), so no --session-id pin;
         # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
-        # NOT be used for a pane. A message rides as the trailing positional,
-        # matching claude's interactive form.
-        # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
-        # pin it via capture-readiness-grid.sh when the manifest is validated.
-        argv = [*identity, "--dangerously-skip-permissions"]
+        # NOT be used for a pane. The shared readiness gate submits the seed
+        # after trust and the composer are ready.
+        argv = ["agy", "--dangerously-skip-permissions"]
         if permission_mode:
             # skip -> [] (argv already carries the flag); anything else raises.
             argv += permission_pane_tokens("agy", permission_mode)
@@ -1027,13 +1028,6 @@ def build_pane_argv(
             argv += ["--model", model]
         argv += tier3
         argv += pane_passthrough_tokens(passthrough, argv)
-        if message:
-            # Deliberately unfenced: agy has no clean end-of-options. Probed
-            # 2026-08-15, `agy -p -- "<prompt>"` folds the flag text AND the
-            # fence itself into the prompt, so fencing corrupts the seed; an
-            # unfenced leading-flag seed rides into the prompt mangled, not
-            # dead. argv-fence: exempt (test_argv_fence_gate honors this marker)
-            argv.append(message)
         return argv
     if provider == "opencode":
         if effort:
@@ -2101,6 +2095,62 @@ def _send_permission_response(
         )
 
 
+def _submit_spawn_seed(
+    provider: str,
+    session: str,
+    pane_id: int,
+    seed: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[str, str, str]:
+    """Submit a spawn seed after the shared readiness probe has painted."""
+    try:
+        screen = _run_mux(
+            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            runner,
+        )
+    except DispatchAskError:
+        return "unconfirmed", "", "delivered"
+    frame = screen.stdout or ""
+    if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
+        try:
+            cleared = _run_mux(
+                ["mux", "pane", "send", "--session", session, str(pane_id), "--text", "", "--submit"],
+                runner,
+            )
+        except DispatchAskError:
+            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+        if cleared.returncode != 0:
+            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+        try:
+            screen = _run_mux(
+                ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+                runner,
+            )
+        except DispatchAskError:
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+        frame = screen.stdout or ""
+        if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+        trust_source = "trust-cleared"
+    else:
+        trust_source = ""
+    if not frame.strip():
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source
+    if provider != "agy" and seed not in frame:
+        return "submitted", "", "argv"
+    payload = "" if seed in frame else seed
+    try:
+        submitted = _run_mux(
+            ["mux", "pane", "send", "--session", session, str(pane_id), "--text", payload, "--submit"],
+            runner,
+        )
+    except DispatchAskError:
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+    if submitted.returncode != 0:
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+    return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -2522,6 +2572,14 @@ def dispatch_spawn_pane(
                 else None
             ),
         )
+        seed_state: Optional[str] = None
+        seed_source: Optional[str] = None
+        if message and readiness != "failed":
+            seed_state, seed_detail, seed_source = _submit_spawn_seed(
+                provider, session, pane_id, message, runner
+            )
+            if seed_state == "unconfirmed":
+                readiness_detail = seed_detail or readiness_detail
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
                 readiness_detail = (
@@ -2894,6 +2952,7 @@ def dispatch_spawn_pane(
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
                     route_settings_path=route_settings_path,
+                    fno_id=stored_session_uuid or name,
                 )
             )
             return rows
@@ -3103,4 +3162,7 @@ def dispatch_spawn_pane(
             if readiness_detail.startswith(("ready-marker=", "blocked-rule="))
             else None
         ),
+        seed=seed_state,
+        seed_source=seed_source,
+        fno_id=session_uuid or name,
     )

@@ -5782,10 +5782,8 @@ def _mux_pane_send(
                     file=sys.stderr,
                 )
             return False
-        # The CR is unguarded: the guarded paste already proved the pane idle, and
-        # guarding the submit could strand a pasted-but-unsent prompt.
-        time.sleep(enter_delay_s)
-        return all(_run(["send", pane, "--text", key]) == 0 for key in submit_text)
+        # Rust owns the settle, separate CR, retries, and positive confirmation.
+        return True
 
     if guarded:
         sent = _paste_then_submit()
