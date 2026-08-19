@@ -488,6 +488,19 @@ pub(crate) fn codex_plan_writable_args(cwd: &std::path::Path) -> Vec<String> {
 ///
 /// Empty on any failure: a posture we cannot resolve must never break a resume.
 pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<String> {
+    let grant = codex_writable_config_args(cwd);
+    if grant.is_empty() {
+        return vec![];
+    }
+    let mut args = vec!["-c".into(), "sandbox_mode=workspace-write".into()];
+    args.extend(grant);
+    args
+}
+
+/// The single whole-value `writable_roots` override used by interactive resume
+/// lanes that must grant roots without also changing the operator's sandbox
+/// mode.
+pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
     let roots: Vec<String> = [git_common_dir(cwd), plan_content_dir(cwd)]
         .into_iter()
         .flatten()
@@ -500,18 +513,26 @@ pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<Str
     };
     vec![
         "-c".into(),
-        "sandbox_mode=workspace-write".into(),
-        "-c".into(),
         format!("sandbox_workspace_write.writable_roots={encoded}"),
     ]
 }
 
 fn plan_content_dir(cwd: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("fno")
+    let out = match std::process::Command::new("fno")
         .args(["plan", "path", "--slug", "codex-sandbox-grant"])
         .current_dir(cwd)
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(_) if !cwd.exists() => {
+            return Some(
+                resolve_allow_missing(&cwd.join(".fno/plans"))
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+        Err(_) => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -526,9 +547,26 @@ fn plan_content_dir(cwd: &std::path::Path) -> Option<String> {
     } else {
         cwd.join(path)
     };
-    absolute
+    resolve_allow_missing(&absolute)
         .parent()
         .map(|parent| parent.to_string_lossy().into_owned())
+}
+
+fn resolve_allow_missing(path: &std::path::Path) -> std::path::PathBuf {
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    while !cursor.exists() {
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        cursor.pop();
+    }
+    let mut resolved = std::fs::canonicalize(&cursor).unwrap_or(cursor);
+    for part in missing.into_iter().rev() {
+        resolved.push(part);
+    }
+    resolved
 }
 
 /// Absolute git COMMON dir for `cwd`; `None` outside a repo or on any failure.

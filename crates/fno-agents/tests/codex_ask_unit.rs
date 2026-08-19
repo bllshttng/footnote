@@ -105,8 +105,8 @@ fn build_argv_create_default_sandbox() {
     let full_prompt = "[from: alice]\n\nhello";
     let argv = build_argv_create(&cwd, full_prompt, false, None, None, None);
     assert_eq!(
-        argv,
-        vec![
+        &argv[..8],
+        [
             "codex",
             "--ask-for-approval",
             "never",
@@ -115,12 +115,13 @@ fn build_argv_create_default_sandbox() {
             "-C",
             "/tmp/proj",
             "--skip-git-repo-check",
-            "--sandbox",
-            "workspace-write",
-            "--",
-            "[from: alice]\n\nhello",
         ]
     );
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == ["--sandbox", "workspace-write"]));
+    assert!(argv.iter().any(|arg| arg.ends_with("/.fno/plans")));
+    assert_eq!(&argv[argv.len() - 2..], ["--", full_prompt]);
 }
 
 #[test]
@@ -142,7 +143,8 @@ fn build_argv_create_forwards_model() {
 #[test]
 fn build_argv_create_forwards_add_dir() {
     // x-b6e2: a user --add-dir grants extra write access on `codex exec`. codex's
-    // own cwd rides -C, so add-dir is purely additive. Empty/None = no flag.
+    // own cwd rides -C, so add-dir is purely additive. Empty/None adds no USER
+    // flag; the bounded worker's internal plan grant remains.
     let cwd = PathBuf::from("/tmp/proj");
     let argv = build_argv_create(&cwd, "hi", false, None, None, Some("/extra"));
     let i = argv
@@ -151,7 +153,8 @@ fn build_argv_create_forwards_add_dir() {
         .expect("--add-dir present");
     assert_eq!(argv[i + 1], "/extra");
     let none = build_argv_create(&cwd, "hi", false, None, None, Some(""));
-    assert!(!none.iter().any(|a| a == "--add-dir"));
+    assert!(!none.iter().any(|a| a == "/extra"));
+    assert_eq!(none.iter().filter(|a| *a == "--add-dir").count(), 1);
 }
 
 #[test]

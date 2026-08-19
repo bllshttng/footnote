@@ -341,6 +341,8 @@ def test_init_never_refuses_a_node_with_a_bound_plan(
     from fno.cli import app
 
     load_settings.cache_clear()
-    r = CliRunner().invoke(app, ["target", "init", "--plan-path", str(tmp_path / "plan.md")])
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    r = CliRunner().invoke(app, ["target", "init", "--plan-path", str(plan)])
     assert r.exit_code == 0, r.output
     assert "no scope denominator" not in r.output
