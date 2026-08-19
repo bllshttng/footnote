@@ -367,6 +367,7 @@ def test_attended_shell_crowns_an_existing_live_session(tmp_path: Path, monkeypa
         "grantor": "human",
         "vacated_scope": None,
         "vacated_level": None,
+        "stranded_subordinates": [],
     }
     row = load_registry()[0]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
@@ -672,9 +673,43 @@ def test_rescope_emits_the_vacated_pair_on_the_event(
                 "grantor": "human",
                 "vacated_scope": "beta",
                 "vacated_level": 1,
+                "stranded_subordinates": [],
             },
         )
     ]
+
+
+def test_rescope_names_subordinates_stranded_by_the_move(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.registry import load_registry
+
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    sub = _entry(
+        "sub",
+        harness_session_id="sub-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="king",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [king, sub])
+
+    result = _invoke_crown("king", "--scope", "beta")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["stranded_subordinates"] == ["sub"]
+    # The subordinate keeps reigning; the report is the only trace the move
+    # out-ran its grant.
+    row = next(r for r in load_registry() if r.name == "sub")
+    assert (row.crown_level, row.crown_scope) == (1, "alpha")
 
 
 def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
@@ -779,6 +814,7 @@ def test_in_place_crown_emits_one_success_event_only_after_commit(
                 "grantor": "human",
                 "vacated_scope": None,
                 "vacated_level": None,
+                "stranded_subordinates": [],
             },
         )
     ]

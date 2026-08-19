@@ -412,6 +412,7 @@ def cmd_crown(
         grantor=receipt["grantor"],
         vacated_scope=receipt["vacated_scope"],
         vacated_level=receipt["vacated_level"],
+        stranded_subordinates=receipt["stranded_subordinates"],
     )
     print(json.dumps(receipt))
 
