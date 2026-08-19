@@ -12,6 +12,12 @@ use fno_agents::codex_ask::{
 };
 use std::path::PathBuf;
 
+/// Guards tests that mutate the process-global `PATH` (the crate's own
+/// `#[cfg(test)]` lock in `claims::test_env_lock` is stripped from this
+/// external integration-test binary, so it needs its own).
+#[cfg(unix)]
+static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // inject_from_name (Locked Decision 7 parity)
 // ---------------------------------------------------------------------------
@@ -157,12 +163,20 @@ fn build_argv_create_forwards_add_dir() {
     assert_eq!(none.iter().filter(|a| *a == "--add-dir").count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn build_argv_create_grants_git_metadata_write_in_a_repo() {
     // Byte-parity with codex.py::create. codex's workspace-write policy marks
     // <project_root>/.git read-only, so a bounded `ask` worker asked to commit
     // fails on index.lock. The grant is the git COMMON dir, which also covers a
     // linked worktree's gitdir at <repo>/.git/worktrees/<name>/.
+    //
+    // Shares PATH_ENV_LOCK with the PATH-mutating tests below: this test never
+    // touches PATH itself, but a sibling test's temporary override (run
+    // concurrently, since cargo test threads by default) would otherwise make
+    // `git` transiently unreachable here too and fail this test's own `git
+    // init` on NotFound.
+    let _guard = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git")
         .args(["init", "-q"])
@@ -185,20 +199,67 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
     assert!(!yolo.iter().any(|a| a == "--add-dir"));
 }
 
+#[cfg(unix)]
 #[test]
 fn build_argv_create_internal_grants_compose_with_user_add_dir() {
     // --add-dir is repeatable, so the git and plan grants never clobber a
-    // caller's own root.
+    // caller's own root. The plan grant shells to `fno plan path`, which is
+    // not on PATH in every test environment (e.g. this crate's own CI leg,
+    // which never installs the `fno` console script) - stub it, matching
+    // provider.rs's `codex_create_and_resume_argv_grant_the_resolved_plan_directory`.
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(dir.path())
         .output()
         .unwrap();
+    let plan_dir = dir.path().join("configured-plans");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake_fno = bin.join("fno");
+    std::fs::write(
+        &fake_fno,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            plan_dir.join("probe.md").display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&fake_fno).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake_fno, perms).unwrap();
+    let old_path = std::env::var_os("PATH");
+    // Prepend (never replace): `codex_git_writable_args` inside `build_argv_create`
+    // still shells to a real `git`, so dropping the rest of PATH would silently
+    // lose the git grant too and undercount by one more than intended.
+    let mut new_path = bin.clone().into_os_string();
+    if let Some(existing) = old_path.as_ref() {
+        new_path.push(":");
+        new_path.push(existing);
+    }
+    unsafe { std::env::set_var("PATH", &new_path) };
 
     let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"));
+
+    match old_path {
+        Some(path) => unsafe { std::env::set_var("PATH", path) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+
     assert_eq!(argv.iter().filter(|a| *a == "--add-dir").count(), 3);
     assert!(argv.iter().any(|a| a == "/extra"));
+    // Suffix match, not exact-path equality: a symlinked tempdir root (macOS
+    // /tmp -> /private/tmp) makes the resolved grant diverge from `plan_dir`
+    // by prefix only, and the suffix is what proves this is the PLAN grant
+    // specifically (not a duplicate of the git or user grant).
+    assert!(
+        argv.iter()
+            .any(|a| std::path::Path::new(a).ends_with("configured-plans")),
+        "expected a --add-dir grant ending in configured-plans, got {argv:?}"
+    );
 }
 
 #[test]
@@ -281,6 +342,7 @@ fn build_argv_resume_no_cd_flag() {
     assert!(!argv.contains(&"-C".to_string()));
 }
 
+#[cfg(unix)]
 #[test]
 fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
     // Resume re-resolves the sandbox from config instead of inheriting the
@@ -288,6 +350,9 @@ fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
     // the bounded case must re-pin BOTH halves through -c, or a resumed worker
     // either loses its sandbox or keeps it without the git grant and cannot
     // commit.
+    //
+    // Shares PATH_ENV_LOCK: see build_argv_create_grants_git_metadata_write_in_a_repo.
+    let _guard = PATH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git")
         .args(["init", "-q"])
