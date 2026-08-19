@@ -15,6 +15,7 @@ TABLE_ROW = re.compile(
     r"\s*`([^`]+)`\s*\|\s*(planned|scripted)\s*\|$"
 )
 SLASH_COMMAND = re.compile(r"(?<![\w-])/fno:([a-z][a-z0-9-]*)")
+CLOSED_SLASH_ROUTERS = {"do", "pr", "review"}
 
 
 def _load_verb_callers():
@@ -80,9 +81,7 @@ def _fno_resolution_errors(paths: list[Path], leaves: set[str]) -> list[str]:
                 if not words or words[0] not in {"fno", "fno-py", "fno-agents"}:
                     continue
                 if any(
-                    word in {"fno", "fno-py", "fno-agents"}
-                    and words[index - 1] in {"&&", "||", ";", "|"}
-                    for index, word in enumerate(words[1:], start=1)
+                    word in {"fno", "fno-py", "fno-agents"} for word in words[1:]
                 ):
                     errors.append(
                         f"{path}:{line_number}: multiple fno commands on one run line"
@@ -146,9 +145,10 @@ def _slash_resolution_errors(paths: list[Path], root: Path = REPO_ROOT) -> list[
                         ),
                         "",
                     )
-                    if not re.search(
+                    documented = re.search(
                         rf"(?<![a-z0-9-]){re.escape(mode)}(?![a-z0-9-])", hint
-                    ):
+                    )
+                    if not documented and verb in CLOSED_SLASH_ROUTERS:
                         errors.append(
                             f"{path}:{line_number}: unresolved /fno:{verb} mode {mode!r}"
                         )
@@ -223,7 +223,7 @@ def test_fno_verbs_resolve_against_live_surface(tmp_path):
     assert not _fno_resolution_errors([root_flag], leaves)
     compound = tmp_path / "compound.md"
     compound.write_text(
-        "```run\nfno status && fno backlog no-such-leaf\n```\n\n[capture-at-record]\n"
+        "```run\nfno status && env X=1 fno backlog no-such-leaf\n```\n\n[capture-at-record]\n"
     )
     assert _fno_resolution_errors([compound], leaves) == [
         f"{compound}:2: multiple fno commands on one run line"
@@ -245,6 +245,11 @@ def test_slash_commands_resolve_to_shipped_surface(tmp_path):
     assert errors == [
         f"{bad_mode}:2: unresolved /fno:review mode 'no-such-mode'"
     ]
+    free_text = tmp_path / "free-text.md"
+    free_text.write_text(
+        "```run\n/fno:target deploy\n/fno:think uploads\n```\n\n[capture-at-record]\n"
+    )
+    assert not _slash_resolution_errors([free_text])
 
 
 def test_run_fences_have_captured_or_deferred_output(tmp_path):

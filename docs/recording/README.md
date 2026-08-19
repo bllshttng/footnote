@@ -23,7 +23,7 @@ A recording script is the exact terminal run, expected output, and edit list for
 
 ## Setup state
 
-Run this block before every recording except L01. L01 records installation itself, so its script names the smaller set of host-machine checks that must happen before the demo state exists.
+Run this block before every recording except L01 and L03. L01 records installation itself. L03 continues from L02 without replacing its target worktree.
 
 ```run
 export DEMO_ROOT=/Users/Shared/footnote-recording-demo

@@ -42,14 +42,12 @@ Narration: "Peer asks one different model for a second opinion. It is cheaper an
 ## 4. Inspect the available specialist routing
 
 ```run
-fno review --print-providers | jq -c '{has_specialists:(length > 0)}'
+fno review --print-providers
 ```
 
-```expected
-{"has_specialists":true}
-```
+[capture-at-record]
 
-Narration: "The mechanical review surface exposes the available specialist routing without running the panel. The selected sigma tier decides which roles inspect this diff."
+Narration: "The mechanical surface reports configured cross-model routing overrides. An empty object means provider defaults. The selected sigma tier still decides which specialists run."
 
 ## Cut list
 

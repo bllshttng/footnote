@@ -11,12 +11,12 @@ This is the only lesson recorded before the shared demo state exists. Record it 
 ## 1. Identify the installed build
 
 ```run
-fno version | sed -E 's/^fno [^ ]+ \([0-9a-f]+, release\)$/fno VERSION (REVISION, release)/'
+fno version
 ```
 
-```expected
-fno VERSION (REVISION, release)
-```
+[capture-at-record]
+
+The capture must show the real version and revision. If either identifier is cropped, restart the take.
 
 ## 2. Diagnose the active front door
 
