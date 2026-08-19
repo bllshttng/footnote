@@ -26,6 +26,7 @@ cli/src/fno/restart.py::_revive_orphans  # restart (config.restart.enabled)
 cli/src/fno/retro/keep_going.py::_spawn_target_worker  # keep_going (config.keep_going.enabled)
 cli/src/fno/verify_advise.py::run_verifier  # NOT autonomy: synchronous ship-time verify sub-step of an already-permitted ship, not its own self-start trigger
 hooks/context-nudge.sh::  # NOT a call site: quotes `fno agents spawn` inside an operator-facing nudge message
+hooks/helpers/init-target-state.sh::  # NOT a call site: a comment naming `fno agents spawn --node` as the OTHER end of the claim handover this script's acquire inherits from. init spawns nothing.
 scripts/run-target-loop.sh::  # NOT a call site: comment only; the real dispatch is the Rust `fno-agents loop run --driver target` binary, out of this script's scan
 skills/agent/scripts/normalize.sh::  # NOT a call site: comment/variable-name references only
 skills/agent/scripts/spawn.sh::  # explicit operator command wrapper (`/fno:agent spawn`); builds argv from a dynamic $VERB, not a literal spawn call
