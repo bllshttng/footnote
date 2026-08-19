@@ -137,7 +137,10 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
         assert_eq!(parse_home_arg(&s(&["--home", "/a"])), Some("/a".into()));
         assert_eq!(parse_home_arg(&s(&["--home=/b"])), Some("/b".into()));
-        assert_eq!(parse_home_arg(&s(&["--once", "--home", "/a"])), Some("/a".into()));
+        assert_eq!(
+            parse_home_arg(&s(&["--once", "--home", "/a"])),
+            Some("/a".into())
+        );
         // Absent, or present with no value.
         assert_eq!(parse_home_arg(&s(&[])), None);
         assert_eq!(parse_home_arg(&s(&["--once"])), None);

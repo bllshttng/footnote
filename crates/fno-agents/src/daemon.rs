@@ -2448,7 +2448,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let _ = std::fs::remove_file(&sock_path);
     }
     emit_state(&ctx.emitter, DaemonState::Exited);
-    let _ = ctx.emitter.emit("daemon_exited", &daemon_exited_payload(exit_reason));
+    let _ = ctx
+        .emitter
+        .emit("daemon_exited", &daemon_exited_payload(exit_reason));
     Ok(())
 }
 
@@ -8826,8 +8828,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let home = short_home("idle-terminal");
         home.ensure_root().unwrap();
         state::update_registry(&home.registry_json(), |r| {
-            r.entries.push(ask_row("done-1", Some("2020-01-01T00:00:00Z")));
-            r.entries.push(ask_row("done-2", Some("2020-01-01T00:00:00Z")));
+            r.entries
+                .push(ask_row("done-1", Some("2020-01-01T00:00:00Z")));
+            r.entries
+                .push(ask_row("done-2", Some("2020-01-01T00:00:00Z")));
         })
         .unwrap();
         assert!(

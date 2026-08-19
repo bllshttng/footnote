@@ -419,7 +419,13 @@ mod tests {
         let root = tmp("holder-garbage");
         let home = AgentsHome::at(&root);
         home.ensure_root().unwrap();
-        for garbage in ["", "garbage\n", "-1 5\n", "99999999999 5\n", "12 13 14 extra\n"] {
+        for garbage in [
+            "",
+            "garbage\n",
+            "-1 5\n",
+            "99999999999 5\n",
+            "12 13 14 extra\n",
+        ] {
             std::fs::write(home.supervisor_lock(), garbage).unwrap();
             assert_eq!(
                 supervisor_lock_holder(&home),

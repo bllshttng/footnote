@@ -701,8 +701,18 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
     // worker - which the old registry-emptiness gate could never exit from.
     let home = short_home();
     home.ensure_root().unwrap();
-    seed_codex_source(&home, "done-1", "uuid-idle-1", fno_agents::AgentStatus::Exited);
-    seed_codex_source(&home, "done-2", "uuid-idle-2", fno_agents::AgentStatus::Exited);
+    seed_codex_source(
+        &home,
+        "done-1",
+        "uuid-idle-1",
+        fno_agents::AgentStatus::Exited,
+    );
+    seed_codex_source(
+        &home,
+        "done-2",
+        "uuid-idle-2",
+        fno_agents::AgentStatus::Exited,
+    );
 
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
     let pid = daemon.id();
@@ -1015,7 +1025,11 @@ async fn restart_force_recovers_a_wedged_holder() {
         .await
         .expect("--force recovers the wedge");
     assert!(outcome.forced, "the transcript records a kill, not a drain");
-    assert_eq!(outcome.old_pid, Some(wedged_pid), "the wedged holder is the one killed");
+    assert_eq!(
+        outcome.old_pid,
+        Some(wedged_pid),
+        "the wedged holder is the one killed"
+    );
     // Reap OUR child first: a SIGKILLed child is a zombie until waited, and a
     // zombie still answers kill(pid,0), so liveness-before-reap would lie.
     let _ = daemon.wait();
@@ -1026,7 +1040,11 @@ async fn restart_force_recovers_a_wedged_holder() {
     let resp = fno_agents::client::call_if_running(&home, &req)
         .await
         .expect("fresh daemon serves after force");
-    assert!(!resp.is_err(), "unexpected error response: {:?}", resp.error());
+    assert!(
+        !resp.is_err(),
+        "unexpected error response: {:?}",
+        resp.error()
+    );
 
     unsafe {
         libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
@@ -1050,11 +1068,7 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         .arg("300")
         .spawn()
         .expect("spawn sleep");
-    std::fs::write(
-        home.supervisor_lock(),
-        format!("{} 1\n", stranger.id()),
-    )
-    .unwrap();
+    std::fs::write(home.supervisor_lock(), format!("{} 1\n", stranger.id())).unwrap();
 
     let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
         .await
