@@ -802,6 +802,58 @@ def _pr_watch_liveness() -> dict[str, Any]:
         }
 
 
+_FD_SOFT_FLOOR = 1024
+
+
+def _parse_launchctl_maxfiles(stdout: str) -> Optional[int]:
+    """Soft limit from a `launchctl limit maxfiles` line, or None.
+
+    Pure function over the `maxfiles 256 unlimited` shape so the verdict is
+    unit-testable without a Mac.
+    """
+    for line in stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "maxfiles":
+            try:
+                return int(fields[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _fd_limit_report() -> dict[str, Any]:
+    """Soft RLIMIT_NOFILE of THIS process, beside the launchd session default.
+
+    Reporting one number reproduces the disagreement this check exists to end:
+    a login shell reads 1048576 while every launchd-spawned worker on the same
+    machine runs at 256, and both readings are correct. The limit belongs to
+    the launch context, not the machine. Advisory: never changes status/exit.
+    """
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    report: dict[str, Any] = {
+        "soft": soft,
+        "hard": "unlimited" if hard == resource.RLIM_INFINITY else hard,
+        "threshold": _FD_SOFT_FLOOR,
+        "launchd_soft": None,
+        "kern_maxfiles": None,
+    }
+    if sys.platform == "darwin":
+        probe = _bounded_command(["launchctl", "limit", "maxfiles"])
+        if probe and probe[0] == 0:
+            report["launchd_soft"] = _parse_launchctl_maxfiles(probe[1])
+        kern = _bounded_command(["sysctl", "-n", "kern.maxfiles"])
+        if kern and kern[0] == 0:
+            try:
+                report["kern_maxfiles"] = int(kern[1].strip())
+            except ValueError:
+                pass
+    measured = [v for v in (report["soft"], report["launchd_soft"]) if isinstance(v, int)]
+    report["verdict"] = "low" if any(v <= _FD_SOFT_FLOOR for v in measured) else "ok"
+    return report
+
+
 def _groom_health() -> dict[str, Any]:
     """Freshness of the daily grooming pass, plus whether its agent is installed.
 
@@ -1542,6 +1594,41 @@ def _emit_human(
         )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
+
+    # Open-file soft limit (advisory): name BOTH numbers and which launch
+    # context each belongs to, or the warning repeats the trap it diagnoses.
+    fd = result.get("fd_limit") or {}
+    if fd.get("verdict") == "low":
+        floor = fd.get("threshold")
+        soft = fd.get("soft")
+        launchd = fd.get("launchd_soft")
+        if isinstance(soft, int) and soft <= floor:
+            out(
+                f"fno doctor: open-file soft limit is {soft} in THIS process "
+                f"(floor {floor})."
+            )
+        else:
+            out(
+                f"fno doctor: open-file soft limit is {soft} in THIS process, but "
+                f"launchd's session default is {launchd} (floor {floor})."
+            )
+        kern = fd.get("kern_maxfiles")
+        kern_note = (
+            f"kern.maxfiles is {kern}, so the kernel is not the constraint"
+            if isinstance(kern, int)
+            else "the kernel's own ceiling is far higher than either number"
+        )
+        out(
+            "The limit is inherited from the launch context, not the machine: "
+            f"{kern_note}, and a login shell can read a healthy number while "
+            "every spawned worker starves."
+        )
+        out("Raise it for launchd children: sudo launchctl limit maxfiles 65536 unlimited")
+        out(
+            "The raise only reaches NEWLY launched processes, so restart the "
+            "affected sessions afterwards. Persistence across reboot needs a "
+            "LaunchDaemon plist."
+        )
 
     dl = result.get("dead_letter") or {}
     if dl.get("drain_hook_wired") is False:
@@ -3057,6 +3144,11 @@ def doctor_command(
     # weeks with zero signal; the verdict derives from tick recency (ground
     # truth), never from config alone. Never changes status/exit.
     result["pr_watch"] = _pr_watch_liveness()
+
+    # Advisory open-file limit visibility: a launchd child starves at 256 while
+    # a login shell reads 1048576 and both are correct. Never changes
+    # status/exit.
+    result["fd_limit"] = _fd_limit_report()
 
     # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
     # mail to a dead handle are silent quicksand. Never changes status/exit.
