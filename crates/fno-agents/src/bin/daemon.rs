@@ -2,8 +2,10 @@
 //!
 //! Usage:
 //! ```text
-//! fno-agents-daemon            # start (foreground); lazy-exits when idle
-//! fno-agents-daemon --once     # run recovery + serve until idle/SIGTERM
+//! fno-agents-daemon                    # start (foreground); lazy-exits when idle
+//! fno-agents-daemon --home <dir>       # name the home in argv; must agree with
+//!                                      # FNO_AGENTS_HOME or the daemon refuses
+//! fno-agents-daemon --once             # run recovery + serve until idle/SIGTERM
 //! ```
 //! The client lazy-starts this detached on first need; running it directly is
 //! for debugging and for the Python wrapper's explicit `daemon` sub-mode.
@@ -37,6 +39,27 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // `--home <path>` (x-cd31): names the home in argv so a stray daemon can be
+    // attributed in ps. The env stays the resolution source; a --home that
+    // DISAGREES with the env is a daemon about to serve a home nobody expects,
+    // so refuse it loudly rather than silently prefer one. No --home keeps the
+    // env-only behavior (a daemon started by hand for debugging).
+    if let Some(home_arg) = parse_home_arg(&args) {
+        let env_home = AgentsHome::from_env();
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf())
+                == std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf())
+        };
+        if !same(std::path::Path::new(&home_arg), env_home.root()) {
+            eprintln!(
+                "fno-agents-daemon: --home {} disagrees with FNO_AGENTS_HOME {}; refusing to start",
+                home_arg,
+                env_home.root().display()
+            );
+            std::process::exit(2);
+        }
+    }
 
     let home = AgentsHome::from_env();
     let mut opts = DaemonOptions::default();
@@ -86,5 +109,38 @@ fn main() {
     if let Err(e) = outcome {
         eprintln!("fno-agents-daemon: {e}");
         std::process::exit(1);
+    }
+}
+
+/// The value of `--home <path>` (or `--home=<path>`) from the daemon's argv,
+/// or `None` when absent. Other argv is not ours to judge (the `version`
+/// subcommand is matched earlier; anything else is ignored as today).
+fn parse_home_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--home" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--home=") {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_home_arg_takes_both_spellings() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        assert_eq!(parse_home_arg(&s(&["--home", "/a"])), Some("/a".into()));
+        assert_eq!(parse_home_arg(&s(&["--home=/b"])), Some("/b".into()));
+        assert_eq!(parse_home_arg(&s(&["--once", "--home", "/a"])), Some("/a".into()));
+        // Absent, or present with no value.
+        assert_eq!(parse_home_arg(&s(&[])), None);
+        assert_eq!(parse_home_arg(&s(&["--once"])), None);
+        assert_eq!(parse_home_arg(&s(&["--home"])), None);
     }
 }

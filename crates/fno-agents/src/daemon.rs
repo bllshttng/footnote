@@ -1840,6 +1840,38 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
     }
 }
 
+/// The idle-exit predicate: is any WORKER live on this home? A registry row is
+/// not a reason to stay resident -- rows outlive their workers by design (the
+/// GC reaps them a grace window later), so the registry-emptiness test this
+/// replaced made idle-exit unsatisfiable on any machine that had ever spawned
+/// a worker (x-cd31: 78 daemons at once, all idle, all orphaned). The question
+/// is whether a worker is LIVE, answered by the same pair `gc_sweep_impl`
+/// uses: a live worker socket, or a pid that is still ours.
+///
+/// A MISSING registry answers `true`: a fresh machine has never tracked a
+/// worker, and lazy-exit must hold there (the documented contract covers the
+/// very first daemon). An EXISTING but unreadable registry answers `false`
+/// (stay resident): that is an absence with two explanations, and exiting on a
+/// transient read failure would trade a moment of caution for a fleet of dead
+/// workers' supervisors.
+fn no_live_worker(home: &AgentsHome) -> bool {
+    let path = home.registry_json();
+    if !path.exists() {
+        return true;
+    }
+    let live_sockets = home.scan_worker_sockets();
+    state::load_registry(&path)
+        .map(|r| {
+            !r.entries.iter().any(|e| {
+                live_sockets.contains(&e.short_id)
+                    || e.pid
+                        .map(|p| pid_is_ours(p, e.pid_start_time))
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Socket bind + perms + lazy-start race.
 // ---------------------------------------------------------------------------
@@ -1885,11 +1917,12 @@ pub async fn bind_supervisor_socket(
     flock_self_test(home)?;
 
     let lock_path = home.supervisor_lock();
-    let lock_file = std::fs::OpenOptions::new()
+    let mut lock_file = std::fs::OpenOptions::new()
         .create(true)
-        // Nothing ever reads or writes this file's CONTENT -- the flock on it is
-        // the whole signal -- so truncation is meaningless here. Say so
-        // explicitly; `create` without a truncate decision is a clippy lint.
+        // Truncation happens below, AFTER the exclusive lock is held (the
+        // content write is part of taking ownership; truncating a file another
+        // holder's readers may be mid-read on would race). `create` without a
+        // truncate decision is a clippy lint, so it is decided here either way.
         .truncate(false)
         .write(true)
         .open(&lock_path)?;
@@ -1927,6 +1960,28 @@ pub async fn bind_supervisor_socket(
     }
     if !lock_held {
         return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
+    }
+
+    // Record the holder in the lockfile CONTENT (x-3498): pid plus start time,
+    // so `restart --force` has a SIGKILL target that survives "which daemon
+    // owns this". The start time is written alongside because a bare pid is a
+    // reuse hazard -- `pid_is_ours` guards the eventual signal with it. A write
+    // failure is non-fatal: the flock, not this content, is the authority on
+    // whether a holder exists; the content only names one.
+    {
+        use std::io::Write;
+        let pid = std::process::id();
+        let start = process_start_time(pid)
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        if lock_file
+            .set_len(0)
+            .and_then(|()| lock_file.write_all(format!("{pid} {start}\n").as_bytes()))
+            .and_then(|()| lock_file.flush())
+            .is_err()
+        {
+            let _ = lock_file.set_len(0);
+        }
     }
 
     let sock = home.supervisor_sock();
@@ -2228,7 +2283,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // same time -- which is how 59 supervisors accumulated, each new client
     // reading the silence as "no daemon" and starting another. Give a sweep
     // `spawn_blocking` plus a one-in-flight `AtomicBool`, like the four below.
-    loop {
+    // The reason the serve loop ended, threaded to the shared exit tail so
+    // `daemon_exited` can tell an abnormal ending from a graceful one
+    // (x-3498): every break carries its reason string.
+    let exit_reason: &str = loop {
         tokio::select! {
             accepted = listener.accept() => {
                 if let Ok((stream, _)) = accepted {
@@ -2246,7 +2304,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
             _ = sigterm.recv() => {
                 emit_state(&ctx.emitter, DaemonState::ShuttingDown);
                 let _ = ctx.emitter.emit("daemon_shutting_down", &json!({"reason": "sigterm"}));
-                break;
+                break "sigterm";
             }
             _ = idle_check.tick() => {
                 // Bound-inode self-check (x-ef7f): if the socket path no
@@ -2264,7 +2322,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                             "daemon_shutting_down",
                             &json!({"reason": "socket-lost"}),
                         );
-                        break;
+                        break "socket-lost";
                     }
                 }
                 // Reap any worker that exited since the last tick so it never
@@ -2352,14 +2410,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         terminal_stop_sweep(&home, &emitter).await;
                     });
                 }
-                let empty = state::load_registry(&ctx.home.registry_json())
-                    .map(|r| r.entries.is_empty())
-                    .unwrap_or(true);
                 // An enabled active-backlog project keeps the daemon resident even
                 // when the board is drained (OQ1 Option A): idle-exit must never
                 // kill a live drain supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                if empty && !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
+                if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit && no_live_worker(&ctx.home) {
                     emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                     let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
                     emit_state(&ctx.emitter, DaemonState::ShuttingDown);
@@ -2367,11 +2422,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         "daemon_shutting_down",
                         &json!({"reason": "idle"}),
                     );
-                    break;
+                    break "idle";
                 }
             }
         }
-    }
+    };
 
     // Wind down the active-backlog supervisor: signal it to stop scheduling new
     // ticks, then abort its await. An in-flight tick's spawn_blocking thread is
@@ -2393,7 +2448,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let _ = std::fs::remove_file(&sock_path);
     }
     emit_state(&ctx.emitter, DaemonState::Exited);
-    let _ = ctx.emitter.emit("daemon_exited", &json!({"clean": true}));
+    let _ = ctx.emitter.emit("daemon_exited", &daemon_exited_payload(exit_reason));
     Ok(())
 }
 
@@ -2429,6 +2484,16 @@ const PENDING_INSIDE_LEG_CAP: usize = 64;
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
+}
+
+/// The final `daemon_exited` payload (x-3498). Every exit path flows through
+/// one tail, and before this it emitted `clean: true` unconditionally, so the
+/// socket-lost retirement - where something unlinked and rebound our socket
+/// path - logged identically to a graceful SIGTERM shutdown. A watchdog
+/// reading `daemon_exited` alone could not tell them apart; `clean` is false
+/// only for that abnormal ending, and `reason` names which path fired.
+fn daemon_exited_payload(reason: &str) -> Value {
+    json!({"clean": reason != "socket-lost", "reason": reason})
 }
 
 /// Idle cap for the first read on a connection: a client that connects but
@@ -8738,6 +8803,119 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert!(
             pid_is_ours(me, None),
             "no recorded start time -> fall back to bare liveness (legacy)"
+        );
+    }
+
+    // ---- x-cd31: idle-exit reads live workers, not registry emptiness ------
+
+    /// A row with a live-pid shape (short_id set, pid + matching start time),
+    /// the row that must PIN the daemon.
+    fn live_pid_row(short_id: &str) -> RegistryEntry {
+        let mut row = ask_row(short_id, None);
+        row.short_id = short_id.to_string();
+        row.pid = Some(std::process::id());
+        row.pid_start_time = process_start_time(std::process::id());
+        row
+    }
+
+    #[test]
+    fn idle_exit_fires_on_terminal_rows_with_no_live_worker() {
+        // The exact defect box: a registry of TERMINAL rows (the roster an
+        // established machine always has) with no live socket and no live pid
+        // must let the daemon exit. Registry emptiness never held here.
+        let home = short_home("idle-terminal");
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(ask_row("done-1", Some("2020-01-01T00:00:00Z")));
+            r.entries.push(ask_row("done-2", Some("2020-01-01T00:00:00Z")));
+        })
+        .unwrap();
+        assert!(
+            no_live_worker(&home),
+            "terminal rows with dead pids and no sockets must not pin the daemon"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn idle_exit_held_by_a_live_worker_socket() {
+        let home = short_home("idle-sock");
+        home.ensure_root().unwrap();
+        std::fs::create_dir_all(home.agent_dir("wka")).unwrap();
+        std::fs::write(home.worker_sock("wka"), b"").unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            // Terminal row, dead pid, but a live worker socket on disk.
+            let mut row = ask_row("wka", Some("2020-01-01T00:00:00Z"));
+            row.short_id = "wka".to_string();
+            r.entries.push(row);
+        })
+        .unwrap();
+        assert!(
+            !no_live_worker(&home),
+            "a live worker socket pins the daemon regardless of its row's status"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn idle_exit_held_by_a_live_worker_pid() {
+        let home = short_home("idle-pid");
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(live_pid_row("wkb"));
+        })
+        .unwrap();
+        assert!(
+            !no_live_worker(&home),
+            "a row whose pid is still ours pins the daemon"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn idle_exit_held_by_an_unreadable_registry() {
+        // The fail-safe side: an unreadable registry is an absence with two
+        // explanations, and the daemon must stay resident rather than exit on
+        // a transient read failure (the old code exited: unwrap_or(true)).
+        let home = short_home("idle-unreadable");
+        home.ensure_root().unwrap();
+        std::fs::write(home.registry_json(), "not json at all{").unwrap();
+        assert!(
+            !no_live_worker(&home),
+            "an unreadable registry must not license an idle exit"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn idle_exit_fires_on_a_fresh_home_with_no_registry() {
+        // The first daemon on a fresh machine: no registry file has ever been
+        // written, and lazy-exit must hold for it too (the missing file is
+        // "nothing ever tracked", not a read failure).
+        let home = short_home("idle-fresh");
+        home.ensure_root().unwrap();
+        assert!(
+            no_live_worker(&home),
+            "a fresh home with no registry must idle-exit"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn daemon_exited_payload_distinguishes_socket_loss() {
+        // x-3498 AC: an abnormal retirement (socket path taken from under us)
+        // must read differently from a graceful ending.
+        assert_eq!(
+            daemon_exited_payload("socket-lost"),
+            json!({"clean": false, "reason": "socket-lost"})
+        );
+        assert_eq!(
+            daemon_exited_payload("sigterm"),
+            json!({"clean": true, "reason": "sigterm"})
+        );
+        assert_eq!(
+            daemon_exited_payload("idle"),
+            json!({"clean": true, "reason": "idle"})
         );
     }
 
