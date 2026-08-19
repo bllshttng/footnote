@@ -5540,27 +5540,26 @@ async fn handle_rm_with(
     // a dead worker.
     let rm_name = name.clone();
     // retain() cannot fail and cannot report what it dropped, so count across
-    // it: a resolved name that no row in the file actually carries must not
-    // report removed:true (this is the MODE A silent no-op, x-76d1).
-    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = dropped.clone();
-    if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+    // it via the closure's return value: a resolved name that no row in the
+    // file actually carries must not report removed:true (this is the MODE A
+    // silent no-op, x-76d1).
+    let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| e.name != rm_name);
-        counter.store(
-            before - r.entries.len(),
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        before - r.entries.len()
     })
     .await
     {
-        return Response::err(
-            req.id,
-            state_error_code(&e),
-            format!("agent {name}: removal did not persist: {e}"),
-        );
-    }
-    if dropped.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        Ok(dropped) => dropped,
+        Err(e) => {
+            return Response::err(
+                req.id,
+                state_error_code(&e),
+                format!("agent {name}: removal did not persist: {e}"),
+            );
+        }
+    };
+    if dropped == 0 {
         return Response::err(
             req.id,
             ErrorCode::Internal,

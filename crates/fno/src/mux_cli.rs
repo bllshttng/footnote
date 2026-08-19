@@ -1646,37 +1646,52 @@ fn squad_prune(args: &[OsString]) -> i32 {
     // Both paths produce the same receipt type. Dry-run builds it from a
     // read-only load (no lock, no write); the real run builds it from the
     // locked closure's actual removals (AC1-UI).
-    let (removed, kept_unknown, skipped_named, kept_protected, applied, notice) = if dry_run {
-        let loaded = crate::squad_store::load();
-        let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
-        let (mut ku, mut sn, mut kp) = (0usize, 0usize, 0usize);
-        for sq in &loaded.squads {
-            match decide(sq) {
-                crate::squad_store::PruneDecision::Prune => {
-                    removed.push(crate::squad_store::PrunedSquad::from(sq));
+    let (removed, kept_unknown, skipped_named, kept_protected, members_reaped, applied, notice) =
+        if dry_run {
+            let loaded = crate::squad_store::load();
+            let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
+            let (mut ku, mut sn, mut kp, mut mr) = (0usize, 0usize, 0usize, 0usize);
+            for sq in &loaded.squads {
+                match decide(sq) {
+                    crate::squad_store::PruneDecision::Prune => {
+                        removed.push(crate::squad_store::PrunedSquad::from(sq));
+                    }
+                    surviving => {
+                        match surviving {
+                            crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
+                            crate::squad_store::PruneDecision::SkipNamed => sn += 1,
+                            crate::squad_store::PruneDecision::Keep => kp += 1,
+                            crate::squad_store::PruneDecision::Prune => unreachable!(),
+                        }
+                        // Preview the SAME reap `prune` would perform on a
+                        // squad this decision keeps, so `--dry-run` does not
+                        // undercount what the real run silently mutates.
+                        mr += sq
+                            .members
+                            .iter()
+                            .filter(|m| crate::squad_store::tombstone_reapable(m, live_ref))
+                            .count();
+                    }
                 }
-                crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
-                crate::squad_store::PruneDecision::SkipNamed => sn += 1,
-                crate::squad_store::PruneDecision::Keep => kp += 1,
             }
-        }
-        (removed, ku, sn, kp, false, loaded.notice)
-    } else {
-        match crate::squad_store::prune(decide, live_ref) {
-            Ok(o) => (
-                o.removed,
-                o.kept_unknown,
-                o.skipped_named,
-                o.kept_protected,
-                true,
-                None,
-            ),
-            Err(e) => {
-                eprintln!("fno mux workspace prune: {e}");
-                return EXIT_ERROR;
+            (removed, ku, sn, kp, mr, false, loaded.notice)
+        } else {
+            match crate::squad_store::prune(decide, live_ref) {
+                Ok(o) => (
+                    o.removed,
+                    o.kept_unknown,
+                    o.skipped_named,
+                    o.kept_protected,
+                    o.members_reaped,
+                    true,
+                    None,
+                ),
+                Err(e) => {
+                    eprintln!("fno mux workspace prune: {e}");
+                    return EXIT_ERROR;
+                }
             }
-        }
-    };
+        };
 
     // `load()` can quarantine a corrupt store, drop malformed members, or fail
     // to read it at all before we see any of it. Reporting "no changes written"
@@ -1695,6 +1710,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             kept_unknown,
             skipped_named,
             kept_protected,
+            members_reaped,
             notice.as_deref(),
         );
     } else {
@@ -1728,6 +1744,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             kept_unknown,
             skipped_named,
             kept_protected,
+            members_reaped,
             include_named,
         );
     }
@@ -1750,6 +1767,7 @@ fn print_prune_summary(
     kept_unknown: usize,
     skipped_named: usize,
     kept_protected: usize,
+    members_reaped: usize,
     include_named: bool,
 ) {
     let mut parts = vec![format!("{verb} {n} squad(s)")];
@@ -1764,6 +1782,16 @@ fn print_prune_summary(
             "skipped {skipped_named} named (pass --include-named)"
         ));
     }
+    if members_reaped > 0 {
+        let mverb = if verb == "pruned" {
+            "reaped"
+        } else {
+            "would reap"
+        };
+        parts.push(format!(
+            "{mverb} {members_reaped} tombstoned member(s) from surviving squads"
+        ));
+    }
     println!("{}", parts.join("; "));
 }
 
@@ -1773,6 +1801,7 @@ fn render_prune_json(
     kept_unknown: usize,
     skipped_named: usize,
     kept_protected: usize,
+    members_reaped: usize,
     notice: Option<&str>,
 ) {
     let pruned: Vec<_> = removed
@@ -1796,6 +1825,7 @@ fn render_prune_json(
             "kept_protected": kept_protected,
             "kept_unknown": kept_unknown,
             "skipped_named": skipped_named,
+            "members_reaped": members_reaped,
             "notice": notice,
         })
     );

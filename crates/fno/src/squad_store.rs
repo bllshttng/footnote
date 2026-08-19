@@ -800,7 +800,13 @@ impl PruneOutcome {
 /// True when a tombstoned member is reapable: provably dead (absent from a
 /// KNOWN live set). A `None` live set (the liveness query failed) reaps
 /// nothing, the same fail-safe direction `KeepUnknown` takes for whole squads.
-fn tombstone_reapable(m: &StoredMember, live: Option<&std::collections::HashSet<String>>) -> bool {
+/// `pub(crate)` so a `--dry-run` caller can preview the same count `prune`
+/// would actually remove, instead of the write path being the only place
+/// that knows this number.
+pub(crate) fn tombstone_reapable(
+    m: &StoredMember,
+    live: Option<&std::collections::HashSet<String>>,
+) -> bool {
     m.tombstone && live.is_some_and(|set| !set.contains(&m.attach_id))
 }
 
