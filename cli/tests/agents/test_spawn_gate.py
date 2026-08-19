@@ -581,6 +581,25 @@ class TestRunGate:
         assert spawn_gate.provider_live_count("zai") == 0
         unrelated.release()
 
+    def test_suspect_claim_for_other_provider_does_not_block_count(
+        self, tmp_path, monkeypatch
+    ):
+        claims = tmp_path / ".fno" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "worker%3Aopenai-peer.lock").write_text("claim")
+        monkeypatch.setattr(spawn_gate, "_gate_claims_root", lambda: tmp_path)
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        other_provider = "openai"
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda *_args, **_kwargs: {
+                "state": "suspect",
+                "metadata": {"model_provider": other_provider},
+            },
+        )
+
+        assert spawn_gate.provider_live_count("zai") == 0
+
     def test_capped_headless_refuses_when_lane_reservation_is_unwritable(
         self, monkeypatch, capsys
     ):
@@ -625,6 +644,27 @@ class TestRunGate:
         refused = capsys.readouterr().err
         assert "could not release gate mutex" in refused
         assert "could not release worker reservation worker:peer" in refused
+
+    def test_release_retries_transient_claim_store_failures(self, monkeypatch):
+        guard = spawn_gate.GateGuard(
+            _gate_holder="gate-holder",
+            _worker_key="worker:peer",
+            _worker_holder="worker-holder",
+        )
+        attempts: dict[str, int] = {}
+
+        def flaky_release(key, *_args, **_kwargs):
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] < 3:
+                raise OSError("transient store failure")
+
+        monkeypatch.setattr("fno.claims.core.release_claim", flaky_release)
+
+        guard.release()
+
+        assert attempts == {"spawn-gate": 3, "worker:peer": 3}
+        assert guard._gate_holder is None
+        assert guard._worker_key is None
 
     def test_pidless_bg_requires_a_readable_positive_roster_marker(
         self, tmp_path, monkeypatch

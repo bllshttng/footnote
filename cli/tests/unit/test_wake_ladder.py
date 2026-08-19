@@ -43,6 +43,10 @@ def test_roster_exited_revives_in_place(monkeypatch):
     _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    stamped = []
+    monkeypatch.setattr(
+        dispatch, "_stamp_revived_live", lambda entry: stamped.append(entry.name)
+    )
     monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **_k: True)
     spawned = []
     monkeypatch.setattr(
@@ -54,6 +58,7 @@ def test_roster_exited_revives_in_place(monkeypatch):
     assert ok is True
     assert detail == "abc12345"  # revived short_id, not a fork id
     assert spawned == []  # never forked - one roster row, same uuid
+    assert stamped == ["wk-abc12345"]
 
 
 def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
@@ -82,6 +87,11 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
     )
     monkeypatch.setattr(
         dispatch,
+        "_stamp_revived_live",
+        lambda entry: events.append("stamp-live"),
+    )
+    monkeypatch.setattr(
+        dispatch,
         "_mail_inject_claude",
         lambda uuid, text, **kwargs: events.append("inject") or True,
     )
@@ -92,7 +102,7 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
     )
 
     assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
-    assert events == ["gate", "respawn", "inject", "release"]
+    assert events == ["gate", "respawn", "stamp-live", "inject", "release"]
 
 
 def test_incomplete_forward_registry_refuses_wake(monkeypatch):
@@ -141,10 +151,11 @@ def test_respawn_failure_falls_through_to_fork(monkeypatch):
     assert ok is True and detail == "FORK"
 
 
-def test_respawn_ok_inject_miss_falls_through(monkeypatch):
+def test_respawn_ok_inject_miss_does_not_create_second_worker(monkeypatch):
     _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
     monkeypatch.setattr(dispatch, "_mail_inject_claude", lambda u, t, **_k: False)
     monkeypatch.setattr(dispatch.time, "sleep", lambda s: None)  # no real waits
     spawned = []
@@ -154,7 +165,8 @@ def test_respawn_ok_inject_miss_falls_through(monkeypatch):
         lambda **k: spawned.append(k) or SimpleNamespace(short_id="FORK"),
     )
     ok, detail = wake_and_deliver("uuid-full", "wake")
-    assert ok is True and detail == "FORK"
+    assert ok is False and detail == "respawn-inject-unconfirmed"
+    assert spawned == []
 
 
 def test_live_roster_skips_rung2_and_forks(monkeypatch):
@@ -279,6 +291,7 @@ def test_revive_does_not_prefix_or_fork(monkeypatch):
     _allow_rung2_claim(monkeypatch)
     monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: _entry("exited"))
     monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(dispatch, "_stamp_revived_live", lambda entry: None)
     injected = {}
     monkeypatch.setattr(
         dispatch,

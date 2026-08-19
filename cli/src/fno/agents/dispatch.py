@@ -2360,8 +2360,15 @@ def dispatch_spawn(
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
-        if route_provider is None and resolved_providers:
-            route_provider = resolved_providers[-1]
+        if resolved_providers:
+            resolved_provider = resolved_providers[-1]
+            if route_provider is not None and route_provider != resolved_provider:
+                raise DispatchAskError(
+                    f"resolved provider {resolved_provider!r} does not match supplied "
+                    f"provider {route_provider!r}; refusing before dispatch",
+                    exit_code=2,
+                )
+            route_provider = resolved_provider
         launch_role = None
 
     if provider == "claude" and route_env and route_provider is None:
@@ -6151,6 +6158,19 @@ def _release_rung2_guard(session_uuid: str, holder: Optional[str]) -> None:
     release_session_writer_claim(session_uuid=session_uuid, holder=holder)
 
 
+def _stamp_revived_live(entry: AgentEntry) -> None:
+    """Make a successful identity-preserving respawn countable before admission ends."""
+    applied = _update_registry_if_recipient_unchanged(
+        entry.name,
+        _recipient_identity_key(entry),
+        _stamp_status(entry.name, status="live", last_message_at_preserve=True),
+    )
+    if not applied:
+        raise RegistryVersionError(
+            f"registry row {entry.name!r} changed during identity-preserving respawn"
+        )
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -6224,33 +6244,40 @@ def wake_and_deliver(
         except GateRefused as exc:
             return False, f"spawn-exit-{exc.code}"
 
-    if entry is not None and getattr(entry, "status", None) == "exited":
-        short = (
-            getattr(entry, "short_id", None)
-            or getattr(entry, "name", "")
-            or claude_transport_short_id(session_uuid)
-        )
-        # F5: take session:<uuid> so two concurrent wakes of one exited session
-        # don't both respawn+inject (double delivery / competing writers). Another
-        # incarnation holding it -> skip rung 2 and let the fork rung claim/pin.
-        # Released on every exit from this block so rung 3 can claim on fall-through.
-        guard = _acquire_rung2_guard(session_uuid, short)
-        if guard is not None:
-            try:
-                if _respawn_claude_session(short) == 0:
-                    for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
-                        if _mail_inject_claude(session_uuid, wrapped):
-                            if gate is not None:
-                                gate.release()
-                                gate = None
-                            return True, short  # revived in place: no new uuid, no new row
-                        time.sleep(_RESPAWN_REINJECT_DELAY_S)
-            finally:
-                _release_rung2_guard(session_uuid, guard)
-            # respawn failed or the revived session did not accept the inject within
-            # the probe budget -> fall through to the fork rung.
-
     try:
+        if entry is not None and getattr(entry, "status", None) == "exited":
+            short = (
+                getattr(entry, "short_id", None)
+                or getattr(entry, "name", "")
+                or claude_transport_short_id(session_uuid)
+            )
+            # F5: take session:<uuid> so two concurrent wakes of one exited session
+            # don't both respawn+inject (double delivery / competing writers). Another
+            # incarnation holding it -> skip rung 2 and let the fork rung claim/pin.
+            guard = _acquire_rung2_guard(session_uuid, short)
+            if guard is not None:
+                try:
+                    if _respawn_claude_session(short) == 0:
+                        _stamp_revived_live(entry)
+                        for _attempt in range(_RESPAWN_REINJECT_ATTEMPTS):
+                            if _mail_inject_claude(session_uuid, wrapped):
+                                return True, short
+                            time.sleep(_RESPAWN_REINJECT_DELAY_S)
+                        # The respawn already created a live worker. A fork here
+                        # would spend this one admission twice; durable mail can
+                        # retry delivery without creating another incarnation.
+                        return False, "respawn-inject-unconfirmed"
+                finally:
+                    try:
+                        _release_rung2_guard(session_uuid, guard)
+                    except Exception as exc:
+                        print(
+                            f"rung-2 writer claim release failed for {short}: {exc}",
+                            file=sys.stderr,
+                        )
+                # A failed respawn created no worker, so the fork rung may use
+                # the admission that is still held.
+
         result = dispatch_spawn(
             name=spawn_name,
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
@@ -6260,6 +6287,20 @@ def wake_and_deliver(
             route_provider=route_provider,
             provider_gate=gate,
         )
+        short = (
+            getattr(result, "short_id", None)
+            or getattr(result, "name", "")
+            or "unknown"
+        )
+        # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
+        # names both the new handle and the old lineage, and the seed prompt above
+        # carried the lineage prefix. A fork is never silent.
+        print(
+            f"forked new incarnation {short} from lineage "
+            f"{canonical_handle(session_uuid)}",
+            file=sys.stderr,
+        )
+        return True, short
     except GateRefused as exc:
         return False, f"spawn-exit-{exc.code}"
     except DispatchAskError as exc:
@@ -6278,16 +6319,6 @@ def wake_and_deliver(
     finally:
         if gate is not None:
             gate.release()
-
-    short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
-    # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
-    # names both the new handle and the old lineage, and the seed prompt above
-    # carried the lineage prefix. A fork is never silent.
-    print(
-        f"forked new incarnation {short} from lineage {canonical_handle(session_uuid)}",
-        file=sys.stderr,
-    )
-    return True, short
 
 
 def wake_drain_agent(

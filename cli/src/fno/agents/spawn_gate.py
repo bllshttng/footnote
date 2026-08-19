@@ -52,6 +52,7 @@ GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
 MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
+CLAIM_RELEASE_ATTEMPTS = 3
 
 #: Registry statuses that can hold a live process. `idle` counts when the pid
 #: is alive (an unreaped idle process still holds RAM); a reaped pid drops out
@@ -531,11 +532,13 @@ def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
             )
         if model_provider == _KNOWN_UNROUTED_PROVIDER:
             continue
+        if model_provider != provider:
+            continue
         if state == "suspect":
             raise ProviderCountUnavailable(
                 f"worker reservation {key} liveness is suspect"
             )
-        if state == "live" and model_provider == provider:
+        if state == "live":
             count += 1
     return count
 
@@ -598,12 +601,7 @@ class GateGuard:
         if self._gate_holder is None:
             return
         holder = self._gate_holder
-        try:
-            from fno.claims.core import release_claim
-
-            release_claim("spawn-gate", holder, root=_gate_claims_root())
-        except Exception as exc:
-            _warn(f"spawn-gate: could not release gate mutex: {exc}")
+        if not _release_claim_bounded("spawn-gate", holder):
             return
         self._gate_holder = None
 
@@ -613,15 +611,28 @@ class GateGuard:
         if self._worker_key is None:
             return
         key = self._worker_key
-        try:
-            from fno.claims.core import release_claim
-
-            release_claim(key, self._worker_holder or "", root=_gate_claims_root())
-        except Exception as exc:
-            _warn(f"spawn-gate: could not release worker reservation {key}: {exc}")
+        if not _release_claim_bounded(key, self._worker_holder or ""):
             return
         self._worker_key = None
         self._worker_holder = None
+
+
+def _release_claim_bounded(key: str, holder: str) -> bool:
+    """Release a gate claim with a short retry budget for transient store faults."""
+    from fno.claims.core import release_claim
+
+    last_error: Exception | None = None
+    for attempt in range(CLAIM_RELEASE_ATTEMPTS):
+        try:
+            release_claim(key, holder, root=_gate_claims_root())
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < CLAIM_RELEASE_ATTEMPTS:
+                time.sleep(0.01)
+    label = "gate mutex" if key == "spawn-gate" else f"worker reservation {key}"
+    _warn(f"spawn-gate: could not release {label}: {last_error}")
+    return False
 
 
 class GateRefused(SystemExit):

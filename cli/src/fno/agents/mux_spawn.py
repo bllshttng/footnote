@@ -2031,8 +2031,15 @@ def dispatch_spawn_pane(
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
-        if route_provider is None and resolved_providers:
-            route_provider = resolved_providers[-1]
+        if resolved_providers:
+            resolved_provider = resolved_providers[-1]
+            if route_provider is not None and route_provider != resolved_provider:
+                raise DispatchAskError(
+                    f"resolved provider {resolved_provider!r} does not match supplied "
+                    f"provider {route_provider!r}; refusing before dispatch",
+                    exit_code=2,
+                )
+            route_provider = resolved_provider
         launch_role = None
 
     if provider == "claude" and route_env and route_provider is None:

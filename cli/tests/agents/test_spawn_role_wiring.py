@@ -225,6 +225,55 @@ def test_pre_resolved_route_without_provider_axis_refuses_before_launch(
 
 
 @pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_resolved_provider_must_match_admitted_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents import dispatch as dispatch_mod, model_routing
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+    from fno.agents.spawn_gate import run_gate
+
+    route = _route_unit()
+    monkeypatch.setattr(model_routing, "resolve_route", _resolved_zai(route))
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_claude_create_path",
+        lambda **_kwargs: pytest.fail("refusal must precede worker launch"),
+    )
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    gate = run_gate("wrong-provider", "bg", route_provider="openai")
+    harness = "claude"
+
+    with pytest.raises(DispatchAskError, match="resolved provider.*zai.*openai"):
+        if substrate == "worker":
+            dispatch_spawn(
+                name="wrong-provider-worker",
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                role="tidy",
+                route_provider="openai",
+                provider_gate=gate,
+            )
+        else:
+            dispatch_spawn_pane(
+                name="wrong-provider-pane",
+                message="work",
+                provider=harness,
+                cwd=tmp_path,
+                role="tidy",
+                route_provider="openai",
+                provider_gate=gate,
+                runner=lambda *_args, **_kwargs: pytest.fail(
+                    "refusal must precede pane launch"
+                ),
+            )
+
+
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
 def test_routed_direct_spawn_without_admission_token_refuses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
