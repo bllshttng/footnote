@@ -19555,8 +19555,9 @@ mod tests {
         assert!(joined.contains("x stop a live row · remove a dead one"));
         assert!(joined.contains("X reap all exited agents"));
         // (x-7683) The context-menu row names every trigger, not just the
-        // right-click; "on a header: clear dead" moved into that richer label.
-        assert!(joined.contains("context menu · or m · or hold L 500ms"));
+        // right-click, and keeps the header-only clear-dead behavior named
+        // too - the only in-app documentation that a header's menu offers it.
+        assert!(joined.contains("context menu · or m · or hold L 500ms · on a header: clear dead"));
         // Display-only: Enter on them must BEL, never dispatch a bogus chord.
         for (i, r) in modal.popup.rows.iter().enumerate() {
             if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
