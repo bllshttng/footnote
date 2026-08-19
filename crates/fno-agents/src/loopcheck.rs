@@ -8061,7 +8061,7 @@ fn run_bounded(
 
     enum Outcome {
         Done,
-        TimedOut,
+        TimedOut(std::time::Duration),
         WaitFailed,
     }
 
@@ -8070,9 +8070,10 @@ fn run_bounded(
         match child.try_wait() {
             Ok(Some(_)) => break Outcome::Done,
             Ok(None) => {
-                if start.elapsed() >= timeout {
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
                     kill_process_group(&mut child);
-                    break Outcome::TimedOut;
+                    break Outcome::TimedOut(elapsed);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -8093,7 +8094,10 @@ fn run_bounded(
     killpg(pgid);
 
     match outcome {
-        Outcome::TimedOut => BoundedRun::TimedOut(start.elapsed()),
+        // Captured at the moment the bound was actually crossed, not after
+        // kill_process_group + killpg have run - else the reported duration
+        // is inflated by cleanup cost instead of reflecting the timeout itself.
+        Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
         Outcome::WaitFailed => BoundedRun::WaitFailed,
         Outcome::Done => {
             let stdout = stdout_drain.join().unwrap_or_default();
@@ -8127,10 +8131,10 @@ fn evaluate_plan_fidelity(
         BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
-                "plan fidelity check timed out after {}s running `{} plan fidelity {} --json` \
+                "plan fidelity check timed out after {:.1}s running `{} plan fidelity {} --json` \
                  and was killed; degraded, not a pass - the fno CLI itself is hanging, \
                  investigate that command directly",
-                elapsed.as_secs(),
+                elapsed.as_secs_f64(),
                 fno_bin.to_string_lossy(),
                 plan,
             ),
@@ -10066,6 +10070,9 @@ mod tests {
                 assert!(reason.contains("/x/plan.md"), "{reason}");
                 assert!(reason.contains("timed out"), "{reason}");
                 assert!(!reason.contains("gh read"), "{reason}");
+                // A 200ms bound must read as sub-second, never truncate to a
+                // flat "0s" that misreads as no time having passed at all.
+                assert!(reason.contains("0.2s"), "{reason}");
             }
             other => panic!("expected Degraded, got {other:?}"),
         }
