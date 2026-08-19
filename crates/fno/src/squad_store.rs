@@ -810,6 +810,37 @@ pub(crate) fn tombstone_reapable(
     m.tombstone && live.is_some_and(|set| !set.contains(&m.attach_id))
 }
 
+/// One squad's fate under `decide` and `live`: its prune decision, and -- if
+/// it survives -- how many of its members would be reaped as tombstones.
+/// Shared by the real (locked) `prune` loop and `--dry-run`'s preview so the
+/// two classification loops can never diverge from each other (self-review
+/// finding: they used to be hand-duplicated, one over owned/drained squads,
+/// one over a borrowed read-only load).
+pub struct SquadFate {
+    pub decision: PruneDecision,
+    pub reaped_if_kept: usize,
+}
+
+pub fn classify_squad(
+    sq: &StoredSquad,
+    decide: &impl Fn(&StoredSquad) -> PruneDecision,
+    live: Option<&std::collections::HashSet<String>>,
+) -> SquadFate {
+    let decision = decide(sq);
+    let reaped_if_kept = if matches!(decision, PruneDecision::Prune) {
+        0
+    } else {
+        sq.members
+            .iter()
+            .filter(|m| tombstone_reapable(m, live))
+            .count()
+    };
+    SquadFate {
+        decision,
+        reaped_if_kept,
+    }
+}
+
 /// Prune prunable squads in ONE locked mutation, returning what was actually
 /// removed plus the keep/skip counts (the receipt source). `decide` is the pure
 /// [`prune_decision`] re-evaluated under the store lock against fresh fs state,
@@ -831,8 +862,8 @@ pub fn prune(
     mutate_file(|sf| {
         let mut kept = Vec::with_capacity(sf.squads.len());
         for mut sq in sf.squads.drain(..) {
-            let decision = decide(&sq);
-            let counter = match decision {
+            let fate = classify_squad(&sq, &decide, live);
+            let counter = match fate.decision {
                 PruneDecision::Prune => {
                     out.removed.push(PrunedSquad::from(&sq));
                     continue;
@@ -842,9 +873,8 @@ pub fn prune(
                 PruneDecision::Keep => &mut out.kept_protected,
             };
             *counter += 1;
-            let before = sq.members.len();
             sq.members.retain(|m| !tombstone_reapable(m, live));
-            out.members_reaped += before - sq.members.len();
+            out.members_reaped += fate.reaped_if_kept;
             kept.push(sq);
         }
         sf.squads = kept;

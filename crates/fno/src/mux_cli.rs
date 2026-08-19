@@ -1652,27 +1652,18 @@ fn squad_prune(args: &[OsString]) -> i32 {
             let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
             let (mut ku, mut sn, mut kp, mut mr) = (0usize, 0usize, 0usize, 0usize);
             for sq in &loaded.squads {
-                match decide(sq) {
+                let fate = crate::squad_store::classify_squad(sq, &decide, live_ref);
+                match fate.decision {
                     crate::squad_store::PruneDecision::Prune => {
                         removed.push(crate::squad_store::PrunedSquad::from(sq));
                     }
-                    surviving => {
-                        match surviving {
-                            crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
-                            crate::squad_store::PruneDecision::SkipNamed => sn += 1,
-                            crate::squad_store::PruneDecision::Keep => kp += 1,
-                            crate::squad_store::PruneDecision::Prune => unreachable!(),
-                        }
-                        // Preview the SAME reap `prune` would perform on a
-                        // squad this decision keeps, so `--dry-run` does not
-                        // undercount what the real run silently mutates.
-                        mr += sq
-                            .members
-                            .iter()
-                            .filter(|m| crate::squad_store::tombstone_reapable(m, live_ref))
-                            .count();
-                    }
+                    crate::squad_store::PruneDecision::KeepUnknown => ku += 1,
+                    crate::squad_store::PruneDecision::SkipNamed => sn += 1,
+                    crate::squad_store::PruneDecision::Keep => kp += 1,
                 }
+                // Same classification the real run uses, so `--dry-run` can
+                // never undercount what a real run would reap.
+                mr += fate.reaped_if_kept;
             }
             (removed, ku, sn, kp, mr, false, loaded.notice)
         } else {

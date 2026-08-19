@@ -3407,7 +3407,7 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
 /// report is lost, not the turn), a successful store/drop is exit 0; only a
 /// malformed invocation (exit 2) or a real transport error (exit 1) is loud,
 /// so a per-turn hook never reds a turn. Bounded at its OWN short deadline,
-/// not `client::RESPONSE_TIMEOUT` -- that one is sized for the human-facing
+/// not `client::RESPONSE_DEADLINE` -- that one is sized for the human-facing
 /// blocking rm/stop RPCs, and inheriting it here would let a wedged daemon
 /// stall a turn for a minute-plus before this call's own permissive fallback
 /// ever gets to run.

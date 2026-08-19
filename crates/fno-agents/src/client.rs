@@ -90,6 +90,26 @@ async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
+/// Write one request, refusing to wait past `timeout` (self-review finding).
+/// `read_response_bounded` bounds only the read half of the round trip; a
+/// daemon wedged before it starts reading its socket (e.g. stuck holding the
+/// registry lock before `read_request`) fills the OS receive buffer, and this
+/// half of the write blocks in the kernel with no deadline. Same failure this
+/// PR fixes on the read side, unbounded on the write side otherwise.
+async fn write_request_bounded(
+    conn: &mut UnixStream,
+    req: &Request,
+    timeout: Duration,
+) -> Result<(), ClientError> {
+    match tokio::time::timeout(timeout, write_request(conn, req)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(ClientError::DaemonUnresponsive {
+            method: req.method.clone(),
+            timeout,
+        }),
+    }
+}
+
 /// Resolve the daemon binary: `FNO_AGENTS_DAEMON_BIN` or a sibling of the
 /// current executable named `fno-agents-daemon`.
 pub fn resolve_daemon_bin() -> PathBuf {
@@ -323,8 +343,9 @@ pub async fn call(
 ) -> Result<Response, ClientError> {
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
-    write_request(&mut conn, req).await?;
-    read_response_bounded(&mut conn, &req.method, response_deadline()).await
+    let deadline = response_deadline();
+    write_request_bounded(&mut conn, req, deadline).await?;
+    read_response_bounded(&mut conn, &req.method, deadline).await
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -346,8 +367,9 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         }
         Err(e) => return Err(ClientError::Io(e)),
     };
-    write_request(&mut conn, req).await?;
-    read_response_bounded(&mut conn, &req.method, response_deadline()).await
+    let deadline = response_deadline();
+    write_request_bounded(&mut conn, req, deadline).await?;
+    read_response_bounded(&mut conn, &req.method, deadline).await
 }
 
 // ---------------------------------------------------------------------------
