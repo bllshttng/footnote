@@ -205,6 +205,10 @@ FIELD_META: dict[str, Meta] = {
     ),
     "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
+    # --- config.preflight.* ---
+    "preflight.required": Meta(
+        "advanced", "Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.",
+    ),
     # --- config.target.* ---
     "target.dedupe_dead_duplicates": Meta("never", "Opt-in cleanup of provably-dead duplicate state files."),
     "target.auto_launch_on_blueprint": Meta(
