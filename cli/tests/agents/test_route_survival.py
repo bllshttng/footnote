@@ -79,9 +79,15 @@ def _spawn_pane(monkeypatch, tmp_path, provider="claude", **kwargs):
 def test_routed_pane_spawn_records_an_existing_route_settings_path(tmp_path, monkeypatch) -> None:
     from fno.agents.registry import load_registry
 
-    _spawn_pane(monkeypatch, tmp_path, route_env=dict(ROUTE_ENV))
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        route_env=dict(ROUTE_ENV),
+        route_provider="zai",
+    )
     row = load_registry()[0]
     assert row.route_settings_path, "a routed pane must record the file it launched with"
+    assert row.provider == "zai"
     assert Path(row.route_settings_path).exists()
 
 

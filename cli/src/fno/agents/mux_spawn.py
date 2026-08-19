@@ -2648,6 +2648,7 @@ def dispatch_spawn_pane(
                 AgentEntry(
                     name=name,
                     harness=provider,
+                    provider=route_provider,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
                     # a concurrent reconcile cannot land one without the other

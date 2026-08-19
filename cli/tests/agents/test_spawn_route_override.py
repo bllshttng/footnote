@@ -268,6 +268,7 @@ def test_receipt_model_is_the_effective_model_not_the_routed_one(
     assert result.exit_code == 0, result.output
     # What the worker actually gets, versus what the receipt claims.
     assert captured["model"] == "opus"
+    assert captured["route_provider"] == "zai"
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt["model"] == "opus"
@@ -309,6 +310,7 @@ def test_bg_receipt_carries_route_provider_and_effective_model(
     )
     assert result.exit_code == 0, result.output
     assert captured["model"] == "opus"
+    assert captured["route_provider"] == "zai"
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
     receipt_line = next(
         line for line in result.output.strip().splitlines() if '"short_id"' in line

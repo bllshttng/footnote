@@ -389,7 +389,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -442,8 +442,9 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     // makes it indistinguishable from a complete one, and a routing decision
     // taken on one leaves no trace. Fixing only Python would have left this
     // path, the daemon, and mux still failing closed on the same file.
+    let on_disk_version = obj.get("schema_version").and_then(Value::as_u64);
     let mut read_forward = false;
-    match obj.get("schema_version").and_then(Value::as_u64) {
+    match on_disk_version {
         Some(v) if ACCEPTED_SCHEMA_VERSIONS.contains(&v) => {}
         Some(v) if v > REGISTRY_SCHEMA_VERSION as u64 => {
             read_forward = true;
@@ -476,7 +477,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let mut skipped: Vec<usize> = Vec::new();
     let mut kept: Vec<Value> = Vec::with_capacity(rows.len());
     for (i, row_value) in rows.iter().enumerate() {
-        match validate_registry_row(i, row_value) {
+        match validate_registry_row(i, row_value, on_disk_version.unwrap_or(0) < 15) {
             Ok(()) => kept.push(row_value.clone()),
             Err(_) if read_forward => skipped.push(i),
             Err(e) => return Err(e),
@@ -493,7 +494,7 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
     let mut out = kept;
     for row in &mut out {
         if let Some(obj) = row.as_object_mut() {
-            backfill_row_aliases(obj);
+            backfill_row_aliases(obj, on_disk_version.unwrap_or(0) < 15);
         }
     }
     Ok(out)
@@ -502,25 +503,36 @@ fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, String> {
 /// One registry row's shape checks, split out of [`load_registry_entries`] so a
 /// newer-schema read can skip a single unrepresentable row instead of refusing
 /// the shared file. Returns the same messages the inline checks used to return.
-fn validate_registry_row(i: usize, row_value: &Value) -> Result<(), String> {
+fn validate_registry_row(
+    i: usize,
+    row_value: &Value,
+    legacy_provider_semantics: bool,
+) -> Result<(), String> {
     {
         let row = row_value
             .as_object()
             .ok_or_else(|| format!("registry row {i} is not a JSON object"))?;
-        // Identity is one axis (x-8dfc): tolerate ANY well-shaped identity
-        // token (provider OR harness) so a single alien-harness row never
-        // bricks the shared read; capability is gated at the spawn seam. The
-        // corruption guard survives as the shape check.
+        // Before v15 provider was a harness alias. At v15 it is the separate
+        // model-provider axis, so only harness establishes row identity.
         let provider = row.get("provider").and_then(Value::as_str);
         let harness = row.get("harness").and_then(Value::as_str);
-        if !(is_identity_token(provider) || is_identity_token(harness)) {
+        let valid_legacy_alias = legacy_provider_semantics && is_identity_token(provider);
+        if !(valid_legacy_alias || is_identity_token(harness)) {
             return Err(format!(
                 "registry row {i} has no valid identity token (provider={provider:?}, harness={harness:?})"
             ));
         }
-        // Divergence is loud, not fatal (x-8dfc), mirroring Python: a writer bug
-        // stamping provider != harness surfaces in the skew window; harness wins.
-        if is_identity_token(provider) && is_identity_token(harness) && provider != harness {
+        if provider.is_some() && !is_identity_token(provider) {
+            return Err(format!(
+                "registry row {i} has invalid provider={provider:?}"
+            ));
+        }
+        // Divergence is meaningful only while both fields name the harness.
+        if legacy_provider_semantics
+            && is_identity_token(provider)
+            && is_identity_token(harness)
+            && provider != harness
+        {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("?");
             eprintln!(
                 "fno agents: warning: registry row {name:?} has provider={provider:?} and harness={harness:?} (diverged); harness wins for identity"
@@ -573,7 +585,7 @@ fn validate_registry_row(i: usize, row_value: &Value) -> Result<(), String> {
 /// Caller obligation: at least one of `provider` / `harness` is a valid identity
 /// token. `load_registry_entries` checks that before calling; `heal_token` gets
 /// it from the healer, which only ever writes a known harness.
-fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>) {
+fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>, legacy_provider_semantics: bool) {
     // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
     // the two identity fields are the same token in the skew window, so
     // heal whichever is missing OR corrupt (shape-checked, not truthy)
@@ -582,7 +594,7 @@ fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>) {
     // otherwise resolve session_id to None.
     let provider_valid = is_identity_token(obj.get("provider").and_then(Value::as_str));
     let harness_valid = is_identity_token(obj.get("harness").and_then(Value::as_str));
-    if !provider_valid && harness_valid {
+    if legacy_provider_semantics && !provider_valid && harness_valid {
         if let Some(h) = obj
             .get("harness")
             .and_then(Value::as_str)
@@ -590,7 +602,7 @@ fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>) {
         {
             obj.insert("provider".into(), Value::String(h));
         }
-    } else if !harness_valid && provider_valid {
+    } else if legacy_provider_semantics && !harness_valid && provider_valid {
         if let Some(p) = obj
             .get("provider")
             .and_then(Value::as_str)
@@ -1248,16 +1260,15 @@ fn parse_heal_token_output(
         Ok(mut row) if row.is_object() => {
             // The healed row skipped `load_registry_entries`, so it gets neither
             // that loader's alias reconciliation nor its validation. Apply both:
-            // without the backfill the row has no `provider` (logs would take the
-            // codex branch) and no `claude_session_uuid` (resume's dead arm would
-            // refuse); without the field bar, an exit-0 helper returning `{}` or a
+            // without the backfill the row has no `claude_session_uuid` (resume's
+            // dead arm would refuse); without the field bar, an exit-0 helper returning `{}` or a
             // partial object would resolve as a SUCCESS and surface as a confusing
             // missing-cwd error three frames later instead of a clean not-found.
             let obj = match row.as_object_mut() {
                 Some(o) => o,
                 None => unreachable!("object guard above"),
             };
-            backfill_row_aliases(obj);
+            backfill_row_aliases(obj, false);
             let has_identity = is_identity_token(obj.get("harness").and_then(Value::as_str));
             let has_fields = ["name", "cwd", "log_path"]
                 .iter()
@@ -1634,6 +1645,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         name: synthesized_name(&short),
         short_id: short,
         legacy_provider: String::new(),
+        provider: None,
         harness: Some(harness),
         harness_session_id: Some(session.clone()),
         cwd: id.owner_cwd.clone(),
@@ -2835,23 +2847,27 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     };
     let entry = &entry;
 
-    let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+    let harness = entry
+        .get("harness")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("provider").and_then(Value::as_str))
+        .unwrap_or("");
     let events_path = trace_events_path(home);
 
-    // Every non-claude provider refuses attach (claude is the only provider
+    // Every non-claude harness refuses attach (claude is the only harness
     // with a persistent `--bg` session to attach to). `!= "claude"` instead of
     // an allowlist so a provider added to the roster inherits the refusal
     // rather than falling through to a claude-shaped attach (x-51f6 US1).
-    if provider != "claude" {
+    if harness != "claude" {
         eprintln!(
-            "{provider} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-provider attach is planned for the Phase 6 supervisor."
+            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-harness attach is planned for the Phase 6 supervisor."
         );
         append_agents_event(
             &events_path,
             "agent_attach_refused",
             &[
                 ("name", Value::String(name.clone())),
-                ("provider", Value::String(provider.to_string())),
+                ("provider", Value::String(harness.to_string())),
                 (
                     "reason",
                     Value::String("one-shot-provider-no-persistent-session".to_string()),
@@ -2861,10 +2877,10 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 13;
     }
 
-    if provider != "claude" {
+    if harness != "claude" {
         eprintln!(
-            "attach for provider {} is not implemented",
-            py_repr_str(provider)
+            "attach for harness {} is not implemented",
+            py_repr_str(harness)
         );
         return 2;
     }
@@ -3092,9 +3108,13 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
     let entry = &entry;
-    let provider = entry.get("provider").and_then(Value::as_str).unwrap_or("");
+    let harness = entry
+        .get("harness")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("provider").and_then(Value::as_str))
+        .unwrap_or("");
 
-    if provider == "claude" {
+    if harness == "claude" {
         return run_logs_claude(entry, &args);
     }
 
@@ -3111,7 +3131,7 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
             log_path
         };
         eprintln!(
-            "no logs for {provider} agent {}: no log file at {where_}",
+            "no logs for {harness} agent {}: no log file at {where_}",
             args.name
         );
         return 13;
@@ -3903,8 +3923,8 @@ mod tests {
             "short_id": "a1b2c3d4", "harness_session_id": CLAUDE_UUID_FIXTURE,
             "status": "orphaned",
         });
-        backfill_row_aliases(row.as_object_mut().unwrap());
-        assert_eq!(row["provider"], "claude");
+        backfill_row_aliases(row.as_object_mut().unwrap(), false);
+        assert!(row.get("provider").is_none());
         assert_eq!(row["claude_session_uuid"], CLAUDE_UUID_FIXTURE);
     }
 
@@ -3916,8 +3936,8 @@ mod tests {
             "name": "fno-a1b2c3d4", "harness": "codex", "cwd": "/w", "log_path": "",
             "harness_session_id": CLAUDE_UUID_FIXTURE, "status": "orphaned",
         });
-        backfill_row_aliases(row.as_object_mut().unwrap());
-        assert_eq!(row["provider"], "codex");
+        backfill_row_aliases(row.as_object_mut().unwrap(), false);
+        assert!(row.get("provider").is_none());
         assert_eq!(row["codex_session_id"], CLAUDE_UUID_FIXTURE);
         assert!(row.get("claude_session_uuid").is_none());
     }

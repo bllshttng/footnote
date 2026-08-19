@@ -1312,6 +1312,7 @@ def _claude_create_path(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    route_provider: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1559,6 +1560,7 @@ def _claude_create_path(
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
+        provider=route_provider,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
@@ -2291,6 +2293,7 @@ def dispatch_spawn(
     account_env: Optional[Mapping[str, str]] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
+    route_provider: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -2660,6 +2663,7 @@ def dispatch_spawn(
                         account_env=account_env,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
+                        route_provider=route_provider,
                     )
                     return SpawnResult(
                         kind="created",

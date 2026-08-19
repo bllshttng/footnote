@@ -1527,6 +1527,7 @@ def cmd_spawn(
                 account_env=account_env,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
+                route_provider=route_provider,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

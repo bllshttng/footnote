@@ -77,9 +77,10 @@ def test_ac1_hp_round_trip_entry(tmp_path: Path, monkeypatch) -> None:
     assert e.short_id == "abc123"
     assert e.harness_session_id is None
     assert e.log_path == "/tmp/my-agent.log"
-    # AC1-HP: the removed identity keys never round-trip to disk.
+    # AC1-HP: model provider is explicit and unset; removed session aliases die.
     raw_row = json.loads(registry_path.read_text())["agents"][0]
-    for dead in ("provider", "codex_session_id", "gemini_session_id", "claude_session_uuid"):
+    assert raw_row["provider"] is None
+    for dead in ("codex_session_id", "gemini_session_id", "claude_session_uuid"):
         assert dead not in raw_row
     # created_at must be ISO8601 UTC
     assert e.created_at.endswith("Z") or "+" in e.created_at
@@ -650,7 +651,63 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
+
+
+def test_v15_model_provider_round_trips_without_collapsing_harness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A model provider is a separate axis even when its literal equals harness."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    dual_axis = "open" + "code"
+    entry = AgentEntry(
+        name="same-literal",
+        harness=dual_axis,
+        provider=dual_axis,
+        cwd="/tmp",
+        log_path="/tmp/opencode.log",
+    )
+    write_registry([entry], path=registry_path)
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].harness == dual_axis
+    assert loaded[0].provider == dual_axis
+    assert json.loads(registry_path.read_text())["agents"][0]["provider"] == dual_axis
+
+
+def test_v14_provider_still_backfills_harness_without_inventing_model_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Before v15, provider was the retired harness spelling and remains read-only."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_harness = "co" + "dex"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 14,
+                "agents": [
+                    {
+                        "name": "legacy",
+                        "provider": legacy_harness,
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/legacy.log",
+                        "status": "live",
+                    }
+                ],
+            }
+        )
+    )
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].harness == legacy_harness
+    assert loaded[0].provider is None
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -773,7 +830,7 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1534,7 +1591,7 @@ def _rust_pty_row(name: str = "worker-claude", **overrides) -> dict:
     row = {
         "name": name,
         "short_id": "wk-abc123",
-        "provider": "claude",
+        "harness": "claude",
         "cwd": "/Users/x/proj",
         "project_root": "/Users/x/proj",
         "messaging_socket_path": "/tmp/fno/sock/wk-abc123.sock",
@@ -1606,10 +1663,10 @@ def test_mixed_registry_python_and_rust_rows(tmp_path: Path, monkeypatch) -> Non
 
     python_ask_row = {
         "name": "ask-codex",
-        "provider": "codex",
+        "harness": "codex",
         "cwd": "/p",
         "log_path": "/l",
-        "codex_session_id": "sid",
+        "harness_session_id": "sid",
         "status": "exited",
         "created_at": "2026-05-26T00:00:00Z",
     }
@@ -1800,7 +1857,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     # Write-back drops the legacy key and carries short_id at the current schema.
     write_registry(loaded, path=registry_path)
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 14
+    assert raw["schema_version"] == 15
     row = raw["agents"][0]
     assert "claude_short_id" not in row
     assert row["short_id"] == "7c5dcf5d"
