@@ -1808,6 +1808,20 @@ fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
     .ok()
 }
 
+fn interactive_resume_supported(provider: &str) -> bool {
+    crate::harness_capabilities::HarnessContract::packaged()
+        .ok()
+        .and_then(|contract| {
+            contract.capabilities(provider).ok().and_then(|caps| {
+                caps.resume_strategy
+                    .forms
+                    .get("interactive_resume")
+                    .map(|form| form.kind != "unsupported")
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
 /// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
 /// never reach `claude --resume` (x-9844 Failure Modes / Boundaries).
@@ -2438,25 +2452,23 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
     // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
-    // <uuid>`. Other harnesses keep their settled-session resume CLI, checked
-    // BEFORE session_id so an unknown harness surfaces "not supported" rather
-    // than a misleading "no session_id".
+    // <uuid>`. Other harnesses keep their settled-session resume CLI. Check
+    // support before session_id so an unknown harness surfaces "not supported",
+    // then check identity before rendering so a supported harness with no bound
+    // session reports the missing binding instead of an invalid argv.
     let (argv, claim_uuid) = if harness == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
         }
     } else {
-        let v = match build_resume_argv(harness, session_id) {
-            Some(v) => v,
-            None => {
-                eprintln!(
-                    "fno agents resume: harness {} resume not supported by this fno version.",
-                    py_repr_str(harness)
-                );
-                return 13;
-            }
-        };
+        if !interactive_resume_supported(harness) {
+            eprintln!(
+                "fno agents resume: harness {} resume not supported by this fno version.",
+                py_repr_str(harness)
+            );
+            return 13;
+        }
         if session_id.is_empty() {
             eprintln!(
                 "fno agents resume: agent {} has no recorded session_id for harness {}.",
@@ -2465,6 +2477,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return 13;
         }
+        let v = match build_resume_argv(harness, session_id) {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "fno agents resume: harness {} resume contract is invalid.",
+                    py_repr_str(harness)
+                );
+                return 13;
+            }
+        };
         (v, None)
     };
 
