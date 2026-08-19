@@ -931,20 +931,40 @@ print(f"{result.msg_id} delivered ({result.delivery})")
             timeout=8,
             check=False,
         )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert len(result.stdout.splitlines()) == 1
+        assert result.stdout.strip().endswith("delivered (hosted)")
+        assert not bus_log_path().exists()
+        # Poll for the CONTENT, not the path. `exists()` goes true the instant the
+        # file is created, so a poll on it can read an empty file the relay has not
+        # finished writing, and the assert fails on '' instead of "started".
+        assert _await_content(relay_marker) == "started"
+        # The relay is still blocked on relay_release here - nothing has
+        # touched it yet. Releasing it before this check (a bare
+        # `finally: relay_release.touch()` around subprocess.run used to do
+        # exactly that) races the still-running orphaned relay process
+        # against this assert: its 10ms poll loop can see the touch and
+        # write "finished" before this line runs, flaking the test under
+        # load. Release only after this check, in the finally below.
+        assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
     finally:
+        # Always release, even on assertion failure, so the orphaned relay
+        # (bounded at an 8s internal deadline anyway) exits promptly.
         relay_release.touch()
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert len(result.stdout.splitlines()) == 1
-    assert result.stdout.strip().endswith("delivered (hosted)")
-    assert not bus_log_path().exists()
-    # Poll for the CONTENT, not the path. `exists()` goes true the instant the
-    # file is created, so a poll on it can read an empty file the relay has not
-    # finished writing, and the assert fails on '' instead of "started".
-    assert _await_content(relay_marker) == "started"
-    assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
     relay_release.write_text("release")
     assert _await_content(relay_finished) == "finished"
+
+
+def test_relay_finished_guard_detects_premature_completion(tmp_path) -> None:
+    """Negative control for the guard above: it must FAIL when the relay has,
+    in fact, finished before the receipt check runs - otherwise the guard is
+    a tautology that can never catch a real ordering regression."""
+    relay_finished = tmp_path / "relay-finished"
+    relay_finished.write_text("finished")
+    with pytest.raises(AssertionError):
+        assert not relay_finished.exists(), "relay finished before the CLI receipt returned"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
