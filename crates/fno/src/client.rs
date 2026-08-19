@@ -3033,6 +3033,91 @@ impl View {
             .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(pid)))
     }
 
+    /// (x-7683) Whether any mode-owning overlay is open. The pane context
+    /// menu refuses to open over one: most overlays never intercepted the
+    /// mouse, open_row_menu clears only peek, and the key router checks
+    /// row_menu ahead of every overlay below it - so a menu opening under an
+    /// overlay would silently steal its typing. Over-guarding is free here
+    /// (close the overlay first); under-guarding is the hijack.
+    fn overlay_open(&self) -> bool {
+        self.keys_modal.is_some()
+            || self.row_menu.is_some()
+            || self.aux.is_some()
+            || self.connections.is_some()
+            || self.confirm.is_some()
+            || self.move_pick.is_some()
+            || self.attach_place.is_some()
+            || self.create.is_some()
+            || self.rename.is_some()
+            || self.recruit.is_some()
+            || self.search.is_some()
+            || self.answers.is_some()
+            || self.yard.is_some()
+            || self.nav.is_some()
+            || self.peek.is_some()
+            || self.peek_input.is_some()
+            || self.digest.is_some()
+    }
+
+    /// (x-7683) Open the owning agent's row menu for the pane under
+    /// `(row, col)`, the one shared sequence behind the fresh right-press and
+    /// the in-menu re-anchor (one implementation of "a pane is
+    /// menu-bearing", so the two paths can never disagree about whose menu
+    /// opens). `false` when the cell is no pane, the pane has no agent row,
+    /// or the row has no menu - the caller leaves the press to fall through.
+    fn open_pane_menu(&mut self, row: u16, col: u16) -> bool {
+        let Some((pane, _, _)) = self.hit_test(row, col) else {
+            return false;
+        };
+        self.agent_row_index_for_pane(pane)
+            .is_some_and(|i| self.open_row_menu(i, Anchor::At { row, col }))
+    }
+
+    /// (x-7683) Open the context menu for whichever new drag is live, pinned
+    /// to its captured source - the dead-drag reaper's path, which has no
+    /// press cell to hit-test. A motionless hold past MENU_LONG_PRESS emits
+    /// no events at all, so the reaper at PANE_DRAG_TIMEOUT is the only
+    /// thing that can fire for a hold longer than the drag timeout; without
+    /// this the advertised hold silently stops working for exactly the most
+    /// deliberate holds. `false` (drag left untouched for the reaper) when
+    /// no drag is live, it moved, or it has not qualified yet.
+    fn open_drag_menu(&mut self) -> bool {
+        let qualified = |start: Instant, moved: bool| {
+            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
+        };
+        if let Some(d) = self.tab_drag {
+            if qualified(d.start_at, d.moved) {
+                if let Some((_, idx, tab)) = self.find_tab(d.src_tab) {
+                    let menu = build_tab_menu(idx, tab, Anchor::Center);
+                    self.clear_peek();
+                    self.row_menu = Some(menu);
+                    self.row_menu_esc.clear();
+                    self.tab_drag = None;
+                    return true;
+                }
+            }
+            return false;
+        }
+        if let Some(d) = self.row_drag.as_ref() {
+            if !qualified(d.start_at, d.moved) {
+                return false;
+            }
+            let idx = match &d.src {
+                RowSource::Pane(pid) => self.agent_row_index_for_pane(*pid),
+                RowSource::Attach(id) => self.display_rows().iter().position(
+                    |r| matches!(r, DisplayRow::Agent(a) if a.attach_id.as_deref() == Some(id)),
+                ),
+            };
+            if let Some(i) = idx {
+                if self.open_row_menu(i, Anchor::Center) {
+                    self.row_drag = None;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// The flat popup target under a screen cell while the row menu is open, for
     /// mouse hover/click; `None` off the popup.
     fn row_menu_hit(&self, row: u16, col: u16) -> Option<usize> {
@@ -5214,11 +5299,7 @@ impl View {
         if visible == 0 || total <= visible {
             return;
         }
-        let Some(idx) = self
-            .display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(focus)))
-        else {
+        let Some(idx) = self.agent_row_index_for_pane(focus) else {
             return;
         };
         if idx < self.sideline_offset {
@@ -9815,8 +9896,14 @@ async fn attach_and_run(
                 // a tab-join / row-place whose release went missing applies
                 // NOTHING. Clear whichever new drag is live; the struct is cleared
                 // internally so a late release cannot commit a stale command.
-                view.cancel_tab_drag();
-                view.cancel_row_drag();
+                // (x-7683) Exception: a motionless hold that already qualifies
+                // as a long press opens its menu here instead - a held-still
+                // pointer emits no events, so this reaper is the only thing
+                // that ever fires for a hold past the drag timeout.
+                if !view.open_drag_menu() {
+                    view.cancel_tab_drag();
+                    view.cancel_row_drag();
+                }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10099,7 +10186,9 @@ async fn handle_stdin(
                         // same row opens its context menu instead - the no-config
                         // path for terminals that never forward a right-click -
                         // through the same sideline_row_at + open_row_menu a
-                        // right-press uses. `moved` gates it like the tab arm.
+                        // right-press uses. `moved` gates it like the tab arm,
+                        // and a genuine hold never falls back to the click
+                        // action either way (mirroring the tab arm's promise).
                         None => {
                             let still_on_row = pressed.is_some()
                                 && view.row_drag_source_at(rep.row, rep.col) == pressed;
@@ -10108,8 +10197,8 @@ async fn handle_stdin(
                                     !moved
                                         && Instant::now().duration_since(start) >= MENU_LONG_PRESS
                                 });
-                                let menu = long_press
-                                    && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
+                                if long_press {
+                                    view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
                                         view.open_row_menu(
                                             i,
                                             Anchor::At {
@@ -10118,10 +10207,8 @@ async fn handle_stdin(
                                             },
                                         )
                                     });
-                                if !menu {
-                                    if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                                        apply_hit(view, hit, sock_w).await?;
-                                    }
+                                } else if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                                    apply_hit(view, hit, sock_w).await?;
                                 }
                             }
                         }
@@ -10260,24 +10347,14 @@ async fn handle_stdin(
             // row menu - the same menu its sideline row opens - so a pane is a
             // menu-bearing surface too. Same swallow-only-when-opened rule: an
             // agent-less pane falls through to the forward below, keeping the
-            // inner app's own right-click (AC3-EDGE). Skipped while a centered
-            // overlay is up (peek/nav don't intercept the mouse, so a pane
-            // press under them always fell through to the pane; it still does,
-            // and the overlay survives the press).
-            if view.peek.is_none() && view.nav.is_none() {
-                if let Some((pane, _, _)) = view.hit_test(rep.row, rep.col) {
-                    if let Some(i) = view.agent_row_index_for_pane(pane) {
-                        if view.open_row_menu(
-                            i,
-                            Anchor::At {
-                                row: rep.row,
-                                col: rep.col,
-                            },
-                        ) {
-                            continue;
-                        }
-                    }
-                }
+            // inner app's own right-click (AC3-EDGE). Blocked while ANY
+            // overlay is up: most overlays never intercepted the mouse (a
+            // pane press fell through to the pane, and still does), and
+            // open_row_menu clears only peek - a menu opening under rename
+            // would steal the overlay's keys, since the key router checks
+            // row_menu first.
+            if !view.overlay_open() && view.open_pane_menu(rep.row, rep.col) {
+                continue;
             }
         }
         // Wheel over the sideline scrolls the workspace/session list (there is no
@@ -11819,19 +11896,7 @@ async fn row_menu_mouse(
                     // menu-bearing now, and a second right-press on another
                     // pane swapping in that pane's agent menu keeps the
                     // one-press contract the tab re-anchor above cites.
-                    let pane_menu = view
-                        .hit_test(rep.row, rep.col)
-                        .and_then(|(pane, _, _)| view.agent_row_index_for_pane(pane))
-                        .is_some_and(|i| {
-                            view.open_row_menu(
-                                i,
-                                Anchor::At {
-                                    row: rep.row,
-                                    col: rep.col,
-                                },
-                            )
-                        });
-                    if !pane_menu {
+                    if !view.open_pane_menu(rep.row, rep.col) {
                         view.row_menu = None;
                     }
                 }
@@ -12900,7 +12965,16 @@ async fn selector_keys(
                     // owns row 0; there is no TAB_BAR_ROWS offset on this side
                     // of the divider).
                     let arow = (cur.saturating_sub(view.sideline_offset)) as u16;
-                    view.open_row_menu(cur, Anchor::At { row: arow, col: 1 });
+                    // A row that refuses with its own notice (an all-live band)
+                    // keeps it; one that refuses SILENTLY (the Backlog band has
+                    // no menu by design and says nothing on the right-press
+                    // path) still gets a word here, because a swallowed key
+                    // with zero feedback reads as a dead key.
+                    if !view.open_row_menu(cur, Anchor::At { row: arow, col: 1 })
+                        && view.notice.is_none()
+                    {
+                        view.set_notice("this row has no menu".into());
+                    }
                     continue;
                 }
                 // Move a tab into another squad (x-96e8): open the numbered
@@ -20000,6 +20074,97 @@ mod tests {
             ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10),
             other => panic!("expected the pane forward, got {other:?}"),
         }
+    }
+
+    // ---- (x-7683) second review pass: overlay hijack, reaper, feedback -------
+
+    #[tokio::test]
+    async fn x7683_right_press_in_a_pane_under_rename_opens_nothing() {
+        // A right-press under ANY key-owning overlay must not open the pane
+        // menu: open_row_menu clears only peek, and the key router checks
+        // row_menu ahead of the overlay, so a menu opening there would steal
+        // the overlay's typing (rename Enter would run a menu action).
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.rename = Some((super::RenameTarget::Squad(1), "na".into()));
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;31;6M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.row_menu.is_none(), "no menu under an open overlay");
+        assert!(v.rename.is_some(), "the overlay survives untouched");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Mouse { pane, .. } => assert_eq!(pane, 10),
+            other => panic!("expected the pane forward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x7683_a_motionless_hold_past_the_reaper_opens_its_menu() {
+        // The dead-drag reaper fires at 5s from the LAST MOTION, and a
+        // motionless hold emits no motion - so a hold past the drag timeout
+        // is cancelled before its release ever arrives. A hold that already
+        // qualifies opens its menu at the reaper instead of dying silently.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        let tid = v.tab_cell_at(tr, tc).unwrap();
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: tid,
+            zone: None,
+            last_at: Instant::now() - Duration::from_secs(6),
+            start_at: Instant::now() - Duration::from_secs(6),
+            moved: false,
+        });
+        assert!(
+            v.open_drag_menu(),
+            "a qualified motionless hold opens its tab menu"
+        );
+        assert!(matches!(
+            v.row_menu.as_ref().map(|m| &m.target),
+            Some(super::MenuTarget::Tab(_))
+        ));
+        assert!(v.tab_drag.is_none(), "the drag was consumed, not reaped");
+        // A drag that MOVED never opens a menu at the reaper - it is a stuck
+        // drag, exactly what the reaper exists to clear.
+        v.row_menu = None;
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: tid,
+            zone: None,
+            last_at: Instant::now() - Duration::from_secs(6),
+            start_at: Instant::now() - Duration::from_secs(6),
+            moved: true,
+        });
+        assert!(!v.open_drag_menu(), "a moved stale drag refuses the menu");
+        assert!(v.row_menu.is_none());
+    }
+
+    #[tokio::test]
+    async fn x7683_m_on_the_backlog_header_says_why_not_nothing() {
+        // The WorkQueue header is the one menu-less header by design, and
+        // open_row_menu refuses it without a notice; `m` used to fall through
+        // to the move notice. The key must not vanish silently.
+        let mut v = unified_rows_view();
+        let hdr = v
+            .display_rows()
+            .iter()
+            .position(|r| {
+                matches!(
+                    r,
+                    DisplayRow::Header {
+                        key: SectionKey::WorkQueue,
+                        ..
+                    }
+                )
+            })
+            .expect("the backlog band header");
+        v.selector = Some(hdr);
+        v.notice = None;
+        let mut buf: Vec<u8> = Vec::new();
+        super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "the backlog header has no menu");
+        assert!(v.notice.is_some(), "but m says why, never silence");
     }
 
     #[tokio::test]
