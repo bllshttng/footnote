@@ -74,6 +74,7 @@ class EvidenceProof:
     verified: bool
     evidence_count: int
     reason: str
+    sources: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -330,9 +331,11 @@ def _revalidate_persisted_and_raw_evidence(
     *,
     path: Path,
     transcript_path_for: Callable[[Any], Path | None] | None = None,
+    pane_read_fn: Callable[[str, Any], str] | None = None,
+    pane_snapshot_dir: Path | None = None,
     now_s: float | None = None,
 ) -> EvidenceProof:
-    """Re-read the breaker journal and the source transcript under the lease."""
+    """Re-read each persisted source through its original evidence transport."""
     from fno.agents.provider_outage import EvidenceIdentity, collect_transcript_evidence
 
     expected = tuple(sorted(set(request.evidence_fingerprints)))
@@ -359,40 +362,92 @@ def _revalidate_persisted_and_raw_evidence(
         item for item in (state.get("evidence") or [])
         if isinstance(item, dict) and item.get("row_id") == request.source_row_id
     ]
-    source_persisted = {
-        str(item.get("content_fingerprint") or item.get("fingerprint") or "")
+    source_records = {
+        str(item.get("content_fingerprint") or item.get("fingerprint") or ""): item
         for item in evidence
         if item.get("provider") == request.source_provider
         and item.get("account") == request.source_account
     }
-    expected_source = source_persisted.intersection(expected)
+    expected_source = set(source_records).intersection(expected)
     if not expected_source:
         return EvidenceProof(False, 0, "persisted source evidence is unknown")
-    session_id = snapshot.source.harness_session_id
-    if not session_id:
-        return EvidenceProof(False, len(expected_source), "source transcript identity is unknown")
-    records, refusals = collect_transcript_evidence(
-        [EvidenceIdentity(
-            row_id=request.source_row_id,
-            harness=snapshot.source.harness,
-            provider=request.source_provider,
-            account=request.source_account,
-            session_id=session_id,
-            cwd=snapshot.source.cwd,
-        )],
-        now_s=time.time() if now_s is None else now_s,
-        transcript_path_for=transcript_path_for,
+    now = time.time() if now_s is None else now_s
+    verified: set[str] = set()
+    sources: set[str] = set()
+    transcript_expected = {
+        fp for fp in expected_source if source_records[fp].get("source") == "transcript"
+    }
+    if transcript_expected:
+        session_id = snapshot.source.harness_session_id
+        if not session_id:
+            return EvidenceProof(False, 0, "source transcript identity is unknown")
+        records, refusals = collect_transcript_evidence(
+            [EvidenceIdentity(
+                row_id=request.source_row_id, harness=snapshot.source.harness,
+                provider=request.source_provider, account=request.source_account,
+                session_id=session_id, cwd=snapshot.source.cwd,
+            )],
+            now_s=now, transcript_path_for=transcript_path_for,
+        )
+        raw = {record.fingerprint for record in records}.intersection(expected)
+        if refusals or raw != transcript_expected:
+            return EvidenceProof(False, len(raw), "raw source evidence drifted or is unknown")
+        verified.update(raw)
+        sources.add("transcript")
+    pane_expected = {
+        fp for fp in expected_source if source_records[fp].get("source") == "pane"
+    }
+    if pane_expected:
+        mux = snapshot.source.mux or {}
+        session = mux.get("session")
+        pane_id = mux.get("pane_id")
+        if not session or pane_id is None or pane_read_fn is None or pane_snapshot_dir is None:
+            return EvidenceProof(False, len(verified), "source pane identity is unknown")
+        pane_snapshot_dir.mkdir(parents=True, exist_ok=True)
+        for fingerprint in pane_expected:
+            persisted = source_records[fingerprint]
+            age_anchor = persisted.get("snapshot_at", persisted.get("observed_at"))
+            if not isinstance(age_anchor, (int, float)) or not 0 <= now - age_anchor <= 600:
+                return EvidenceProof(False, len(verified), "persisted pane evidence is stale")
+            if str(persisted.get("pane_id")) != str(pane_id):
+                return EvidenceProof(False, len(verified), "stable pane identity drifted")
+            try:
+                content = pane_read_fn(str(session), pane_id)
+            except Exception:
+                return EvidenceProof(False, len(verified), "source pane read is unknown")
+            bounded = content.encode("utf-8")[-64 * 1024:].decode(
+                "utf-8", errors="ignore"
+            ).strip()
+            if bounded != str(persisted.get("content") or "").strip():
+                return EvidenceProof(False, len(verified), "source pane content drifted")
+            receipt = {
+                "fingerprint": fingerprint, "row_id": request.source_row_id,
+                "provider": request.source_provider, "account": request.source_account,
+                "mux_session": str(session), "pane_id": str(pane_id),
+                "snapshot_at": now, "content": bounded,
+            }
+            atomic_write(
+                pane_snapshot_dir / f"{fingerprint}.json",
+                json.dumps(receipt, sort_keys=True),
+            )
+            verified.add(fingerprint)
+        sources.add("pane")
+    unknown_sources = {
+        str(source_records[fp].get("source")) for fp in expected_source
+    } - {"transcript", "pane"}
+    if unknown_sources or verified != expected_source:
+        return EvidenceProof(False, len(verified), "persisted evidence source is unknown")
+    return EvidenceProof(
+        True, len(verified), "exact persisted and raw evidence match", tuple(sorted(sources))
     )
-    raw_source = {record.fingerprint for record in records}.intersection(expected)
-    if refusals or raw_source != expected_source:
-        return EvidenceProof(False, len(raw_source), "raw source evidence drifted or is unknown")
-    return EvidenceProof(True, len(raw_source), "exact persisted and raw evidence match")
 
 
 def production_handoff_dependencies(
     *,
     outage_evidence_path: Path | None = None,
     transcript_path_for: Callable[[Any], Path | None] | None = None,
+    pane_read_fn: Callable[[str, Any], str] | None = None,
+    pane_snapshot_dir: Path | None = None,
     now_s: Callable[[], float] = time.time,
 ) -> HandoffDependencies:
     """Build the real claim, registry, manifest, stop, and spawn transaction."""
@@ -505,6 +560,8 @@ def production_handoff_dependencies(
             snapshot,
             path=outage_evidence_path or provider_outage_journal_path(),
             transcript_path_for=transcript_path_for,
+            pane_read_fn=pane_read_fn,
+            pane_snapshot_dir=pane_snapshot_dir,
             now_s=now_s(),
         )
 

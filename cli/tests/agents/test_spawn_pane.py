@@ -1493,7 +1493,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     tmp_path: Path, monkeypatch
 ) -> None:
     """x-84a8: `fno agents spawn --node ... --slug ... --plan ...` resolves the
-    provenance map and hands it to dispatch_spawn_pane."""
+    provenance map and hands it to the bounded default pane dispatcher."""
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -1509,7 +1509,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
             pane_id=1, child_pid=None, session_uuid="u",
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
 
     res = CliRunner().invoke(
@@ -1535,9 +1535,10 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
     def dispatch_with_fake_mux(**kwargs):
+        kwargs.pop("workspace", None)
         return real_dispatch(**kwargs, runner=fake_runner)
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", dispatch_with_fake_mux)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_SESSION", "main")
     # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
@@ -1570,7 +1571,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
     session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: MuxSpawnResult(
             name=kwargs["name"],
             provider="codex",
@@ -1801,7 +1802,7 @@ def test_bounded_placement_lease_loser_spawns_nothing(tmp_path: Path, monkeypatc
     from fno.claims.core import acquire_claim
 
     use_tmpdir(monkeypatch, tmp_path)
-    acquire_claim("placement:main:current", "other-holder", root=tmp_path)
+    acquire_claim("placement:main:global", "other-holder", root=tmp_path)
     runner = FakeRunner()
     harness = "claude"
     with pytest.raises(DispatchAskError, match="other-holder"):
@@ -1924,6 +1925,38 @@ def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
     assert captured["model_name"] == "gpt-5.6-sol"
     assert captured["workspace"] is None
     assert "tab_id" not in captured
+
+
+def test_cmd_spawn_default_pane_uses_global_bounded_dispatch(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    captured = {}
+
+    def fake_bounded(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=2, child_pid=None, session_uuid="claude-session",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_bounded)
+    monkeypatch.setattr(
+        mux_spawn, "dispatch_spawn_pane",
+        lambda **_kwargs: pytest.fail("default pane bypassed placement lease"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "ordinary", "--harness", "claude", "do work"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["workspace"] is None
 
 
 def test_cmd_spawn_refuses_ordinal_tab_id_before_dispatch(tmp_path: Path, monkeypatch) -> None:
@@ -2542,9 +2575,10 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     real_dispatch = mux_spawn.dispatch_spawn_pane
 
     def dispatch_with_fake_mux(**kwargs):
+        kwargs.pop("workspace", None)
         return real_dispatch(**kwargs, runner=fake_runner)
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", dispatch_with_fake_mux)
     monkeypatch.setattr(
         mux_spawn.shutil, "which", lambda binary, **_kwargs: "/usr/local/bin/happy"
     )
@@ -3819,7 +3853,7 @@ def test_ac6_cli_strict_parser_survives_passthrough(
 
 def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> None:
     """AC1 at the public surface: the tokens parse into the variadic positional
-    and travel to dispatch_spawn_pane as `passthrough`."""
+    and travel to the bounded default pane dispatcher as `passthrough`."""
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -3840,7 +3874,7 @@ def test_ac1_cli_passthrough_reaches_dispatch(tmp_path: Path, monkeypatch) -> No
             session_uuid="u",
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
 

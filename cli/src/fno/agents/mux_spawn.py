@@ -2242,7 +2242,7 @@ def dispatch_spawn_bounded_pane(
 
     session = resolve_mux_session(spawn_kwargs.pop("session", None))
     holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
-    key = f"placement:{session}:{workspace or 'current'}"
+    key = f"placement:{session}:global"
     root = claims_root or global_claims_root()
     try:
         acquire_claim(

@@ -1483,9 +1483,11 @@ def cmd_spawn(
             )
 
             try:
+                exact_placement = any(value is not None for value in (split, at, tab_id))
+                use_bounded_placement = bounded_placement or not exact_placement
                 pane_dispatch = (
                     dispatch_spawn_bounded_pane
-                    if bounded_placement
+                    if use_bounded_placement
                     else dispatch_spawn_pane
                 )
                 pane_kwargs = dict(
@@ -1518,7 +1520,7 @@ def cmd_spawn(
                     account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                 )
-                if bounded_placement:
+                if use_bounded_placement:
                     for placement_key in ("split", "at", "tab_id"):
                         pane_kwargs.pop(placement_key)
                     pane_kwargs["workspace"] = squad

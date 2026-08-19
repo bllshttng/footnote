@@ -283,6 +283,54 @@ def test_ac7_con_production_revalidator_rereads_raw_and_persisted_evidence(
     assert proof.evidence_count == 1
 
 
+def test_ac7_con_production_revalidator_rereads_and_persists_exact_pane(
+    tmp_path: Path,
+):
+    now = 1_787_100_000.0
+    content = "API Error: Request rejected (429) fair usage policy"
+    evidence = OutageEvidence(
+        source="pane", observed_at=now, row_id="source-row", harness="agy",
+        provider="anthropic", account="claude-work", role="assistant",
+        raw_status=429, raw_kind="api_error", content=content, pane_id="19",
+        persisted=True, snapshot_at=now,
+    )
+    journal = tmp_path / "provider-outages.json"
+    journal.write_text(json.dumps({
+        "evidence": [asdict(evidence)],
+        "breakers": [{
+            "provider": "anthropic", "account": "claude-work",
+            "outage_epoch": "epoch-1", "fingerprints": [evidence.fingerprint],
+        }],
+    }), encoding="utf-8")
+    request = replace(_request(), evidence_fingerprints=(evidence.fingerprint,))
+    snapshot = replace(
+        _snapshot(tmp_path),
+        source=replace(
+            _snapshot(tmp_path).source,
+            harness="agy",
+            harness_session_id=None,
+            mux={"session": "stable", "pane_id": "19"},
+        ),
+    )
+    snapshot_dir = tmp_path / "under-lease-pane-snapshots"
+    deps = production_handoff_dependencies(
+        outage_evidence_path=journal,
+        pane_read_fn=lambda session, pane_id: (
+            content if (session, str(pane_id)) == ("stable", "19") else ""
+        ),
+        pane_snapshot_dir=snapshot_dir,
+        now_s=lambda: now,
+    )
+
+    proof = deps.revalidate_evidence(request, snapshot)
+
+    assert proof.verified is True
+    assert proof.sources == ("pane",)
+    persisted = json.loads((snapshot_dir / f"{evidence.fingerprint}.json").read_text())
+    assert persisted["row_id"] == "source-row"
+    assert persisted["pane_id"] == "19"
+
+
 def test_ac7_con_exact_holder_change_after_stop_parks_before_archive(tmp_path: Path):
     calls: list[str] = []
     deps = _deps(tmp_path, calls)
