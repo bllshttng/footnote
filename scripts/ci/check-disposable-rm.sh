@@ -60,17 +60,18 @@ check_file() {
     VIOLATIONS=$((VIOLATIONS + 1))
     return
   fi
-  # Detection, per line, in two passes over the same numbered text.
-  # Pass 1 (quoted forms), BEFORE string-stripping, two arms:
-  #   a quoted rm word in COMMAND position - line start or after ; & | ( { -
-  #   which is the alias-bypass spelling that does NOT bypass a PATH wrapper
-  #   (mid-line, inside another string, a quoted rm is prose: "prefer 'rm'");
-  #   and rm as the FIRST word of a quoted string - eval "rm -rf $X" resolves
-  #   through the user's PATH, one nesting level past the quoted word.
+  # Detection, per line, in two passes over the same numbered text. Both fire
+  # only on rm in COMMAND position: line start, after ; & | ( {, or after the
+  # then/do/else keywords. Anything else (a subcommand like `git rm`, an rm
+  # inside a printed string) never resolves through the user's PATH, so
+  # flagging it cries wolf and the failure message steers the wrong fix.
+  # Pass 1 (quoted / indirected forms), BEFORE string-stripping:
+  #   a quoted rm word in command position - the alias-bypass spelling that
+  #   does NOT bypass a PATH wrapper - and rm as the first word of a string
+  #   introduced by eval or a `<shell> -c`, which is evaluated, not printed.
   # Pass 2 (bare word): strip double- then single-quoted strings (an `rm`
   # inside an echo message is advice to a human, not a call), strip the
-  # comment (after string-stripping, the first # starts one), then mask the
-  # sanctioned spellings. What survives is a command word `rm`.
+  # comment, then mask the sanctioned spellings.
   # Both passes mask `command -p rm` and `/bin/rm` first, so a sanctioned
   # spelling never fires either detector, quoted or not.
   local hits
@@ -78,6 +79,8 @@ check_file() {
   # command-position arm can anchor at the true start of the code. grep -E has
   # no \t, so the tab is a shell literal.
   local NL_PREFIX='^[0-9[:space:]]*'$'\t'
+  local CMDPOS="(${NL_PREFIX}|^|[;&|({])[[:space:]]*"
+  local EVALINTRO='(eval|bash[[:space:]]+-c|sh[[:space:]]+-c|zsh[[:space:]]+-c)[[:space:]]+'
   # Both passes neutralize backslash escapes FIRST: an escaped quote (\"rm\")
   # is not a shell quote, and leaving it intact mispairs the double-quote
   # stripping so a quoted rm reads as bare.
@@ -86,11 +89,11 @@ check_file() {
       nl -ba "$path" \
         | sed -E 's/\\./BS/g; s/#.*$//;
                   s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
-        | grep -E "(${NL_PREFIX}|^|[;&|({])[[:space:]]*[\"']rm[\"']([[:space:]]|$)|[\"']rm([[:space:]]|-)" | cut -f1
+        | grep -E "${CMDPOS}[\"']rm[\"']([[:space:]]|$)|${EVALINTRO}[\"']rm([[:space:]]|-)" | cut -f1
       nl -ba "$path" \
         | sed -E 's/\\./BS/g; s/"[^"]*"//g; s/'"'"'[^'"'"']*'"'"'//g; s/#.*$//;
                   s/command[[:space:]]+-p[[:space:]]+rm/RM_SANCTIONED/g; s#/bin/rm#RM_SANCTIONED#g' \
-        | awk -F'\t' '$0 ~ /(^|[^A-Za-z0-9_\/.-])rm([^A-Za-z0-9_-]|$)/ {print $1}'
+        | grep -E "${CMDPOS}rm([[:space:]]|$)|(then|do|else|command)[[:space:]]+rm([[:space:]]|$)" | cut -f1
     } | sort -un
   )"
   [[ -z "$hits" ]] && return

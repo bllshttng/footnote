@@ -67,14 +67,34 @@ echo "the spelling \"rm\" is fine here mid-line"
 EOF
 run 0 'quoted rm inside prose strings passes' "$TMP/prose-quote.sh"
 
-# rm as the FIRST word of a quoted string resolves through the user's PATH:
-# eval "rm -rf $X" is the hazard one nesting level past the quoted word
-# (review finding: the gate let it through).
+# rm as the FIRST word of a quoted string resolves through the user's PATH
+# only when the string is EVALUATED. eval and `<shell> -c` are; a printed
+# message is prose, not a command (review finding: the gate flagged both).
 cat > "$TMP/evalrm.sh" <<'EOF'
 eval "rm -rf $X"
 bash -c 'rm -rf "$Y"'
 EOF
 run 1 'string-indirected rm (eval / -c) fails' "$TMP/evalrm.sh"
+
+cat > "$TMP/echorm.sh" <<'EOF'
+echo "rm -rf failed for lockdir: $X" >&2
+echo 'rm -rf already attempted, see log' >&2
+EOF
+run 0 'quote-initial rm inside printed messages passes' "$TMP/echorm.sh"
+
+# A subcommand rm never resolves through the user's PATH, so it is not this
+# gate's subject (review finding: the gate flagged it with wrong advice).
+cat > "$TMP/subrm.sh" <<'EOF'
+git rm -f "$stale"
+docker rm -f "$container"
+EOF
+run 0 'subcommand rm (git / docker) passes' "$TMP/subrm.sh"
+
+# rm after a shell keyword IS command position; the word test must catch it.
+cat > "$TMP/thenrm.sh" <<'EOF'
+if [[ -n "$X" ]]; then rm -rf "$LOCKDIR"; fi
+EOF
+run 1 'rm after then keyword fails' "$TMP/thenrm.sh"
 
 # A guarded file that vanished fails closed.
 run 1 'missing listed file fails closed' "$TMP/does-not-exist.sh"
