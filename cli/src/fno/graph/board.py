@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fno.graph._intake import _project_key
-from fno.graph.render import make_kanban_classifiers
+from fno.graph.render import in_progress_epic_ids, make_kanban_classifiers
 from fno.graph.statuses import live_claimed_node_ids
 from fno.pr._cache import newest_row_offline
 
@@ -156,6 +156,12 @@ def compute_board(
         claims_reason = f"live claim state unavailable ({exc})"
 
     board_order, column_for = make_kanban_classifiers(scoped, live_claimed=live_claimed)
+    # Epics never carry their own claim or status=="in_progress" - sessions
+    # claim leaf children, not containers - so an in-progress epic (a done or
+    # claimed child) needs this separate promotion set to land in In progress
+    # instead of falling through to On deck (mirrors _kanban_column's own
+    # epic-promotion overlay in render.py).
+    in_progress_epics = in_progress_epic_ids(scoped, live_claimed)
 
     # -- Just finished --
     def _completed_dt(e: dict) -> datetime:
@@ -183,7 +189,11 @@ def compute_board(
                 e for e in scoped
                 if isinstance(e.get("id"), str)
                 and not e.get("completed_at")
-                and (e["id"] in live_claimed or e.get("status") == "in_progress")
+                and (
+                    e["id"] in live_claimed
+                    or e.get("status") == "in_progress"
+                    or e["id"] in in_progress_epics
+                )
             ),
             key=board_order,
         )
@@ -194,16 +204,18 @@ def compute_board(
         )
 
     # -- On deck: board order, excluding done/deferred/superseded/roadmap and
-    # anything already counted as In progress. The status=="in_progress" check
-    # is independent of in_progress_ids (which the claims-fault branch leaves
-    # empty) - a node the graph itself marks in_progress must never fall
-    # through to On deck just because the live-claims read failed.
+    # anything already counted as In progress. status=="in_progress" and
+    # in_progress_epics are checked directly, independent of in_progress_ids
+    # (which the claims-fault branch leaves empty) - a node the graph itself
+    # marks in_progress, or an epic with a claimed/done child, must never
+    # fall through to On deck just because the live-claims read failed.
     deck_entries = [
         e for e in sorted(scoped, key=board_order)
         if column_for(e) not in (None, "Done")
         and isinstance(e.get("id"), str)
         and e["id"] not in in_progress_ids
         and e.get("status") != "in_progress"
+        and e["id"] not in in_progress_epics
     ]
     on_deck = _section(
         [_row(e, _on_deck_fact(e, id_to_entry)) for e in deck_entries[:MAX_ROWS_PER_SECTION]],

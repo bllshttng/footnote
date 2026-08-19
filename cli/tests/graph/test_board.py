@@ -201,6 +201,23 @@ def test_live_claimed_node_in_progress_not_also_on_deck(monkeypatch, cache_dir):
     assert "x-claimed" not in deck_ids
 
 
+def test_in_progress_epic_lands_in_progress_not_on_deck(cache_dir):
+    """An epic never carries its own claim or status=="in_progress" -
+    sessions claim leaf children, not containers - so it needs the separate
+    in_progress_epics promotion to avoid falling through to On deck."""
+    entries = [
+        _node("x-epic1", type="epic", priority="p1"),
+        _node("x-child1", parent="x-epic1", status="in_progress"),
+    ]
+
+    board = compute_board(entries, project="fno", now=NOW)
+
+    ip_ids = {r["id"] for r in board["in_progress"]["rows"]}
+    deck_ids = {r["id"] for r in board["on_deck"]["rows"]}
+    assert "x-epic1" in ip_ids
+    assert "x-epic1" not in deck_ids
+
+
 def test_no_completions_in_window_falls_back_to_most_recent(cache_dir):
     entries = [
         _node("x-old-done", completed_at=_iso(NOW - timedelta(days=10)), pr_number=1),
