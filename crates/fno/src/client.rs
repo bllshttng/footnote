@@ -240,7 +240,18 @@ const PANE_DRAG_TIMEOUT: Duration = SEAM_DRAG_TIMEOUT;
 /// iTerm2, tmux with mouse on). Long enough that an ordinary click never
 /// triggers it; short enough that a deliberate hold does not feel like a wait.
 /// Release-fired (not hold-fired) so no timer runs while the button is down.
-const MENU_LONG_PRESS: Duration = Duration::from_millis(500);
+/// `pub(crate)`: every user-facing mention of the hold (the keys-modal note,
+/// the meta-row label in `keys.rs`) formats from this one constant, so a
+/// retune can never leave the help advertising a stale duration.
+pub(crate) const MENU_LONG_PRESS: Duration = Duration::from_millis(500);
+
+/// (x-7683) The one long-press qualification rule, shared by the tab release
+/// arm, the row release arm, and the dead-drag reaper: a hold that never
+/// moved, past the threshold. One definition so the three surfaces can never
+/// disagree about what a hold is.
+fn held_long_enough(start: Instant, moved: bool) -> bool {
+    !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
+}
 
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
@@ -1327,7 +1338,10 @@ fn build_keys_modal() -> KeysModal {
         None,
     );
     add(
-        PopupRow::Header("in tmux set mouse off · else m, or hold Left 500ms".into()),
+        PopupRow::Header(format!(
+            "in tmux set mouse off · else m, or hold Left {}ms",
+            MENU_LONG_PRESS.as_millis()
+        )),
         None,
     );
     KeysModal {
@@ -2995,6 +3009,15 @@ impl View {
         let Some(tid) = self.tab_cell_at(row, col) else {
             return false;
         };
+        self.open_tab_menu_by_id(tid, anchor)
+    }
+
+    /// (x-7683) Open the tab menu pinned to a stable [`TabId`] - the ONE
+    /// menu-open sequence (build, clear peek, reset the esc buffer) behind
+    /// the cell-resolved right-press, the long-press release arm, and the
+    /// dead-drag reaper, so the three paths can never drift apart.
+    /// `false` (nothing opened) for an unknown/closed tab.
+    fn open_tab_menu_by_id(&mut self, tid: TabId, anchor: Anchor) -> bool {
         // Clone the tab out of the layout borrow before mutating `self`
         // (menu open is cold; the clone is one small Vec). Unreachable today -
         // `tab_cell_at` walks spans minted from this same layout with no await
@@ -3104,16 +3127,9 @@ impl View {
         if self.menu_usurping_open() {
             return false;
         }
-        let qualified = |start: Instant, moved: bool| {
-            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
-        };
         if let Some(d) = self.tab_drag {
-            if qualified(d.start_at, d.moved) {
-                if let Some((_, idx, tab)) = self.find_tab(d.src_tab) {
-                    let menu = build_tab_menu(idx, tab, Anchor::Center);
-                    self.clear_peek();
-                    self.row_menu = Some(menu);
-                    self.row_menu_esc.clear();
+            if held_long_enough(d.start_at, d.moved) {
+                if self.open_tab_menu_by_id(d.src_tab, Anchor::Center) {
                     self.tab_drag = None;
                     return true;
                 }
@@ -3125,7 +3141,7 @@ impl View {
             return false;
         }
         if let Some(d) = self.row_drag.as_ref() {
-            if !qualified(d.start_at, d.moved) {
+            if !held_long_enough(d.start_at, d.moved) {
                 return false;
             }
             let idx = match &d.src {
@@ -10136,32 +10152,23 @@ async fn handle_stdin(
                     // release reports: with no drag report ever arriving, the
                     // release coords are the one unchecked signal left.
                     let long_press = !view.menu_usurping_open()
-                        && held.is_some_and(|(_, start, moved)| {
-                            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
-                        });
+                        && held.is_some_and(|(_, start, moved)| held_long_enough(start, moved));
                     if long_press {
-                        if let Some((tid, _, _)) = held {
-                            if let Some((_, idx, tab)) = view.find_tab(tid) {
-                                let menu = build_tab_menu(
-                                    idx,
-                                    tab,
-                                    Anchor::At {
-                                        row: rep.row,
-                                        col: rep.col,
-                                    },
-                                );
-                                view.clear_peek();
-                                view.row_menu = Some(menu);
-                                view.row_menu_esc.clear();
-                            } else {
-                                // The held tab closed mid-hold (e.g. a
-                                // co-attached client or server-driven
-                                // layout change) - say so rather than
-                                // let the hold end in silence, mirroring
-                                // the row arm's "no menu on the held
-                                // row" notice.
-                                view.set_notice("no menu on the held tab".into());
-                            }
+                        let opened = held.is_some_and(|(tid, _, _)| {
+                            view.open_tab_menu_by_id(
+                                tid,
+                                Anchor::At {
+                                    row: rep.row,
+                                    col: rep.col,
+                                },
+                            )
+                        });
+                        // The held tab closed mid-hold (e.g. a co-attached
+                        // client or server-driven layout change) - say so
+                        // rather than let the hold end in silence, mirroring
+                        // the row arm's "no menu on the held row" notice.
+                        if !opened {
+                            view.set_notice("no menu on the held tab".into());
                         }
                         view.tab_drag = None;
                         view.refresh_hover_affordances(rep.row, rep.col);
@@ -10231,9 +10238,7 @@ async fn handle_stdin(
                     // usurping overlay the hold degrades to the plain flow
                     // below.
                     let long_press = !view.menu_usurping_open()
-                        && held.is_some_and(|(start, moved)| {
-                            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
-                        });
+                        && held.is_some_and(|(start, moved)| held_long_enough(start, moved));
                     if long_press {
                         let opened = still_on_row
                             && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
