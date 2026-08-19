@@ -87,6 +87,14 @@ fn wait_for_lines(path: &Path, minimum: usize, budget: Duration) -> usize {
     }
 }
 
+fn daemon_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn seed_live_probe_rows(home: &AgentsHome, count: usize) {
     state::update_registry(&home.registry_json(), |registry| {
         for i in 0..count {
@@ -171,6 +179,7 @@ exit "$status"
 
 #[tokio::test]
 async fn daemon_answers_before_probing_finishes() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     seed_live_probe_rows(&home, 40);
@@ -189,7 +198,7 @@ async fn daemon_answers_before_probing_finishes() {
     );
 
     assert!(
-        wait_for_lines(&shim.starts, 1, Duration::from_secs(3)) >= 1,
+        wait_for_lines(&shim.starts, 1, Duration::from_secs(10)) >= 1,
         "the slow probe pass must have started before the request",
     );
     let request_started = Instant::now();
@@ -226,6 +235,7 @@ async fn daemon_answers_before_probing_finishes() {
 
 #[test]
 fn sigterm_stops_daemon_during_slow_sweep() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     seed_live_probe_rows(&home, 40);
@@ -243,7 +253,7 @@ fn sigterm_stops_daemon_during_slow_sweep() {
         ],
     );
     assert!(
-        wait_for_lines(&shim.starts, 1, Duration::from_secs(3)) >= 1,
+        wait_for_lines(&shim.starts, 1, Duration::from_secs(10)) >= 1,
         "the slow probe pass must be in flight before SIGTERM",
     );
 
@@ -279,6 +289,7 @@ fn sigterm_stops_daemon_during_slow_sweep() {
 
 #[test]
 fn wedged_daemon_clients_fail_fast_no_orphans() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     let fake_daemon = home.root().join("wedged-daemon");
@@ -361,6 +372,7 @@ while True:
 
 #[test]
 fn final_answer_check_keeps_a_daemon_that_binds_at_the_deadline() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     let delayed_daemon = home.root().join("delayed-daemon");
@@ -428,6 +440,7 @@ fn final_answer_check_keeps_a_daemon_that_binds_at_the_deadline() {
 /// no explicit `reconcile` RPC is issued here.
 #[tokio::test]
 async fn cold_start_reconciles_stale_ask_row_to_exited() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     let daemon_bin = PathBuf::from(DAEMON_BIN);
@@ -543,6 +556,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
 /// failure is injected via the FNO_AGENTS_FAIL_STARTUP_RECONCILE test seam.
 #[tokio::test]
 async fn startup_reconcile_failure_degrades_to_serving() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     let daemon_bin = PathBuf::from(DAEMON_BIN);
@@ -597,6 +611,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
 /// status` client exits 13 and does NOT lazy-start a daemon.
 #[tokio::test]
 async fn status_client_exits_13_when_daemon_down() {
+    let _test_guard = daemon_e2e_guard();
     const CLIENT_BIN: &str = env!("CARGO_BIN_EXE_fno-agents");
     let home = short_home();
     home.ensure_root().unwrap();
@@ -720,6 +735,7 @@ fn write_executable(path: &Path, body: &str) {
 
 #[tokio::test]
 async fn rm_reaps_registry_claude_and_mux_surfaces_in_one_call() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     seed_pane_row(&home, "three-surface-worker");
@@ -857,6 +873,7 @@ exit 2
 
 #[tokio::test]
 async fn restart_when_down_starts_fresh() {
+    let _test_guard = daemon_e2e_guard();
     // AC2-EDGE: no daemon running -> restart starts a fresh one and reports it,
     // with no error and old_pid == None.
     let home = short_home();
@@ -879,6 +896,7 @@ async fn restart_when_down_starts_fresh() {
 
 #[tokio::test]
 async fn drift_warned_on_list_stderr_only() {
+    let _test_guard = daemon_e2e_guard();
     // AC1-HP + AC4-HP: a daemon whose on-disk binary was replaced after startup
     // makes `list --json` emit a drift warning on STDERR while STDOUT stays clean
     // JSON.
@@ -1089,6 +1107,7 @@ fn write_valid_registry(home: &AgentsHome) {
 /// agents and serve that false zero to every caller.
 #[tokio::test]
 async fn registry_startup_refuses_a_divergent_nonempty_registry() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     write_divergent_registry(&home);
@@ -1158,6 +1177,7 @@ async fn registry_startup_refuses_a_divergent_nonempty_registry() {
 /// discovered count.
 #[tokio::test]
 async fn registry_list_refuses_over_a_broken_registered_lane() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     write_valid_registry(&home);
@@ -1219,6 +1239,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
 /// still returns `AgentNotFound`.
 #[tokio::test]
 async fn registry_lookup_distinguishes_unreadable_from_absent() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     let daemon_bin = PathBuf::from(DAEMON_BIN);
@@ -1335,6 +1356,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
 /// the daemon and serves a legitimate count of zero.
 #[tokio::test]
 async fn registry_true_empty_registry_still_serves_zero() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     std::fs::write(home.registry_json(), r#"{"schema_version":14,"agents":[]}"#).unwrap();
@@ -1371,6 +1393,7 @@ async fn registry_true_empty_registry_still_serves_zero() {
 /// complete one -- the startup assertion never re-runs.
 #[tokio::test]
 async fn registry_runtime_upgrade_refuses_a_partial_roster() {
+    let _test_guard = daemon_e2e_guard();
     let home = short_home();
     home.ensure_root().unwrap();
     write_valid_registry(&home);
