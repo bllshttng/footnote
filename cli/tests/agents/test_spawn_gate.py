@@ -240,7 +240,7 @@ class TestRamFloor:
         assert "skipping the floor check" in capsys.readouterr().err
 
 
-def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
+def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None):
     """Point run_gate at fixed knobs without touching real settings."""
 
     class _A:
@@ -249,6 +249,7 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0):
     a = _A()
     a.max_live = max_live
     a.min_free_gb = min_free_gb
+    a.max_lanes = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
         pass
@@ -417,6 +418,120 @@ class TestRunGate:
         assert spawn_gate.census().slot_claims == 1
         guard.release()
         assert spawn_gate.census().slot_claims == 0
+
+    def test_cap_two_refuses_third_but_not_codex_then_exit_releases_slot(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        rows: list[AgentEntry] = []
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, _start: bool(pid))
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        for index in (1, 2):
+            guard = spawn_gate.run_gate(f"zai-{index}", "pane", route_provider="zai")
+            rows.append(
+                AgentEntry(
+                    name=f"zai-{index}", harness="claude", provider="zai",
+                    cwd="/tmp", log_path="/tmp/log", pid=100 + index,
+                )
+            )
+            guard.release()
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-3", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count 2" in refused and "queued" not in refused
+
+        codex = spawn_gate.run_gate("codex-peer", "pane")
+        codex.release()
+        rows[0].status = "exited"
+        admitted = spawn_gate.run_gate("zai-4", "pane", route_provider="zai")
+        admitted.release()
+
+    def test_unreadable_provider_count_refuses_instead_of_zero(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+
+        def unreadable():
+            raise OSError("registry denied")
+
+        monkeypatch.setattr("fno.agents.registry.load_registry", unreadable)
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-1", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "provider zai" in refused and "cap 2" in refused
+        assert "current count unavailable" in refused
+
+    def test_force_does_not_bypass_provider_cap(self, monkeypatch):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
+        row = AgentEntry(
+            name="zai-live", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", pid=101,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: True
+        )
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate(
+                "zai-forced", "pane", route_provider="zai", force=True
+            )
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+
+    def test_provider_cap_never_queues_on_a_busy_mutex(self, monkeypatch, capsys):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr(
+            spawn_gate, "_acquire_gate_mutex", lambda _holder, **_kwargs: False
+        )
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("zai-now", "pane", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        refused = capsys.readouterr().err
+        assert "current count unavailable" in refused and "queued" not in refused
+
+    def test_provider_count_requires_positive_liveness_and_skips_exited(
+        self, monkeypatch
+    ):
+        rows = [
+            AgentEntry(name="positive", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=101),
+            AgentEntry(name="stale", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=102),
+            AgentEntry(name="exited", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", status="exited", pid=103),
+        ]
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        monkeypatch.setattr(
+            spawn_gate, "_pid_alive",
+            lambda pid, _start: {101: True, 102: False, 103: True}[pid],
+        )
+        assert spawn_gate.provider_live_count("zai") == 1
+
+    def test_pidless_bg_requires_a_readable_positive_roster_marker(
+        self, tmp_path, monkeypatch
+    ):
+        row = AgentEntry(
+            name="zai-bg", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", short_id="11111111",
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+        _write_roster(
+            tmp_path,
+            {"zai-bg": {"sessionId": "11111111-2222-3333-4444-55555555abcd", "pid": ALIVE}},
+        )
+        assert spawn_gate.provider_live_count("zai") == 1
 
 
 class TestQos:

@@ -259,6 +259,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "fallback",
         "gemini",
         "happy_routed_panes",
+        "max_lanes",
         "max_live",
         "min_free_gb",
         "profiles",

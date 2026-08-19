@@ -1626,14 +1626,17 @@ class AgentsBlock(BaseModel):
     dead_row_grace: int | dict[str, int] = 3600
     codex: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
-    # Spawn-gate knobs (x-c5cc). All three coerce invalid values to their
-    # defaults (fail-open, matching _coerce_max_concurrent): the gate is
-    # protective infrastructure and a typo must never brick spawning.
+    # Spawn-gate knobs (x-c5cc). Scalar guards retain their fail-open defaults;
+    # max_lanes keeps its safe default on invalid input because dropping zai's
+    # cap would fail open exactly when the fleet is busiest.
     #   max_live    — cap on concurrent live worker processes (union of the fno
     #                 registry and claude's daemon roster). Spawn queues at cap.
+    #   max_lanes   — immediate-refusal cap per model provider. Unlisted
+    #                 providers are uncapped; the built-in zai cap is 5.
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
+    max_lanes: dict[str, int] = Field(default_factory=lambda: {"zai": 5})
     min_free_gb: float = 4.0
     worker_qos: str = "utility"
     # Default permission/approval mode for AUTONOMOUS dispatchers only
@@ -1709,6 +1712,31 @@ class AgentsBlock(BaseModel):
                 return 3
             return n if n >= 1 else 3
         return 3
+
+    @field_validator("max_lanes", mode="before")
+    @classmethod
+    def _coerce_max_lanes(cls, v: object) -> object:
+        """Accept positive integer caps keyed by literal model provider.
+
+        An explicit empty table disables all provider caps. Any malformed key
+        or value restores the safe built-in zai cap instead of dropping the
+        invalid entry and accidentally making that provider unlimited.
+        """
+        safe_default = {"zai": 5}
+        if not isinstance(v, dict):
+            return safe_default
+        out: dict[str, int] = {}
+        for provider, cap in v.items():
+            if not (
+                isinstance(provider, str)
+                and re.fullmatch(r"[a-z][a-z0-9_-]*", provider)
+                and isinstance(cap, int)
+                and not isinstance(cap, bool)
+                and cap >= 1
+            ):
+                return safe_default
+            out[provider] = cap
+        return out
 
     @field_validator("min_free_gb", mode="before")
     @classmethod

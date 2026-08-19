@@ -186,7 +186,13 @@ def test_route_allowed_on_capability_enabled_pane(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
     monkeypatch.setenv("ZAI_API_KEY", "zk-live")
-    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    gate_call: Dict[str, Any] = {}
+
+    def fake_gate(*_args: Any, **kwargs: Any) -> _Gate:
+        gate_call.update(kwargs)
+        return _Gate()
+
+    monkeypatch.setattr(spawn_gate, "run_gate", fake_gate)
     captured: Dict[str, Any] = {}
 
     def fake_dispatch(**kwargs: Any) -> MuxSpawnResult:
@@ -208,6 +214,7 @@ def test_route_allowed_on_capability_enabled_pane(
     assert result.exit_code == 0, result.output
     assert captured["provider"] == "claude"
     assert captured["route_provider"] == "zai"
+    assert gate_call["route_provider"] == "zai"
     route_env = captured["route_env"]
     assert route_env["ANTHROPIC_BASE_URL"] == DEFAULT_ZAI_BASE_URL
     assert route_env["ANTHROPIC_AUTH_TOKEN"] == "zk-live"

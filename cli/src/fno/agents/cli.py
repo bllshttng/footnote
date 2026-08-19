@@ -1312,6 +1312,7 @@ def cmd_spawn(
             "headless" if (once or substrate == "headless") else substrate,
             force=force,
             no_wait=no_wait,
+            route_provider=route_provider,
         )
     except BaseException:
         if node_reservation is not None:
