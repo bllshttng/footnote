@@ -280,6 +280,52 @@ def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
     assert verdict.owner_id == "x-5555"
 
 
+def test_hold_for_pr_falls_back_to_show_toplevel_when_canonical_worktree_is_none(
+    tmp_path, monkeypatch,
+):
+    """Review fix: when resolve_canonical_worktree(cwd) returns None (its
+    own docstring: bare repos and separate-git-dir checkouts legitimately
+    do), hold_for_pr must re-resolve via `git rev-parse --show-toplevel`
+    against the passed cwd - never fall back to the RAW, unnormalized cwd
+    string. Passes a subdirectory of the repo as cwd (never equal to the
+    entry's stored root by string comparison alone) and forces the None
+    branch, proving the toplevel re-resolution - not a raw-cwd string
+    match - is what finds the held node."""
+    import subprocess
+
+    target_repo = tmp_path / "target-repo"
+    sub_dir = target_repo / "sub"
+    sub_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(target_repo), check=True)
+
+    plan = target_repo / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-7777", "cwd": str(target_repo), "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    verdict = _hold.hold_for_pr(42, str(sub_dir))
+    assert verdict is not None
+    assert verdict.owner_id == "x-7777"
+
+
 def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
     tmp_path, monkeypatch,
 ):

@@ -67,14 +67,33 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     # the wrong root from it would both silently mismatch a genuinely-held
     # node's own repo.
     _canonical_root = resolve_canonical_worktree(Path(cwd))
-    _root = (
-        os.path.normpath(str(_canonical_root))
-        if _canonical_root is not None
-        else os.path.normpath(cwd)
-    )
+    if _canonical_root is not None:
+        _root = os.path.normpath(str(_canonical_root))
+    else:
+        # resolve_canonical_worktree's own docstring: a bare repo or a
+        # separate-git-dir checkout returns None, "the caller's
+        # --show-toplevel fallback yields the real checkout" - never the
+        # RAW, unresolved cwd. A relative or unnormalized cwd (e.g. `fno pr
+        # hold-check 42 --repo .`) can never equal or prefix an entry's
+        # absolute stored cwd, which would silently fail the project-scope
+        # gate open for a repo that genuinely has held nodes (review fix).
+        try:
+            _toplevel = _merge.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
+        except ToolMissing:
+            _toplevel = None
+        _root = os.path.normpath(
+            _toplevel.stdout.strip() if _toplevel is not None and _toplevel.ok and _toplevel.stdout.strip() else cwd
+        )
     _root_prefix = _root.rstrip(os.sep) + os.sep
 
     from fno.graph._intake import project_root_from_settings
+
+    # Memoized per project name: project_root_from_settings re-parses the
+    # settings file(s) from disk on every call, and most graphs share a
+    # small number of distinct project names across many entries - without
+    # this, the any(...) scan below would re-read the same settings file
+    # once per entry (review fix, efficiency).
+    _settings_root_cache: dict[str, Optional[str]] = {}
 
     def _effective_cwd(entry: dict) -> Optional[str]:
         # Prefer the LIVE settings-resolved root for the entry's project
@@ -87,11 +106,11 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # path) - matching only the stale snapshot would silently misread a
         # node that genuinely belongs here as "not this repo" (review fix).
         project = entry.get("project")
-        resolved = (
-            project_root_from_settings(project)
-            if isinstance(project, str) and project
-            else None
-        )
+        resolved = None
+        if isinstance(project, str) and project:
+            if project not in _settings_root_cache:
+                _settings_root_cache[project] = project_root_from_settings(project)
+            resolved = _settings_root_cache[project]
         raw = resolved or entry.get("cwd")
         return raw if isinstance(raw, str) and raw else None
 
