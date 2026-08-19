@@ -39,7 +39,13 @@ prompt: |
   Write your dispatch plan now.
 grade:
   - kind: exit
-    command: "cd cli && uv run pytest tests/unit/test_blueprint_batching_rule.py -q -k behavioral"
+    # The `test -f` is the guard, and it cannot move into the test. A worker
+    # that writes nothing is the failure this grader exists to catch, but
+    # pytest skips the behavioral test when the artifact is absent, and a skip
+    # exits 0. So the grade would read "no artifact" as a pass. An env var
+    # cannot steer the skip either: cli/tests/conftest.py clears os.environ for
+    # hermetic runs, so the test module never sees it.
+    command: "test -f dispatch-plan.md && cd cli && uv run pytest tests/unit/test_blueprint_batching_rule.py -q -k behavioral"
     expect: 0
 timeout_minutes: 15
 tags: [king-for-a-day, blueprint, batching]
