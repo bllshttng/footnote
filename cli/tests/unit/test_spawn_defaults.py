@@ -15,7 +15,7 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
-                 route="", account=""):
+                 route="", account="", pane_group="", lanes=None):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -23,13 +23,26 @@ class _Defaults:
         self.permission_mode = permission_mode
         self.route = route
         self.account = account
+        self.pane_group = pane_group
+        self.lanes = [
+            _Defaults(**lane) if isinstance(lane, dict) else lane
+            for lane in (lanes or [])
+        ]
 
 
 class _Settings:
-    def __init__(self, profiles=None, model_routing=None, **kw):
+    def __init__(self, profiles=None, model_routing=None, max_lanes=None, **kw):
         # profiles: {verb: {field: value}} -> {verb: _Defaults}
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
-        self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
+        self.agents = type(
+            "A",
+            (),
+            {
+                "defaults": _Defaults(**kw),
+                "profiles": prof,
+                "max_lanes": max_lanes or {},
+            },
+        )()
         # a real ModelRoutingBlock so resolve_route can resolve a lane.
         self.model_routing = model_routing
 
@@ -342,6 +355,110 @@ def test_ac3_hp_namespace_stripped_key():
             profiles={"think": {"model": "fable"}},
         )
         assert out[out.index("--model") + 1] == "fable", seed
+
+
+def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    lanes = [
+        {"provider": "codex", "effort": "high", "substrate": "pane", "permission_mode": "yolo"},
+        {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+    ]
+    for live_count, expected_harness, expected_rung in (
+        (0, "codex", "lanes[0]"),
+        (1, "claude", "lanes[1]"),
+        (2, "codex", "lanes[0]"),
+        (3, "claude", "lanes[1]"),
+    ):
+        monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda n=live_count: [object()] * n)
+        err = io.StringIO()
+        out = _inject(
+            ["spawn", "--name", f"w{live_count}", "/fno:target x-1"],
+            err=err,
+            profiles={"target": {"lanes": lanes}},
+        )
+        assert out[out.index("--harness") + 1] == expected_harness
+        assert expected_rung in err.getvalue()
+
+
+def test_profile_lanes_skip_capped_vendor(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            {"provider": "codex", "permission_mode": "yolo"},
+            {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "zai lane skipped at 2 of 2" in err.getvalue()
+    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+
+
+def test_profile_only_lane_at_cap_refuses(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            max_lanes={"zai": 2},
+            profiles={"target": {"lanes": [
+                {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+            ]}},
+        )
+    assert exc.value.code == 2
+    assert "zai" in err.getvalue() and "2 of 2" in err.getvalue()
+
+
+def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(
+        spawn_gate,
+        "provider_live_count",
+        lambda vendor: (_ for _ in ()).throw(spawn_gate.ProviderCountUnavailable("registry incomplete")),
+    )
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            max_lanes={"zai": 2},
+            profiles={"target": {"lanes": [
+                {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+            ]}},
+        )
+    assert exc.value.code == 2
+    assert "registry incomplete" in err.getvalue()
+
+
+def test_profile_lane_unknown_harness_refuses(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            profiles={"target": {"lanes": [{"provider": "banana"}]}},
+        )
+    assert exc.value.code == 2
+    assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
 
 
 def test_ac4_err_incompatible_config_substrate_degrades_open():

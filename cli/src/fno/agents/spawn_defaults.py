@@ -27,7 +27,7 @@ from __future__ import annotations
 import random
 import re
 import sys
-from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import IO, Any, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 
 # Flags that consume the FOLLOWING token. Scanning for our three flags skips a
 # value flag's value so a value that looks like `--model` / `--effort` can never
@@ -39,7 +39,7 @@ _VALUE_FLAGS = frozenset(
         "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
-        "--output-format", "--monitor",
+        "--output-format", "--monitor", "--tab",
     }
 )
 
@@ -102,7 +102,7 @@ _SUBSTRATES = ("pane", "bg", "headless")
 _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
-        "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
+        "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--node", "--slug", "--plan", "--name",
         # x-6de8: --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
@@ -324,14 +324,14 @@ def _mint_node_name(
     return name
 
 
-def _read_registry_names() -> Set[str]:
-    """Live worker names for the autogen pre-check. Best-effort: {} on any error."""
+def _read_registry_rows() -> list[object]:
+    """Registry rows shared by name minting and profile-lane selection."""
     try:
         from fno.agents.registry import load_registry
 
-        return {e.name for e in load_registry()}
+        return list(load_registry())
     except Exception:
-        return set()
+        return []
 
 
 def normalize_spawn_args(
@@ -483,7 +483,11 @@ def normalize_spawn_args(
     # session display name) and must not suppress fno's own name mint (x-1caa).
     head = toks if fence is None else toks[:fence]
     if not any(t == "--name" or t.startswith("--name=") for t in head):
-        names = existing_names if existing_names is not None else _read_registry_names()
+        names = (
+            existing_names
+            if existing_names is not None
+            else {str(getattr(e, "name", "")) for e in _read_registry_rows()}
+        )
         # x-b80d: a node-driven spawn carries what an operator remembers. The
         # name is the registry row's ONLY node carrier, so a nodeless mint makes
         # the row unfindable by node or slug. Mint ``t-<node>-<slug>-<model>``
@@ -712,6 +716,100 @@ def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> 
         return False
 
 
+_LANE_FIELDS = frozenset(
+    {"provider", "model", "effort", "substrate", "permission_mode", "route", "account", "pane_group"}
+)
+
+
+def _lane_value(lane: object, name: str) -> str:
+    value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _validated_lanes(raw: object, path: str, err: IO[str]) -> list[object]:
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list) or not raw:
+        print(f"fno agents spawn: config.{path} must be a non-empty list", file=err)
+        raise SystemExit(2)
+    for index, lane in enumerate(raw):
+        lane_path = f"{path}[{index}]"
+        if not isinstance(lane, Mapping) and not hasattr(lane, "provider"):
+            print(f"fno agents spawn: config.{lane_path} must be a table", file=err)
+            raise SystemExit(2)
+        if isinstance(lane, Mapping):
+            unknown = sorted(set(lane) - _LANE_FIELDS)
+            if unknown:
+                print(
+                    f"fno agents spawn: config.{lane_path} has unknown field {unknown[0]!r}",
+                    file=err,
+                )
+                raise SystemExit(2)
+            for key, value in lane.items():
+                if not isinstance(value, str):
+                    print(
+                        f"fno agents spawn: config.{lane_path}.{key} must be a string; got {value!r}",
+                        file=err,
+                    )
+                    raise SystemExit(2)
+        if not any(_lane_value(lane, key) for key in _LANE_FIELDS):
+            print(f"fno agents spawn: config.{lane_path} is empty", file=err)
+            raise SystemExit(2)
+    return list(raw)
+
+
+def _lane_vendor(lane: object) -> Optional[str]:
+    route = _lane_value(lane, "route")
+    if not route:
+        return None
+    normalized = route.replace(",", "/")
+    vendor, sep, _model = normalized.partition("/")
+    return vendor.strip() if sep and vendor.strip() else None
+
+
+def _select_profile_lane(profile: object, verb: str, agents: object, err: IO[str]) -> tuple[Optional[object], Optional[int]]:
+    path = f"agents.profiles.{verb}.lanes"
+    lanes = _validated_lanes(getattr(profile, "lanes", []), path, err)
+    if not lanes:
+        return None, None
+
+    from fno.agents.registry import TERMINAL_STATUSES
+    from fno.agents.spawn_gate import ProviderCountUnavailable, provider_live_count
+
+    live_rows = [
+        row
+        for row in _read_registry_rows()
+        if getattr(row, "status", "live") not in TERMINAL_STATUSES
+    ]
+    start = len(live_rows) % len(lanes)
+    caps = dict(getattr(agents, "max_lanes", {}) or {})
+    blocked: list[tuple[str, int, int]] = []
+    for offset in range(len(lanes)):
+        index = (start + offset) % len(lanes)
+        lane = lanes[index]
+        vendor = _lane_vendor(lane)
+        cap = caps.get(vendor) if vendor else None
+        if cap is None:
+            return lane, index
+        try:
+            current = provider_live_count(vendor)
+        except ProviderCountUnavailable as exc:
+            print(
+                f"fno agents spawn: config.{path}[{index}] provider count unavailable "
+                f"for {vendor}: {exc}; refusing; no worker launched",
+                file=err,
+            )
+            raise SystemExit(2) from exc
+        if current < cap:
+            return lane, index
+        blocked.append((vendor, current, cap))
+        print(f"fno agents spawn: {vendor} lane skipped at {current} of {cap}", file=err)
+
+    details = ", ".join(f"{vendor} {current} of {cap}" for vendor, current, cap in blocked)
+    print(f"fno agents spawn: every configured lane is at cap ({details}); refusing; no worker launched", file=err)
+    raise SystemExit(2)
+
+
 # A model string's implied vendor, by prefix or tier word. A pure string
 # opinion and never a routing input: the warning it drives is advisory, because
 # the pairing is legal and --model is deliberate passthrough (cli.py).
@@ -879,9 +977,17 @@ def inject_spawn_defaults(
     # unknown-provider refusal all run once, on the merged fields.
     verb = _profile_key(_seed_of(out[1:]))
     profile = (getattr(agents, "profiles", None) or {}).get(verb) if verb else None
+    lane: Optional[object] = None
+    lane_index: Optional[int] = None
+    if profile is not None and verb is not None:
+        lane, lane_index = _select_profile_lane(profile, verb, agents, err)
 
     def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung for a field: profile > defaults."""
+        """Effective value + source rung: lane > profile > defaults."""
+        if lane is not None and lane_index is not None:
+            lv = _lane_value(lane, name)
+            if lv:
+                return lv, f"agents.profiles.{verb}.lanes[{lane_index}]"
         if profile is not None:
             pv = (getattr(profile, name, "") or "").strip()
             if pv:

@@ -1484,6 +1484,15 @@ class SpawnDefaultsBlock(BaseModel):
     account: str = ""
 
 
+class SpawnProfileBlock(SpawnDefaultsBlock):
+    """Per-verb overlay plus its strict ordered delivery-lane vocabulary."""
+
+    pane_group: str = ""
+    # Keep lanes raw so a malformed routing list does not make every config
+    # read fail; the spawn seam validates and refuses before launching anything.
+    lanes: Any = Field(default_factory=list)
+
+
 class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
@@ -1587,7 +1596,7 @@ class AgentsBlock(BaseModel):
     # x-3d5b: per-verb overlay of `defaults`, keyed by the seed's leading
     # slash-verb (`profiles.blueprint`, `profiles.target`, ...). Same block, one
     # rung above defaults in precedence. Resolved at the spawn seam.
-    profiles: dict[str, SpawnDefaultsBlock] = Field(default_factory=dict)
+    profiles: dict[str, SpawnProfileBlock] = Field(default_factory=dict)
     # The operator's own simple-versus-complex split, written where a daemon can
     # read it: an ordered fallback chain per node size, consulted only when a
     # provider refuses and the account queue cannot answer. Keys are S, M, L and
@@ -1646,6 +1655,7 @@ class AgentsBlock(BaseModel):
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
     max_lanes: dict[str, int] = Field(default_factory=lambda: {"zai": 5})
+    pane_group_max: int = 4
     min_free_gb: float = 4.0
     worker_qos: str = "utility"
     # Default permission/approval mode for AUTONOMOUS dispatchers only
@@ -1721,6 +1731,13 @@ class AgentsBlock(BaseModel):
                 return 3
             return n if n >= 1 else 3
         return 3
+
+    @field_validator("pane_group_max", mode="before")
+    @classmethod
+    def _coerce_pane_group_max(cls, v: object) -> object:
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+            return v
+        return 4
 
     @field_validator("max_lanes", mode="before")
     @classmethod
