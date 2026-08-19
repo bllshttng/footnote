@@ -55,7 +55,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 import typer
 
@@ -670,13 +670,31 @@ def refresh(
 _UNHELD_STATES = frozenset({"free", "stale"})
 
 
-def _roster_crosscheck(node_id: str) -> dict:
-    """Ask the fleet roster whether anyone is working ``node_id``.
+class RosterReading(NamedTuple):
+    """One reading of the fleet roster, reusable across many claims.
 
-    Returns the additive fields :func:`status` merges into its output:
-    ``roster_consulted`` (bool), ``roster_rows_scanned`` (int),
-    ``roster_workers`` (list of ``{name, state, cwd}``) and, when the
-    cross-check could not run, ``roster_skip_reason``.
+    ``consulted`` is the honest instrument flag: False means the join could not
+    run, and ``reason`` says why. ``rows_scanned`` is the positive marker - a
+    scan of forty rows finding nobody is a different answer from a read that
+    failed, and rendering both the same way is how this defect would survive its
+    own fix. ``workers_by_node`` maps a resolved node id to the rows on it.
+
+    Taken ONCE and passed down. The read shells out to the harness, so a sweep
+    over sixty claims that took its own reading each time would pay sixty
+    subprocesses to answer one question.
+    """
+
+    consulted: bool
+    rows_scanned: int
+    workers_by_node: dict
+    reason: str = ""
+
+    def workers_on(self, node_id: str) -> list:
+        return self.workers_by_node.get(node_id, [])
+
+
+def read_roster(timeout: float = 10.0) -> RosterReading:
+    """Read the fleet once and index it by resolved node id.
 
     The join is :func:`fno.agents.watchdog.fleet_rows`, which resolves a row's
     node from the worktree manifest and then the session-keyed ledger - both
@@ -685,42 +703,52 @@ def _roster_crosscheck(node_id: str) -> dict:
     is recorded in that module's header.
 
     Distinguishing "scanned and found nothing" from "could not scan" is the
-    whole point, so the degrade signal is explicit rather than inferred from
-    an empty list. ``fleet_rows`` returns ``([], warnings)`` for every failure
-    mode, so no rows PLUS a warning is an instrument that did not run, while
-    no rows and no warning is an honestly empty fleet. Reporting the second as
-    the first would rebuild the ambiguity one layer up.
+    whole point, so the degrade signal is explicit rather than inferred from an
+    empty index. ``fleet_rows`` returns ``([], warnings)`` for every failure
+    mode, so no rows PLUS a warning is an instrument that did not run, while no
+    rows and no warning is an honestly empty fleet.
 
     A row whose node did not resolve carries ``node=None`` and is invisible
-    here - which is exactly the shape of a worker that never ran ``target
-    init``. The scanned count is the honest ceiling on what was checked.
+    here - exactly the shape of a worker that never ran ``target init``. The
+    scanned count is the honest ceiling on what was checked, which is why every
+    caller prints it rather than just the hits.
     """
     try:
         from fno.agents.watchdog import fleet_rows
 
-        rows, warnings = fleet_rows(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+        rows, warnings = fleet_rows(timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
-        return {
-            "roster_consulted": False,
-            "roster_rows_scanned": 0,
-            "roster_workers": [],
-            "roster_skip_reason": f"{type(exc).__name__}: {exc}",
-        }
+        return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
     if not rows and warnings:
+        return RosterReading(False, 0, {}, warnings[0])
+    index: dict = {}
+    for r in rows:
+        if r.node:
+            index.setdefault(r.node, []).append(
+                {"name": r.name, "state": r.state, "cwd": r.cwd}
+            )
+    return RosterReading(True, len(rows), index)
+
+
+def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) -> dict:
+    """The additive ``roster_*`` fields for one node key.
+
+    ``reading`` lets a sweep share one fleet read across every claim it
+    classifies; omitting it takes a fresh reading for a single lookup.
+    """
+    if reading is None:
+        reading = read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+    if not reading.consulted:
         return {
             "roster_consulted": False,
             "roster_rows_scanned": 0,
             "roster_workers": [],
-            "roster_skip_reason": warnings[0],
+            "roster_skip_reason": reading.reason,
         }
     return {
         "roster_consulted": True,
-        "roster_rows_scanned": len(rows),
-        "roster_workers": [
-            {"name": r.name, "state": r.state, "cwd": r.cwd}
-            for r in rows
-            if r.node == node_id
-        ],
+        "roster_rows_scanned": reading.rows_scanned,
+        "roster_workers": reading.workers_on(node_id),
     }
 
 
@@ -909,6 +937,39 @@ def list_cmd(
         )
 
 
+def _abandonment_probe(reading: Optional[RosterReading] = None):
+    """The roster-backed probe :func:`reap_dead_claims` calls on a SUSPECT node.
+
+    Returns a callable answering ``True`` (proven abandoned), ``False`` (a live
+    worker is on the node) or ``None`` (the join could not run, so the claim is
+    kept). One roster READING is taken lazily and shared across every claim in
+    the sweep: the read shells out to the harness, so taking it per claim would
+    pay one subprocess per lockfile to answer one question.
+
+    Abandonment needs all four conditions true, and the caller already proved
+    the first two (same machine by machine_id, pid dead or reused) before this
+    runs. The two this adds are both positive: the join actually ran, and it
+    scanned at least one row. A probe that read zero rows because the roster
+    read failed proves nothing, and reaping on it would archive a live worker's
+    claim - x-ba4b's disaster from the other side.
+    """
+    cache: dict = {}
+
+    def _probe(claim) -> Optional[bool]:
+        if "reading" not in cache:
+            cache["reading"] = (
+                reading
+                if reading is not None
+                else read_roster(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+            )
+        seen: RosterReading = cache["reading"]
+        if not seen.consulted or seen.rows_scanned == 0:
+            return None
+        return not seen.workers_on(claim.key[len("node:"):])
+
+    return _probe
+
+
 @cli.command(name="reap")
 def reap_cmd(
     apply: bool = typer.Option(
@@ -922,17 +983,30 @@ def reap_cmd(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Archive every provably-dead claim: same-machine, dead/reused pid, no live TTL.
+    """Archive every provably-dead claim, naming the instrument that proved it.
 
-    Not an age cutoff - a claim's holder pid is proven dead by the same
-    three-part proof as :func:`fno.claims.staleness.is_provably_dead`
-    (same-machine, dead/reused pid, no live TTL), never guessed from how
-    old the file is. Dry-run by default; `--apply` archives to `.expired/`
-    and re-reads the store to confirm each move before counting it
-    `reaped` - an exit code alone is not evidence. Exits 1 when
-    any reapable file's move could not be confirmed on that re-read.
+    Not an age cutoff - death is measured, never guessed from how old a file is.
+    Which measurement applies depends on what the claim's holder is:
+
+      * An EXPIRED TTL is a clock reading and proves death from any host.
+      * A dead PID proves death only on this machine, by machine_id.
+      * A dead one-shot `dispatch:` holder is provable death even inside its
+        TTL: nothing respawns under `spawn-cli:<pid>`.
+      * A SUSPECT `node:` claim is the one case a pid cannot settle, because a
+        session can be respawned under a new pid. It is reaped only on a
+        POSITIVE roster finding: the join ran, scanned at least one row, and no
+        row resolves to that node. A join that could not run yields unknown, and
+        unknown keeps the claim.
+
+    Dry-run by default; `--apply` archives to `.expired/` and re-reads the store
+    to confirm each move before counting it `reaped` - an exit code alone is not
+    evidence. Exits 1 when any reapable file's move could not be confirmed.
     """
-    summary = reap_dead_claims(roots=list(root) if root else None, apply=apply)
+    summary = reap_dead_claims(
+        roots=list(root) if root else None,
+        apply=apply,
+        abandonment_probe=_abandonment_probe(),
+    )
 
     if json_output:
         typer.echo(json.dumps(summary))
@@ -946,8 +1020,18 @@ def reap_cmd(
                 f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
                 "(dry-run; pass --apply)"
             )
+        # The suspect buckets are split because "kept: 2 suspect" is the line
+        # that taught the operator this verb was useless: it could not say
+        # whether those two were protected by a measurement or merely unmeasured.
+        suspect = f"{summary['kept_suspect']} suspect"
+        if summary["kept_suspect_alive"]:
+            suspect += f", {summary['kept_suspect_alive']} suspect (worker alive)"
+        if summary["kept_suspect_unprobed"]:
+            suspect += (
+                f", {summary['kept_suspect_unprobed']} suspect (roster not consulted)"
+            )
         typer.echo(
-            f"kept: {summary['kept_live']} live, {summary['kept_suspect']} suspect, "
+            f"kept: {summary['kept_live']} live, {suspect}, "
             f"{summary['kept_offhost']} off-host, {summary['corrupted']} corrupted, "
             f"{summary['vanished']} vanished, {summary['contended']} contended  |  "
             f"roots: {', '.join(summary['roots'])}"

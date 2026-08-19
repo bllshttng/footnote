@@ -123,6 +123,33 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
 
 
+#: Key families whose holder is a single process that launches something and
+#: exits. Nothing respawns under that holder, so SUSPECT protects nothing there.
+_ONE_SHOT_KEY_PREFIXES = ("dispatch:",)
+
+
+def is_one_shot_key(key: str) -> bool:
+    """Is KEY held by a process that cannot come back under a new pid?
+
+    SUSPECT (a dead pid inside an unexpired TTL) exists because a `node:` claim
+    is held by a SESSION, and a session genuinely can be respawned by the daemon
+    under a new pid - x-ba4b measured the disaster when one was treated as free.
+
+    A `dispatch:<id>` reservation is different in kind. Its holder is
+    `spawn-cli:<pid>`, one process that launches a worker and exits, so there is
+    no respawn to protect and the rationale is structurally inapplicable. The
+    generic rule applied it anyway, and a queued spawn that never got a slot
+    left a reservation that refused the relaunch with `reason=reservation-held`
+    for its whole TTL, recoverable only by hand (x-05be).
+
+    So a dead one-shot holder on this machine is a provable death needing no
+    further evidence. A `node:` key is deliberately absent: its liveness needs
+    the roster probe, and a shortcut here would archive a live respawned
+    worker's claim inside its first stop cycle.
+    """
+    return key.startswith(_ONE_SHOT_KEY_PREFIXES)
+
+
 def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, str]:
     """Classify one claim for GC: can its holder be PROVEN dead from this host?
 
@@ -165,14 +192,18 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     bool and the bucket, so a caller scanning many claims (or re-verifying
     one under a mutex) never pays for it twice.
     """
+    same_machine = is_same_machine(claim.host, claim.machine_id)
     # The same-machine gate guards the PID arm only. An expired TTL carries its
     # own proof, so it must reach classify() even from a host we cannot verify.
-    if not is_expired(claim, now=now) and not is_same_machine(
-        claim.host, claim.machine_id
-    ):
+    if not is_expired(claim, now=now) and not same_machine:
         return False, "offhost"
     state = classify(claim, now=now)
     if state is ClaimState.STALE:
+        return True, ""
+    if state is ClaimState.SUSPECT and same_machine and is_one_shot_key(claim.key):
+        # SUSPECT protects a slot whose holder might come back under a new pid.
+        # A one-shot holder cannot, so the protection buys nothing and costs a
+        # permanent wedge. See is_one_shot_key.
         return True, ""
     return False, "suspect" if state is ClaimState.SUSPECT else "live"
 

@@ -167,6 +167,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
     """
     known_keys = {
         "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
+        "kept_suspect_alive", "kept_suspect_unprobed",
         "kept_offhost", "corrupted", "vanished", "contended", "reap_failed",
         "apply", "roots",
     }
@@ -189,6 +190,8 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "would_reap": int(summary["would_reap"]),
         "kept_live": int(summary["kept_live"]),
         "kept_suspect": int(summary["kept_suspect"]),
+        "kept_suspect_alive": int(summary["kept_suspect_alive"]),
+        "kept_suspect_unprobed": int(summary["kept_suspect_unprobed"]),
         "kept_offhost": int(summary["kept_offhost"]),
         "corrupted": int(summary["corrupted"]),
         "vanished": int(summary["vanished"]),

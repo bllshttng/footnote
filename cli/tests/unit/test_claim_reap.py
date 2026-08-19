@@ -705,3 +705,187 @@ def test_reconcile_folds_the_reap_summary_into_its_json_payload(tmp_path, monkey
     assert payload["claim_reap"]["outcome"] == "ok"
     assert payload["claim_reap"]["reaped"] == 3
     assert payload["claim_reap"]["scanned"] == 9
+
+
+# ---------------------------------------------------------------------------
+# a dead one-shot holder blocks nothing (x-05be change 3)
+# ---------------------------------------------------------------------------
+
+
+class TestOneShotKeysNeedNoRespawnProtection:
+    """SUSPECT protects a slot whose holder might come back under a new pid.
+    `spawn-cli:<pid>` launches a worker and exits, so it cannot, and a queued
+    spawn that never got a slot wedged its node for the whole TTL.
+    """
+
+    def _suspect(self, key):
+        return Claim(
+            key=key, holder="spawn-cli:1", acquired_at=now_ms(),
+            expires_at=now_ms() + 180_000, pid=_dead_pid(),
+            host=socket.gethostname(),
+        )
+
+    def test_a_dead_dispatch_reservation_is_reapable_inside_its_ttl(self):
+        assert is_provably_dead(self._suspect("dispatch:x-05be")) is True
+
+    def test_a_nested_dispatch_key_is_covered_too(self):
+        assert is_provably_dead(self._suspect("dispatch:think:x-18ac:birth")) is True
+
+    def test_a_node_key_is_deliberately_not_one_shot(self):
+        """Its holder is a session, which CAN respawn. Shortcutting here would
+        archive a live respawned worker inside its first stop cycle."""
+        provably_dead, bucket = classify_for_sweep(self._suspect("node:x-05be"))
+        assert (provably_dead, bucket) == (False, "suspect")
+
+    def test_an_off_host_dispatch_reservation_is_still_opaque(self):
+        claim = Claim(
+            key="dispatch:x-far", holder="spawn-cli:1", acquired_at=now_ms(),
+            expires_at=now_ms() + 180_000, pid=_dead_pid(),
+            host="some-other-host", machine_id="not-this-machine",
+        )
+        provably_dead, bucket = classify_for_sweep(claim)
+        assert (provably_dead, bucket) == (False, "offhost")
+
+
+# ---------------------------------------------------------------------------
+# the abandonment probe: reap only on a positive finding (x-05be change 2)
+# ---------------------------------------------------------------------------
+
+
+class TestAbandonmentProbe:
+    def _suspect_node(self, tmp_path, key="node:x-gone"):
+        """A SUSPECT node claim on disk: dead pid, TTL still open."""
+        acquire_claim(
+            key=key, holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+
+    def test_without_a_probe_nothing_changes(self, tmp_path):
+        """The parameter defaults to None so every existing caller is
+        byte-for-byte unaffected."""
+        self._suspect_node(tmp_path)
+        summary = reap_dead_claims(roots=[tmp_path], apply=False)
+        assert summary["would_reap"] == 0
+        assert summary["kept_suspect"] == 1
+        assert summary["kept_suspect_alive"] == 0
+        assert summary["kept_suspect_unprobed"] == 0
+
+    def test_a_proven_abandoned_node_claim_is_reaped(self, tmp_path):
+        self._suspect_node(tmp_path)
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+        )
+        assert summary["would_reap"] == 1
+        assert summary["kept_suspect_alive"] == 0
+
+    def test_a_live_worker_keeps_its_claim(self, tmp_path):
+        """The x-ba4b regression guard. Archiving this claim is two live
+        sessions in one worktree and a duplicate PR."""
+        self._suspect_node(tmp_path)
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+        )
+        assert summary["reaped"] == 0
+        assert summary["kept_suspect_alive"] == 1
+        assert claim_status("node:x-gone", root=tmp_path)["state"] == "suspect"
+
+    def test_a_probe_that_could_not_run_keeps_the_claim(self, tmp_path):
+        """unknown KEEPS. Reaping because a probe returned nothing is the exact
+        inversion of this fix."""
+        self._suspect_node(tmp_path)
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: None
+        )
+        assert summary["reaped"] == 0
+        assert summary["kept_suspect_unprobed"] == 1
+        assert claim_status("node:x-gone", root=tmp_path)["state"] == "suspect"
+
+    def test_the_probe_is_never_asked_about_a_non_node_key(self, tmp_path):
+        """No other key family has a roster to consult, and a dispatch: claim
+        is already settled by the one-shot predicate."""
+        def _boom(_claim):
+            raise AssertionError("probe asked about a non-node key")
+
+        acquire_claim(
+            key="dispatch:x-one", holder="spawn-cli:1", ttl_ms=180_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=False, abandonment_probe=_boom
+        )
+        assert summary["would_reap"] == 1
+
+    def test_the_probe_is_never_asked_about_a_live_claim(self, tmp_path):
+        def _boom(_claim):
+            raise AssertionError("probe asked about a live claim")
+
+        acquire_claim(
+            key="node:x-busy", holder="target-session:s", ttl_ms=3_600_000,
+            pid=os.getpid(), root=tmp_path,
+        )
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=False, abandonment_probe=_boom
+        )
+        assert summary["kept_live"] == 1
+
+
+class TestCliProbeWiring:
+    """The CLI is what injects the roster join, so the wiring needs its own
+    coverage: a probe that exists but is never passed is a decorative guard."""
+
+    def _fake_roster(self, monkeypatch, rows, warnings=()):
+        def _fake(*_a, **_kw):
+            return list(rows), list(warnings)
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _fake)
+
+    def test_a_blind_roster_never_reaps_and_says_so(self, tmp_path, monkeypatch):
+        acquire_claim(
+            key="node:x-blind", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "suspect (roster not consulted)" in r.output
+
+    def test_an_empty_scan_never_reaps(self, tmp_path, monkeypatch):
+        """Zero rows scanned is not a finding, even with no read error: there is
+        nothing to have found the worker in."""
+        acquire_claim(
+            key="node:x-empty", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(monkeypatch, rows=[])
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "suspect (roster not consulted)" in r.output
+
+    def test_a_scanned_roster_with_nobody_on_the_node_reaps(self, tmp_path, monkeypatch):
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-abandoned", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(
+            monkeypatch,
+            rows=[Row(row_id="a", name="t-other", state="working", node="x-else", cwd="")],
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 1" in r.output
+
+    def test_a_scanned_roster_with_the_worker_on_it_keeps(self, tmp_path, monkeypatch):
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-busy2", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(
+            monkeypatch,
+            rows=[Row(row_id="a", name="t-busy2", state="working", node="x-busy2", cwd="")],
+        )
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
+        assert "suspect (worker alive)" in r.output

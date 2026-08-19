@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from urllib.parse import quote as _url_quote
 
@@ -1099,6 +1099,7 @@ def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
+    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
 ) -> dict[str, Any]:
     """Archive every provably-dead claim across one or more claims roots.
 
@@ -1138,10 +1139,33 @@ def reap_dead_claims(
     ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
     exits non-zero when that list is non-empty.
 
+    ``abandonment_probe`` is the SECOND instrument, and it is optional so that
+    omitting it is byte-for-byte today's behavior. A ``node:`` claim reading
+    SUSPECT (dead pid, unexpired TTL) is the one case a pid cannot settle: the
+    holder is a session, and a session can be respawned under a new pid. The
+    probe answers "is a live worker actually on this node" from the roster, and
+    is called ONLY for a ``node:`` key that classified SUSPECT - never to
+    override a live claim, and never for a key family with no roster to consult.
+
+    Its three answers are deliberately not a bool:
+
+      ``True``  proven abandoned; reap it.
+      ``False`` a live worker is on the node; keep it (``kept_suspect_alive``).
+      ``None``  the probe could not run; keep it (``kept_suspect_unprobed``).
+
+    ``None`` KEEPS. Reaping because a probe returned nothing is the exact
+    inversion of this fix: an instrument that did not run must never be read as
+    a finding, and archiving a live worker's claim is x-ba4b's disaster from the
+    other side.
+
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
-    ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
-    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path, reason)``),
-    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
+    ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
+    ``kept_suspect_unprobed``, ``kept_offhost``, ``corrupted``, ``vanished``,
+    ``contended``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
+    ``roots``. The two new suspect buckets split what used to be one number:
+    "kept: 2 suspect" is the line that taught the operator the reaper was
+    useless, because it could not say whether those two were protected or
+    merely unmeasured. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1154,7 +1178,29 @@ def reap_dead_claims(
     scanned = 0
     reaped = 0
     would_reap = 0
-    kept: dict[str, int] = {"offhost": 0, "suspect": 0, "live": 0}
+    kept: dict[str, int] = {
+        "offhost": 0, "suspect": 0, "live": 0,
+        "suspect_alive": 0, "suspect_unprobed": 0,
+    }
+
+    def _sweep_verdict(claim: Claim) -> tuple[bool, str]:
+        """classify_for_sweep, plus the roster probe on a SUSPECT node key.
+
+        One place, so the lock-free triage and the under-mutex re-verify cannot
+        drift into two different answers about the same claim.
+        """
+        provably_dead, bucket = classify_for_sweep(claim, ts)
+        if provably_dead or bucket != "suspect":
+            return provably_dead, bucket
+        if abandonment_probe is None or not claim.key.startswith("node:"):
+            return False, "suspect"
+        verdict = abandonment_probe(claim)
+        if verdict is True:
+            return True, ""
+        # False: a live worker holds this node. None: the probe could not run,
+        # which is unknown, and unknown keeps.
+        return False, "suspect_alive" if verdict is False else "suspect_unprobed"
+
     corrupted = 0
     vanished = 0
     # A provably-dead claim whose recovery mutex is held by a genuine live
@@ -1208,7 +1254,7 @@ def reap_dead_claims(
             # because the claim may have been archived-and-recreated between
             # this scan and the lock. Do not "de-duplicate" that second call;
             # it is the TOCTOU check, not redundant work.
-            provably_dead, bucket = classify_for_sweep(claim, ts)
+            provably_dead, bucket = _sweep_verdict(claim)
 
             if provably_dead:
                 if not apply:
@@ -1242,7 +1288,7 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    fresh_dead, fresh_bucket = classify_for_sweep(fresh, ts)
+                    fresh_dead, fresh_bucket = _sweep_verdict(fresh)
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
                         continue
@@ -1308,6 +1354,8 @@ def reap_dead_claims(
         "would_reap": would_reap,
         "kept_live": kept["live"],
         "kept_suspect": kept["suspect"],
+        "kept_suspect_alive": kept["suspect_alive"],
+        "kept_suspect_unprobed": kept["suspect_unprobed"],
         "kept_offhost": kept["offhost"],
         "corrupted": corrupted,
         "vanished": vanished,
