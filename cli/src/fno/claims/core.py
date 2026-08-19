@@ -50,7 +50,8 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, classify_for_sweep, now_ms
+from .hostid import is_same_machine
+from .staleness import classify, classify_for_sweep, is_live, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
@@ -746,6 +747,42 @@ def release_claim(
     return existing
 
 
+def _reanchor_pid_for(existing: Claim) -> Optional[int]:
+    """The durable pid a renewal should re-anchor EXISTING to, or None.
+
+    Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
+    preserve the recorded pid, and that is what made SUSPECT mean two things: a
+    respawned worker renewing under a new pid left a claim byte-identical to a
+    dead worker's, so nothing on disk separated a live session from a corpse and
+    every reader that must not steal from the first was forced to protect the
+    second (x-05be).
+
+    Returns None - meaning leave the anchor alone - in three cases, each for its
+    own reason:
+
+      * The recorded pid is still LIVE. There is nothing to repair, and
+        rewriting it would let any process holding the same holder string take
+        over a running session's anchor.
+      * The claim is off-machine. We cannot read another box's pid table, so a
+        dead-looking pid there is unverified.
+      * No harness ancestor resolves. There is no better anchor to write, and a
+        transient pid is a worse one: ``fno-agents loop-check`` exits about a
+        second after it renews, so anchoring to the renewer would re-file the
+        corpse under a fresh number and fix nothing.
+
+    PID-reuse detection survives because the anchor moves WITH the pid.
+    ``_rebound_claim`` rewrites ``acquired_at`` alongside ``pid``, and the
+    harness ancestor started before this renewal, so the claim reads live now
+    and a later recycle of that pid number reads ``create_time > acquired_at``
+    exactly as today.
+    """
+    if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
+        return None
+    from .session_pid import resolve_session_pid
+
+    return resolve_session_pid(from_pid=os.getpid())
+
+
 def refresh_claim(
     key: str,
     holder: str,
@@ -813,8 +850,12 @@ def refresh_claim(
         if existing.expires_at is None:
             return None
 
-        new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
-        refreshed = existing.model_copy(update={"expires_at": new_expires})
+        window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
+        anchor_pid = _reanchor_pid_for(existing)
+        if anchor_pid is not None:
+            refreshed = _rebound_claim(existing, anchor_pid, window)
+        else:
+            refreshed = existing.model_copy(update={"expires_at": now_ms() + window})
 
         try:
             _atomic_replace(path, serialize_claim(refreshed))
