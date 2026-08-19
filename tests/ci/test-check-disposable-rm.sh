@@ -59,6 +59,23 @@ cat > "$TMP/quotedrm.sh" <<'EOF'
 EOF
 run 1 'quoted rm command word fails' "$TMP/quotedrm.sh"
 
+# A quoted rm inside another string is prose, not a command. Command-position
+# detection must not flag it (review finding: false positive on prose).
+cat > "$TMP/prose-quote.sh" <<'EOF'
+echo "prefer rm or 'rm' today"
+echo "the spelling \"rm\" is fine here mid-line"
+EOF
+run 0 'quoted rm inside prose strings passes' "$TMP/prose-quote.sh"
+
+# rm as the FIRST word of a quoted string resolves through the user's PATH:
+# eval "rm -rf $X" is the hazard one nesting level past the quoted word
+# (review finding: the gate let it through).
+cat > "$TMP/evalrm.sh" <<'EOF'
+eval "rm -rf $X"
+bash -c 'rm -rf "$Y"'
+EOF
+run 1 'string-indirected rm (eval / -c) fails' "$TMP/evalrm.sh"
+
 # A guarded file that vanished fails closed.
 run 1 'missing listed file fails closed' "$TMP/does-not-exist.sh"
 

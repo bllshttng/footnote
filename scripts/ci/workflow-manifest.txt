@@ -10,7 +10,6 @@ cli-ci.yml
 coverage-context-parity.yml
 crates-publish.yml
 deferred-census.yml
-disposable-rm.yml
 executor-routing.yml
 guards.yml
 install-script-portability.yml
