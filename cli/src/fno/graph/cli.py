@@ -5697,10 +5697,6 @@ def cmd_defer(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
-    # (id, freed-children) collected per node so each release is echoed, the
-    # same way the single-id path reported its one freed set.
-    freed_by_id: list[tuple[str, list[str]]] = []
-
     def mutator(entries):
         # Resolve every id and abort naming ALL missing ones before mutating,
         # mirroring cmd_queue's all-or-nothing batch atomicity.
@@ -5731,17 +5727,11 @@ def cmd_defer(
             node["completed_at"] = None
             node["deferred_at"] = now
             node["deferred_reason"] = cleaned_reason
-            # Release anything shipping inside it (x-e957). _release_contained_children
-            # owns the full rationale; the per-node call is what surfaces each
-            # freed set on a batch drain.
-            freed = _release_contained_children(entries, node.get("id"))
-            freed_by_id.append((tid, freed))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
-    for tid, freed in freed_by_id:
+    for tid in ids:
         typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
-        _echo_freed(freed, tid)
     _project_plans_from_graph(ids)
 
 
@@ -6583,7 +6573,7 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 
     Silence here is a real gap, not tidiness: the release turns N nodes that
     were invisible to dispatch into autonomously buildable, separately costed
-    ones, and the bare "Deferred <id>" receipt gives the operator no way to know
+    ones, and a bare remove/supersede receipt gives the operator no way to know
     what the next selection pass will pick up.
     """
     if not freed:
@@ -6597,20 +6587,15 @@ def _echo_freed(freed: list, owner_id: str) -> None:
 def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
     """Un-contain everything shipping inside ``owner_id``; return the ids freed.
 
-    Called wherever a delivery unit DIES - removed, superseded, or deferred by
-    any route (x-e957). A dead unit will never merge, so
+    Called wherever a delivery unit permanently dies: remove and supersede. A
+    reversible defer keeps its folded delivery unit intact so undefer restores
+    the same one-PR scope. A permanently dead unit will never merge, so
     ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
     its children, while ``selection_guards`` and ``fno target init`` keep
     refusing them: unbuildable, uncloseable, invisible to every sweep.
 
-    One helper because there are SIX writers of this transition and wiring three
-    of them was the decorative-guard shape this whole change is about - the
-    maintain auto-defer legs and the triage defer reach the same state as
-    ``cmd_defer`` and must free the same children.
-
     Un-contained, never closed: a unit dying is not a claim that its children
-    shipped. Nothing re-contains them on undefer, deliberately - re-adoption is
-    decompose's job, and inferring it would re-hide work since re-scoped.
+    shipped.
     """
     if not owner_id:
         return []
@@ -9196,7 +9181,6 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = reason
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
@@ -9233,7 +9217,6 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
                     applied_stale_ready.append({
                         "node_id": cand.node_id,
@@ -11201,4 +11184,3 @@ def _exec_liveness(state: str) -> str:
     """Map a claim_status state to the ExecNode liveness enum."""
     return {"live": "live", "suspect": "unknown", "stale": "unknown",
             "corrupted": "unknown", "free": ""}.get(state, "")
-

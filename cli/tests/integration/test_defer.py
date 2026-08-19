@@ -367,6 +367,11 @@ def test_status_summary_shows_deferred_count(tmp_graph, tmp_path):
 def test_triage_defer_proposal_validates_and_applies(tmp_graph, tmp_path):
     """A proposal with a defer entry validates clean and applies the defer."""
     node_id = _seed_with_plan(tmp_path, "Plan Triage Defer")
+    graph = json.loads(tmp_graph.read_text())
+    graph["entries"].append(
+        {"id": "x-f01d", "title": "Folded", "contained_in": node_id, "status": "ready"}
+    )
+    tmp_graph.write_text(json.dumps(graph))
 
     proposal = tmp_path / "proposal.json"
     proposal.write_text(json.dumps({
@@ -391,6 +396,8 @@ def test_triage_defer_proposal_validates_and_applies(tmp_graph, tmp_path):
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "deferred"
     assert node.get("deferred_reason") == "out of season"
+    child = next(e for e in entries if e["id"] == "x-f01d")
+    assert child.get("contained_in") == node_id
 
 
 def test_triage_defer_drops_unknown_id_and_missing_reason(tmp_graph, tmp_path):

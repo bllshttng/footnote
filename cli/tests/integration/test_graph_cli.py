@@ -2195,11 +2195,17 @@ def test_next_selects_healthy_ready_node(tmp_graph):
 
 
 def test_maintain_apply_defers_stale_ready(tmp_graph):
-    _seed(tmp_graph, [{
-        "id": "ab-old", "title": "old", "project": "fno",
-        "plan_path": "/nonexistent/plan.md", "priority": "p2",
-        "created_at": "2026-01-01T00:00:00+00:00",
-    }])
+    _seed(tmp_graph, [
+        {
+            "id": "ab-old", "title": "old", "project": "fno",
+            "plan_path": "/nonexistent/plan.md", "priority": "p2",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "id": "ab-folded", "title": "folded", "project": "fno",
+            "contained_in": "ab-old", "created_at": _recent_iso(1),
+        },
+    ])
     r = _invoke("backlog", "maintain", "--apply", "--json")
     data = json.loads(r.stdout)
     applied = [x["node_id"] for x in data["stale_ready"]["applied"]]
@@ -2208,6 +2214,8 @@ def test_maintain_apply_defers_stale_ready(tmp_graph):
     entries = _read_graph(tmp_graph)
     node = next(e for e in entries if e["id"] == "ab-old")
     assert node["deferred_reason"] == "stale-quarantine (guard)"
+    child = next(e for e in entries if e["id"] == "ab-folded")
+    assert child["contained_in"] == "ab-old"
 
 
 def test_next_mission_receipts_ignore_other_mission(tmp_graph):
