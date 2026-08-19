@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph.ladder import DispatchHoldState
 from fno.pr import _hold
 from fno.pr.closure import ClosureQueryError, PrClosureContext
+
+# Bound at import, before the conftest hermeticity default replaces the
+# module attribute with a no-hold noop; the fixture below restores it for
+# every test in this module, which exists to exercise the real reader.
+_REAL_HOLD_FOR_PR = _hold.hold_for_pr
+
+
+@pytest.fixture(autouse=True)
+def _real_hold_reader(monkeypatch):
+    monkeypatch.setattr(_hold, "hold_for_pr", _REAL_HOLD_FOR_PR)
 
 
 def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=None):

@@ -8,6 +8,7 @@ and the stdout-vs-stderr routing the bash used.
 from __future__ import annotations
 
 import json
+from pathlib import Path as _Path
 
 import pytest
 
@@ -200,16 +201,9 @@ def enabled(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
-    # Hermetic hold-check: point graph_json at a file that does not exist so
-    # hold_for_pr's by_id is always empty and it returns None without a live
-    # `gh pr view --json ...body...` fetch. Session-scoped HOME sandboxing
-    # (conftest.py) is per-worker, not per-test, so an unpinned graph_json
-    # here would pick up nodes another test in this worker wrote earlier -
-    # FakeRun's generic `gh pr view` fallback answers a bare URL, not JSON,
-    # so a fetch that should never fire (this PR names no held node) instead
-    # trips hold_for_pr's fail-closed path (round-11 review fix exposed
-    # this).
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    # The graph_json hermeticity pin this fixture used to carry is closed at
+    # the reader now: the autouse _hermetic_merge_hold_gate fixture in
+    # tests/conftest.py defaults hold_for_pr to no hold for every test.
 
 
 def _last_json(capsys, *, stream="out") -> dict:

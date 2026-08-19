@@ -114,7 +114,9 @@ impl AgentsHome {
 
     /// Sidecar advisory-lock file for the supervisor-socket singleton guard
     /// (x-ef7f). Held exclusively, for the daemon's whole process lifetime, by
-    /// whichever process is entitled to bind `supervisor_sock()`.
+    /// whichever process is entitled to bind `supervisor_sock()`. Since x-3498
+    /// the holder also writes `<pid> <pid_start_time>` into the content at
+    /// bind time; see [`supervisor_lock_holder`].
     pub fn supervisor_lock(&self) -> PathBuf {
         self.root.join("supervisor.sock.lock")
     }
@@ -173,6 +175,24 @@ impl AgentsHome {
         }
         out.sort();
         out
+    }
+}
+
+/// The pid (and start time, when recorded) written into the supervisor
+/// lockfile by the daemon that holds it. `None` for an absent, empty, or
+/// malformed file -- and a `None` here is NEVER "no holder": the flock on the
+/// lockfile is the authority on whether a holder exists; the content only
+/// names one. Callers treat `None` as "no force target", not as a free socket.
+pub fn supervisor_lock_holder(home: &AgentsHome) -> Option<(u32, Option<u64>)> {
+    let content = std::fs::read_to_string(home.supervisor_lock()).ok()?;
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    // Strict on purpose: this value becomes a SIGKILL target, so anything the
+    // writer would not have produced (extra fields, a non-numeric token) is
+    // corruption and answers None rather than a best-effort parse.
+    match fields.as_slice() {
+        [pid] => Some((pid.parse().ok()?, None)),
+        [pid, start] => Some((pid.parse().ok()?, Some(start.parse().ok()?))),
+        _ => None,
     }
 }
 
@@ -374,6 +394,49 @@ mod tests {
         let home = AgentsHome::from_env();
         assert_eq!(home.root(), root.as_path());
         std::env::remove_var(HOME_ENV);
+    }
+
+    // ── supervisor_lock_holder (x-3498) ─────────────────────────────────────
+
+    #[test]
+    fn supervisor_lock_holder_parses_pid_and_start_time() {
+        let root = tmp("holder");
+        let home = AgentsHome::at(&root);
+        home.ensure_root().unwrap();
+        std::fs::write(home.supervisor_lock(), b"4242 1700000000000\n").unwrap();
+        assert_eq!(
+            supervisor_lock_holder(&home),
+            Some((4242, Some(1_700_000_000_000)))
+        );
+        // pid alone (a platform that could not read the start time).
+        std::fs::write(home.supervisor_lock(), b"4242\n").unwrap();
+        assert_eq!(supervisor_lock_holder(&home), Some((4242, None)));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn supervisor_lock_holder_garbage_is_none_never_a_guess() {
+        let root = tmp("holder-garbage");
+        let home = AgentsHome::at(&root);
+        home.ensure_root().unwrap();
+        for garbage in [
+            "",
+            "garbage\n",
+            "-1 5\n",
+            "99999999999 5\n",
+            "12 13 14 extra\n",
+        ] {
+            std::fs::write(home.supervisor_lock(), garbage).unwrap();
+            assert_eq!(
+                supervisor_lock_holder(&home),
+                None,
+                "content {garbage:?} must answer None (no target), never a parsed guess"
+            );
+        }
+        // Absent file, same answer.
+        std::fs::remove_file(home.supervisor_lock()).unwrap();
+        assert_eq!(supervisor_lock_holder(&home), None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── canonical_repo_root (ab-77b691dc) ────────────────────────────────────
