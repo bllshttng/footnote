@@ -20,6 +20,23 @@ def quota_lock_path() -> Path:
     return graphql_quota_lock()
 
 
+def _is_proxy_shim(path: Path) -> bool:
+    """Is this ``gh`` our own broker shim, judged by content rather than location?
+
+    ``github_cli_proxy_dir()`` is TMPDIR-derived, so directory identity only
+    recognizes a shim written by a process sharing our TMPDIR. A background job
+    or a launchd agent inherits the shim on PATH but computes a different
+    directory, and so fails to recognize it. The shim is a two-line script, so
+    reading it is cheap and cannot drift from what ``ensure_proxy`` writes.
+    """
+    try:
+        if path.stat().st_size > 4096:
+            return False
+        return "fno-gh-proxy" in path.read_text(errors="ignore")
+    except OSError:
+        return False
+
+
 def _proxy_dirs() -> set[str]:
     paths = set()
     inherited = os.environ.get(_PROXY_DIR_ENV)
@@ -38,7 +55,9 @@ def delegate_environment() -> dict[str, str]:
     proxy_dirs = _proxy_dirs()
     env["PATH"] = os.pathsep.join(
         part for part in env.get("PATH", "").split(os.pathsep)
-        if part and str(Path(part).resolve()) not in proxy_dirs
+        if part
+        and str(Path(part).resolve()) not in proxy_dirs
+        and not _is_proxy_shim(Path(part) / "gh")
     )
     env.pop("FNO_REAL_GH", None)
     env.pop(_PROXY_DIR_ENV, None)
@@ -54,19 +73,22 @@ def resolve_real_gh() -> Optional[str]:
             candidate.is_file()
             and os.access(candidate, os.X_OK)
             and str(candidate.parent.resolve()) not in proxy_dirs
+            and not _is_proxy_shim(candidate)
         ):
             return str(candidate.resolve())
-    skipped_proxy = False
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory:
             continue
         candidate = Path(directory) / "gh"
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
-        if str(candidate.parent.resolve()) in proxy_dirs:
-            skipped_proxy = True
+        if str(candidate.parent.resolve()) in proxy_dirs or _is_proxy_shim(candidate):
             continue
-        return str(candidate.resolve()) if skipped_proxy else "gh"
+        # Always absolute, never the bare name. `delegate` execve's this and
+        # execve does no PATH lookup, so a bare name raises FileNotFoundError.
+        # `execute_graphql` runs it while holding the flock, so a bare name
+        # re-enters the shim and blocks until the outer command times out.
+        return str(candidate.resolve())
     return None
 
 

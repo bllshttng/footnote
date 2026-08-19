@@ -192,3 +192,75 @@ def test_delegate_environment_strips_fallback_proxy_from_env(monkeypatch, tmp_pa
     env = _quota.delegate_environment()
     assert env["PATH"].split(os.pathsep) == [str(real), "/usr/bin"]
     assert "FNO_GH_PROXY_DIR" not in env
+
+
+def _shim(directory, name="gh"):
+    """A proxy shim as `fno setup` writes it: a two-line script calling the broker."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text('#!/bin/sh\nexec fno-gh-proxy "$@"\n')
+    path.chmod(0o755)
+    return path
+
+
+def _real(directory, name="gh"):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("#!/bin/sh\necho real\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_resolve_real_gh_never_returns_a_bare_name(monkeypatch, tmp_path):
+    """A bare "gh" is unusable by both callers, so it must never be returned.
+
+    `delegate` execve's the result, and execve does no PATH lookup, so a bare
+    name raises FileNotFoundError. `execute_graphql` runs the result while
+    holding the flock, and a bare name re-enters the shim and blocks forever.
+    """
+    shim_dir = tmp_path / "unrecognized-shim"
+    real_dir = tmp_path / "real"
+    _shim(shim_dir)
+    real = _real(real_dir)
+    # The shim's own directory is TMPDIR-derived. A caller whose TMPDIR differs
+    # (a background job, a launchd agent) computes a different one and so does
+    # not recognize the shim sitting first on its inherited PATH.
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "elsewhere")
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.delenv("FNO_REAL_GH", raising=False)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{real_dir}")
+
+    resolved = _quota.resolve_real_gh()
+
+    assert resolved == str(real.resolve())
+    assert os.path.isabs(resolved)
+
+
+def test_resolve_real_gh_refuses_a_configured_shim(monkeypatch, tmp_path):
+    """FNO_REAL_GH pointing at a shim would loop the broker into itself."""
+    shim_dir = tmp_path / "shim"
+    real_dir = tmp_path / "real"
+    shim = _shim(shim_dir)
+    real = _real(real_dir)
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "elsewhere")
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.setenv("FNO_REAL_GH", str(shim))
+    monkeypatch.setenv("PATH", f"{real_dir}")
+
+    assert _quota.resolve_real_gh() == str(real.resolve())
+
+
+def test_delegate_environment_strips_an_unrecognized_proxy_shim(monkeypatch, tmp_path):
+    """The delegate's own PATH walk must not find a shim we failed to name."""
+    shim_dir = tmp_path / "unrecognized-shim"
+    real_dir = tmp_path / "real"
+    _shim(shim_dir)
+    _real(real_dir)
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", lambda: tmp_path / "elsewhere")
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{real_dir}:/usr/bin")
+
+    assert _quota.delegate_environment()["PATH"].split(os.pathsep) == [
+        str(real_dir),
+        "/usr/bin",
+    ]
