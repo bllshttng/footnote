@@ -3738,8 +3738,10 @@ def rm_agent(
                     error_type="RecipientIdentityChanged",
                 )
                 raise DispatchAskError(
-                    f"agent {name!r} recipient identity changed during rm; "
-                    "the replacement registry row was retained",
+                    f"agent {name!r}: resolved to a row the registry does not hold, "
+                    "or its recipient identity changed during rm; nothing was "
+                    "removed, and any replacement row was retained. Re-read it "
+                    "with `fno agents list --json` and rm by the exact `name` field.",
                     exit_code=12,
                 )
 
