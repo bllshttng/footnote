@@ -866,9 +866,16 @@ mod tests {
         // mux, and recovery is immediate).
         let mut state = ReaderState::default();
         let stamp = Some((std::time::SystemTime::UNIX_EPOCH, 0u64));
-        let first = state.tick(stamp, || {
-            Some(r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#.into())
-        }, None);
+        let first = state.tick(
+            stamp,
+            || {
+                Some(
+                    r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#
+                        .into(),
+                )
+            },
+            None,
+        );
         assert!(first.is_some());
         // Three failing refreshes with strictly increasing stamps (the exec
         // path mints a new clock stamp per window; a failed read commits none
@@ -885,14 +892,22 @@ mod tests {
             } else {
                 let (queue, _, _) = out.expect("the stale crossing publishes");
                 assert!(queue.stale, "the crossing publish carries the stale marker");
-                assert!(!queue.cards.is_empty(), "last-good cards survive the outage");
+                assert!(
+                    !queue.cards.is_empty(),
+                    "last-good cards survive the outage"
+                );
                 stale_publish = Some(queue);
             }
         }
         assert!(stale_publish.is_some());
         let recovered = state.tick(
             Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(9), 0)),
-            || Some(r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#.into()),
+            || {
+                Some(
+                    r#"{"entries":[{"id":"E","slug":"e","status":"ready","priority":"p1"}]}"#
+                        .into(),
+                )
+            },
             None,
         );
         let (queue, _, _) = recovered.expect("recovery republishes");

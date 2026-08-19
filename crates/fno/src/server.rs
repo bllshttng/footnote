@@ -9590,10 +9590,12 @@ async fn serve(
                     let read_path = path.clone();
                     let changed = stamp != state.cached_stamp();
                     let raw = if changed {
-                        tokio::task::spawn_blocking(move || std::fs::read_to_string(&read_path).ok())
-                            .await
-                            .ok()
-                            .flatten()
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::read_to_string(&read_path).ok()
+                        })
+                        .await
+                        .ok()
+                        .flatten()
                     } else {
                         None
                     };
