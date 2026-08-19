@@ -417,6 +417,44 @@ def test_rm_retains_row_restamped_during_shellout(
     assert rows[0].harness_session_id == replacement_id
 
 
+def test_rm_refuses_when_row_is_removed_entirely_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """AC1-NEG (x-76d1 MODE A): the row is gone entirely by write time, not
+    just replaced. rm must not report success on a no-op removal."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.harnesses import claude as claude_mod
+
+    def remove_during_rm(*_args, **_kwargs):
+        registry_mod.update_registry(
+            lambda entries: [e for e in entries if e.name != "victim"]
+        )
+        return (0, "")
+
+    monkeypatch.setattr(claude_mod, "claude_rm", remove_during_rm)
+
+    with pytest.raises(dispatch.DispatchAskError, match="nothing was removed") as exc:
+        dispatch.rm_agent("victim")
+
+    assert exc.value.exit_code == 12
+    rows = registry_mod.load_registry()
+    assert len(rows) == 0
+
+
 @pytest.mark.parametrize("address_by_name", [False, True])
 def test_stop_does_not_stamp_row_restamped_during_shellout(
     tmp_path: Path,
