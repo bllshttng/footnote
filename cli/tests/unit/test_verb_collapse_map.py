@@ -50,7 +50,10 @@ def _load_callers():
 def test_map_covers_current_surface_once():
     rows = _rows()
     mapped = [row["current-leaf"] for row in rows]
-    assert len(mapped) == len(set(mapped))
+    assert len(mapped) == len(set(mapped)), (
+        "duplicate current-leaf rows in verb-collapse-map.tsv; delete the "
+        "duplicate row instead of bumping the count below"
+    )
     # Adding a CLI action means allocating its row in verb-collapse-map.tsv
     # BEFORE scripts/ci/verb-baseline.txt can regenerate, then bumping this
     # count. Nothing else states that order, and the regeneration refuses
@@ -61,7 +64,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 340, (
+    assert len(mapped) == 341, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
