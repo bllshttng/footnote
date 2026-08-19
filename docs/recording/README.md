@@ -38,6 +38,10 @@ id_prefix = "demo"
 id_hex_width = 4
 TOML
 export FNO_CONFIG="$DEMO_ROOT/config.toml"
+test -d "$DEMO_ROOT/repo/.git" || git clone --quiet https://github.com/bllshttng/footnote.git "$DEMO_ROOT/repo"
+git -C "$DEMO_ROOT/repo" checkout --quiet main
+git -C "$DEMO_ROOT/repo" pull --ff-only --quiet
+cd "$DEMO_ROOT/repo"
 set -o pipefail
 fno config doctor | sed '/post-merge:/d'
 ```
@@ -50,7 +54,7 @@ fno config doctor | sed '/post-merge:/d'
 [doctor] OK; no suspicious paths detected.
 ```
 
-The `state_dir` line is the go-ahead. If it is under `$HOME`, stop. An unset or wrong `FNO_CONFIG` can put real node IDs, account names, and maintainer vault paths on camera.
+The `state_dir` line is the go-ahead. If it is under `$HOME`, stop. If `pwd` is not `/Users/Shared/footnote-recording-demo/repo`, stop. An incorrect config or working directory can put real node IDs, account names, and maintainer vault paths on camera.
 
 ## Terminal and capture
 
