@@ -412,7 +412,7 @@ def test_spawn_claude_receipt_cwd_json_encoded(workdir_claude, monkeypatch) -> N
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    receipt = _receipt_json(result.output)
+    receipt = json.loads(_receipt_line(result.output))
     assert receipt["cwd"] == str(canon.resolve())
 
 
