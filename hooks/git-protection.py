@@ -633,6 +633,7 @@ def _stacked_base_refusal(command=""):
 # pair arithmetic. Split literals can drift apart, and the drift test pins this
 # definition against the doc's per-invocation ceiling.
 _VETO_PROBE_TIMEOUT = 25
+_HOLD_PROBE_TIMEOUT = 5
 
 
 def _fno_veto_refusal(args, timeout, fallback):
@@ -723,7 +724,7 @@ def _dispatch_hold_refusal(command=""):
             ["fno", "pr", "hold-check", pr_number],
             capture_output=True,
             text=True,
-            timeout=_VETO_PROBE_TIMEOUT,
+            timeout=_HOLD_PROBE_TIMEOUT,
         )
     except Exception as exc:  # noqa: BLE001 - unreadable means held
         return f"dispatch hold check unavailable ({type(exc).__name__}); refusing to assume unheld"

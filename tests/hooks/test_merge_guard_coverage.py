@@ -105,6 +105,7 @@ def test_dispatch_hold_veto_refuses_confirmed_hold(monkeypatch):
     msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
     assert msg == "dispatch-hold:x-5a5c: blocking; set_by=king"
     assert seen["cmd"] == ["fno", "pr", "hold-check", "900"]
+    assert seen["timeout"] <= 5
 
 
 def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
