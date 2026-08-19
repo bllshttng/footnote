@@ -3128,6 +3128,13 @@ def cmd_rm(
     a blocked row names model rotation as its remedy. Terminal rows need
     no separate stop first.
 
+    A row this refuses as live is provably still there: the harness roster
+    is consulted, not just this tool's own stored status. If you tear a
+    session down by hand instead, ``claude rm`` (and ``claude stop``) take
+    the harness's SHORT ID, never the agent NAME this command takes --
+    passing the name to ``claude rm`` fails, and this command will keep
+    refusing the row until the harness side is actually gone.
+
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with
     ``fno worktree cleanup --merged --apply``.
