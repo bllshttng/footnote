@@ -8,8 +8,10 @@ invariant, so future drift could reintroduce it (a new helper path that
 constructs the ``target-session:<sid>`` holder and releases the node claim, or
 an exit handler that unlinks it).
 
-The ONLY source files permitted to release a ``node:<id>`` claim:
-  1. ``skills/target/scripts/handoff.sh``      - deliberate self-handoff (holder-verified)
+The target self-handoff shell must not release a ``node:<id>`` claim directly.
+It delegates archive plus exact-holder release to
+``fno.state.outage_handoff.prepare_manifest_and_release`` so shell and outage
+handoffs share one recoverable custody operation.
 
 A "node-release site" is a ``claim release`` invocation whose released KEY
 resolves to a ``node:`` prefix (a literal, or a local variable / ``format!``
@@ -45,7 +47,6 @@ SCAN_DIRS = ["cli/src/fno", "scripts", "skills", "hooks", "crates"]
 # A NEW entry here requires an equivalent justification (a holder-verified,
 # single-authority release at a sanctioned lifecycle boundary).
 ALLOWLIST = {
-    "skills/target/scripts/handoff.sh",
     # `fno backlog unclaim`/`release`: the sanctioned one-shot un-claim verb. Its
     # lockfile release is holder-verified - it drops the lock ONLY when the
     # holder is stale (PID dead / TTL expired) or matches the invoking session,
@@ -322,6 +323,18 @@ def test_both_sanctioned_sites_detected():
         f"{sorted(missing)}. Either the matcher regressed (it would now miss a "
         "real new releaser too) or the site moved - update the matcher/allowlist."
     )
+
+
+def test_target_handoff_delegates_node_release_to_python_prepare_owner():
+    shell = (REPO_ROOT / "skills/target/scripts/handoff.sh").read_text(encoding="utf-8")
+    owner = (REPO_ROOT / "cli/src/fno/state/outage_handoff.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-m fno.state.outage_handoff prepare" in shell
+    assert _shell_node_release_lines(shell) == []
+    assert "def prepare_manifest_and_release(" in owner
+    assert "released = release_exact(claim_key, holder)" in owner
 
 
 def test_matcher_classifies_keys_by_prefix():

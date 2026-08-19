@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import argparse
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from fno.schemas.target import TargetState
 from fno.state.io import read_frontmatter
@@ -18,6 +21,23 @@ class ManifestAuthorityError(ValueError):
 
 class ManifestArchiveCollision(FileExistsError):
     """An attempt archive already exists with different bytes."""
+
+
+class ManifestPrepareError(RuntimeError):
+    """Manifest custody was restored because exact claim release failed."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        archive_path: str,
+        restored: bool,
+        live_holder: str | None = None,
+    ) -> None:
+        self.archive_path = archive_path
+        self.restored = restored
+        self.live_holder = live_holder
+        super().__init__(reason)
 
 
 @dataclass(frozen=True)
@@ -36,6 +56,13 @@ class ManifestAuthority:
 class ManifestArchiveReceipt:
     path: str
     content_hash: str
+
+
+@dataclass(frozen=True)
+class ManifestPrepareReceipt:
+    path: str
+    content_hash: str
+    claim_released: bool = True
 
 
 @dataclass(frozen=True)
@@ -131,10 +158,16 @@ def archive_target_manifest(
     if not _SAFE_ATTEMPT.fullmatch(attempt):
         raise ManifestAuthorityError("attempt id is not safe for an archive filename")
     state_path, content = _validate(Path(worktree), authority)
-    digest = hashlib.sha256(content).hexdigest()
     archive_dir = Path(authority.plan_path + ".artifacts")
     archive_path = archive_dir / f"target-state-{attempt}.md"
-    archive_dir.mkdir(parents=True, exist_ok=True)
+    digest = _archive_exact(state_path, archive_path, content)
+    return ManifestArchiveReceipt(path=str(archive_path), content_hash=digest)
+
+
+def _archive_exact(state_path: Path, archive_path: Path, content: bytes) -> str:
+    """Persist exact bytes once, then remove the live manifest."""
+    digest = hashlib.sha256(content).hexdigest()
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -150,4 +183,147 @@ def archive_target_manifest(
             stream.flush()
             os.fsync(stream.fileno())
     state_path.unlink()
-    return ManifestArchiveReceipt(path=str(archive_path), content_hash=digest)
+    return digest
+
+
+def _restore_target_manifest(
+    worktree: Path, archive_path: Path, content_hash: str
+) -> bool:
+    """Restore identical bytes without replacing a concurrently-created file."""
+    state_path = Path(worktree).resolve() / ".fno" / "target-state.md"
+    content = archive_path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != content_hash:
+        return False
+    try:
+        fd = os.open(state_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            return hashlib.sha256(state_path.read_bytes()).hexdigest() == content_hash
+        except OSError:
+            return False
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            state_path.unlink()
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def prepare_target_handoff(
+    worktree: Path,
+    attempt: str,
+    authority: ManifestAuthority,
+    *,
+    release_exact: Callable[[str, str], object] | None = None,
+    claims_root: Path | None = None,
+) -> ManifestPrepareReceipt:
+    """Archive the manifest and release only its exact claim, or restore custody."""
+    if release_exact is None:
+        from fno.claims.core import release_claim
+        from fno.claims.io import claims_root_for
+
+        def release_exact(key: str, holder: str) -> object:
+            return release_claim(
+                key,
+                holder=holder,
+                root=claims_root or claims_root_for(key),
+                strict=True,
+            )
+
+    if not _SAFE_ATTEMPT.fullmatch(attempt):
+        raise ManifestAuthorityError("attempt id is not safe for an archive filename")
+    state_path, content = _validate(Path(worktree), authority)
+    archive_path = Path(authority.plan_path + ".artifacts") / f"target-state-{attempt}.md"
+    return prepare_manifest_and_release(
+        state_path,
+        archive_path,
+        claim_key=f"node:{authority.node}",
+        holder=authority.claim_holder,
+        release_exact=release_exact,
+    )
+
+
+def prepare_manifest_and_release(
+    state_path: Path,
+    archive_path: Path,
+    *,
+    claim_key: str,
+    holder: str,
+    release_exact: Callable[[str, str], object],
+) -> ManifestPrepareReceipt:
+    """The sole archive plus exact-release operation for every handoff caller."""
+    state_path = Path(state_path)
+    archive_path = Path(archive_path)
+    content = state_path.read_bytes()
+    digest = _archive_exact(state_path, archive_path, content)
+    try:
+        released = release_exact(claim_key, holder)
+        if released is False or released is None:
+            raise RuntimeError("exact claim release was not positively confirmed")
+    except Exception as exc:
+        live_holder = getattr(exc, "actual", None)
+        restored = _restore_target_manifest(
+            state_path.parent.parent, archive_path, digest
+        )
+        raise ManifestPrepareError(
+            f"exact claim release failed: {exc}",
+            archive_path=str(archive_path),
+            restored=restored,
+            live_holder=str(live_holder) if live_holder else None,
+        ) from exc
+    return ManifestPrepareReceipt(str(archive_path), digest)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m fno.state.outage_handoff")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    prepare = subparsers.add_parser("prepare")
+    prepare.add_argument("--state", type=Path, required=True)
+    prepare.add_argument("--archive", type=Path, required=True)
+    prepare.add_argument("--claim-key", required=True)
+    prepare.add_argument("--holder", required=True)
+    args = parser.parse_args(argv)
+
+    def release_via_cli(key: str, holder: str) -> object:
+        proc = subprocess.run(
+            ["fno", "claim", "release", key, "--holder", holder],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "claim release failed").strip())
+        return True
+
+    try:
+        receipt = prepare_manifest_and_release(
+            args.state,
+            args.archive,
+            claim_key=args.claim_key,
+            holder=args.holder,
+            release_exact=release_via_cli,
+        )
+    except ManifestPrepareError as exc:
+        print(json.dumps({
+            "ok": False,
+            "reason": str(exc),
+            "archive_path": exc.archive_path,
+            "restored": exc.restored,
+            "live_holder": exc.live_holder,
+        }, sort_keys=True))
+        return 10 if exc.restored else 12
+    except Exception as exc:
+        print(json.dumps({"ok": False, "reason": str(exc)}, sort_keys=True))
+        return 10
+    print(json.dumps({"ok": True, **receipt.__dict__}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

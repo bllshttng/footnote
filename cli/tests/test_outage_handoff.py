@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 import subprocess
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from fno.agents.outage_handoff import (
     ArchiveReceipt,
+    EvidenceProof,
     HandoffDependencies,
     HandoffRequest,
     HandoffSnapshot,
@@ -17,14 +20,20 @@ from fno.agents.outage_handoff import (
     StopProof,
     SuccessorProof,
     run_outage_handoff,
+    production_handoff_dependencies,
     spawn_successor_exact,
     stop_source_exact,
+    registry_entry_executable,
 )
 from fno.state.outage_handoff import (
     ManifestAuthority,
     ManifestArchiveCollision,
+    ManifestPrepareError,
     archive_target_manifest,
+    prepare_target_handoff,
 )
+from fno.claims.core import HolderMismatch
+from fno.agents.provider_outage import OutageEvidence
 
 
 def _request() -> HandoffRequest:
@@ -32,6 +41,9 @@ def _request() -> HandoffRequest:
         node="x-abcd",
         outage_epoch="epoch-1",
         source_row_id="source-row",
+        source_provider="anthropic",
+        source_account="claude-work",
+        evidence_fingerprints=("fp-source", "fp-peer"),
         destination_harness="codex",
         destination_provider="openai",
         destination_model="gpt-5.6-sol",
@@ -84,9 +96,15 @@ def _deps(tmp_path: Path, calls: list[str], *, stopped: bool = True) -> HandoffD
 
     return HandoffDependencies(
         acquire_dispatch=acquire,
+        read_dispatch_holder=lambda _key: lease_holder[0] if lease_holder else None,
         refresh_dispatch=lambda _key, holder: lease_holder == [holder],
         release_dispatch=release,
         read_snapshot=lambda _request: _snapshot(tmp_path),
+        revalidate_evidence=lambda _request, _snapshot: EvidenceProof(
+            verified=True,
+            evidence_count=2,
+            reason="exact persisted and raw evidence match",
+        ),
         stop_source=lambda _source: (
             calls.append("stop")
             or StopProof(
@@ -96,14 +114,14 @@ def _deps(tmp_path: Path, calls: list[str], *, stopped: bool = True) -> HandoffD
                 reason="pane absent" if stopped else "pane state unknown",
             )
         ),
-        archive_manifest=lambda _snapshot, attempt: (
+        prepare_handoff=lambda _snapshot, attempt: (
             calls.append("archive")
+            or calls.append("claim-release")
             or ArchiveReceipt(
                 path=str(tmp_path / f"target-state-{attempt}.md"),
                 content_hash="manifest-before",
             )
         ),
-        release_node_claim=lambda _key, _holder: calls.append("claim-release") or True,
         spawn_successor=lambda _snapshot, _request: (
             calls.append("spawn")
             or SpawnReceipt(row_id="successor-row", name="worker-b")
@@ -119,6 +137,32 @@ def _deps(tmp_path: Path, calls: list[str], *, stopped: bool = True) -> HandoffD
         ),
         stop_partial_successor=lambda _spawn: calls.append("stop-partial") or True,
     )
+
+
+def test_ac6_con_lease_contention_names_live_holder_and_is_retryable(
+    tmp_path: Path,
+):
+    calls: list[str] = []
+    deps = _deps(tmp_path, calls)
+    deps = replace(
+        deps,
+        acquire_dispatch=lambda _key, _holder: False,
+        read_dispatch_holder=lambda _key: "outage-handoff:winner",
+        read_snapshot=lambda _request: pytest.fail("contention read source snapshot"),
+        stop_source=lambda _source: pytest.fail("contention stopped source"),
+        prepare_handoff=lambda _snapshot, _attempt: pytest.fail("contention prepared"),
+        spawn_successor=lambda _snapshot, _request: pytest.fail("contention spawned"),
+    )
+
+    result = run_outage_handoff(
+        _request(), deps=deps, journal_root=tmp_path / "journal"
+    )
+
+    assert result.phase == "refused"
+    assert result.failed_phase == "observed"
+    assert "outage-handoff:winner" in result.reason
+    assert result.counts == {"lease_contention": 1}
+    assert not (tmp_path / "journal").exists()
 
 
 def test_ac6_con_double_tick_has_one_successor_and_terminal_replay_is_inert(tmp_path: Path):
@@ -140,7 +184,8 @@ def test_ac6_con_double_tick_has_one_successor_and_terminal_replay_is_inert(tmp_
     for thread in threads:
         thread.join()
 
-    assert [result.phase for result in results].count("committed") == 2
+    assert [result.phase for result in results].count("committed") == 1
+    assert [result.phase for result in results].count("refused") == 1
     assert calls.count("spawn") == 1
     assert len([call for call in calls if call.startswith("lease:")]) == 1
 
@@ -163,6 +208,79 @@ def test_ac10_err_unknown_source_stop_parks_without_mutation(tmp_path: Path):
     assert "archive" not in calls
     assert "claim-release" not in calls
     assert "spawn" not in calls
+
+
+def test_ac7_con_evidence_drift_under_lease_refuses_before_stop(tmp_path: Path):
+    calls: list[str] = []
+    deps = replace(
+        _deps(tmp_path, calls),
+        revalidate_evidence=lambda _request, _snapshot: EvidenceProof(
+            verified=False,
+            evidence_count=1,
+            reason="breaker fingerprint drift",
+        ),
+    )
+
+    result = run_outage_handoff(
+        _request(), deps=deps, journal_root=tmp_path / "journal"
+    )
+
+    assert result.phase == "refused"
+    assert result.failed_phase == "source_stopped"
+    assert result.reason == "breaker fingerprint drift"
+    assert result.counts["source_evidence"] == 1
+    assert "stop" not in calls
+    assert "archive" not in calls
+    assert "claim-release" not in calls
+    assert "spawn" not in calls
+
+
+def test_ac7_con_production_revalidator_rereads_raw_and_persisted_evidence(
+    tmp_path: Path,
+):
+    now = 1_787_100_000.0
+    transcript = tmp_path / "source.jsonl"
+    content = "API Error: Request rejected (429) fair usage policy"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        "isApiErrorMessage": True,
+        "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": content},
+    }) + "\n", encoding="utf-8")
+    evidence = OutageEvidence(
+        source="transcript",
+        observed_at=now,
+        row_id="source-row",
+        harness="claude",
+        provider="anthropic",
+        account="claude-work",
+        role="assistant",
+        raw_status=429,
+        raw_kind="api_error",
+        content=content,
+    )
+    journal = tmp_path / "provider-outages.json"
+    journal.write_text(json.dumps({
+        "evidence": [asdict(evidence)],
+        "breakers": [{
+            "provider": "anthropic",
+            "account": "claude-work",
+            "outage_epoch": "epoch-1",
+            "fingerprints": [evidence.fingerprint],
+        }],
+    }), encoding="utf-8")
+    request = replace(_request(), evidence_fingerprints=(evidence.fingerprint,))
+    deps = production_handoff_dependencies(
+        outage_evidence_path=journal,
+        transcript_path_for=lambda _identity: transcript,
+        now_s=lambda: now,
+    )
+
+    proof = deps.revalidate_evidence(request, _snapshot(tmp_path))
+
+    assert proof.verified is True
+    assert proof.evidence_count == 1
 
 
 def test_ac7_con_exact_holder_change_after_stop_parks_before_archive(tmp_path: Path):
@@ -312,6 +430,61 @@ def test_ac10_err_archive_collision_with_different_content_refuses(tmp_path: Pat
     assert archive.read_text(encoding="utf-8") == "different\n"
 
 
+def test_ac10_err_prepare_release_failure_restores_identical_manifest(tmp_path: Path):
+    _repo, worktree, head = _linked_worktree(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n", encoding="utf-8")
+    authority = _write_manifest(worktree, plan, head)
+    state = worktree / ".fno" / "target-state.md"
+    before = state.read_bytes()
+
+    with pytest.raises(ManifestPrepareError, match="release failed") as exc_info:
+        prepare_target_handoff(
+            worktree,
+            "attempt-a",
+            authority,
+            release_exact=lambda _key, _holder: (_ for _ in ()).throw(
+                RuntimeError("release failed")
+            ),
+        )
+
+    archive = Path(exc_info.value.archive_path)
+    assert exc_info.value.restored is True
+    assert state.read_bytes() == before
+    assert archive.read_bytes() == before
+
+
+def test_ac10_err_prepare_foreign_holder_restores_and_names_holder(tmp_path: Path):
+    _repo, worktree, head = _linked_worktree(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("plan\n", encoding="utf-8")
+    authority = _write_manifest(worktree, plan, head)
+
+    with pytest.raises(ManifestPrepareError) as exc_info:
+        prepare_target_handoff(
+            worktree,
+            "attempt-a",
+            authority,
+            release_exact=lambda key, holder: (_ for _ in ()).throw(
+                HolderMismatch(expected=holder, actual="target-session:other", key=key)
+            ),
+        )
+
+    assert exc_info.value.live_holder == "target-session:other"
+    assert exc_info.value.restored is True
+    assert (worktree / ".fno" / "target-state.md").exists()
+
+
+def test_ac8_con_shell_delegates_prepare_to_python_owner():
+    script = (
+        Path(__file__).parents[2] / "skills" / "target" / "scripts" / "handoff.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "-m fno.state.outage_handoff prepare" in script
+    assert 'mv "$STATE_FILE" "$ARCHIVED_STATE"' not in script
+    assert 'fno claim release "node:$NODE_ID"' not in script
+
+
 def test_ac8_con_mux_stop_requires_exact_pane_absence():
     calls = []
 
@@ -382,11 +555,25 @@ def test_ac9_hp_successor_spawn_uses_canonical_axes_and_no_merge(tmp_path: Path)
     assert cmd[-1] == "/fno:target --no-merge x-abcd"
     assert cmd[cmd.index("--harness") + 1] == "codex"
     assert cmd[cmd.index("--substrate") + 1] == "pane"
+    assert "--bounded-placement" in cmd
     assert cmd[cmd.index("--cwd") + 1] == str(tmp_path)
     assert cmd[cmd.index("--node") + 1] == "x-abcd"
     assert "--provider" not in cmd
-    assert cmd[cmd.index("--recorded-provider") + 1] == "openai"
+    assert "--recorded-provider=openai" in cmd
     assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol"
     assert cmd[cmd.index("--dispatch-account") + 1] == "work"
     assert kwargs["env"]["TARGET_NO_MERGE"] == "1"
     assert receipt == SpawnReceipt(row_id="child-row", name="successor")
+
+
+def test_ac11_ui_live_registry_status_is_not_executability_proof():
+    entry = type("Entry", (), {
+        "status": "live",
+        "mux": {"session": "stable", "pane_id": "19"},
+        "pid": None,
+        "pid_start_time": None,
+    })()
+
+    assert registry_entry_executable(entry, pane_probe=lambda _mux: None) is False
+    assert registry_entry_executable(entry, pane_probe=lambda _mux: False) is False
+    assert registry_entry_executable(entry, pane_probe=lambda _mux: True) is True

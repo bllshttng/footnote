@@ -729,6 +729,12 @@ def cmd_spawn(
             "are refused. Pane substrate only."
         ),
     ),
+    bounded_placement: bool = typer.Option(
+        False,
+        "--bounded-placement",
+        hidden=True,
+        help="Serialize stable-tab selection and enforce at most four panes.",
+    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -1021,7 +1027,9 @@ def cmd_spawn(
     # x-3e38 pane placement: squad/split name mux geometry, which only the
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = any(value is not None for value in (squad, split, at, tab_id))
+    placement_requested = bounded_placement or any(
+        value is not None for value in (squad, split, at, tab_id)
+    )
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
@@ -1046,6 +1054,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+    if bounded_placement and any(value is not None for value in (split, at, tab_id)):
+        print(
+            "--bounded-placement selects its own stable tab and cannot be combined "
+            "with --split, --at, or --tab-id",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
     if at is not None:
         # `--at current` is the exact-anchor spelling: the mux CLI resolves the
         # calling pane from FNO_PANE and sets the strict (Refuse) policy, so the
@@ -1462,10 +1477,18 @@ def cmd_spawn(
     spawn_succeeded = False
     try:
         if substrate == "pane" and not once:
-            from fno.agents.mux_spawn import dispatch_spawn_pane
+            from fno.agents.mux_spawn import (
+                dispatch_spawn_bounded_pane,
+                dispatch_spawn_pane,
+            )
 
             try:
-                pane_result = dispatch_spawn_pane(
+                pane_dispatch = (
+                    dispatch_spawn_bounded_pane
+                    if bounded_placement
+                    else dispatch_spawn_pane
+                )
+                pane_kwargs = dict(
                     name=name,
                     message=message,
                     provider=provider,
@@ -1479,7 +1502,6 @@ def cmd_spawn(
                     agent=agent,
                     tools=tools,
                     deny_tools=deny_tools,
-                    squad=squad,
                     split=split,
                     at=at,
                     tab_id=tab_id,
@@ -1496,6 +1518,13 @@ def cmd_spawn(
                     account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                 )
+                if bounded_placement:
+                    for placement_key in ("split", "at", "tab_id"):
+                        pane_kwargs.pop(placement_key)
+                    pane_kwargs["workspace"] = squad
+                else:
+                    pane_kwargs["squad"] = squad
+                pane_result = pane_dispatch(**pane_kwargs)
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
                 raise typer.Exit(code=exc.exit_code) from exc

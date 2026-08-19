@@ -1874,6 +1874,58 @@ def test_cmd_spawn_threads_stable_tab_id_to_dispatch(tmp_path: Path, monkeypatch
     assert captured["tab_id"] == "id:12"
 
 
+def test_cmd_spawn_codex_successor_uses_bounded_dispatch_without_claude_route(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    import fno.adapters.providers.dispatch as provider_dispatch
+    import fno.adapters.providers.loader as provider_loader
+    from fno.agents.mux_spawn import MuxSpawnResult
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def fake_bounded(**kwargs):
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"], provider=kwargs["provider"], session="main",
+            pane_id=1, child_pid=None, session_uuid="codex-thread",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_bounded)
+    monkeypatch.setattr(
+        provider_loader,
+        "load_providers",
+        lambda **_kwargs: SimpleNamespace(
+            by_id={"work": SimpleNamespace(harness="codex")}
+        ),
+    )
+    monkeypatch.setattr(
+        provider_dispatch, "dispatch_env", lambda *_args, **_kwargs: {"CODEX_HOME": "/tmp/codex"}
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn", "--name", "successor", "--harness", "codex",
+            "--substrate", "pane", "--bounded-placement",
+            "--recorded-provider=openai", "--model", "gpt-5.6-sol",
+            "--dispatch-account", "work", "/fno:target --no-merge x-abcd",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["provider"] == "codex"
+    assert captured["route_provider_id"] == "openai"
+    assert captured["account_record_id"] == "work"
+    assert captured["model_name"] == "gpt-5.6-sol"
+    assert captured["workspace"] is None
+    assert "tab_id" not in captured
+
+
 def test_cmd_spawn_refuses_ordinal_tab_id_before_dispatch(tmp_path: Path, monkeypatch) -> None:
     from typer.testing import CliRunner
 

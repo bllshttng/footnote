@@ -10,12 +10,12 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from fno.state.io import atomic_write
 
 
-TerminalPhase = Literal["committed", "parked"]
+ResultPhase = Literal["committed", "parked", "refused"]
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,9 @@ class HandoffRequest:
     destination_provider: str
     destination_model: str
     destination_account: str
+    source_provider: str = ""
+    source_account: str = ""
+    evidence_fingerprints: tuple[str, ...] = ()
     destination_account_env: dict[str, str] = field(default_factory=dict, repr=False)
     quorum_evidence_count: int = 0
 
@@ -62,6 +65,13 @@ class HandoffSnapshot:
 class StopProof:
     confirmed_dead: bool
     kind: str
+    evidence_count: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class EvidenceProof:
+    verified: bool
     evidence_count: int
     reason: str
 
@@ -103,12 +113,13 @@ class SuccessorProof:
 @dataclass(frozen=True)
 class HandoffDependencies:
     acquire_dispatch: Callable[[str, str], bool]
+    read_dispatch_holder: Callable[[str], str | None]
     refresh_dispatch: Callable[[str, str], bool]
     release_dispatch: Callable[[str, str], None]
     read_snapshot: Callable[[HandoffRequest], HandoffSnapshot]
+    revalidate_evidence: Callable[[HandoffRequest, HandoffSnapshot], EvidenceProof]
     stop_source: Callable[[SourceRow], StopProof]
-    archive_manifest: Callable[[HandoffSnapshot, str], ArchiveReceipt]
-    release_node_claim: Callable[[str, str], bool]
+    prepare_handoff: Callable[[HandoffSnapshot, str], ArchiveReceipt]
     spawn_successor: Callable[[HandoffSnapshot, HandoffRequest], SpawnReceipt]
     verify_successor: Callable[[HandoffSnapshot, SpawnReceipt], SuccessorProof]
     stop_partial_successor: Callable[[SpawnReceipt], bool]
@@ -119,7 +130,7 @@ class HandoffResult:
     node: str
     outage_epoch: str
     attempt: str
-    phase: TerminalPhase
+    phase: ResultPhase
     failed_phase: str | None = None
     reason: str = ""
     counts: dict[str, int] = field(default_factory=dict)
@@ -129,6 +140,31 @@ class HandoffResult:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def registry_entry_executable(
+    entry: object,
+    *,
+    pane_probe: Callable[[dict[str, object]], bool | None] | None = None,
+    pid_probe: Callable[[int, int | None], bool | None] | None = None,
+) -> bool:
+    """Require positive transport evidence; registry status is never enough."""
+    mux = getattr(entry, "mux", None)
+    if mux is not None:
+        if pane_probe is None:
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            pane_probe = _mux_pane_alive
+        return pane_probe(mux) is True
+    pid = getattr(entry, "pid", None)
+    started = getattr(entry, "pid_start_time", None)
+    if pid and started is not None:
+        if pid_probe is None:
+            from fno.agents.spawn_gate import _pid_alive
+
+            pid_probe = _pid_alive
+        return pid_probe(pid, started) is True
+    return False
 
 
 def stop_source_exact(
@@ -242,12 +278,12 @@ def spawn_successor_exact(
         request.destination_harness,
         "--substrate",
         "pane",
+        "--bounded-placement",
         "--cwd",
         snapshot.owner_cwd,
         "--node",
         request.node,
-        "--recorded-provider",
-        request.destination_provider,
+        f"--recorded-provider={request.destination_provider}",
         "--model",
         request.destination_model,
         "--dispatch-account",
@@ -288,7 +324,77 @@ def spawn_successor_exact(
     return SpawnReceipt(row_id=row_id, name=str(receipt["name"]))
 
 
-def production_handoff_dependencies() -> HandoffDependencies:
+def _revalidate_persisted_and_raw_evidence(
+    request: HandoffRequest,
+    snapshot: HandoffSnapshot,
+    *,
+    path: Path,
+    transcript_path_for: Callable[[Any], Path | None] | None = None,
+    now_s: float | None = None,
+) -> EvidenceProof:
+    """Re-read the breaker journal and the source transcript under the lease."""
+    from fno.agents.provider_outage import EvidenceIdentity, collect_transcript_evidence
+
+    expected = tuple(sorted(set(request.evidence_fingerprints)))
+    if not request.source_provider or not request.source_account or not expected:
+        return EvidenceProof(False, 0, "source route or breaker fingerprints are unknown")
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return EvidenceProof(False, 0, "persisted breaker evidence is unknown")
+    breakers = state.get("breakers") if isinstance(state, dict) else None
+    matches = [
+        item for item in (breakers or [])
+        if isinstance(item, dict)
+        and str(item.get("outage_epoch")) == request.outage_epoch
+        and item.get("provider") == request.source_provider
+        and item.get("account") == request.source_account
+    ]
+    if len(matches) != 1:
+        return EvidenceProof(False, 0, "breaker route or quorum epoch drifted")
+    persisted_fingerprints = tuple(sorted(set(matches[0].get("fingerprints") or [])))
+    if persisted_fingerprints != expected:
+        return EvidenceProof(False, len(persisted_fingerprints), "breaker fingerprint drift")
+    evidence = [
+        item for item in (state.get("evidence") or [])
+        if isinstance(item, dict) and item.get("row_id") == request.source_row_id
+    ]
+    source_persisted = {
+        str(item.get("content_fingerprint") or item.get("fingerprint") or "")
+        for item in evidence
+        if item.get("provider") == request.source_provider
+        and item.get("account") == request.source_account
+    }
+    expected_source = source_persisted.intersection(expected)
+    if not expected_source:
+        return EvidenceProof(False, 0, "persisted source evidence is unknown")
+    session_id = snapshot.source.harness_session_id
+    if not session_id:
+        return EvidenceProof(False, len(expected_source), "source transcript identity is unknown")
+    records, refusals = collect_transcript_evidence(
+        [EvidenceIdentity(
+            row_id=request.source_row_id,
+            harness=snapshot.source.harness,
+            provider=request.source_provider,
+            account=request.source_account,
+            session_id=session_id,
+            cwd=snapshot.source.cwd,
+        )],
+        now_s=time.time() if now_s is None else now_s,
+        transcript_path_for=transcript_path_for,
+    )
+    raw_source = {record.fingerprint for record in records}.intersection(expected)
+    if refusals or raw_source != expected_source:
+        return EvidenceProof(False, len(raw_source), "raw source evidence drifted or is unknown")
+    return EvidenceProof(True, len(raw_source), "exact persisted and raw evidence match")
+
+
+def production_handoff_dependencies(
+    *,
+    outage_evidence_path: Path | None = None,
+    transcript_path_for: Callable[[Any], Path | None] | None = None,
+    now_s: Callable[[], float] = time.time,
+) -> HandoffDependencies:
     """Build the real claim, registry, manifest, stop, and spawn transaction."""
     from fno import paths
     from fno.agents.registry import load_registry
@@ -301,10 +407,11 @@ def production_handoff_dependencies() -> HandoffDependencies:
     )
     from fno.claims.io import claims_root_for
     from fno.graph.store import read_graph
+    from fno.agents.provider_outage import journal_path as provider_outage_journal_path
     from fno.state.outage_handoff import (
         ManifestAuthority,
-        archive_target_manifest,
         inspect_target_manifest,
+        prepare_target_handoff,
     )
 
     def acquire(key: str, holder: str) -> bool:
@@ -316,6 +423,11 @@ def production_handoff_dependencies() -> HandoffDependencies:
             return True
         except ClaimHeldByOther:
             return False
+
+    def dispatch_holder(key: str) -> str | None:
+        status = claim_status(key, root=claims_root_for(key))
+        holder = status.get("holder")
+        return str(holder) if holder else None
 
     def refresh(key: str, holder: str) -> bool:
         try:
@@ -373,7 +485,7 @@ def production_handoff_dependencies() -> HandoffDependencies:
             manifest_hash=inspection.content_hash,
         )
 
-    def archive(snapshot: HandoffSnapshot, attempt: str) -> ArchiveReceipt:
+    def prepare(snapshot: HandoffSnapshot, attempt: str) -> ArchiveReceipt:
         authority = ManifestAuthority(
             node=snapshot.node,
             claim_holder=snapshot.claim_holder,
@@ -384,33 +496,25 @@ def production_handoff_dependencies() -> HandoffDependencies:
             worktree_id=snapshot.worktree_id,
             harness_session_id=snapshot.source.harness_session_id or "",
         )
-        receipt = archive_target_manifest(Path(snapshot.owner_cwd), attempt, authority)
+        receipt = prepare_target_handoff(Path(snapshot.owner_cwd), attempt, authority)
         return ArchiveReceipt(receipt.path, receipt.content_hash)
 
-    def release_node(key: str, holder: str) -> bool:
-        try:
-            release_claim(key, holder=holder, root=claims_root_for(key), strict=True)
-            return True
-        except Exception:
-            return False
+    def revalidate(request: HandoffRequest, snapshot: HandoffSnapshot) -> EvidenceProof:
+        return _revalidate_persisted_and_raw_evidence(
+            request,
+            snapshot,
+            path=outage_evidence_path or provider_outage_journal_path(),
+            transcript_path_for=transcript_path_for,
+            now_s=now_s(),
+        )
 
     def verify(snapshot: HandoffSnapshot, spawned: SpawnReceipt) -> SuccessorProof:
-        from fno.agents.mux_spawn import _mux_pane_alive
-        from fno.agents.spawn_gate import _pid_alive
-
-        def executable(entry) -> bool:
-            if entry.mux is not None:
-                return _mux_pane_alive(entry.mux) is True
-            if entry.pid and entry.pid_start_time is not None:
-                return _pid_alive(entry.pid, entry.pid_start_time) is True
-            return False
-
         entries = load_registry()
         successors = [
             entry for entry in entries
             if str(entry.harness_session_id or entry.short_id) == spawned.row_id
         ]
-        successor_executable = len(successors) == 1 and executable(successors[0])
+        successor_executable = len(successors) == 1 and registry_entry_executable(successors[0])
         same_cwd = successor_executable and Path(successors[0].cwd).resolve() == Path(snapshot.owner_cwd)
         try:
             inspection = inspect_target_manifest(Path(snapshot.owner_cwd))
@@ -428,7 +532,7 @@ def production_handoff_dependencies() -> HandoffDependencies:
         executable_same_worktree = [
             entry for entry in entries
             if Path(entry.cwd).resolve() == Path(snapshot.owner_cwd)
-            and executable(entry)
+            and registry_entry_executable(entry)
         ]
         unique = (
             len(successors) == 1
@@ -468,12 +572,13 @@ def production_handoff_dependencies() -> HandoffDependencies:
 
     return HandoffDependencies(
         acquire_dispatch=acquire,
+        read_dispatch_holder=dispatch_holder,
         refresh_dispatch=refresh,
         release_dispatch=release,
         read_snapshot=read_snapshot,
+        revalidate_evidence=revalidate,
         stop_source=stop_source_exact,
-        archive_manifest=archive,
-        release_node_claim=release_node,
+        prepare_handoff=prepare,
         spawn_successor=spawn_successor_exact,
         verify_successor=verify,
         stop_partial_successor=stop_partial,
@@ -601,19 +706,14 @@ def run_outage_handoff(
     dispatch_key = f"dispatch:{request.node}"
     lease_holder = f"outage-handoff:{attempt}"
     if not deps.acquire_dispatch(dispatch_key, lease_holder):
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            terminal = _read_terminal(path)
-            if terminal is not None:
-                return terminal
-            time.sleep(0.01)
+        live_holder = deps.read_dispatch_holder(dispatch_key) or "unknown"
         return HandoffResult(
             node=request.node,
             outage_epoch=request.outage_epoch,
             attempt=attempt,
-            phase="parked",
+            phase="refused",
             failed_phase="observed",
-            reason="dispatch lease contended and no terminal receipt appeared",
+            reason=f"dispatch lease held by {live_holder}; no handoff action taken",
             counts={"lease_contention": 1},
         )
 
@@ -641,6 +741,18 @@ def run_outage_handoff(
         snapshot = deps.read_snapshot(request)
         _validate_snapshot(request, snapshot)
         _require_same_authority(observed, snapshot)
+        evidence = deps.revalidate_evidence(request, snapshot)
+        counts["source_evidence"] = evidence.evidence_count
+        if not evidence.verified:
+            return HandoffResult(
+                node=request.node,
+                outage_epoch=request.outage_epoch,
+                attempt=attempt,
+                phase="refused",
+                failed_phase="source_stopped",
+                reason=evidence.reason,
+                counts=counts,
+            )
         proof = deps.stop_source(snapshot.source)
         counts["source_stop_evidence"] = proof.evidence_count
         if not proof.confirmed_dead:
@@ -656,14 +768,10 @@ def run_outage_handoff(
         snapshot = deps.read_snapshot(request)
         _validate_snapshot(request, snapshot)
         _require_same_authority(observed, snapshot)
-        archive = deps.archive_manifest(snapshot, attempt)
+        archive = deps.prepare_handoff(snapshot, attempt)
         if archive.content_hash != snapshot.manifest_hash:
             return _park(path, request, attempt, "prepared",
                          "archive content hash differs from observed manifest", counts,
-                         archive_path=archive.path)
-        if not deps.release_node_claim(f"node:{request.node}", snapshot.claim_holder):
-            return _park(path, request, attempt, "prepared",
-                         "exact source claim was not released", counts,
                          archive_path=archive.path)
         _journal(path, phase="prepared", request=request, attempt=attempt,
                  archive_path=archive.path, archive_hash=archive.content_hash)
@@ -703,6 +811,7 @@ def run_outage_handoff(
                 deps.stop_partial_successor(spawned)
             except Exception:  # noqa: BLE001 - preserve the original failed phase
                 pass
+        failure_archive = archive.path if archive else getattr(exc, "archive_path", None)
         return _park(
             path,
             request,
@@ -710,7 +819,7 @@ def run_outage_handoff(
             active_phase,
             f"{type(exc).__name__}: {exc}",
             {**counts, "errors": 1},
-            archive_path=archive.path if archive else None,
+            archive_path=failure_archive,
             successor_row_id=spawned.row_id if spawned else None,
         )
     finally:
