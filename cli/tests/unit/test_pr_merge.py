@@ -8,6 +8,7 @@ and the stdout-vs-stderr routing the bash used.
 from __future__ import annotations
 
 import json
+from pathlib import Path as _Path
 
 import pytest
 
@@ -229,10 +230,15 @@ def test_missing_pr_exits_1(capsys):
     assert _merge.run_merge([]) == 1
 
 
-def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys):
+def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys, tmp_path):
     # x-04ab removed --invoker; a lingering legacy flag is silently accepted
     # (never an error). The merge proceeds and is gated only by `enabled`, so
     # with auto-merge off it skips (exit 2) exactly as a no-flag call would.
+    # Hermetic hold-check (same pin the `enabled` fixture applies): without it,
+    # a CI worker whose session HOME graph was populated by an earlier test
+    # scopes the hold lookup through a real PR-body fetch, which fails closed
+    # and reads as `held` here instead of `skipped`.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
     assert _merge.run_merge(["--invoker=anything", "42"]) == 2
     assert _last_json(capsys)["outcome"] == "skipped"
@@ -268,6 +274,11 @@ def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
 
 
 def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
+    # Hermetic hold-check (same pin the `enabled` fixture applies): an
+    # unsandboxed graph_json lets a populated worker HOME scope the hold
+    # lookup into the PR-body fetch, and THAT gh failure holds the merge
+    # before the very gate this test exists to exercise.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
     # Isolate from an ambient target-state.md: run_merge with no cwd reads
@@ -976,6 +987,15 @@ def _checks_enabled(monkeypatch):
         _merge,
         "_load_auto_merge",
         lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
+    )
+    # Hermetic hold-check (same pin the `enabled` fixture applies, on a stable
+    # nonexistent path because this helper is also called directly): without
+    # it a populated CI-worker HOME graph turns the PR-body fetch's failure
+    # into a `held` that never reaches the checks logic these fixtures exist
+    # to drive.
+    monkeypatch.setattr(
+        "fno.paths.graph_json",
+        lambda: _Path("/nonexistent-fno-hermetic-graph.json"),
     )
 
 
