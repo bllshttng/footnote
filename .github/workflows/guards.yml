@@ -208,6 +208,11 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
+      - name: Cargo rustc-wrapper announces its path
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/lib/test_cargo_rustc_wrapper.sh
+
       # From disposable-rm.yml.
       - name: Bare rm in disposable-delete files + self-test
         if: ${{ !cancelled() }}
