@@ -183,6 +183,14 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     `counts["unsettled"]` counts latest runs with NO settled marker (an absent
     result: cancelled, stale, still running), and `settled` is derived from it
     positively elsewhere - never from the absence of a pending run.
+
+    A would-be-green tally is refused when NO entry is a real check-run (the
+    `name` key, produced by GitHub Actions/apps via the check-runs API) -
+    x-4271: a conflicting PR (mergeable_state dirty) gets zero workflow runs,
+    but fno's own self-published StatusContexts (review-coverage,
+    stacked-base-guard) still post and can all pass, so an all-`context`
+    rollup read as green with no CI having run at all. A fail or pending
+    StatusContext is still a real, actionable signal and stays red/pending.
     """
     deduped = _latest_per_name(rollup)
     counts = {
@@ -192,16 +200,29 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
         "pending": 0,
         "unsettled": 0,
     }
+    real_check_runs = 0
     for c in deduped:
         counts[_classify(c)] += 1
         if not _has_settled_marker(c):
             counts["unsettled"] += 1
+        if c.get("name") not in (None, ""):
+            real_check_runs += 1
     if not deduped:
         return ("unknown", 3, counts)
     if counts["fail"]:
         return ("red", 1, counts)
     if counts["pending"]:
         return ("pending", 2, counts)
+    if not real_check_runs:
+        # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
+        # real CI still rides the legacy commit-status API (no GitHub Actions,
+        # no Checks-API app) would never clear this and would hold forever
+        # under `require_checks_pass` (unknown holds, never fails - see
+        # _merge.py's `_checks_verdict` caller). footnote's own workflows
+        # (guards.yml et al.) are all Actions/CheckRuns, so this repo never
+        # hits it; a fork that genuinely needs status-only CI as its sole
+        # signal should route around this via `require_checks_pass=false`.
+        return ("unknown", 3, counts)
     return ("green", 0, counts)
 
 
@@ -257,6 +278,7 @@ def _ready_blockers(
     *,
     head: str = "",
     code_review_required: bool = False,
+    mergeable: Optional[str] = None,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -287,6 +309,13 @@ def _ready_blockers(
     next reader budgets for it.
     """
     blockers: list[str] = []
+    # x-4271: `mergeable` is None only when the caller never asked (old test
+    # stubs, a degraded fetch that omitted the field) - never block on that,
+    # only on a GitHub-supplied answer that isn't the positive "MERGEABLE".
+    # `_map_mergeable` already turns a null (still computing) into the string
+    # "UNKNOWN", so this also fails closed on "still computing", not open.
+    if mergeable not in (None, "MERGEABLE"):
+        blockers.append(f"not_mergeable_{str(mergeable).lower()}")
     if not green:
         blockers.append(f"ci_{verdict}")
     if unresolved is None or not isinstance(unresolved, int):
@@ -347,7 +376,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # recompute against a PR that will never merge again. Skip all of them;
     # the report prints the no-pending answers ([] / 0) rather than `unknown`,
     # because nothing was failed, it was deliberately not asked.
-    if (pr_json.get("state") or "").upper() in ("MERGED", "CLOSED"):
+    is_terminal = (pr_json.get("state") or "").upper() in ("MERGED", "CLOSED")
+    if is_terminal:
         # Any-typed to match the probe arms below, whose reads return the
         # same untyped dicts; a first binding of `0` would narrow the
         # variable to int and fail the reassignments' type check.
@@ -418,6 +448,10 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         review_lane,
         head=pr_json.get("headRefOid") or "",
         code_review_required=code_review_required,
+        # A terminal PR has no would-merge left, like the coverage conjunct
+        # above - a merged/closed PR's mergeable field is stale and must not
+        # hold a report that changes nothing.
+        mergeable=None if is_terminal else pr_json.get("mergeable"),
     )
     if hold_reason:
         blockers.append("dispatch_hold")
@@ -432,9 +466,14 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 # total > 0 is load bearing: an empty rollup and an all-green
                 # one both have zero unsettled entries, and only one of them
                 # is decided. Existence must be stated, not inherited.
-                "settled": counts["total"] > 0 and counts["unsettled"] == 0,
+                # verdict != unknown too (x-4271): a zero-real-check-run
+                # rollup can have zero unsettled entries (every StatusContext
+                # already settled) while still being an undecided read.
+                "settled": verdict != "unknown" and counts["total"] > 0
+                and counts["unsettled"] == 0,
                 "green": green,
                 "pr_state": pr_json.get("state"),
+                "mergeable": pr_json.get("mergeable"),
                 "checks": counts,
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,

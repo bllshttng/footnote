@@ -326,6 +326,32 @@ def test_dedup_empty_rollup_is_unknown():
     assert counts["total"] == 0
 
 
+def test_all_pass_status_contexts_with_zero_check_runs_is_unknown():
+    """x-4271: a conflicting PR (mergeable_state dirty) gets zero workflow
+    runs, but fno's own self-published StatusContexts (review-coverage,
+    stacked-base-guard) still post and can all pass. An all-`context` rollup
+    with no real check-run must read unknown, never green - PR 965 read
+    green ready true off exactly this shape with zero CI having run."""
+    rollup = [
+        {"context": "fno/review-coverage", "state": "SUCCESS"},
+        {"context": "stacked-base-guard", "state": "SUCCESS"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "unknown"
+    assert code == 3
+    assert counts["total"] == 2
+
+
+def test_a_failing_status_context_still_reds_with_zero_check_runs():
+    """A StatusContext-only rollup that is genuinely failing is still a real,
+    actionable signal - the zero-real-check-run refusal only intercepts a
+    would-be-green tally, never masks a fail as unknown."""
+    rollup = [{"context": "fno/review-coverage", "state": "FAILURE"}]
+    verdict, code, _ = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert code == 1
+
+
 def test_dedup_single_entry_per_name_is_unchanged():
     """Boundary: one entry per name -> nothing to dedup, behaves as today."""
     rollup = [
@@ -374,6 +400,25 @@ def test_newer_success_before_older_superseded_fail_is_green():
          "startedAt": "2026-07-09T10:05:00Z"},
         {"name": "ci", "status": "COMPLETED", "conclusion": "CANCELLED",
          "startedAt": "2026-07-09T10:00:00Z"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert verdict == "green"
+    assert code == 0
+    assert counts["fail"] == 0
+    assert counts["total"] == 1
+
+
+def test_pr966_style_rerun_failure_loses_to_newer_success():
+    """x-5a83: PR 966 head 8c0a736e carried two check-runs named
+    check-pr-body-style, an 05:09Z FAILURE and a 12:37Z SUCCESS rerun. The
+    tally took the failure and a green PR read red. Pinned with the REST
+    reader's actual (lowercase status/conclusion) shape, not the GraphQL
+    uppercase one every other test in this file uses."""
+    rollup = [
+        {"name": "check-pr-body-style", "status": "completed", "conclusion": "failure",
+         "startedAt": "2026-08-19T05:09:34Z"},
+        {"name": "check-pr-body-style", "status": "completed", "conclusion": "success",
+         "startedAt": "2026-08-19T12:37:59Z"},
     ]
     verdict, code, counts = _status.verdict_for(rollup)
     assert verdict == "green"
@@ -483,6 +528,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "settled": True,
         "green": True,
         "pr_state": "OPEN",
+        "mergeable": None,
         "checks": {"total": 1, "pass": 1, "fail": 0, "pending": 0, "unsettled": 0},
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
@@ -646,6 +692,52 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
     assert out["ready_blockers"] == ["ci_red"]
+
+
+@pytest.mark.parametrize(
+    "mergeable, expected_ready, expected_blocker",
+    [
+        pytest.param(
+            "CONFLICTING", False, "not_mergeable_conflicting", id="conflicting"
+        ),
+        pytest.param(
+            "UNKNOWN", False, "not_mergeable_unknown",
+            id="still-computing-a-null-from-github-maps-to-the-string-unknown",
+        ),
+        pytest.param("MERGEABLE", True, None, id="the-common-case-adds-no-blocker"),
+    ],
+)
+def test_ready_reflects_mergeable(
+    monkeypatch, capsys, mergeable, expected_ready, expected_blocker
+):
+    """x-4271: PR 965 read verdict green / ready true / ready_blockers empty
+    at mergeable=CONFLICTING, because `mergeable` never reached the ready
+    conjunction. A dirty or still-computing merge state must block ready
+    regardless of what the (self-published, real-CI-free) check tally says."""
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "mergeable": mergeable,
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2},
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is expected_ready
+    if expected_blocker is None:
+        assert out["ready_blockers"] == []
+    else:
+        assert expected_blocker in out["ready_blockers"]
 
 
 def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys):

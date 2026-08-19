@@ -180,9 +180,9 @@ def fetch_pr_rest(
 ) -> "tuple[Optional[dict], str]":
     """Same contract as the old GraphQL `_fetch`: `(pr_json, reason)`.
 
-    `pr_json` carries `state`, `statusCheckRollup`, `headRefOid` - the keys
-    `run_status` reads. `reason` is empty on success and names the failure
-    class otherwise; `(None, reason)` must reach the caller as a loud
+    `pr_json` carries `state`, `statusCheckRollup`, `headRefOid`, `mergeable`
+    - the keys `run_status` reads. `reason` is empty on success and names the
+    failure class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
     slug = _repo_slug(cwd, runner)
@@ -263,7 +263,12 @@ def fetch_pr_rest(
             return None, "gh api status returned output that is not JSON"
 
     return (
-        {"state": info["state"], "statusCheckRollup": rollup, "headRefOid": sha},
+        {
+            "state": info["state"],
+            "statusCheckRollup": rollup,
+            "headRefOid": sha,
+            "mergeable": info["mergeable"],
+        },
         "",
     )
 
