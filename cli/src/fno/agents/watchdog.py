@@ -31,6 +31,7 @@ import json
 import hashlib
 import logging
 import re
+import shutil
 import subprocess
 import time
 from collections import Counter, namedtuple
@@ -1007,12 +1008,16 @@ def measure_provider_outages(
     rows: list[Row], *, now_s: float,
     entries_provider: Optional[Callable[[], list[Any]]] = None,
     transcript_path_for: Optional[Callable[[Any], Path | None]] = None,
+    pane_read_fn: Optional[Callable[[str, Any], str]] = None,
+    pane_snapshot_dir: Optional[Path] = None,
     journal: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Collect raw transcript records joined to explicit registry route axes."""
+    """Collect durable transcript records, then persist exact pane fallbacks."""
     from fno.agents.provider_outage import (
         EvidenceIdentity,
+        collect_pane_evidence,
         collect_transcript_evidence,
+        journal_path as provider_journal_path,
         measure_and_persist,
     )
 
@@ -1032,6 +1037,7 @@ def measure_provider_outages(
         if getattr(entry, "harness_session_id", None)
     }
     identities = []
+    mux_by_row: dict[str, dict[str, Any]] = {}
     for row in rows:
         entry = by_session.get(row.row_id)
         identities.append(EvidenceIdentity(
@@ -1042,6 +1048,9 @@ def measure_provider_outages(
             session_id=str(getattr(entry, "harness_session_id", "") or row.row_id),
             cwd=str(getattr(entry, "cwd", "") or row.cwd),
         ))
+        mux = getattr(entry, "mux", None)
+        if isinstance(mux, dict):
+            mux_by_row[row.row_id] = mux
     try:
         from fno.config import load_settings
 
@@ -1056,6 +1065,47 @@ def measure_provider_outages(
         transcript_path_for=transcript_path_for,
         evidence_freshness_s=freshness,
     )
+    unreadable_rows = {
+        str(item.get("row_id"))
+        for item in refusals
+        if item.get("reason") == "transcript_unreadable"
+    }
+    if unreadable_rows:
+        if pane_read_fn is None:
+            from fno import _subprocess_util
+
+            def pane_read_fn(session: str, pane_id: Any) -> str:
+                proc = subprocess.run(
+                    [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
+                     "--session", session, str(pane_id), "--lines", "80"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError((proc.stderr or proc.stdout or "mux pane read failed").strip())
+                return proc.stdout
+
+        target = journal or provider_journal_path()
+        snapshot_root = pane_snapshot_dir or target.parent / "provider-pane-snapshots"
+        fallback_identities = [
+            identity for identity in identities if identity.row_id in unreadable_rows
+        ]
+        pane_records, pane_refusals = collect_pane_evidence(
+            fallback_identities,
+            mux_by_row=mux_by_row,
+            now_s=now_s,
+            snapshot_dir=Path(snapshot_root),
+            pane_read_fn=pane_read_fn,
+        )
+        successful_rows = {record.row_id for record in pane_records}
+        refusals = [
+            item for item in refusals
+            if not (
+                item.get("reason") == "transcript_unreadable"
+                and str(item.get("row_id")) in successful_rows
+            )
+        ]
+        records.extend(pane_records)
+        refusals.extend(pane_refusals)
     if not records and refusals:
         counts = Counter(str(item["reason"]) for item in refusals)
         return {
@@ -1141,6 +1191,11 @@ def supervise_provider_handoffs(
                 destination_provider=str(selected.provider),
                 destination_model=selected.model,
                 destination_account=str(selected.record_id),
+                source_provider=broken_provider,
+                source_account=str(breaker.get("account") or ""),
+                evidence_fingerprints=tuple(
+                    str(item) for item in (breaker.get("fingerprints") or [])
+                ),
                 destination_account_env=selected.account_env or {},
                 quorum_evidence_count=len(breaker.get("fingerprints") or []),
             )
@@ -1180,9 +1235,18 @@ def supervise_provider_handoffs(
 
 
 def production_handoff_candidate(
-    breaker: dict[str, Any], row: Row, now_s: float
+    breaker: dict[str, Any], row: Row, now_s: float, *,
+    entries_provider: Optional[Callable[[], list[Any]]] = None,
+    route_policy_provider: Optional[Callable[[Row], tuple[list[str], dict[str, str]]]] = None,
+    account_env_for: Optional[Callable[[str, Path], dict[str, str]]] = None,
+    route_env_for: Optional[Callable[[Any], dict[str, str]]] = None,
+    runtime_exhausted_fn: Optional[Callable[[str, Path], bool]] = None,
+    harness_installed_fn: Optional[Callable[[str], bool]] = None,
+    pane_occupancy_fn: Optional[Callable[[str], int]] = None,
+    canary_fn: Optional[Callable[[Any, Row, float], Any]] = None,
+    open_breakers_provider: Optional[Callable[[], list[dict[str, Any]]]] = None,
 ):
-    """Prove one configured, explicitly stamped route outside the node tree."""
+    """Walk configured route policy and return the first proved destination."""
     from fno.agents.provider_outage import (
         CanaryProof,
         HEALTH_MARKER,
@@ -1195,11 +1259,57 @@ def production_handoff_candidate(
     # provider, or account identity refuses instead of deriving one axis from
     # the harness or model label.
     try:
-        from fno.agents.registry import load_registry
         from fno.adapters.providers.dispatch import dispatch_env
         from fno.agents.model_routing import read_route_settings
+        from fno.agents.registry import load_registry
 
-        for entry in load_registry():
+        entries_provider = entries_provider or load_registry
+        route_policy_provider = route_policy_provider or _production_route_policy
+        account_env_for = account_env_for or (
+            lambda account, root: dispatch_env(account, repo_root=root)
+        )
+        route_env_for = route_env_for or (
+            lambda entry: read_route_settings(Path(entry.route_settings_path))
+            if getattr(entry, "route_settings_path", None) else {}
+        )
+        runtime_exhausted_fn = runtime_exhausted_fn or _runtime_exhausted
+        harness_installed_fn = harness_installed_fn or (
+            lambda harness: shutil.which(harness) is not None
+        )
+        pane_occupancy_fn = pane_occupancy_fn or _production_pane_occupancy
+        open_breakers_provider = open_breakers_provider or _persisted_open_breakers
+        ordered_accounts, pins = route_policy_provider(row)
+        broken_provider = str(breaker.get("provider") or "")
+        broken_account = str(breaker.get("account") or "")
+        if any(str(value) in {broken_provider, broken_account} for value in pins.values()):
+            return None
+        entries_by_account: dict[str, list[Any]] = {}
+        for registered in entries_provider():
+            account = str(getattr(registered, "account_record_id", "") or "")
+            if account:
+                entries_by_account.setdefault(account, []).append(registered)
+        open_routes = {
+            (str(item.get("provider") or ""), str(item.get("account") or ""))
+            for item in open_breakers_provider()
+            if isinstance(item, dict)
+        }
+
+        for account in ordered_accounts:
+            observations = entries_by_account.get(account, [])
+            identities = {
+                (
+                    str(getattr(item, "harness", "") or ""),
+                    str(getattr(item, "route_provider_id", "") or ""),
+                    str(getattr(item, "model_name", "") or ""),
+                )
+                for item in observations
+            }
+            if len(identities) != 1:
+                continue
+            harness, provider, model = next(iter(identities))
+            if not all((harness, provider, model)):
+                continue
+            entry = observations[0]
             if not all((
                 entry.harness,
                 entry.route_provider_id,
@@ -1207,23 +1317,44 @@ def production_handoff_candidate(
                 entry.account_record_id,
             )):
                 continue
-            if entry.route_provider_id == breaker.get("provider"):
+            pin_provider = str(pins.get("provider") or "")
+            if pin_provider and pin_provider not in {account, harness, provider}:
                 continue
-            route_env = (
-                read_route_settings(Path(entry.route_settings_path))
-                if entry.route_settings_path else None
-            )
-            account_env = dispatch_env(entry.account_record_id, repo_root=Path(row.cwd))
+            if pins.get("harness") and str(pins["harness"]) != harness:
+                continue
+            if pins.get("model") and str(pins["model"]) != model:
+                continue
+            root = Path(row.cwd)
             candidate = RouteCandidate(
-                record_id=entry.account_record_id,
-                harness=entry.harness,
-                provider=entry.route_provider_id,
-                model=entry.model_name,
-                account=entry.account_record_id,
-                account_env=account_env,
-                route_env=route_env,
+                record_id=account,
+                harness=harness,
+                provider=provider,
+                model=model,
+                account=account,
+                account_env=account_env_for(account, root),
+                route_env=route_env_for(entry),
                 canary=None,
+                breaker_open=(provider, account) in open_routes,
+                runtime_exhausted=runtime_exhausted_fn(account, root),
+                harness_installed=harness_installed_fn(harness),
+                pane_supported=harness in {"codex", "opencode", "agy"},
+                pane_count=pane_occupancy_fn(harness),
             )
+            if (
+                provider == broken_provider
+                or candidate.breaker_open
+                or candidate.runtime_exhausted
+                or not candidate.harness_installed
+                or not candidate.pane_supported
+                or candidate.pane_count >= 4
+            ):
+                continue
+
+            if canary_fn is not None:
+                proof = canary_fn(candidate, row, now_s)
+                if proof is not None:
+                    return RouteCandidate(**{**candidate.__dict__, "canary": proof})
+                continue
 
             from fno import _subprocess_util, paths
             from fno.agents.mux_spawn import _mux_pane_alive
@@ -1302,6 +1433,79 @@ def production_handoff_candidate(
     except Exception:
         return None
     return None
+
+
+def _production_route_policy(row: Row) -> tuple[list[str], dict[str, str]]:
+    from fno.adapters.providers.loader import load_combos, load_providers
+    from fno.agents.dispatch_target import resolve_dispatch_target
+
+    root = Path(row.cwd)
+    node = _graph_index().get(str(row.node), {}) if row.node else {}
+    pins = {
+        key: str(node.get(key) or "")
+        for key in ("provider", "harness", "model")
+        if str(node.get(key) or "").strip()
+    }
+    target = resolve_dispatch_target(
+        "provider-outage-handoff", repo_root=root, env={}
+    )
+    if target.provider_id:
+        return [target.provider_id], pins
+    if target.combo_name:
+        combo = load_combos(repo_root=root).get(target.combo_name)
+        return (list(combo.providers) if combo is not None else []), pins
+    config = load_providers(repo_root=root)
+    return ([config.active] if config.active else []), pins
+
+
+def _runtime_exhausted(account: str, root: Path) -> bool:
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.runtime_state import HeadroomState, headroom
+
+    quota = load_quota_config(repo_root=root)
+    return headroom(
+        account,
+        ttl_seconds=quota.probe_ttl_seconds,
+        threshold_pct=quota.defer_threshold_pct,
+        repo_root=root,
+    ).state is HeadroomState.EXHAUSTED
+
+
+def _persisted_open_breakers() -> list[dict[str, Any]]:
+    from fno.agents.provider_outage import journal_path
+
+    try:
+        value = json.loads(journal_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    breakers = value.get("breakers") if isinstance(value, dict) else None
+    return [item for item in (breakers or []) if isinstance(item, dict)]
+
+
+def _production_pane_occupancy(_harness: str) -> int:
+    from fno import _subprocess_util
+    from fno.agents.mux_spawn import resolve_mux_session
+
+    session = resolve_mux_session(None)
+    proc = subprocess.run(
+        [*_subprocess_util.fno_py_cmd(), "mux", "tab", "ls",
+         "--session", session, "--json"],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if proc.returncode != 0:
+        return 4
+    try:
+        tabs = json.loads(proc.stdout or "")
+    except (TypeError, ValueError):
+        return 4
+    if not isinstance(tabs, list):
+        return 4
+    counts = [
+        len(item["pane_ids"])
+        for item in tabs
+        if isinstance(item, dict) and isinstance(item.get("pane_ids"), list)
+    ]
+    return min(counts) if counts else 0
 
 
 def run_sweep(

@@ -479,7 +479,11 @@ def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
         ),
     )
     monkeypatch.setattr(prcli, "load_settings", lambda: settings)
-    monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *_a, **_k: 0)
+    recovery_calls = []
+    monkeypatch.setattr(
+        "fno.recovery.run_recovery_sweep",
+        lambda *_a, **kwargs: recovery_calls.append(kwargs) or 0,
+    )
     monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_k: ([], 0))
     verdict = Verdict("row-1", "worker", "working", LEAVE, "ok", "none")
     payload = {
@@ -509,6 +513,8 @@ def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
 
     assert result.exit_code == 0, result.output
     assert order == ["supervisor", "github"]
+    assert recovery_calls[0]["provider_failover"] is False
+    assert order.count("github") == 1
 
 
 def test_derived_deadline_stays_below_the_interval(monkeypatch):

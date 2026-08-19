@@ -1426,6 +1426,7 @@ def run_recovery_sweep(
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
+    provider_failover: bool = True,
     mission_complete_fn: Optional[Callable] = None,
     notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> int:
@@ -1461,11 +1462,13 @@ def run_recovery_sweep(
             )
     load_counts_fn = load_counts_fn or load_counts
     save_counts_fn = save_counts_fn or save_counts
-    # Default-on in production: the failover branch activates whenever a stale
-    # session's last error is swap-class. With a single configured provider the
-    # controller returns QUEUE_EXHAUSTED (a bounded stop), so wiring it on by
-    # default is safe (x-7abe).
-    failover_fn = failover_fn or _default_failover
+    # The legacy single-row failover is exclusive with provider supervision.
+    # Report/wake/handoff modes still run this sweep for unrelated close
+    # surfacing, but only the quorum supervisor may move provider ownership.
+    if provider_failover:
+        failover_fn = failover_fn or _default_failover
+    else:
+        failover_fn = None
     mission_complete_fn = mission_complete_fn or mission_complete
     notify_close_fn = notify_close_fn or _notify_close
 

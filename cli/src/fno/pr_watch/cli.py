@@ -374,7 +374,9 @@ def tick() -> None:
                     _emit_event(event_type, data)
 
                 _fleet_candidates = run_recovery_sweep(
-                    settings.recovery, emit=emit_recovery
+                    settings.recovery,
+                    emit=emit_recovery,
+                    provider_failover=(settings.recovery.watchdog == "off"),
                 )
                 _fleet_swept = True
                 typer.echo(f"recovery sweep: candidates={_fleet_candidates}")

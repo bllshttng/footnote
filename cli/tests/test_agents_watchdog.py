@@ -1013,7 +1013,10 @@ def test_ac12_obs_handoff_mode_obeys_master_vetoes():
 def test_ac1_det_production_collector_joins_explicit_registry_route_identity(
     monkeypatch, tmp_path
 ):
-    fup = "API Error 429: Fair Usage Policy; submit a request to restore access"
+    fup = (
+        "API Error: Request rejected (429): Fair Usage Policy; "
+        "submit a request to restore access"
+    )
     paths = {}
     entries = []
     rows = []
@@ -1063,6 +1066,146 @@ def test_ac4_err_production_collector_missing_axes_is_count_bearing_unknown(tmp_
     assert report["instrument"] == "unknown"
     assert report["breakers"] == []
     assert report["counts"] == {"unknown_route_identity": 1}
+
+
+def test_ac1_det_production_collector_persists_exact_pane_fallback_before_vote(
+    tmp_path,
+):
+    fup = (
+        "API Error: Request rejected (429): Fair Usage Policy; "
+        "submit a request to restore access"
+    )
+    rows = []
+    entries = []
+    reads = []
+    for index in (1, 2):
+        sid = f"agy-session-{index}"
+        rows.append(Row(sid, f"agy-{index}", "working", "x-abcd", str(tmp_path)))
+        entries.append(SimpleNamespace(
+            harness_session_id=sid,
+            harness="agy",
+            route_provider_id="zai",
+            account_record_id="acct-a",
+            cwd=str(tmp_path),
+            mux={"session": "stable-session", "pane_id": 40 + index},
+        ))
+
+    def pane_read(session, pane_id):
+        reads.append((session, pane_id))
+        return fup
+
+    journal = tmp_path / "provider-outages.json"
+    snapshots = tmp_path / "pane-snapshots"
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda _identity: None,
+        pane_read_fn=pane_read,
+        pane_snapshot_dir=snapshots,
+        journal=journal,
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["breakers"][0]["row_ids"] == ["agy-session-1", "agy-session-2"]
+    assert reads == [("stable-session", 41), ("stable-session", 42)]
+    stored = [json.loads(path.read_text()) for path in snapshots.glob("*.json")]
+    assert len(stored) == 2
+    assert all(item["observed_at"] == NOW_1840 for item in stored)
+    assert {(item["mux_session"], item["pane_id"]) for item in stored} == {
+        ("stable-session", "41"), ("stable-session", "42"),
+    }
+    assert all(item["provider"] == "zai" and item["account"] == "acct-a" for item in stored)
+
+
+def test_ac1_det_readable_transcript_is_not_duplicated_as_a_pane_vote(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": "2026-08-16T18:39:30Z",
+        "isApiErrorMessage": True,
+        "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": "API Error 429: Fair Usage Policy"},
+    }) + "\n", encoding="utf-8")
+    entry = SimpleNamespace(
+        harness_session_id="session-1", harness="agy",
+        route_provider_id="zai", account_record_id="acct-a", cwd=str(tmp_path),
+        mux={"session": "stable-session", "pane_id": 9},
+    )
+    reads = []
+
+    report = watchdog.measure_provider_outages(
+        [Row("session-1", "agy", "working", "x-abcd", str(tmp_path))],
+        now_s=NOW_1840,
+        entries_provider=lambda: [entry],
+        transcript_path_for=lambda _identity: transcript,
+        pane_read_fn=lambda *args: reads.append(args) or "API Error 429: Fair Usage Policy",
+        pane_snapshot_dir=tmp_path / "snapshots",
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["counts"]["accepted"] == 1
+    assert reads == []
+
+
+def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp_path):
+    from fno.agents.provider_outage import CanaryProof
+
+    entries = [
+        SimpleNamespace(
+            account_record_id="full", harness="codex", route_provider_id="openai",
+            model_name="gpt-full", route_settings_path=None,
+        ),
+        SimpleNamespace(
+            account_record_id="good", harness="agy", route_provider_id="google",
+            model_name="gemini-good", route_settings_path=None,
+        ),
+    ]
+    canaries = []
+
+    def canary(candidate, _row, now_s):
+        canaries.append(candidate.record_id)
+        return CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=now_s,
+            persisted=True, assistant_role=False, pane_id="88", stopped=True,
+        )
+
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-abcd", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: entries,
+        route_policy_provider=lambda _row: (["full", "good"], {}),
+        account_env_for=lambda account, _root: {"ACCOUNT": account},
+        route_env_for=lambda _entry: {},
+        runtime_exhausted_fn=lambda account, _root: account == "full",
+        harness_installed_fn=lambda harness: harness in {"codex", "agy"},
+        pane_occupancy_fn=lambda _harness: 3,
+        canary_fn=canary,
+        open_breakers_provider=lambda: [],
+    )
+
+    assert selected is not None
+    assert (selected.record_id, selected.harness, selected.provider, selected.model) == (
+        "good", "agy", "google", "gemini-good",
+    )
+    assert selected.pane_count == 3
+    assert selected.runtime_exhausted is False
+    assert canaries == ["good"]
+
+
+def test_ac5_hlth_node_pin_to_broken_route_refuses_automatic_movement(tmp_path):
+    canaries = []
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-abcd", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: [],
+        route_policy_provider=lambda _row: (["other"], {"provider": "zai"}),
+        canary_fn=lambda *_args: canaries.append(True),
+    )
+    assert selected is None
+    assert canaries == []
 
 
 @pytest.mark.parametrize("mode", ["report", "wake"])
@@ -1135,6 +1278,9 @@ def test_ac12_obs_handoff_mode_requires_fresh_canary_then_runs_one_transaction(
     assert len(calls) == 1
     assert calls[0].destination_provider == "openai"
     assert calls[0].destination_model == "gpt-5.6-sol"
+    assert calls[0].source_provider == "zai"
+    assert calls[0].source_account == "acct-a"
+    assert calls[0].evidence_fingerprints == ("f1", "f2")
     assert decisions[0]["authority_source"] == "daemon-automation"
     assert decisions[0]["source"] == "daemon"
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -20,6 +21,8 @@ OVERLOAD_PERSISTENCE_S = 2 * 60
 PANE_FRESHNESS_S = 2 * 60
 _JOURNAL_VERSION = 1
 _MAX_EVIDENCE = 512
+_MAX_PANE_SNAPSHOT_BYTES = 64 * 1024
+_MAX_PANE_SNAPSHOTS = 512
 HEALTH_MARKER = "FNO_PROVIDER_" + "HEALTH_OK"
 _HEALTH_FRAGMENTS = ("FNO_", "PROVIDER_", "HEALTH_", "OK")
 
@@ -172,6 +175,116 @@ def collect_transcript_evidence(
                 raw_kind="api_error" if is_error else "content",
                 content=content,
             ))
+    return records, refusals
+
+
+def _pane_status(content: str) -> int | None:
+    match = re.search(
+        r"API Error[^\r\n]{0,80}?(?:\b(429|529)\b|\((429|529)\))",
+        content,
+        re.IGNORECASE,
+    )
+    return int(match.group(1) or match.group(2)) if match else None
+
+
+def collect_pane_evidence(
+    identities: Iterable[EvidenceIdentity], *, mux_by_row: dict[str, dict[str, Any]],
+    now_s: float, snapshot_dir: Path,
+    pane_read_fn: Callable[[str, Any], str],
+) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
+    """Persist exact mux screens before returning any pane-backed vote."""
+    from fno.state.io import atomic_write
+
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    records: list[OutageEvidence] = []
+    refusals: list[dict[str, Any]] = []
+    for identity in identities:
+        mux = mux_by_row.get(identity.row_id)
+        session = mux.get("session") if isinstance(mux, dict) else None
+        pane_id = mux.get("pane_id") if isinstance(mux, dict) else None
+        if not session or pane_id is None:
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "pane_identity_missing",
+                "count": 1,
+            })
+            continue
+        try:
+            content = pane_read_fn(str(session), pane_id)
+        except Exception as exc:  # noqa: BLE001 - an unreadable screen cannot vote
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "pane_read_failed",
+                "detail": repr(exc)[:400],
+                "count": 1,
+            })
+            continue
+        if not isinstance(content, str) or not content.strip():
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "pane_read_failed",
+                "count": 1,
+            })
+            continue
+        bounded = content.encode("utf-8")[-_MAX_PANE_SNAPSHOT_BYTES:].decode(
+            "utf-8", errors="ignore"
+        ).strip()
+        status = _pane_status(bounded)
+        record = OutageEvidence(
+            source="pane",
+            observed_at=now_s,
+            row_id=identity.row_id,
+            harness=identity.harness,
+            provider=identity.provider,
+            account=identity.account,
+            role="assistant",
+            raw_status=status,
+            raw_kind="api_error" if status is not None else "content",
+            content=bounded,
+            pane_id=str(pane_id),
+            persisted=True,
+            snapshot_at=now_s,
+        )
+        snapshot = {
+            "observed_at": now_s,
+            "mux_session": str(session),
+            "pane_id": str(pane_id),
+            "row_id": identity.row_id,
+            "harness": identity.harness,
+            "provider": identity.provider,
+            "account": identity.account,
+            "fingerprint": record.fingerprint,
+            "content": bounded,
+        }
+        target = snapshot_dir / f"{record.fingerprint}.json"
+        try:
+            atomic_write(target, json.dumps(snapshot, sort_keys=True))
+            persisted = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "pane_snapshot_unpersisted",
+                "count": 1,
+            })
+            continue
+        if persisted.get("fingerprint") != record.fingerprint:
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "pane_snapshot_unpersisted",
+                "count": 1,
+            })
+            continue
+        records.append(record)
+
+    snapshots = sorted(
+        snapshot_dir.glob("*.json"), key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in snapshots[_MAX_PANE_SNAPSHOTS:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     return records, refusals
 
 

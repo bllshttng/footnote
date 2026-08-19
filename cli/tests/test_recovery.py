@@ -442,6 +442,42 @@ class TestRunRecoverySweep:
         assert "capped:gone9999" not in saved
         assert saved["aaaa1111"] == 1
 
+    @pytest.mark.parametrize("mode", ["report", "wake", "handoff"])
+    def test_ac12_obs_provider_supervision_disables_legacy_failover_only(
+        self, mode, tmp_path, monkeypatch
+    ):
+        h = _Harness()
+        entries = [_Entry("claude", "aaaa1111", cwd=_node_bound_cwd(tmp_path))]
+        live = {"aaaa1111": _Locator("aaaa1111", "/tmp/a.sock", tmp_path)}
+        failovers = []
+        monkeypatch.setattr(
+            recovery, "_default_failover",
+            lambda *_args: failovers.append((mode, "default")) or "swapped",
+        )
+        monkeypatch.setattr(
+            recovery, "_redispatch",
+            lambda *_args, **_kwargs: failovers.append((mode, "redispatch")) or True,
+        )
+
+        recovery.run_recovery_sweep(
+            _Cfg(),
+            emit=h.emit,
+            now=_now(),
+            registry_load=lambda: entries,
+            locate_fn=lambda sid: live.get(sid),
+            read_state_fn=h.read_state,
+            truth_fn=lambda _candidate: {
+                **h.truth(_candidate),
+                "last_message": "API Error: rate limit exceeded, retry later",
+            },
+            liveness_fn=h.liveness,
+            load_counts_fn=lambda: {},
+            save_counts_fn=lambda _counts: None,
+            provider_failover=False,
+        )
+
+        assert failovers == []
+
 
 # ---------------------------------------------------------------------------
 # out-of-usage provider failover (x-7abe) — wire attempt_swap into the watchdog
