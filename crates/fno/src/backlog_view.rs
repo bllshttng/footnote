@@ -422,7 +422,7 @@ fn mark_head(cards: &mut [BacklogCard]) {
     }
 }
 
-/// (x-9c5f) node id -> `pr_number` from the same graph read `derive_cards`
+/// node id -> `pr_number` from the same graph read `derive_cards`
 /// consumes, for the peek header's `PR #N` label (server-joins holder -> node ->
 /// pr at layout time). A sibling of `derive_cards`: parses `entries[].pr_number`
 /// via `.as_u64()`, so a string/float/absent value is skipped (matching
@@ -662,7 +662,7 @@ pub struct ReaderState {
     /// same card states, different/new holder - must republish too, not wait
     /// for a card flip (codex peer review of the v18 routes).
     last_live: Option<HashMap<String, String>>,
-    /// (x-9c5f) node id -> pr_number, recomputed ONLY when the graph read
+    /// node id -> pr_number, recomputed ONLY when the graph read
     /// refreshes (not per tick), so a second full JSON parse per second is
     /// avoided. Cloned onto every publish; a pr-only change (a node gets a
     /// pr_number, same card set + holders) still republishes via the gate below.
@@ -716,7 +716,7 @@ impl ReaderState {
                 (Some(raw), _) => {
                     self.cached_stamp = stamp;
                     fresh_read = true;
-                    // (x-9c5f) The pr map derives from the SAME read; recompute it
+                    // The pr map derives from the SAME read; recompute it
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
                     self.pr = derive_pr_map(&raw);
@@ -777,7 +777,7 @@ impl ReaderState {
         }
         // A pr-only change (a node gains a pr_number while its card + holder stay
         // put) must republish too, else the `PR #N` label would lag until an
-        // unrelated card/claim flip (x-9c5f).
+        // unrelated card/claim flip.
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
         let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
         if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&queue)
@@ -852,7 +852,7 @@ mod tests {
         // through tombstone evidence rather than a stored flag.
         assert_eq!(queue.cards[1].state, CardState::Ready);
         assert_eq!(queue.cards[0].plan_path.as_deref(), Some("/plans/one.md"));
-        // (x-9c5f) the pr map derives from the same document.
+        // the pr map derives from the same document.
         let prs = derive_pr_map(raw);
         assert_eq!(prs.get("EXT-3"), Some(&31u64));
         assert!(!prs.contains_key("EXT-1"));
@@ -1318,7 +1318,7 @@ mod tests {
 
     #[test]
     fn derive_pr_map_takes_only_u64_pr_numbers() {
-        // US8 (x-9c5f): node id -> pr_number, skipping a missing / non-u64 value
+        // node id -> pr_number, skipping a missing / non-u64 value
         // (matching AgentRow.pr: Option<u64>). Keyed by node id, not unique pr.
         let raw = graph(
             r#"{"id":"x-a","slug":"a","priority":"p1","status":"claimed","pr_number":385},
