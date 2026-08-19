@@ -73,6 +73,17 @@ The plugin manifest (`plugin.json` and `marketplace.json`) is structured for fut
 claude plugin install footnote
 ```
 
+### Method 4: Antigravity CLI (optional)
+
+Run the bundled installer from the repository root:
+
+```bash
+bash scripts/install/agy-plugin.sh
+```
+
+The script validates the root `plugin.json`, installs Footnote, and verifies the staged manifest.
+Set `AGY_PLUGIN_INSTALL_TIMEOUT_S=120` when installation needs more time.
+
 ---
 
 ## Setup Wizard
