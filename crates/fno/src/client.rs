@@ -10083,17 +10083,15 @@ async fn handle_stdin(
                                     Instant::now().duration_since(start) >= MENU_LONG_PRESS
                                 });
                                 let menu = long_press
-                                    && view
-                                        .sideline_row_at(rep.row, rep.col)
-                                        .is_some_and(|i| {
-                                            view.open_row_menu(
-                                                i,
-                                                Anchor::At {
-                                                    row: rep.row,
-                                                    col: rep.col,
-                                                },
-                                            )
-                                        });
+                                    && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
+                                        view.open_row_menu(
+                                            i,
+                                            Anchor::At {
+                                                row: rep.row,
+                                                col: rep.col,
+                                            },
+                                        )
+                                    });
                                 if !menu {
                                     if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                                         apply_hit(view, hit, sock_w).await?;
@@ -19613,12 +19611,7 @@ mod tests {
         // press forwarded to the inner app instead. Now it opens the menu of the
         // agent that OWNS the pane under the cursor - the same menu its sideline
         // row opens - and nothing reaches the pane (AC1-HP).
-        let mut v = view_with_agents(vec![agent_row(
-            "w",
-            10,
-            Some(AgentBadge::Working),
-            false,
-        )]);
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         let mut scanner = Scanner::default();
         let mut carry = Vec::new();
         let mut buf: Vec<u8> = Vec::new();
@@ -19735,12 +19728,7 @@ mod tests {
     async fn x7683_long_press_on_an_agent_row_opens_its_menu_not_the_click() {
         // Same contract on a sideline row: a 600ms hold opens the agent's row
         // menu; the focus/attach click action does not fire.
-        let mut v = view_with_agents(vec![agent_row(
-            "w",
-            10,
-            Some(AgentBadge::Working),
-            false,
-        )]);
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         // Display row 1 = agent w (row 0 is the squad name row); sideline col.
         v.row_drag = Some(super::RowDrag {
             src: super::RowSource::Pane(10),
@@ -19805,7 +19793,10 @@ mod tests {
             .position(|r| {
                 matches!(
                     r,
-                    DisplayRow::Header { key: SectionKey::Elsewhere, .. }
+                    DisplayRow::Header {
+                        key: SectionKey::Elsewhere,
+                        ..
+                    }
                 )
             })
             .expect("an ~ elsewhere header");
@@ -19815,7 +19806,10 @@ mod tests {
         assert!(
             matches!(
                 v.row_menu.as_ref().map(|m| &m.target),
-                Some(super::MenuTarget::Section { key: SectionKey::Elsewhere, .. })
+                Some(super::MenuTarget::Section {
+                    key: SectionKey::Elsewhere,
+                    ..
+                })
             ),
             "m on the header opens its section menu"
         );
@@ -19834,7 +19828,10 @@ mod tests {
         super::selector_keys(&mut v, b"m", &mut buf).await.unwrap();
         assert_eq!(
             v.row_menu.as_ref().unwrap().popup.anchor,
-            crate::popup::Anchor::At { row: w as u16, col: 1 },
+            crate::popup::Anchor::At {
+                row: w as u16,
+                col: 1
+            },
             "the menu anchors on the row itself, not one below"
         );
     }
