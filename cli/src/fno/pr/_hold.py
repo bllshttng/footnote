@@ -1,6 +1,7 @@
 """One plan-level hold reader shared by every PR merge path."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from fno.graph.ladder import DispatchHoldState, DispatchHoldVerdict, dispatch_hold_verdict
@@ -50,6 +51,25 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # by_id is what candidate_ids gets checked against below. Skip the PR
         # fetch entirely rather than paying a gh call (and a fail-closed trip
         # on its failure) for a lookup whose answer is always None.
+        return None
+
+    from fno.worktree_paths import resolve_project_id
+
+    try:
+        _our_project = resolve_project_id(Path(cwd))
+    except ValueError:
+        _our_project = None
+    if _our_project is not None and not any(
+        isinstance(entry, dict) and entry.get("project") == _our_project
+        for entry in entries
+    ):
+        # graph.json is a single store shared across every project on the
+        # machine - a non-empty by_id only proves SOME project has nodes,
+        # never THIS one. A repo with zero backlog nodes of its own paid the
+        # same unconditional gh fetch (and the same fail-closed trip on a
+        # blip) as a repo with hundreds. resolve_project_id is local only
+        # (settings.yaml, then a local `git remote get-url origin` read - no
+        # network) so this costs nothing extra when it doesn't short-circuit.
         return None
 
     from fno.graph._reconcile import node_pr_refs

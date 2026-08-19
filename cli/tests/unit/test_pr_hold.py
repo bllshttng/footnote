@@ -14,14 +14,23 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=
     plan = tmp_path / "held.md"
     plan.write_text(plan_body)
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": entries or [{
+    resolved_entries = entries or [{
         "id": "x-5a5c",
         "cwd": str(tmp_path),
         "pr_number": 42,
         "pr_url": "https://github.com/o/r/pull/42",
         "plan_path": str(plan),
-    }]}))
+    }]
+    # x-a93a: hold_for_pr scopes its "anything to check" gate to this repo's
+    # own project (resolve_project_id) before paying a gh fetch. Every entry
+    # here belongs to the one project these tests exercise, and the resolver
+    # is pinned to match - resolve_project_id would otherwise read the tmp_path
+    # basename (not a real project id) and short-circuit every test to None.
+    for entry in resolved_entries:
+        entry.setdefault("project", "test-project")
+    graph.write_text(json.dumps({"entries": resolved_entries}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.worktree_paths.resolve_project_id", lambda *a, **k: "test-project")
     monkeypatch.setattr(
         "fno.pr.closure.fetch_pr_closure_context",
         lambda pr_number, **k: PrClosureContext(
@@ -122,9 +131,10 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     plan.write_text("---\nstatus: ready\n---\n")
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"entries": [
-        {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)},
+        {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan), "project": "test-project"},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.worktree_paths.resolve_project_id", lambda *a, **k: "test-project")
 
     def _boom(pr_number, **k):
         raise ClosureQueryError("gh pr view timed out")
@@ -133,6 +143,62 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold-invalid:" in reason
     assert "PR body is unreadable" in reason
+
+
+def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nodes(
+    tmp_path, monkeypatch,
+):
+    """x-a93a: graph.json is a single store shared across every project on
+    the machine. A repo whose OWN project has zero nodes must not pay the
+    gh fetch just because SOME other project sharing the graph has nodes -
+    and it must not be reachable at all, proving the short-circuit is real,
+    not merely unexercised by this test's stub."""
+    plan = tmp_path / "other-project.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-2222", "cwd": str(tmp_path), "plan_path": str(plan), "project": "other-project"},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.worktree_paths.resolve_project_id", lambda *a, **k: "test-project")
+
+    def _unreachable(pr_number, **k):
+        raise AssertionError("fetch_pr_closure_context must not be called")
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _unreachable)
+    assert _hold.hold_for_pr(42, str(tmp_path)) is None
+
+
+def test_hold_for_pr_still_checks_when_this_repos_project_has_a_ref_less_node(
+    tmp_path, monkeypatch,
+):
+    """The project-scope short-circuit narrows, it never widens: a node
+    that shares this repo's own project (even ref-less, unstamped) still
+    reaches the gh fetch exactly as before - no regression to the
+    round-10/11 trailer-only coverage. A positive control against test
+    ``..._zero_backlog_nodes`` above: proves that test's None came from the
+    project-scope guard, not from a mock that never gets exercised either way."""
+    plan = tmp_path / "unheld.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-3333", "cwd": str(tmp_path), "plan_path": str(plan), "project": "test-project"},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.worktree_paths.resolve_project_id", lambda *a, **k: "test-project")
+
+    calls: list[int] = []
+
+    def _spy(pr_number, **k):
+        calls.append(pr_number)
+        return PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _spy)
+    assert _hold.hold_for_pr(42, str(tmp_path)) is None
+    assert calls == [42]
 
 
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
