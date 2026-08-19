@@ -65,9 +65,9 @@ run_init_in() {
     (
       cd "$tmpdir"
       if [[ $# -gt 0 ]]; then
-        env HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" "$@" bash "$INIT_SCRIPT"
+        env HOME="$fake_home" FNO_TARGET_INIT_GATED=1 TARGET_START=1 TARGET_INPUT="test feature" "$@" bash "$INIT_SCRIPT"
       else
-        HOME="$fake_home" TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
+        HOME="$fake_home" FNO_TARGET_INIT_GATED=1 TARGET_START=1 TARGET_INPUT="test feature" bash "$INIT_SCRIPT"
       fi
     ) 2>/dev/null
 }
