@@ -5695,8 +5695,8 @@ def _mux_pane_send(
         "up": "\x1b[A", "down": "\x1b[B", "esc": "\x1b",
     }
     try:
-        [submit_bytes.get(key, key) for key in submit_keys]
-        input_caps["send_keys_enter_delay_ms"]
+        submit_text = [submit_bytes.get(key, key) for key in submit_keys]
+        enter_delay_s = input_caps["send_keys_enter_delay_ms"] / 1000
     except (KeyError, TypeError):
         return False
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
@@ -5769,7 +5769,7 @@ def _mux_pane_send(
 
     def _paste_then_submit() -> bool:
         # PaneSend is bytes; the CR submit waits for the TUI to absorb the paste.
-        send_args = ["send", pane, "--stdin", "--submit"]
+        send_args = ["send", pane, "--stdin"]
         if guarded:
             send_args.append("--guarded")
         rc = _run(send_args, stdin_text=text)
@@ -5782,8 +5782,10 @@ def _mux_pane_send(
                     file=sys.stderr,
                 )
             return False
-        # Rust owns the settle, separate CR, retries, and positive confirmation.
-        return True
+        # The CR is unguarded: the guarded paste already proved the pane idle, and
+        # guarding the submit could strand a pasted-but-unsent prompt.
+        time.sleep(enter_delay_s)
+        return all(_run(["send", pane, "--text", key]) == 0 for key in submit_text)
 
     if guarded:
         sent = _paste_then_submit()

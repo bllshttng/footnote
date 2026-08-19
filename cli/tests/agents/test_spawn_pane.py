@@ -731,7 +731,9 @@ def test_codex_binding_expiry_runs_one_reconcile_backfill(
 
     monkeypatch.setattr(dispatch, "reconcile_agents", reconcile_once)
 
-    result, _ = _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS)
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider=CODEX_HARNESS, codex_binding=False
+    )
 
     assert calls == ["reconcile"]
     assert load_registry()[0].harness_session_id == session_id
@@ -3798,7 +3800,9 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
     ls_stdout = json.dumps(
         [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
     )
-    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+    runner = FakeRunner(
+        run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout, read_stdout=""
+    )
 
     with pytest.raises(DispatchAskError) as exc:
         _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)

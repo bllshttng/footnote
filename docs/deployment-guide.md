@@ -82,7 +82,8 @@ bash scripts/install/agy-plugin.sh
 ```
 
 The script validates the root `plugin.json`, installs Footnote, and verifies the staged manifest.
-Set `AGY_PLUGIN_INSTALL_TIMEOUT_S=120` when installation needs more time.
+
+When installation needs more time, set `AGY_PLUGIN_INSTALL_TIMEOUT_S=120`.
 
 ---
 

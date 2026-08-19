@@ -2725,7 +2725,18 @@ def dispatch_spawn_pane(
                     cwd=str(cwd),
                     reason="no unique codex rollout for this cwd after spawn",
                 )
-                if binding_caps["required"] and not pane_died:
+                # binding-window-expired is a soft miss, not a dead end: the
+                # pane is confirmed live, only codex's own id has not shown up
+                # yet, and the spawn-time reconcile pass below gets one more
+                # chance to backfill it. Reaping here would kill a working
+                # worker over a race it can still win. Every other required-
+                # binding miss (no pid to correlate, a pane that never got
+                # this far) has nothing left to wait on and reaps as before.
+                if (
+                    binding_caps["required"]
+                    and not pane_died
+                    and unbound_reason != "binding-window-expired"
+                ):
                     reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
                     if reaped:
                         raise DispatchAskError(
@@ -3145,6 +3156,58 @@ def dispatch_spawn_pane(
                 )
             stored_session_uuid = registered_id
             row_status = "live"
+
+        # A codex id-less row from a binding-window timeout is a different
+        # mechanism from the happy-hosted restamp above: the pane is
+        # confirmed alive and the row is already written `spawning`, so a
+        # single spawn-time reconcile pass gives the rollout one more chance
+        # to appear before the receipt returns. Scoped to this exact reason:
+        # any other unbound cause (no pid to correlate, pane died) has
+        # nothing for reconcile to find and would just cost a wasted pass.
+        if provider == "codex" and unbound_reason == "binding-window-expired":
+            from fno.agents import dispatch as _dispatch
+
+            _dispatch.reconcile_agents()
+            this_mux = {"session": session, "pane_id": pane_id}
+            backfilled_row = next(
+                (
+                    r
+                    for r in load_registry(path=registry_path)
+                    if r.name == name and r.mux == this_mux
+                ),
+                None,
+            )
+            if backfilled_row is not None and backfilled_row.harness_session_id:
+                stored_session_uuid = backfilled_row.harness_session_id
+                row_status = backfilled_row.status
+            elif binding_caps["required"]:
+                # Reconcile's one extra chance came up empty too: a required
+                # binding that is STILL id-less is the same unusable pane the
+                # earlier required-binding gate reaps for every other unbound
+                # reason, so it earns the same fate rather than lingering
+                # `spawning` forever.
+                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                if reaped:
+                    try:
+                        update_registry(
+                            lambda rows: [
+                                r for r in rows if not (r.name == name and r.mux == this_mux)
+                            ],
+                            path=registry_path,
+                        )
+                    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+                        pass
+                    raise DispatchAskError(
+                        f"agent {name!r} required {provider} session binding "
+                        f"({unbound_reason}); pane {pane_id} reaped, "
+                        "no registry row written",
+                        exit_code=1,
+                    )
+                raise DispatchAskError(
+                    f"agent {name!r} required {provider} session binding but cleanup "
+                    f"failed: {cleanup_detail}; pane {pane_id} may still exist",
+                    exit_code=1,
+                )
 
         # Claude and Codex both resolve the canonical full harness id through the
         # generated mailbox handle. The row keeps short_id empty because mux is
