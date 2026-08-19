@@ -64,6 +64,71 @@ class AgentProgressFilter(str, enum.Enum):
     unknown = "unknown"
 
 
+def _remedy_for(key: str, holder: str) -> str:
+    """The two commands that clear KEY, safest first.
+
+    A refusal that names only its blocker leaves the operator doing archaeology:
+    read the lockfile for a pid, run ps, force-release. That was three manual
+    steps to undo one crash (x-05be). After the self-clearing recovery above,
+    this text is for the case the probe could NOT run - which is exactly when
+    nobody is coming to help.
+    """
+    return (
+        f"  Clear it:  fno claim reap --apply      "
+        f"(takes it only if no live worker is on the node)\n"
+        f"  Override:  fno claim release {key} --force --reason '<why>'"
+    )
+
+
+#: `_reclaim_if_provably_dead` bucket meaning "a holder we PROVED is alive".
+#: The discriminator between benign dedup and a wedge: somebody is genuinely
+#: working, so the refusal is the system behaving correctly and there is nothing
+#: for an operator to clear. Every other unrecovered bucket is a wedge.
+_HOLDER_ALIVE = "live"
+
+
+def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]:
+    """Force-release KEY when its holder is PROVABLY dead.
+
+    Returns ``(prior_holder, bucket)``. ``prior_holder`` is None whenever the
+    claim was not cleared, and ``bucket`` says why, so the caller can tell a
+    live holder (benign dedup) from one it merely could not measure (a wedge).
+    Those deserve opposite refusals: pointing an operator at a force-release for
+    a reservation whose spawner is mid-launch is worse advice than none.
+
+    Nothing is cleared on a read failure or a probe failure. An instrument that
+    could not run is not a finding, and clearing a claim on one hands a live
+    worker's node to a second worker.
+
+    The proof itself is :func:`fno.claims.core.sweep_verdict`, the same single
+    authority the reaper uses, called on exactly the one key we were asked
+    about. This never sweeps: a dispatch deciding to prune the whole store as a
+    side effect is a blast radius nobody asked for.
+    """
+    from fno.claims.core import force_release_claim, sweep_verdict
+    from fno.claims.io import claim_path, claims_root_for, read_claim_file
+
+    try:
+        claim = read_claim_file(claim_path(key, root=claims_root_for(key)))
+    except Exception:  # noqa: BLE001 - unreadable is unproven, never reclaimable
+        return None, "unreadable"
+    try:
+        provably_dead, bucket = sweep_verdict(claim, abandonment_probe=probe)
+    except Exception:  # noqa: BLE001 - a probe blowing up must not clear a claim
+        return None, "unprobed"
+    if not provably_dead:
+        return None, bucket
+    try:
+        force_release_claim(
+            key=key,
+            reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
+            root=claims_root_for(key),
+        )
+    except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
+        return None, "release-failed"
+    return claim.holder, ""
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -120,11 +185,36 @@ def _spawn_guard_decision(
             **common,
         }, 0
     if observation.blocks_dispatch:
-        return {
-            "verdict": "already-running",
-            "reason": "suspect-claim" if state == "suspect" else "live-claim",
-            **common,
-        }, 0
+        # A LIVE claim is benign dedup: somebody is genuinely building this and
+        # a batch sweep must keep going. A SUSPECT one is a wedge - dead pid,
+        # unexpired TTL - and nobody will build the node until it clears. Only
+        # the wedge is worth trying to recover, and only on a positive finding.
+        if state == "suspect":
+            from fno.claims.cli import _abandonment_probe
+
+            prior, _bucket = _reclaim_if_provably_dead(
+                node_key, probe=_abandonment_probe()
+            )
+            if prior is not None:
+                _emit_reaped_abandoned(node_id, prior, observation.truth_status)
+                observation = _observe_node_claim(
+                    node_id,
+                    cwd,
+                    enforce_failure_limit=not no_reserve,
+                    emit=False,
+                )
+                common = {
+                    "holder": observation.holder,
+                    "truth_status": observation.truth_status,
+                }
+        if observation.blocks_dispatch:
+            return {
+                "verdict": "already-running",
+                "reason": "suspect-claim" if state == "suspect" else "live-claim",
+                **({"remedy": _remedy_for(node_key, observation.holder)}
+                   if state == "suspect" else {}),
+                **common,
+            }, 0
     if no_reserve:
         return {"verdict": "dispatchable"}, 0
 
@@ -137,10 +227,42 @@ def _spawn_guard_decision(
             root=claims_root_for(res_key),
         )
     except CLAIM_UNAVAILABLE:
-        # Not the "error" verdict (exit 3) below - a caller shelling out to
-        # this verb under contention must not flip from benign dedup to an
-        # actionable failure.
-        return {"verdict": "already-running", "reason": "reservation-held"}, 0
+        # A dead spawner's reservation blocks nothing. `spawn-cli:<pid>` is one
+        # process that launches and exits, so it cannot come back under a new
+        # pid and its TTL protects an empty slot. A queued spawn that never got
+        # a slot wedged its node this way for the full three minutes (x-05be).
+        #
+        # Exactly ONE retry, never a loop: a genuine racing dispatcher still
+        # wins the second acquire, and losing twice means the contention is real.
+        cleared, bucket = _reclaim_if_provably_dead(res_key)
+        if cleared is None:
+            # A live spawner is mid-launch: benign dedup, and naming a
+            # force-release here would be worse advice than none.
+            return {
+                "verdict": "already-running",
+                "reason": "reservation-held",
+                **({} if bucket == _HOLDER_ALIVE
+                   else {"remedy": _remedy_for(res_key, holder)}),
+            }, 0
+        try:
+            acquire_claim(
+                res_key,
+                holder,
+                reason=f"bg-dispatch reservation for {node_id}",
+                ttl_ms=_parse_ttl(ttl),
+                root=claims_root_for(res_key),
+            )
+        except CLAIM_UNAVAILABLE:
+            return {
+                "verdict": "already-running",
+                "reason": "reservation-held",
+                "remedy": _remedy_for(res_key, holder),
+            }, 0
+        except Exception as exc:
+            return {
+                "verdict": "error",
+                "detail": f"could not acquire dispatch reservation {res_key} ({exc})",
+            }, 3
     except Exception as exc:
         return {
             "verdict": "error",
@@ -164,6 +286,30 @@ def _spawn_guard_decision(
         "reservation_key": res_key,
         "reservation_holder": holder,
     }, 0
+
+
+def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -> None:
+    """Record a self-clearing recovery on the claim-observed stream.
+
+    Without it the event log shows a gap where a refusal used to be, and the
+    next operator reading back through a wedge cannot tell "it recovered itself"
+    from "nothing ever tried".
+    """
+    try:
+        from fno.agents import events as agent_events
+        from fno.backlog.advance import EVENT_CLAIM_OBSERVED
+
+        agent_events.emit(
+            EVENT_CLAIM_OBSERVED,
+            node_id=node_id,
+            claim_verdict="dead_predecessor",
+            claim_state="suspect",
+            holder=prior_holder,
+            truth_status=truth_status,
+            action="reaped-abandoned",
+        )
+    except Exception:  # noqa: BLE001 - telemetry must never block a dispatch
+        pass
 
 
 def _resolve_dispatch_workdir(cwd: str | None, fresh: bool, here: bool) -> Path:

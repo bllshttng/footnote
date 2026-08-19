@@ -159,6 +159,7 @@ __all__ = [
     "list_claims",
     "list_claims_with_counts",
     "reap_dead_claims",
+    "sweep_verdict",
     "refresh_claim",
     "release_claim",
 ]
@@ -1083,6 +1084,41 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
+def sweep_verdict(
+    claim: Claim,
+    *,
+    now: Optional[int] = None,
+    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+) -> tuple[bool, str]:
+    """Can this claim be archived, and if not, which bucket says why?
+
+    :func:`fno.claims.staleness.classify_for_sweep` plus the roster probe on the
+    one case a pid cannot settle: a ``node:`` claim reading SUSPECT, whose
+    holder is a session and so genuinely might come back under a new pid.
+
+    THE single reap decision. The sweep's lock-free triage, its under-mutex
+    re-verify, and the spawn guard's targeted recovery all call this, so no two
+    of them can drift into different answers about the same claim - the shape
+    the first pitfalls entry names.
+
+    Buckets: ``""`` (reapable), ``"live"``, ``"offhost"``, ``"suspect"`` (no
+    probe was supplied), ``"suspect_alive"`` (a worker is on the node) and
+    ``"suspect_unprobed"`` (the probe could not run). The last two are kept
+    apart deliberately: one is a measurement and the other is its absence.
+    """
+    provably_dead, bucket = classify_for_sweep(claim, now)
+    if provably_dead or bucket != "suspect":
+        return provably_dead, bucket
+    if abandonment_probe is None or not claim.key.startswith("node:"):
+        return False, "suspect"
+    verdict = abandonment_probe(claim)
+    if verdict is True:
+        return True, ""
+    # False: a live worker holds this node. None: the probe could not run,
+    # which is unknown, and unknown keeps.
+    return False, "suspect_alive" if verdict is False else "suspect_unprobed"
+
+
 def _default_reap_roots() -> list[Path]:
     """Both claims roots swept by a bare ``fno claim reap`` (AC2).
 
@@ -1184,22 +1220,7 @@ def reap_dead_claims(
     }
 
     def _sweep_verdict(claim: Claim) -> tuple[bool, str]:
-        """classify_for_sweep, plus the roster probe on a SUSPECT node key.
-
-        One place, so the lock-free triage and the under-mutex re-verify cannot
-        drift into two different answers about the same claim.
-        """
-        provably_dead, bucket = classify_for_sweep(claim, ts)
-        if provably_dead or bucket != "suspect":
-            return provably_dead, bucket
-        if abandonment_probe is None or not claim.key.startswith("node:"):
-            return False, "suspect"
-        verdict = abandonment_probe(claim)
-        if verdict is True:
-            return True, ""
-        # False: a live worker holds this node. None: the probe could not run,
-        # which is unknown, and unknown keeps.
-        return False, "suspect_alive" if verdict is False else "suspect_unprobed"
+        return sweep_verdict(claim, now=ts, abandonment_probe=abandonment_probe)
 
     corrupted = 0
     vanished = 0

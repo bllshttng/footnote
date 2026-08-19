@@ -152,3 +152,132 @@ def test_reservation_precedes_dispatchable(monkeypatch, tmp_path):
     assert _last_json(r.output)["verdict"] == "dispatchable"
     assert order[0] == ("probe", "node:N")  # Guard 1 first
     assert ("acquire", "dispatch:N") in order  # reservation on disk
+
+
+# ---------------------------------------------------------------------------
+# the guard clears what it can prove, and refuses loudly otherwise (x-05be)
+# ---------------------------------------------------------------------------
+
+
+def _dead_pid():
+    import psutil
+
+    dead = 999_999
+    while psutil.pid_exists(dead):
+        dead += 1
+    return dead
+
+
+def _fake_roster(monkeypatch, rows, warnings=()):
+    monkeypatch.setattr(
+        "fno.agents.watchdog.fleet_rows", lambda *_a, **_kw: (list(rows), list(warnings))
+    )
+
+
+def _row(name, state, node):
+    from fno.agents.watchdog import Row
+
+    return Row(row_id=name, name=name, state=state, node=node, cwd="")
+
+
+def test_a_dead_spawners_reservation_blocks_nothing(monkeypatch, tmp_path):
+    """x-05be case 8. A queued spawn that never got a slot left a reservation
+    that refused the relaunch for its whole TTL. spawn-cli:<pid> launches and
+    exits, so it cannot come back and its TTL protects an empty slot."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(
+        "dispatch:N", "spawn-cli:99", ttl_ms=180_000, pid=_dead_pid(), root=tmp_path
+    )
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "dispatchable", verdict
+    assert exit_code == 0
+
+
+def test_a_live_spawners_reservation_is_benign_dedup_with_no_remedy(
+    monkeypatch, tmp_path
+):
+    """Somebody is mid-launch right now. Naming a force-release here would be
+    worse advice than none."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(
+        "dispatch:N", "spawn-cli:other", ttl_ms=180_000, pid=os.getpid(), root=tmp_path
+    )
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict == {"verdict": "already-running", "reason": "reservation-held"}
+    assert exit_code == 0
+
+
+def test_an_abandoned_node_claim_is_cleared_and_the_node_dispatches(
+    monkeypatch, tmp_path
+):
+    """x-05be case 1. A worker died on a 429 and its claim refused its own
+    respawn. Recovery took three manual steps; now it takes none."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+    )
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
+    _fake_roster(monkeypatch, rows=[_row("t-elsewhere", "working", "x-other")])
+
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "dispatchable", verdict
+    assert exit_code == 0
+
+
+def test_a_live_worker_on_the_node_is_never_cleared(monkeypatch, tmp_path):
+    """The x-ba4b regression guard at the dispatch site. Clearing this claim
+    launches a second worker into a live session's worktree."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:respawned", ttl_ms=3_600_000,
+        pid=_dead_pid(), root=tmp_path,
+    )
+    _fake_roster(monkeypatch, rows=[_row("t-N-worker", "working", "N")])
+
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "already-running"
+    assert verdict["reason"] == "suspect-claim"
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
+    assert exit_code == 0
+
+
+def test_an_unprovable_wedge_refuses_and_names_the_way_out(monkeypatch, tmp_path):
+    """x-05be case 3. Assert the command string, never the absence of a launch.
+    When the roster cannot be read the operator is on their own, which is
+    exactly when the refusal has to carry the remedy."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(
+        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+    )
+    _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+
+    verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "already-running"
+    assert "fno claim release node:N --force" in verdict["remedy"]
+    assert "fno claim reap --apply" in verdict["remedy"]
+
+
+def test_a_blind_roster_never_clears_a_node_claim(monkeypatch, tmp_path):
+    """The same run as above, stated as the safety property: an instrument that
+    did not run must never authorize a clear."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+    )
+    _fake_roster(monkeypatch, rows=[], warnings=["registry unreadable"])
+    _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
