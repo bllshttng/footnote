@@ -234,6 +234,14 @@ const GRIP: &str = "···";
 /// latched, silently eating every later click.
 const PANE_DRAG_TIMEOUT: Duration = SEAM_DRAG_TIMEOUT;
 
+/// (x-7683) How long a Left press must hold, with no drag, before its release
+/// opens the context menu instead of the click action - the no-config path for
+/// terminals that never forward a right-click (Terminal.app, an unconfigured
+/// iTerm2, tmux with mouse on). Long enough that an ordinary click never
+/// triggers it; short enough that a deliberate hold does not feel like a wait.
+/// Release-fired (not hold-fired) so no timer runs while the button is down.
+const MENU_LONG_PRESS: Duration = Duration::from_millis(500);
+
 /// Run the client for `session`. Returns the process exit code.
 pub fn run(session: &str) -> i32 {
     match run_inner(session) {
@@ -586,6 +594,9 @@ struct TabDrag {
     src_tab: u64,
     zone: Option<DropZone>,
     last_at: Instant,
+    /// (x-7683) When the press began - the long-press clock, unlike `last_at`
+    /// which motion refreshes.
+    start_at: Instant,
 }
 
 /// (x-10ec) The workspace peek body: everything the layout already holds for
@@ -659,6 +670,9 @@ struct RowDrag {
     src: RowSource,
     zone: Option<DropZone>,
     last_at: Instant,
+    /// (x-7683) When the press began - the long-press clock, unlike `last_at`
+    /// which motion refreshes.
+    start_at: Instant,
 }
 
 /// The last `Layout` as the client holds it.
@@ -3866,6 +3880,7 @@ impl View {
             src_tab,
             zone: None,
             last_at: now,
+            start_at: now,
         });
     }
 
@@ -3917,6 +3932,7 @@ impl View {
             src,
             zone: None,
             last_at: now,
+            start_at: now,
         });
     }
 
@@ -9959,7 +9975,7 @@ async fn handle_stdin(
                 }
                 MouseKind::Release(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
-                    let src = view.tab_drag.map(|d| d.src_tab);
+                    let held = view.tab_drag.map(|d| (d.src_tab, d.start_at));
                     match view.commit_tab_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -9969,9 +9985,30 @@ async fn handle_stdin(
                         // A zone-less release still ON the strip is a plain click:
                         // select the tab (the click-to-select affordance the strip
                         // has always had). Released off the strip it is a cancelled
-                        // drag - nothing travels.
+                        // drag - nothing travels. (x-7683) A hold past
+                        // MENU_LONG_PRESS opens the tab menu instead - the
+                        // no-config path for terminals that never forward a
+                        // right-click - resolved through the same tab_cell_at the
+                        // drag pickup used, so the menu pins the tab under the
+                        // release.
                         None => {
-                            if let Some(tid) = src {
+                            let long_press = held.is_some_and(|(_, start)| {
+                                Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                            });
+                            if long_press
+                                && view.open_tab_menu(
+                                    rep.row,
+                                    rep.col,
+                                    Anchor::At {
+                                        row: rep.row,
+                                        col: rep.col,
+                                    },
+                                )
+                            {
+                                view.refresh_hover_affordances(rep.row, rep.col);
+                                continue;
+                            }
+                            if let Some((tid, _)) = held {
                                 if view.strip_at(rep.row, rep.col) {
                                     write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
                                         .await
@@ -10002,6 +10039,7 @@ async fn handle_stdin(
                     // drag, so a zone-less release can verify it landed back on the
                     // SAME row.
                     let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
+                    let pressed_at = view.row_drag.as_ref().map(|d| d.start_at);
                     match view.commit_row_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -10016,12 +10054,33 @@ async fn handle_stdin(
                         // chrome (row_drag_source_at skips the density button) -
                         // resolves to a different source (or None), so the gesture
                         // cancels rather than acting on the wrong agent.
+                        // (x-7683) A hold past MENU_LONG_PRESS on that same row
+                        // opens its context menu instead - the no-config path for
+                        // terminals that never forward a right-click - through the
+                        // same sideline_row_at + open_row_menu a right-press uses.
                         None => {
-                            if pressed.is_some()
-                                && view.row_drag_source_at(rep.row, rep.col) == pressed
-                            {
-                                if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                                    apply_hit(view, hit, sock_w).await?;
+                            let still_on_row = pressed.is_some()
+                                && view.row_drag_source_at(rep.row, rep.col) == pressed;
+                            if still_on_row {
+                                let long_press = pressed_at.is_some_and(|start| {
+                                    Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                                });
+                                let menu = long_press
+                                    && view
+                                        .sideline_row_at(rep.row, rep.col)
+                                        .is_some_and(|i| {
+                                            view.open_row_menu(
+                                                i,
+                                                Anchor::At {
+                                                    row: rep.row,
+                                                    col: rep.col,
+                                                },
+                                            )
+                                        });
+                                if !menu {
+                                    if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                                        apply_hit(view, hit, sock_w).await?;
+                                    }
                                 }
                             }
                         }
@@ -19606,6 +19665,98 @@ mod tests {
             ),
             "one press re-anchored onto pane 11's agent"
         );
+    }
+
+    // ---- (x-7683) wave 2: Left long-press opens the same menu ---------------
+
+    /// Release Left at 0-based (row, col) through the full stdin path.
+    async fn release_left(
+        v: &mut View,
+        row: u16,
+        col: u16,
+        buf: &mut Vec<u8>,
+    ) -> Result<StdinFlow, String> {
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let bytes = format!("\x1b[<0;{};{}m", col + 1, row + 1);
+        super::handle_stdin(v, &mut scanner, &mut carry, bytes.as_bytes(), buf).await
+    }
+
+    #[tokio::test]
+    async fn x7683_long_press_on_a_tab_cell_opens_the_tab_menu_not_a_select() {
+        // A 600ms hold with no movement opens the tab menu at release - the
+        // no-config path for a terminal that swallows right-click - and the
+        // plain-click SelectTab does not fire.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: v.tab_cell_at(tr, tc).unwrap(),
+            zone: None,
+            last_at: Instant::now(),
+            start_at: Instant::now() - Duration::from_millis(600),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, tr, tc, &mut buf).await.unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Tab(_))
+            ),
+            "the held tab's menu opened"
+        );
+        assert!(buf.is_empty(), "no SelectTab rode the long press");
+    }
+
+    #[tokio::test]
+    async fn x7683_long_press_on_an_agent_row_opens_its_menu_not_the_click() {
+        // Same contract on a sideline row: a 600ms hold opens the agent's row
+        // menu; the focus/attach click action does not fire.
+        let mut v = view_with_agents(vec![agent_row(
+            "w",
+            10,
+            Some(AgentBadge::Working),
+            false,
+        )]);
+        // Display row 1 = agent w (row 0 is the squad name row); sideline col.
+        v.row_drag = Some(super::RowDrag {
+            src: super::RowSource::Pane(10),
+            zone: None,
+            last_at: Instant::now(),
+            start_at: Instant::now() - Duration::from_millis(600),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, 1, 5, &mut buf).await.unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Agent(ident)) if ident.name == "w"
+            ),
+            "the held row's menu opened"
+        );
+        assert!(buf.is_empty(), "no focus or pane input rode the long press");
+    }
+
+    #[tokio::test]
+    async fn x7683_short_press_keeps_the_plain_click_behavior() {
+        // The guard is elapsed time, not the drag state itself: a fast
+        // press-release still selects the tab and focuses the row exactly as
+        // before the long-press existed.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: v.tab_cell_at(tr, tc).unwrap(),
+            zone: None,
+            last_at: Instant::now(),
+            start_at: Instant::now(),
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, tr, tc, &mut buf).await.unwrap();
+        assert!(v.row_menu.is_none(), "a short press opens no menu");
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(Command::SelectTab(_)) => {}
+            other => panic!("expected SelectTab on a short press, got {other:?}"),
+        }
     }
 
     #[tokio::test]
