@@ -36,6 +36,34 @@ pub enum ClientError {
     DaemonBinMissing(PathBuf),
     #[error("daemon is not running")]
     DaemonNotRunning,
+    #[error(
+        "daemon accepted the connection but sent no response within {0:?} - it is listening \
+         and not serving; `fno agents restart --force` recovers a wedged holder"
+    )]
+    DaemonUnresponsive(Duration),
+}
+
+/// How long a client waits for the daemon's response frame before declaring it
+/// unresponsive (x-3498). An AF_UNIX connect succeeds into the listen backlog
+/// whether or not anyone ever calls accept, so connect time cannot tell
+/// "saturated" from "serving"; only a bounded read can. Matches the DaemonBusy
+/// wait budget so both wedge symptoms surface on the same timescale instead of
+/// one hanging forever.
+const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Read one response, bounded by `deadline` ([`RESPONSE_DEADLINE`] at the call
+/// sites, injected so a unit test can prove the bound without waiting 10s). The
+/// deadline lives in the CLIENT, not in `protocol::read_response`, because the
+/// daemon's own read path uses that function too and a deadline there would be
+/// wrong.
+async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
+    conn: &mut R,
+    deadline: Duration,
+) -> Result<Response, ClientError> {
+    match tokio::time::timeout(deadline, read_response(conn)).await {
+        Ok(r) => Ok(r?),
+        Err(_elapsed) => Err(ClientError::DaemonUnresponsive(deadline)),
+    }
 }
 
 /// Resolve the daemon binary: `FNO_AGENTS_DAEMON_BIN` or a sibling of the
@@ -209,6 +237,12 @@ pub async fn ensure_daemon(
     let mut cmd = tokio::process::Command::new(daemon_bin);
     cmd.process_group(0);
     cmd.env("FNO_AGENTS_HOME", home.root());
+    // Name the home in argv too, not just the env (x-cd31): a bare
+    // `fno-agents-daemon` row in ps cannot be attributed to the home it
+    // serves, which is how 78 of them accumulated unnoticed. The binary
+    // refuses a --home that disagrees with the env rather than silently
+    // preferring one.
+    cmd.arg("--home").arg(home.root());
     // Inherit the worker/daemon bin overrides so a test harness's binaries are used.
     if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
         cmd.env("FNO_AGENTS_WORKER_BIN", v);
@@ -266,7 +300,7 @@ pub async fn call(
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
     write_request(&mut conn, req).await?;
-    Ok(read_response(&mut conn).await?)
+    Ok(read_response_bounded(&mut conn, RESPONSE_DEADLINE).await?)
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -289,7 +323,7 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         Err(e) => return Err(ClientError::Io(e)),
     };
     write_request(&mut conn, req).await?;
-    Ok(read_response(&mut conn).await?)
+    Ok(read_response_bounded(&mut conn, RESPONSE_DEADLINE).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +381,13 @@ pub struct RestartOutcome {
     pub old_pid: Option<u32>,
     /// The pid of the freshly-started daemon now serving.
     pub new_pid: u32,
+    /// A `--force` run SIGKILLed the holder rather than draining it; the
+    /// transcript must record that a process was killed (x-3498).
+    pub forced: bool,
+    /// Something the operator should hear but that does not fail the verb
+    /// (e.g. `--force` declined to signal a recycled pid and restarted
+    /// instead). Rendered to stderr, exit stays 0.
+    pub note: Option<String>,
 }
 
 /// Why a restart could not complete. Each variant names the pid where relevant
@@ -356,8 +397,18 @@ pub struct RestartOutcome {
 pub enum RestartError {
     #[error("SIGTERM to daemon pid {pid} failed: {reason}")]
     SigtermFailed { pid: u32, reason: String },
+    #[error("SIGKILL to daemon pid {pid} failed: {reason}")]
+    SigkillFailed { pid: u32, reason: String },
     #[error("daemon pid {pid} did not exit after SIGTERM within {secs}s; check it manually")]
     DidNotExit { pid: u32, secs: u64 },
+    #[error("daemon pid {pid} did not release the supervisor lock after SIGKILL within {secs}s; check it manually")]
+    ForceDidNotFree { pid: u32, secs: u64 },
+    #[error(
+        "the supervisor lock is held but the lockfile names no pid - there is no --force target. \
+         A daemon from before the lockfile-content change may hold it; find its pid with \
+         `lsof +D <agents-home>` and stop it by hand"
+    )]
+    ForceNoTarget,
     #[error("daemon status response missing daemon.pid")]
     StatusMissingPid,
     #[error(transparent)]
@@ -368,8 +419,13 @@ pub enum RestartError {
 /// SIGTERM the daemon unlinks its own socket, so a failed connect means cleared.
 const RESTART_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
-enum SigtermResult {
-    /// SIGTERM delivered.
+/// Bounded wait for a SIGKILLed holder's flock to dissolve. The kernel closes
+/// the descriptors of a SIGKILLed process synchronously enough that this is
+/// normally one poll; the bound only names the worst case.
+const FORCE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum SignalResult {
+    /// Signal delivered.
     Sent,
     /// The pid was already gone (ESRCH) -- treat as a successful "it exited".
     AlreadyGone,
@@ -377,21 +433,21 @@ enum SigtermResult {
     Failed(String),
 }
 
-/// Send SIGTERM to `pid`, mapping the syscall result to a typed verdict. ESRCH
+/// Send `sig` to `pid`, mapping the syscall result to a typed verdict. ESRCH
 /// (no such process) is `AlreadyGone`, not a failure -- the daemon exiting on
 /// its own between the status read and here is the success we wanted. Any other
 /// errno is a `Failed` the caller surfaces loudly.
-fn send_sigterm(pid: u32) -> SigtermResult {
-    // SAFETY: kill(pid, SIGTERM) has no memory effects; errno is read only on the
+fn send_signal(pid: u32, sig: i32) -> SignalResult {
+    // SAFETY: kill(pid, sig) has no memory effects; errno is read only on the
     // error return.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
     if rc == 0 {
-        return SigtermResult::Sent;
+        return SignalResult::Sent;
     }
     let err = std::io::Error::last_os_error();
     match err.raw_os_error() {
-        Some(e) if e == libc::ESRCH => SigtermResult::AlreadyGone,
-        _ => SigtermResult::Failed(err.to_string()),
+        Some(e) if e == libc::ESRCH => SignalResult::AlreadyGone,
+        _ => SignalResult::Failed(err.to_string()),
     }
 }
 
@@ -421,6 +477,19 @@ async fn await_socket_clear(home: &AgentsHome) -> bool {
     UnixStream::connect(&sock).await.is_err()
 }
 
+/// True once nothing holds the supervisor singleton lock, bounded by
+/// [`FORCE_LOCK_TIMEOUT`].
+async fn await_lock_free(home: &AgentsHome) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < FORCE_LOCK_TIMEOUT {
+        if daemon_lock_is_free(home) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    daemon_lock_is_free(home)
+}
+
 /// Lazy-start a fresh daemon and return its pid. Shared by every restart exit.
 async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, RestartError> {
     ensure_daemon(home, daemon_bin).await?;
@@ -438,10 +507,70 @@ async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, Restar
 /// - The SIGTERM targets the daemon pid ONLY; it is pid-reuse-guarded by the
 ///   daemon's own start-time check before signalling, so a recycled pid is never
 ///   hit.
+///
+/// `force` is the break-glass path (x-3498): a daemon that holds the singleton
+/// lock without serving cannot be reached by ANY of the steps above -- the
+/// `call_if_running` probe concludes DaemonNotRunning (a wedged listener either
+/// accepts into the backlog or answers ECONNREFUSED) and `start_fresh`'s
+/// `ensure_daemon` then finds the lock held and returns DaemonBusy, so the
+/// SIGTERM below is never reached. The force path signals the holder FIRST,
+/// reading its pid from the lockfile content, and SIGKILLs it: a wedged select
+/// loop is not reaching its signal handler, which is the whole reason this path
+/// exists. A `--force` that finds a HEALTHY daemon still kills it; that is
+/// correct for a recovery verb and the caller's help says so.
 pub async fn restart_daemon(
     home: &AgentsHome,
     daemon_bin: &Path,
+    force: bool,
 ) -> Result<RestartOutcome, RestartError> {
+    // FORCE BEFORE ANY PROBE: the probe is exactly what a wedge swallows. The
+    // lockfile content names the holder (pid + start time, written at bind).
+    if force {
+        if let Some((pid, recorded_start)) = crate::paths::supervisor_lock_holder(home) {
+            if crate::daemon::pid_is_ours(pid, recorded_start) {
+                match send_signal(pid, libc::SIGKILL) {
+                    SignalResult::Sent | SignalResult::AlreadyGone => {}
+                    SignalResult::Failed(reason) => {
+                        return Err(RestartError::SigkillFailed { pid, reason })
+                    }
+                }
+                if !await_lock_free(home).await {
+                    return Err(RestartError::ForceDidNotFree {
+                        pid,
+                        secs: FORCE_LOCK_TIMEOUT.as_secs(),
+                    });
+                }
+                let new_pid = start_fresh(home, daemon_bin).await?;
+                return Ok(RestartOutcome {
+                    old_pid: Some(pid),
+                    new_pid,
+                    forced: true,
+                    note: None,
+                });
+            }
+            // A recycled pid is never signalled (the same guard the graceful
+            // path applies). The daemon that wrote it is gone, so a plain
+            // restart is both safe and sufficient; the note records the
+            // refusal so the transcript does not read as a force that fired.
+            let new_pid = start_fresh(home, daemon_bin).await?;
+            return Ok(RestartOutcome {
+                old_pid: Some(pid),
+                new_pid,
+                forced: false,
+                note: Some(format!(
+                    "--force did not signal pid {pid}: the lockfile's pid is not the daemon \
+                     (recycled?); restarted without it"
+                )),
+            });
+        }
+        if !daemon_lock_is_free(home) {
+            // Held, but the content names no target: a daemon from before the
+            // lockfile-content change. Loud, never a blind kill.
+            return Err(RestartError::ForceNoTarget);
+        }
+        // No holder recorded and the lock free: nothing to force, plain restart.
+    }
+
     // Probe the running daemon for its pid + start time. A down daemon just
     // starts fresh.
     let status = Request::new(1, "agent.status", json!({}));
@@ -456,6 +585,8 @@ pub async fn restart_daemon(
         return Ok(RestartOutcome {
             old_pid: None,
             new_pid,
+            forced: false,
+            note: None,
         });
     };
 
@@ -479,12 +610,14 @@ pub async fn restart_daemon(
         return Ok(RestartOutcome {
             old_pid: Some(old_pid),
             new_pid,
+            forced: false,
+            note: None,
         });
     }
 
-    match send_sigterm(old_pid) {
-        SigtermResult::Sent | SigtermResult::AlreadyGone => {}
-        SigtermResult::Failed(reason) => {
+    match send_signal(old_pid, libc::SIGTERM) {
+        SignalResult::Sent | SignalResult::AlreadyGone => {}
+        SignalResult::Failed(reason) => {
             return Err(RestartError::SigtermFailed {
                 pid: old_pid,
                 reason,
@@ -510,6 +643,8 @@ pub async fn restart_daemon(
     Ok(RestartOutcome {
         old_pid: Some(old_pid),
         new_pid,
+        forced: false,
+        note: None,
     })
 }
 
@@ -548,7 +683,7 @@ mod drift_restart_tests {
     }
 
     #[test]
-    fn send_sigterm_reports_already_gone_for_dead_pid() {
+    fn send_signal_reports_already_gone_for_dead_pid() {
         // AC2-FR support: a reaped child's pid is ESRCH -> AlreadyGone (a
         // successful "it exited"), distinct from the loud Failed path.
         let child = std::process::Command::new("true")
@@ -558,11 +693,37 @@ mod drift_restart_tests {
         let mut child = child;
         let _ = child.wait(); // reap so the pid is fully gone
         std::thread::sleep(Duration::from_millis(50));
-        match send_sigterm(pid) {
+        match send_signal(pid, libc::SIGTERM) {
             // pid retired -> ESRCH; not-yet-retired -> Sent. Both acceptable;
             // a Failed (e.g. EPERM) for our own just-reaped child is the bug.
-            SigtermResult::AlreadyGone | SigtermResult::Sent => {}
-            SigtermResult::Failed(e) => panic!("unexpected Failed: {e}"),
+            SignalResult::AlreadyGone | SignalResult::Sent => {}
+            SignalResult::Failed(e) => panic!("unexpected Failed: {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_response_bounded_fails_not_hangs_on_a_silent_peer() {
+        // x-3498 AC: a peer that accepts (here: holds the duplex open) and
+        // never replies must surface as DaemonUnresponsive WITHIN the deadline,
+        // not hang forever. The end-to-end shape (a real wedged daemon) is
+        // proven in tests/daemon_e2e.rs; this pins the bound itself, fast.
+        let (_silent, mut read_side) = tokio::io::duplex(64);
+        let deadline = Duration::from_millis(150);
+        let started = Instant::now();
+        let err = read_response_bounded(&mut read_side, deadline)
+            .await
+            .expect_err("silent peer must fail");
+        assert!(
+            matches!(err, ClientError::DaemonUnresponsive(d) if d == deadline),
+            "wrong error: {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the bound did the bounding, not the scheduler"
+        );
+        assert!(
+            err.to_string().contains("listening and not serving"),
+            "the error itself teaches the --force remedy"
+        );
     }
 }

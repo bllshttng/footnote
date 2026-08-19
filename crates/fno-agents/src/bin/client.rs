@@ -322,15 +322,22 @@ async fn run(args: Vec<String>) -> i32 {
     // (ab-1891cdff): SIGTERM the running daemon (graceful drain; PTY workers
     // survive), wait for the socket to clear, lazy-start fresh. Like `status`,
     // it does not fit the one-shot build_request path and dispatches here.
+    // `--force` (x-3498) is the break-glass variant: SIGKILL the lockfile's
+    // holder BEFORE any probe, because a wedged holder is exactly what the
+    // probe cannot see.
     if verb == "restart" {
-        if args.len() > 1 {
-            eprintln!(
-                "fno-agents: restart takes no arguments (got: {})",
-                args[1..].join(" ")
-            );
-            return 2;
-        }
-        return run_restart().await;
+        let force = match &args[1..] {
+            [] => false,
+            [f] if f == "--force" => true,
+            _ => {
+                eprintln!(
+                    "fno-agents: restart takes no arguments besides --force (got: {})",
+                    args[1..].join(" ")
+                );
+                return 2;
+            }
+        };
+        return run_restart(force).await;
     }
 
     // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
@@ -1465,10 +1472,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
 }
 
 /// Render a restart outcome into (stdout line, optional stderr line, exit code).
-/// Pure so the three observable states (swapped / was-down / failed) are unit
+/// Pure so the observable states (swapped / forced / was-down / failed) are unit
 /// testable without spawning a daemon. A failure always carries a stderr line
 /// and a nonzero code (Locked Decision: a failed restart is loud, never a silent
-/// "restarted").
+/// "restarted"); the forced arm records that a process was KILLED, not drained,
+/// and a note (e.g. --force declining a recycled pid) rides on stderr at exit 0.
 fn render_restart(
     outcome: &Result<RestartOutcome, RestartError>,
 ) -> (Option<String>, Option<String>, i32) {
@@ -1476,15 +1484,33 @@ fn render_restart(
         Ok(RestartOutcome {
             old_pid: Some(old),
             new_pid,
-        }) => (Some(format!("restarted: pid {old} -> {new_pid}")), None, 0),
+            forced: false,
+            note,
+        }) => (
+            Some(format!("restarted: pid {old} -> {new_pid}")),
+            note.clone(),
+            0,
+        ),
+        Ok(RestartOutcome {
+            old_pid: Some(old),
+            new_pid,
+            forced: true,
+            note,
+        }) => (
+            Some(format!("forced: killed pid {old} -> {new_pid}")),
+            note.clone(),
+            0,
+        ),
         Ok(RestartOutcome {
             old_pid: None,
             new_pid,
+            forced: _,
+            note,
         }) => (
             Some(format!(
                 "daemon was not running; started fresh (pid {new_pid})"
             )),
-            None,
+            note.clone(),
             0,
         ),
         Err(e) => (None, Some(format!("fno-agents: {e}")), 1),
@@ -1493,11 +1519,12 @@ fn render_restart(
 
 /// Dispatch `fno-agents restart`: swap a (possibly stale) daemon for one built
 /// from the current binary. SIGTERM the running daemon (graceful drain; PTY
-/// workers survive), wait for the socket to clear, lazy-start fresh.
-async fn run_restart() -> i32 {
+/// workers survive), wait for the socket to clear, lazy-start fresh. With
+/// `force`, SIGKILL the lockfile holder first and lazy-start fresh (x-3498).
+async fn run_restart(force: bool) -> i32 {
     let home = AgentsHome::from_env();
     let daemon_bin = resolve_daemon_bin();
-    let outcome = restart_daemon(&home, &daemon_bin).await;
+    let outcome = restart_daemon(&home, &daemon_bin, force).await;
     let (out, err, code) = render_restart(&outcome);
     if let Some(line) = out {
         println!("{line}");
@@ -2734,7 +2761,10 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all] [--status <live|orphaned|unknown>] [--progress <advancing|awaiting-operator|parked|refused|unknown>]",
     "status",
-    "restart",
+    // --force is break-glass: it SIGKILLs a wedged lock holder (and would kill
+    // a healthy one too). Plain restart is the graceful path; say so here
+    // because this line is what `restart --help` prints.
+    "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "stop <name> [--force]",
     "rm <name> [--force]",
@@ -3375,10 +3405,44 @@ mod tests {
         let (out, err, code) = render_restart(&Ok(RestartOutcome {
             old_pid: Some(91627),
             new_pid: 91999,
+            forced: false,
+            note: None,
         }));
         assert_eq!(out.as_deref(), Some("restarted: pid 91627 -> 91999"));
         assert_eq!(err, None);
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn render_restart_forced_says_killed() {
+        // x-3498: a --force swap must read as a KILL, not a drain.
+        let (out, err, code) = render_restart(&Ok(RestartOutcome {
+            old_pid: Some(91627),
+            new_pid: 91999,
+            forced: true,
+            note: None,
+        }));
+        assert_eq!(out.as_deref(), Some("forced: killed pid 91627 -> 91999"));
+        assert_eq!(err, None);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn render_restart_note_rides_stderr_at_zero() {
+        // --force declining a recycled pid is a report, not a failure.
+        let (out, err, code) = render_restart(&Ok(RestartOutcome {
+            old_pid: Some(7),
+            new_pid: 9,
+            forced: false,
+            note: Some("--force did not signal pid 7".to_string()),
+        }));
+        assert_eq!(out.as_deref(), Some("restarted: pid 7 -> 9"));
+        assert_eq!(
+            err.as_deref(),
+            Some("--force did not signal pid 7"),
+            "the refusal is heard"
+        );
+        assert_eq!(code, 0, "the restart itself succeeded");
     }
 
     #[test]
@@ -3387,6 +3451,8 @@ mod tests {
         let (out, err, code) = render_restart(&Ok(RestartOutcome {
             old_pid: None,
             new_pid: 42,
+            forced: false,
+            note: None,
         }));
         assert_eq!(
             out.as_deref(),

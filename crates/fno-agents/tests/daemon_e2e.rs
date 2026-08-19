@@ -471,7 +471,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let restart = {
         let h = home.clone();
         let b = daemon_bin.clone();
-        tokio::spawn(async move { fno_agents::client::restart_daemon(&h, &b).await })
+        tokio::spawn(async move { fno_agents::client::restart_daemon(&h, &b, false).await })
     };
     let mut verbs = Vec::new();
     for i in 0..CONCURRENT_VERBS {
@@ -682,6 +682,88 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
     .unwrap();
 }
 
+/// Read one typed event of `kind` from the home's event log, newest-last.
+fn last_event_of(home: &AgentsHome, kind: &str) -> Option<serde_json::Value> {
+    std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == kind)
+        .next_back()
+}
+
+#[test]
+fn daemon_idle_exits_over_terminal_rows_and_says_why() {
+    // x-cd31 acceptance, in the user's demanded form: assert the exit by BOTH
+    // the pid being gone AND the reason:idle event. The pid alone has two
+    // explanations (an idle exit, a crash); the event names which fired. The
+    // roster here is the established-machine shape - terminal rows, no live
+    // worker - which the old registry-emptiness gate could never exit from.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_codex_source(&home, "done-1", "uuid-idle-1", fno_agents::AgentStatus::Exited);
+    seed_codex_source(&home, "done-2", "uuid-idle-2", fno_agents::AgentStatus::Exited);
+
+    let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
+    let pid = daemon.id();
+
+    // Wait for the positive marker, not for silence.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let idle_fired = || {
+        last_event_of(&home, "daemon_shutting_down")
+            .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
+            == Some("idle".to_string())
+    };
+    while !idle_fired() {
+        assert!(
+            Instant::now() < deadline,
+            "daemon never idle-exited over terminal rows"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = daemon.wait();
+    assert!(!pid_alive(pid), "the daemon is gone");
+    let exited = last_event_of(&home, "daemon_exited").expect("daemon_exited emitted");
+    assert_eq!(exited["data"]["reason"], json!("idle"));
+    assert_eq!(exited["data"]["clean"], json!(true));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn daemon_stays_resident_while_a_worker_socket_is_live() {
+    // The pin side: one live worker socket (a short_id dir holding a
+    // worker.sock) must hold the daemon open past the idle window, with NO
+    // idle event emitted. The socket is the registry-independent signal, so
+    // the row's own status may say anything.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_codex_source(&home, "pinner", "uuid-pin-1", fno_agents::AgentStatus::Live);
+    state::update_registry(&home.registry_json(), |r| {
+        if let Some(row) = r.entries.iter_mut().find(|e| e.name == "pinner") {
+            row.short_id = "pin1".to_string();
+        }
+    })
+    .unwrap();
+    std::fs::create_dir_all(home.agent_dir("pin1")).unwrap();
+    std::fs::write(home.worker_sock("pin1"), b"").unwrap();
+
+    let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
+    let pid = daemon.id();
+
+    std::thread::sleep(Duration::from_secs(7));
+    assert!(pid_alive(pid), "a live worker socket pins the daemon");
+    assert!(
+        last_event_of(&home, "daemon_shutting_down").is_none(),
+        "no idle event while a worker is live"
+    );
+
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// Seed a pane-hosted row: the shape whose identity keys the list projection
 /// used to drop. Holds the mux ref INSTEAD of a transport key (mux XOR worker
 /// XOR bg), so `short_id` is empty and `harness_session_id` is the only id.
@@ -883,7 +965,7 @@ async fn restart_when_down_starts_fresh() {
     let daemon_bin = PathBuf::from(DAEMON_BIN);
     std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
 
-    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin)
+    let outcome = fno_agents::client::restart_daemon(&home, &daemon_bin, false)
         .await
         .expect("restart-when-down succeeds");
     assert_eq!(outcome.old_pid, None, "nothing was running");
@@ -892,6 +974,108 @@ async fn restart_when_down_starts_fresh() {
     unsafe {
         libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
     }
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn restart_force_recovers_a_wedged_holder() {
+    // x-3498 acceptance: a daemon frozen with SIGSTOP holds the singleton lock
+    // and never accepts. A client verb must fail PROMPTLY (bounded, never a
+    // hang), and ONE `restart --force` must recover the machine with no
+    // operator kill: SIGKILL the holder before any probe, fresh daemon serves.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+    let mut daemon = start_daemon(&home);
+    let wedged_pid = daemon.id();
+
+    // Wedge it: frozen mid-serve, lock held, backlog fills, nothing accepts.
+    unsafe {
+        libc::kill(wedged_pid as libc::pid_t, libc::SIGSTOP);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+
+    // A verb against the wedge fails within the client's read deadline, not by
+    // hanging. Both halves are asserted: the error NAME (DaemonUnresponsive)
+    // and the bound.
+    let req = Request::new(1, "agent.status", json!({}));
+    let started = Instant::now();
+    match fno_agents::client::call_if_running(&home, &req).await {
+        Err(ClientError::DaemonUnresponsive(_)) => {}
+        other => panic!("wedged daemon must answer DaemonUnresponsive, got: {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the read deadline bounded the failure"
+    );
+
+    // The recovery: one verb, no operator kill.
+    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+        .await
+        .expect("--force recovers the wedge");
+    assert!(outcome.forced, "the transcript records a kill, not a drain");
+    assert_eq!(outcome.old_pid, Some(wedged_pid), "the wedged holder is the one killed");
+    // Reap OUR child first: a SIGKILLed child is a zombie until waited, and a
+    // zombie still answers kill(pid,0), so liveness-before-reap would lie.
+    let _ = daemon.wait();
+    assert!(!pid_alive(wedged_pid), "the wedged holder is gone");
+    assert!(pid_alive(outcome.new_pid), "a fresh daemon is serving");
+
+    // And the fresh daemon actually answers.
+    let resp = fno_agents::client::call_if_running(&home, &req)
+        .await
+        .expect("fresh daemon serves after force");
+    assert!(!resp.is_err(), "unexpected error response: {:?}", resp.error());
+
+    unsafe {
+        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[tokio::test]
+async fn restart_force_refuses_to_signal_a_recycled_pid() {
+    // x-3498 acceptance: a lockfile whose pid has been recycled by an unrelated
+    // process must NOT be signalled. The positive marker is the stranger
+    // SURVIVING the verb that had every reason to kill it.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    std::env::set_var("FNO_AGENTS_WORKER_BIN", WORKER_BIN);
+
+    // A live, unrelated process the corrupt lockfile will name. Start time "1"
+    // never matches a real process, so the pid-reuse guard must refuse it.
+    let mut stranger = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn sleep");
+    std::fs::write(
+        home.supervisor_lock(),
+        format!("{} 1\n", stranger.id()),
+    )
+    .unwrap();
+
+    let outcome = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+        .await
+        .expect("force-with-recycled-pid still restarts");
+    assert!(!outcome.forced, "no kill was performed");
+    let note = outcome.note.expect("the refusal is reported, not silent");
+    assert!(
+        note.contains(&stranger.id().to_string()),
+        "the note names the pid it refused: {note}"
+    );
+    assert!(
+        stranger.try_wait().unwrap().is_none(),
+        "the stranger SURVIVED: a recycled pid is never signalled"
+    );
+
+    // Cleanup: the stranger by hand, the fresh daemon gracefully.
+    unsafe {
+        libc::kill(stranger.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = stranger.wait();
     std::thread::sleep(Duration::from_millis(200));
     std::fs::remove_dir_all(home.root()).ok();
 }
