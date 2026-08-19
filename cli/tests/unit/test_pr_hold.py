@@ -14,14 +14,22 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=
     plan = tmp_path / "held.md"
     plan.write_text(plan_body)
     graph = tmp_path / "graph.json"
-    graph.write_text(json.dumps({"entries": entries or [{
+    resolved_entries = entries or [{
         "id": "x-5a5c",
         "cwd": str(tmp_path),
         "pr_number": 42,
         "pr_url": "https://github.com/o/r/pull/42",
         "plan_path": str(plan),
-    }]}))
+    }]
+    graph.write_text(json.dumps({"entries": resolved_entries}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    # x-a93a: hold_for_pr scopes its "anything to check" gate by matching an
+    # entry's own `cwd` against this repo's canonical root
+    # (resolve_canonical_worktree(cwd)) - never against a resolved
+    # project-NAME string. Every entry here already carries
+    # cwd=str(tmp_path), so pinning the resolver to tmp_path is what makes
+    # that match land in a test sandbox.
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
     monkeypatch.setattr(
         "fno.pr.closure.fetch_pr_closure_context",
         lambda pr_number, **k: PrClosureContext(
@@ -125,6 +133,7 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
         {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
 
     def _boom(pr_number, **k):
         raise ClosureQueryError("gh pr view timed out")
@@ -133,6 +142,235 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold-invalid:" in reason
     assert "PR body is unreadable" in reason
+
+
+def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nodes(
+    tmp_path, monkeypatch,
+):
+    """x-a93a: graph.json is a single store shared across every project on
+    the machine. A repo whose OWN root matches no entry's cwd must not pay
+    the gh fetch just because SOME other project sharing the graph has
+    nodes - and it must not be reachable at all, proving the short-circuit
+    is real, not merely unexercised by this test's stub."""
+    other_root = tmp_path / "other-project"
+    other_root.mkdir()
+    our_root = tmp_path / "our-repo"
+    our_root.mkdir()
+    plan = other_root / "other-project.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-2222", "cwd": str(other_root), "plan_path": str(plan)},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: our_root)
+
+    def _unreachable(pr_number, **k):
+        raise AssertionError("fetch_pr_closure_context must not be called")
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _unreachable)
+    assert _hold.hold_for_pr(42, str(our_root)) is None
+
+
+def test_hold_for_pr_still_checks_when_this_repos_project_has_a_ref_less_node(
+    tmp_path, monkeypatch,
+):
+    """The project-scope short-circuit narrows, it never widens: a node
+    whose cwd matches this repo's own root (even ref-less, unstamped) still
+    reaches the gh fetch exactly as before - no regression to the
+    round-10/11 trailer-only coverage. A positive control against test
+    ``..._zero_backlog_nodes`` above: proves that test's None came from the
+    project-scope guard, not from a mock that never gets exercised either way."""
+    plan = tmp_path / "unheld.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-3333", "cwd": str(tmp_path), "plan_path": str(plan)},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
+
+    calls: list[int] = []
+
+    def _spy(pr_number, **k):
+        calls.append(pr_number)
+        return PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _spy)
+    assert _hold.hold_for_pr(42, str(tmp_path)) is None
+    assert calls == [42]
+
+
+def test_hold_for_pr_still_checks_when_the_matching_node_has_a_null_project(
+    tmp_path, monkeypatch,
+):
+    """Review fix: a node created via `fno backlog new`, not yet claimed by
+    a plan, legitimately carries `project: null`. Matching on cwd (not on a
+    resolved project-name string) means a null `project` field on the one
+    node that DOES belong to this repo must not be misread as "no node
+    here" - it still reaches the gh fetch."""
+    plan = tmp_path / "unclaimed.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {"id": "x-4444", "cwd": str(tmp_path), "plan_path": str(plan), "project": None},
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
+
+    calls: list[int] = []
+
+    def _spy(pr_number, **k):
+        calls.append(pr_number)
+        return PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _spy)
+    assert _hold.hold_for_pr(42, str(tmp_path)) is None
+    assert calls == [42]
+
+
+def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
+    tmp_path, monkeypatch,
+):
+    """Review fix: hold_for_pr(pr_number, cwd) must resolve its own repo
+    root from the PASSED cwd, not the invoking process's own directory -
+    `fno pr hold-check --repo <path>` is a real, documented call shape
+    where the two differ. Exercises the real (unmocked)
+    resolve_canonical_worktree against two distinct fake git repos to
+    prove cwd, not process cwd, drives the match."""
+    import subprocess
+
+    process_repo = tmp_path / "process-repo"
+    target_repo = tmp_path / "target-repo"
+    for repo in (process_repo, target_repo):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    plan = target_repo / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-5555", "cwd": str(target_repo), "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    monkeypatch.chdir(process_repo)
+
+    verdict = _hold.hold_for_pr(42, str(target_repo))
+    assert verdict is not None
+    assert verdict.owner_id == "x-5555"
+
+
+def test_hold_for_pr_falls_back_to_show_toplevel_when_canonical_worktree_is_none(
+    tmp_path, monkeypatch,
+):
+    """Review fix: when resolve_canonical_worktree(cwd) returns None (its
+    own docstring: bare repos and separate-git-dir checkouts legitimately
+    do), hold_for_pr must re-resolve via `git rev-parse --show-toplevel`
+    against the passed cwd - never fall back to the RAW, unnormalized cwd
+    string. Passes a subdirectory of the repo as cwd (never equal to the
+    entry's stored root by string comparison alone) and forces the None
+    branch, proving the toplevel re-resolution - not a raw-cwd string
+    match - is what finds the held node."""
+    import subprocess
+
+    target_repo = tmp_path / "target-repo"
+    sub_dir = target_repo / "sub"
+    sub_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(target_repo), check=True)
+
+    plan = target_repo / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-7777", "cwd": str(target_repo), "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    verdict = _hold.hold_for_pr(42, str(sub_dir))
+    assert verdict is not None
+    assert verdict.owner_id == "x-7777"
+
+
+def test_hold_for_pr_still_checks_a_node_whose_stored_cwd_has_drifted(
+    tmp_path, monkeypatch,
+):
+    """Review fix: numerous other cwd consumers in this codebase
+    (graph/cli.py, dispatch.py, backlog/advance.py, pr_watch/_discover.py,
+    provenance/spawn_think.py) prefer the LIVE settings-resolved root for a
+    node's `project` over its stored `cwd` snapshot, because the two can
+    drift (a moved checkout, a re-pointed workspace path). hold_for_pr must
+    follow the same precedence: a node whose stale stored `cwd` points
+    somewhere else entirely, but whose `project` resolves via settings to
+    THIS repo, still reaches the gh fetch."""
+    plan = tmp_path / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-6666",
+            "cwd": "/nonexistent/stale/checkout",
+            "project": "footnote",
+            "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42",
+            "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(
+        "fno.graph._intake.project_root_from_settings",
+        lambda project: str(tmp_path) if project == "footnote" else None,
+    )
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+    verdict = _hold.hold_for_pr(42, str(tmp_path))
+    assert verdict is not None
+    assert verdict.owner_id == "x-6666"
 
 
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):

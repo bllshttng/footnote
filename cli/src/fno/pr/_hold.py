@@ -52,6 +52,99 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # on its failure) for a lookup whose answer is always None.
         return None
 
+    import os
+    from pathlib import Path
+
+    from fno.paths import resolve_canonical_worktree
+
+    # resolve_canonical_worktree(cwd) - NOT a plain `git rev-parse
+    # --show-toplevel` - is load-bearing: hold_for_pr is called with an
+    # explicit `cwd` that is not always the process's own (`fno pr
+    # hold-check --repo <path>` passes an arbitrary directory), and a plain
+    # toplevel resolution run FROM A LINKED WORKTREE returns that worktree's
+    # own path, not the canonical/main root every node's `cwd` field
+    # actually stores - so either ignoring `cwd` (review fix) or resolving
+    # the wrong root from it would both silently mismatch a genuinely-held
+    # node's own repo.
+    _canonical_root = resolve_canonical_worktree(Path(cwd))
+    if _canonical_root is not None:
+        _root = os.path.normpath(str(_canonical_root))
+    else:
+        # resolve_canonical_worktree's own docstring: a bare repo or a
+        # separate-git-dir checkout returns None, "the caller's
+        # --show-toplevel fallback yields the real checkout" - never the
+        # RAW, unresolved cwd. A relative or unnormalized cwd (e.g. `fno pr
+        # hold-check 42 --repo .`) can never equal or prefix an entry's
+        # absolute stored cwd, which would silently fail the project-scope
+        # gate open for a repo that genuinely has held nodes (review fix).
+        try:
+            _toplevel = _merge.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd)
+        except ToolMissing:
+            _toplevel = None
+        _root = os.path.normpath(
+            _toplevel.stdout.strip() if _toplevel is not None and _toplevel.ok and _toplevel.stdout.strip() else cwd
+        )
+    _root_prefix = _root.rstrip(os.sep) + os.sep
+
+    from fno.graph._intake import project_root_from_settings
+
+    # Memoized per project name: project_root_from_settings re-parses the
+    # settings file(s) from disk on every call, and most graphs share a
+    # small number of distinct project names across many entries - without
+    # this, the any(...) scan below would re-read the same settings file
+    # once per entry (review fix, efficiency).
+    _settings_root_cache: dict[str, Optional[str]] = {}
+
+    def _effective_cwd(entry: dict) -> Optional[str]:
+        # Prefer the LIVE settings-resolved root for the entry's project
+        # over its stored `cwd` - the same precedence every other cwd
+        # consumer in this codebase uses (graph/cli.py, dispatch.py,
+        # backlog/advance.py, pr_watch/_discover.py, provenance/spawn_think.py
+        # all read `_resolved_cwd` before `cwd`). A node's stored `cwd` is an
+        # intake-time snapshot; the work-map is the current source of truth,
+        # and the two can drift (a moved checkout, a re-pointed workspace
+        # path) - matching only the stale snapshot would silently misread a
+        # node that genuinely belongs here as "not this repo" (review fix).
+        project = entry.get("project")
+        resolved = None
+        if isinstance(project, str) and project:
+            if project not in _settings_root_cache:
+                _settings_root_cache[project] = project_root_from_settings(project)
+            resolved = _settings_root_cache[project]
+        raw = resolved or entry.get("cwd")
+        return raw if isinstance(raw, str) and raw else None
+
+    def _cwd_in_this_repo(entry: object) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        raw_cwd = _effective_cwd(entry)
+        if raw_cwd is None:
+            # Neither a live project root nor a stored cwd - can't be proven
+            # NOT this repo's, and there is no cost to including it - only
+            # candidate_ids (populated below from the ref/trailer match) can
+            # ever trigger a gh call.
+            return True
+        norm = os.path.normpath(os.path.expanduser(raw_cwd))
+        return norm == _root or norm.startswith(_root_prefix)
+
+    if not any(_cwd_in_this_repo(entry) for entry in entries):
+        # graph.json is a single store shared across every project on the
+        # machine - a non-empty by_id only proves SOME project has nodes,
+        # never THIS one. Matched on cwd (the same field/normalization
+        # detect_project uses to find a node's own project at intake), not
+        # on a resolved project-NAME string: an earlier version derived "our
+        # project id" independently (settings.toml -> git remote -> dirname)
+        # and compared that string against each entry's stored `project`
+        # field, but the two schemes read different config and can drift -
+        # and a node created via `fno backlog new`, not yet claimed by a
+        # plan, legitimately carries `project: null`, which a name-string
+        # comparison would silently treat as "not this repo" even when its
+        # cwd matches exactly. Matching on cwd sidesteps both failure modes
+        # (review fix). Local only (a `git worktree list` read - no
+        # network) so this costs nothing extra when it doesn't
+        # short-circuit.
+        return None
+
     from fno.graph._reconcile import node_pr_refs
 
     stamped = any(
