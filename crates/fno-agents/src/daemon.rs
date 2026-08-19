@@ -4693,7 +4693,7 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
 }
 
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe)
+    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe_many)
 }
 
 /// The attention window this surface orders by. Session-truth's stall window
@@ -4742,9 +4742,12 @@ fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
     )
 }
 
+/// `agent.list`, with the truth probe injected as a BATCH seam: one call for
+/// the whole filtered page, keyed by handle. The per-row seam it replaced spent
+/// one Python interpreter cold start per row per list.
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+    F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
 {
     let all = req
         .params
@@ -4829,7 +4832,7 @@ where
         Ok(reg) => reg,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let classified: Vec<_> = registry
+    let filtered: Vec<_> = registry
         .entries
         .iter()
         .filter(|e| {
@@ -4852,9 +4855,32 @@ where
             }
             true
         })
+        .collect();
+    // ONE probe call for the whole page. This handler renders `state`,
+    // `observed_model` and the reachability triple into every row, so it needs
+    // a real reading per row and no stat can stand in for one: a grown
+    // transcript means the tail CHANGED, which makes the last reading stale
+    // rather than confirmed. Batching is the whole win here, and it is enough -
+    // 24 rows cost 18.7 s as per-row subprocesses and 0.8 s as one.
+    //
+    // Duplicate handles across rows collapse in the request and fan back out on
+    // read: free deduplication the per-row path never had.
+    let handles: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        filtered
+            .iter()
+            .map(|e| registry_truth_handle(e))
+            .filter(|h| seen.insert(h.clone()))
+            .collect()
+    };
+    let truths = truth_fn(&handles);
+    let classified: Vec<_> = filtered
+        .into_iter()
         .map(|e| {
-            let truth_handle = registry_truth_handle(e);
-            let truth = truth_fn(&truth_handle);
+            // A handle absent from the batch behaves exactly as a `None` probe
+            // did on the per-row path: every reader below already treats an
+            // unanswered row that way.
+            let truth = truths.get(&registry_truth_handle(e)).cloned();
             let pid_confirmed_live = e
                 .pid
                 .map(|p| pid_is_ours(p, e.pid_start_time))
@@ -11528,6 +11554,27 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
     }
 
+    /// Adapt a per-handle answer into the BATCH seam `handle_list_with_truth`
+    /// takes, for the rendering tests below - they assert what a row renders,
+    /// never how many processes paid for it.
+    ///
+    /// Deliberately NOT used by
+    /// `list_pays_exactly_one_batch_call_for_the_whole_page`: an adapter that
+    /// fans a batch back out per handle would render identically whether the
+    /// handler called it once or once per row, so the call SHAPE needs its own
+    /// test against the raw seam.
+    fn per_handle(
+        f: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>
+    {
+        move |handles: &[String]| {
+            handles
+                .iter()
+                .filter_map(|h| Some((h.clone(), f(h)?)))
+                .collect()
+        }
+    }
+
     /// A probe carrying the shared verdict, as a current `fno` emits it.
     fn probe_with_verdict(
         state: &str,
@@ -11997,7 +12044,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12066,9 +12113,9 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| {
             probe_with_verdict("working", "reachable")
-        });
+        }));
         let row = &response.result().unwrap()["agents"][0];
 
         assert_eq!(row["reachability"], "reachable");
@@ -12086,7 +12133,7 @@ done
         // A probe that did not answer leaves all five null. That is NOT the
         // same as `no-evidence`, which is a verdict this emitter must never
         // invent on the probe's behalf.
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert!(row["reachability"].is_null());
         assert!(row["basis"].is_null());
@@ -12123,9 +12170,9 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
 
         let parked = Request::new(1, "agent.list", json!({"progress": "parked"}));
-        let response = handle_list_with_truth(&ctx, &parked, |_handle| {
+        let response = handle_list_with_truth(&ctx, &parked, per_handle(|_handle| {
             probe_with_verdict("done", "reachable")
-        });
+        }));
         assert_eq!(
             response.result().unwrap()["agents"]
                 .as_array()
@@ -12135,9 +12182,9 @@ done
         );
 
         let advancing = Request::new(2, "agent.list", json!({"progress": "advancing"}));
-        let response = handle_list_with_truth(&ctx, &advancing, |_handle| {
+        let response = handle_list_with_truth(&ctx, &advancing, per_handle(|_handle| {
             probe_with_verdict("done", "reachable")
-        });
+        }));
         assert!(response.result().unwrap()["agents"]
             .as_array()
             .unwrap()
@@ -12194,7 +12241,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| {
             Some(crate::claude_ask::TruthProbe {
                 state: "working".into(),
                 reachability: Some("reachable".into()),
@@ -12206,7 +12253,7 @@ done
                     "kind": "observed", "model": "glm-5.2", "samples": 300
                 }),
             })
-        });
+        }));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"]["model"], "glm-5.2");
         assert_eq!(row["observed_model"]["kind"], "observed");
@@ -12214,7 +12261,7 @@ done
         // A probe that did not answer must not leave a bare null: an absent
         // value is what an operator correctly reads as proving nothing, which
         // is the exact misreading this field exists to end.
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"], json!({"kind": "no-transcript"}));
 
@@ -12239,7 +12286,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["status"], "live");
 
@@ -12262,7 +12309,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["status"], "unknown");
 
@@ -12288,7 +12335,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12314,7 +12361,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
 
         assert_eq!(result["agents"][0]["crown"], "L1 ?");
@@ -12331,7 +12378,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12387,7 +12434,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let agents = result["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
@@ -12404,10 +12451,10 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
             seen.borrow_mut().push(handle.to_string());
             probe("working")
-        });
+        }));
 
         assert!(response.result().is_some());
         assert_eq!(seen.into_inner(), vec!["uuid-abc12345"]);
@@ -12429,10 +12476,10 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
             seen.borrow_mut().push(handle.to_string());
             probe("working")
-        });
+        }));
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12456,10 +12503,10 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
             seen.borrow_mut().push(handle.to_string());
             probe("working")
-        });
+        }));
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12484,16 +12531,82 @@ done
         let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|handle| {
             seen.borrow_mut().push(handle.to_string());
             probe("working")
-        });
+        }));
 
         assert!(response.result().is_some());
         assert_eq!(
             seen.into_inner(),
             vec!["bbbbbbbb-1111-2222-3333-444444444444"]
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_pays_exactly_one_batch_call_for_the_whole_page() {
+        // The x-0d93 fix, asserted where it is spent: N rows used to cost N
+        // Python interpreter cold starts (780 ms each) on every `fno agents
+        // list`. Asserted against the RAW seam, never `per_handle` -- an
+        // adapter that fans a batch back out renders identically whether the
+        // handler called it once or once per row, so only a direct call count
+        // can tell the two apart.
+        let home = short_home("listbatchonce");
+        let rows = 24;
+        for i in 0..rows {
+            seed_stream_row(&home, &format!("worker-{i:02}"), &format!("{i:02}aaaaaa"));
+        }
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
+            calls.borrow_mut().push(handles.to_vec());
+            handles
+                .iter()
+                .map(|h| (h.clone(), probe("working").unwrap()))
+                .collect()
+        });
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1, "one page, one batch");
+        assert_eq!(calls[0].len(), rows, "every filtered row rides that batch");
+        let entries = response.result().unwrap()["agents"].as_array().unwrap().len();
+        assert_eq!(entries, rows);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_row_the_batch_did_not_answer_renders_exactly_as_an_unanswered_row() {
+        // A handle absent from the batch map must be indistinguishable from the
+        // per-row path's `None`: null triple, no invented model. Anything else
+        // and the batch would be reporting a reading it never took.
+        let home = short_home("listbatchpartial");
+        seed_stream_row(&home, "answered", "aaaaaaaa");
+        seed_stream_row(&home, "unanswered", "bbbbbbbb");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+
+        let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
+            // Answers for the first handle only; the second is simply missing.
+            handles
+                .iter()
+                .take(1)
+                .map(|h| (h.clone(), probe("working").unwrap()))
+                .collect()
+        });
+
+        let agents = response.result().unwrap()["agents"].clone();
+        let rows = agents.as_array().unwrap();
+        let missing = rows
+            .iter()
+            .find(|r| r["name"] == "unanswered")
+            .expect("the unanswered row still renders");
+        assert!(missing["reachability"].is_null());
+        assert!(missing["basis"].is_null());
+        assert!(missing["last_activity_age_s"].is_null());
+        assert_eq!(missing["observed_model"]["kind"], "no-transcript");
         std::fs::remove_dir_all(home.root()).ok();
     }
 
