@@ -155,8 +155,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Shared with smoke-dirty so the two ambient lanes cannot drift on what a
-      # smoke run is provisioned with. See .github/actions/smoke-setup.
       - name: Provision the smoke runner
         uses: ./.github/actions/smoke-setup
 

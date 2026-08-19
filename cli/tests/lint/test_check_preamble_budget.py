@@ -253,13 +253,13 @@ def test_two_positional_roots_are_rejected(tmp_path: Path) -> None:
 
 
 def test_preamble_budget_step_is_unconditionally_reachable() -> None:
-    """AC9-EDGE, x-b130 shape: no measured path can make the job unreachable.
+    """AC9-EDGE: no measured path can make the job unreachable.
 
     preamble-budget.yml used to gate on a `paths:` filter, and this test used
     to assert that filter covered every measured path (`skills/**` subsuming
     the `skills/using-fno/SKILL.md` entry it replaced, since the gate measures
     every `skills/*/SKILL.md` description - a narrower filter would leave the
-    descriptions ceiling unreachable from CI). x-b130 consolidated the check
+    descriptions ceiling unreachable from CI). The check was consolidated
     into guards.yml's `guards` job, which the plan's own name-consumer sweep
     requires to carry NO `paths:` filter at all (it runs on every push and
     pull_request unconditionally) - a strictly stronger guarantee than any

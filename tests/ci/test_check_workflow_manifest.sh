@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/ci/test_check_workflow_manifest.sh
 #
-# Test harness for scripts/ci/check-workflow-manifest.sh (x-b130).
+# Test harness for scripts/ci/check-workflow-manifest.sh.
 #
 # Scenarios:
 #   T01 - manifest matches the live directory  -> PASS, rc=0

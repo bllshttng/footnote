@@ -427,7 +427,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # beside the fresh SUCCESS in the rollup, and reading every entry's
         # conclusion into one flat set poisons that set with the stale result.
         # A body gate that re-ran green then still read red here, twice, the
-        # night this was measured (x-b130).
+        # night this was measured.
         deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-workflow-manifest.sh - a workflow file cannot vanish silently.
 #
-# x-b130 consolidated 16 near-duplicate workflows into guards.yml and
+# This consolidated 16 near-duplicate workflows into guards.yml and
 # measured the deletion of an unmeasured smoke-dirty lane. Both were deletions
 # made with a number behind them. The next deletion might not have one: this
 # gate makes "a workflow file disappeared" a red check on that PR rather than
