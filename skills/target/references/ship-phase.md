@@ -23,22 +23,29 @@ back and run it before creating the PR. The ship phase itself should NOT
 create missing docs - that would couple concerns and hide bugs in the phase
 resolver.
 
-## Preflight before every push (CI's verdict, earlier)
+## Preflight before a push (opt-in rehearsal; the policy decides, not this file)
 
 Distinct from the environment preflight in Step 3g (working-tree / deps / auth
 checks): this is the deterministic **test-parity** runner that reproduces CI's
 smoke + rust legs locally so a green here means a green PR, killing the
 push-wait-red-fix loop where each ~10-minute CI round surfaces one new failure.
 
-**Existence-guarded rule (repo-neutral, no hardcoded repo-root path):**
+It is an OPT-IN rehearsal, never the authority. CI on the PR head is the merge
+gate. `fno pr evidence-required` is the single decision point - it reads
+`config.preflight.required` (default false) and the `FNO_SKIP_PREFLIGHT=1`
+escape, so this bash path and the Python lanes cannot disagree. A project that
+wants the mandatory rehearsal back sets `preflight.required = true`.
 
 ```bash
 # Before the first PR push, and again before the push you expect to settle
-# green. Skip when FNO_SKIP_PREFLIGHT=1 or the diff is docs-only. Capture the
+# green - only when the POLICY asks for it. A failed or unparsable fno call
+# yields an empty string, which is not "true", so this fails open in the same
+# direction as the Python policy (CI still verifies the PR head). Capture the
 # non-docs paths into a var (|| true) rather than piping grep inside the `if`
 # condition - grep -q in a pipeline can SIGPIPE git diff under pipefail.
 non_docs="$(git diff --name-only origin/main...HEAD | grep -vE '^(docs/|internal/|.*\.md$)' || true)"
-if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$non_docs" ]]; then
+pf_required="$(fno pr evidence-required --base "${BASE:-origin/main}" 2>/dev/null | jq -r '.required // false')"
+if [[ "$pf_required" == "true" && -x scripts/ci/preflight.sh && -n "$non_docs" ]]; then
   scripts/ci/preflight.sh; pf_rc=$?
   # Branch on the code. Collapsing every non-zero into "RED" is what sends a
   # loop hunting a test failure that does not exist: 5 means the run lost the
@@ -63,11 +70,11 @@ if [[ "${FNO_SKIP_PREFLIGHT:-0}" != "1" && -x scripts/ci/preflight.sh && -n "$no
 fi
 ```
 
-- **First push / settle-green push:** run `scripts/ci/preflight.sh` (full).
-- **Between fix-loop commits** (external-review fixes, iteration pushes): run `scripts/ci/preflight.sh --retry-failed`. It re-checks only the legs that failed last time. The legs are smoke, fmt, cargo test, and the leak guard, recorded per leg in `.fno/preflight-last-failed-legs.txt`. Then run one **full** pass before the push you expect to go green. A subset green is not a full green. The runner labels it, and a retry with no usable record runs every leg and earns FULL.
-- The receipt preflight mints is **review-entry evidence, not merge eligibility**. `fno pr evidence-check` needs it to open the PR. Hosted CI on the PR head plus the configured reviewers decide the merge. Nothing local gates the merge. It survives a rebase (`fno pr evidence-check --allow-rebase-equivalent`, matching verbatim patch ids) but not a code change. It never rescues a failed or pending receipt for HEAD itself.
+- **Stock config: no local preflight runs before a push.** The pre-push obligation is the focused checks (fmt, style lint on changed markdown, PR-body length, the tests covering the diff's blast radius), and CI is the gate. Six concurrent full preflights at load average 415 with zero completions is the measurement that set this default.
+- **A project that set `preflight.required = true`:** first push / settle-green push runs `scripts/ci/preflight.sh` (full); between fix-loop commits (external-review fixes, iteration pushes) run `scripts/ci/preflight.sh --retry-failed`. It re-checks only the legs that failed last time. The legs are smoke, fmt, cargo test, and the leak guard, recorded per leg in `.fno/preflight-last-failed-legs.txt`. Then run one **full** pass before the push you expect to go green. A subset green is not a full green. The runner labels it, and a retry with no usable record runs every leg and earns FULL.
+- The receipt preflight mints is **review-entry evidence, not merge eligibility**. `fno pr evidence-check` needs it to open the PR only on a project that opted in. Hosted CI on the PR head plus the configured reviewers decide the merge. Nothing local gates the merge. It survives a rebase (`fno pr evidence-check --allow-rebase-equivalent`, matching verbatim patch ids) but not a code change. It never rescues a failed or pending receipt for HEAD itself.
 - The guard is `-x scripts/ci/preflight.sh`, a relative existence check. It no-ops in any repo that does not ship the script. The self-containment lint forbids repo-root-anchored script refs, and the relative form is portable.
-- Escape hatches are explicit and auditable. `FNO_SKIP_PREFLIGHT=1` shows in the transcript, and a docs-only diff (only `docs/`, `internal/`, `*.md`) skips by policy. The script itself never self-skips. The skip decision lives here.
+- Escape hatches stay explicit and auditable, and there is ONE source for the decision: `fno pr evidence-required` (which reads `FNO_SKIP_PREFLIGHT=1` and the docs-only rule itself). A docs-only diff (only `docs/`, `internal/`, `*.md`) skips by policy inside that call. The script itself never self-skips, and this file never second-guesses the policy.
 
 See the repo-root `docs/preflight.md` for the full convention.
 
