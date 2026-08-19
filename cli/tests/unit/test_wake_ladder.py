@@ -73,6 +73,14 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
     events = []
 
     class _Gate:
+        def retain_revived_worker(
+            self, short, *, worker_name=None, worker_pid=None
+        ):
+            events.append(("retain", short, worker_name, worker_pid))
+
+        def release_gate_mutex(self):
+            events.append("release-mutex")
+
         def release(self):
             events.append("release")
 
@@ -102,7 +110,14 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
     )
 
     assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
-    assert events == ["gate", "respawn", "stamp-live", "inject", "release"]
+    assert events == [
+        "gate",
+        "respawn",
+        ("retain", "abc12345", "wk-abc12345", None),
+        "stamp-live",
+        "inject",
+        "release-mutex",
+    ]
 
 
 def test_incomplete_forward_registry_refuses_wake(monkeypatch):
@@ -183,8 +198,10 @@ def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypat
     events = []
 
     class _Gate:
-        def retain_revived_worker(self, short, *, worker_pid=None):
-            events.append(("retain", short, worker_pid))
+        def retain_revived_worker(
+            self, short, *, worker_name=None, worker_pid=None
+        ):
+            events.append(("retain", short, worker_name, worker_pid))
 
         def release_gate_mutex(self):
             events.append("release-mutex")
@@ -214,7 +231,11 @@ def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypat
     ok, detail = wake_and_deliver("uuid-full", "wake")
 
     assert ok is False and detail == "spawn-error-RuntimeError"
-    assert events == [("stop", "abc12345"), "release"]
+    assert events == [
+        ("retain", "abc12345", "wk-abc12345", None),
+        ("stop", "abc12345"),
+        "release",
+    ]
 
 
 def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
@@ -231,8 +252,10 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
     events = []
 
     class _Gate:
-        def retain_revived_worker(self, short, *, worker_pid=None):
-            events.append(("retain", short, worker_pid))
+        def retain_revived_worker(
+            self, short, *, worker_name=None, worker_pid=None
+        ):
+            events.append(("retain", short, worker_name, worker_pid))
 
         def release_gate_mutex(self):
             events.append("release-mutex")
@@ -261,7 +284,45 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
     ok, detail = wake_and_deliver("uuid-full", "wake")
 
     assert ok is False and detail == "spawn-error-RuntimeError"
-    assert events == [("retain", "abc12345", 4242), "release-mutex"]
+    assert events == [
+        ("retain", "abc12345", "wk-abc12345", 4242),
+        "release-mutex",
+    ]
+
+
+def test_respawn_reservation_failure_does_not_release_bg_mutex(monkeypatch):
+    from fno.agents.spawn_gate import ProviderCountUnavailable
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry(
+            "exited", provider="zai", route_settings_path="/route.json"
+        ),
+    )
+    events = []
+
+    class _Gate:
+        def retain_revived_worker(self, *_args, **_kwargs):
+            events.append("retain")
+            raise ProviderCountUnavailable("claim store unavailable")
+
+        def release_gate_mutex(self):
+            events.append("release-mutex")
+
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate", lambda *args, **kwargs: _Gate()
+    )
+    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is False and detail == "spawn-error-ProviderCountUnavailable"
+    assert events == ["retain"]
 
 
 def test_live_roster_skips_rung2_and_forks(monkeypatch):

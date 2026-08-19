@@ -607,7 +607,11 @@ class GateGuard:
         return authorized
 
     def retain_revived_worker(
-        self, short_id: str, *, worker_pid: Optional[int] = None
+        self,
+        short_id: str,
+        *,
+        worker_name: Optional[str] = None,
+        worker_pid: Optional[int] = None,
     ) -> None:
         """Convert a BG admission into durable fail-closed worker evidence."""
         if self._route_provider is None or self._spawn_name is None:
@@ -615,7 +619,7 @@ class GateGuard:
         holder = self._gate_holder or f"spawn-gate:{os.getpid()}:{self._spawn_name}"
         _acquire_worker_slot(
             self,
-            self._spawn_name,
+            worker_name or self._spawn_name,
             holder,
             self._route_provider,
             fail_closed=True,

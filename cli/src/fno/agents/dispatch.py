@@ -6183,6 +6183,22 @@ def _stamp_revived_live(entry: AgentEntry) -> None:
         )
 
 
+def _revived_roster_pid(short_id: str) -> Optional[int]:
+    """Return the revived worker's positive roster PID when readable."""
+    try:
+        from fno.agents.harnesses._claude_session_registry import roster_sessions
+
+        for row in roster_sessions():
+            if row.get("short_id") != short_id:
+                continue
+            pid = int(row.get("pid") or 0)
+            if pid > 0:
+                return pid
+    except (OSError, TypeError, ValueError):
+        pass
+    return None
+
+
 def wake_and_deliver(
     session_uuid: str, wrapped: str, *, cwd: Optional[Path] = None
 ) -> tuple[bool, str]:
@@ -6250,6 +6266,7 @@ def wake_and_deliver(
     from fno.agents.spawn_gate import GateRefused, run_gate
 
     gate = None
+    revived_reservation = False
     if route_provider is not None:
         try:
             gate = run_gate(spawn_name, "bg", route_provider=route_provider)
@@ -6270,6 +6287,21 @@ def wake_and_deliver(
             if guard is not None:
                 try:
                     if _respawn_claude_session(short) == 0:
+                        if gate is not None:
+                            # Move the admission to a worker claim BEFORE any
+                            # fallible registry write. The claim uses the row's
+                            # original name, so provider_live_count deduplicates
+                            # it once registry+roster evidence becomes countable;
+                            # until then it closes the roster-lag window.
+                            transfer_gate = gate
+                            gate = None
+                            transfer_gate.retain_revived_worker(
+                                short,
+                                worker_name=entry.name,
+                                worker_pid=_revived_roster_pid(short),
+                            )
+                            gate = transfer_gate
+                            revived_reservation = True
                         try:
                             _stamp_revived_live(entry)
                         except Exception as stamp_error:
@@ -6279,22 +6311,6 @@ def wake_and_deliver(
                                 stop_code, stop_detail = claude_stop(short)
                             except Exception as stop_error:
                                 if gate is not None:
-                                    from fno.agents.harnesses._claude_session_registry import (
-                                        roster_sessions,
-                                    )
-
-                                    worker_pid = next(
-                                        (
-                                            int(row.get("pid") or 0)
-                                            for row in roster_sessions()
-                                            if row.get("short_id") == short
-                                            and int(row.get("pid") or 0) > 0
-                                        ),
-                                        None,
-                                    )
-                                    gate.retain_revived_worker(
-                                        short, worker_pid=worker_pid
-                                    )
                                     gate.release_gate_mutex()
                                     gate = None
                                 raise RuntimeError(
@@ -6306,20 +6322,6 @@ def wake_and_deliver(
                                 # stopped. Release only the serialization mutex;
                                 # retaining its provider reservation makes later
                                 # matching counts refuse instead of failing open.
-                                from fno.agents.harnesses._claude_session_registry import (
-                                    roster_sessions,
-                                )
-
-                                worker_pid = next(
-                                    (
-                                        int(row.get("pid") or 0)
-                                        for row in roster_sessions()
-                                        if row.get("short_id") == short
-                                        and int(row.get("pid") or 0) > 0
-                                    ),
-                                    None,
-                                )
-                                gate.retain_revived_worker(short, worker_pid=worker_pid)
                                 gate.release_gate_mutex()
                                 gate = None
                                 raise RuntimeError(
@@ -6327,6 +6329,10 @@ def wake_and_deliver(
                                     f"or stopped ({stop_detail}); provider reservation "
                                     "retained"
                                 ) from stamp_error
+                            if gate is not None:
+                                gate.release()
+                                gate = None
+                                revived_reservation = False
                             raise RuntimeError(
                                 f"revived worker {short} was stopped because its live "
                                 "registry stamp failed"
@@ -6390,7 +6396,10 @@ def wake_and_deliver(
         return False, f"spawn-error-{type(exc).__name__}"
     finally:
         if gate is not None:
-            gate.release()
+            if revived_reservation:
+                gate.release_gate_mutex()
+            else:
+                gate.release()
 
 
 def wake_drain_agent(
