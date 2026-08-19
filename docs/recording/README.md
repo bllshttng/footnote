@@ -18,8 +18,8 @@ A recording script is the exact terminal run, expected output, and edit list for
 | L10 | Capture and shape work | cast | `L10-capture-and-shape-work.md` | scripted |
 | L12 | Worktrees | cast | `L12-worktrees.md` | scripted |
 | L13 | Spawn a peer agent | video | `L13-spawn-a-peer-agent.md` | scripted |
-| L14 | Make agents talk | cast | `L14-make-agents-talk.md` | planned |
-| L15 | Mux | cast | `L15-mux.md` | planned |
+| L14 | Make agents talk | cast | `L14-make-agents-talk.md` | scripted |
+| L15 | Mux | cast | `L15-mux.md` | scripted |
 
 ## Setup state
 
