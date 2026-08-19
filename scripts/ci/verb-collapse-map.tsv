@@ -253,6 +253,7 @@ pr evidence-check	T1	pr evidence-check	1
 pr evidence-required	T1	pr evidence-required	1
 pr global-receipt-events-path	T1	pr global-receipt-events-path	0
 pr graphql-exec	T1	pr graphql-exec	1
+pr hold-check	T1	pr hold-check	0
 pr info	T1	pr info	10
 pr list	T1	pr list	3
 pr logs	T1	pr logs	1
@@ -311,6 +312,7 @@ stub-manifest reconcile-validate	T1	stub-manifest reconcile-validate	2
 stub-manifest write	T1	stub-manifest write	2
 target blast-check	T1	target blast-check	3
 target check-contained	T1	target check-contained	4
+target check-dispatch-hold	T1	target check-dispatch-hold	2
 target check-review-gate	T1	target check-review-gate	4
 target denominator-ratio	T1	target denominator-ratio	2
 target init	KEEP	target init	90	deliberate readability slack for a high-traffic distinct operation
