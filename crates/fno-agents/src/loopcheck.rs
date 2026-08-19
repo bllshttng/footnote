@@ -1637,23 +1637,27 @@ fn read_pr_view(
 
 /// Resolve a numeric PR selector without consulting the checkout branch.
 /// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
-/// response and must not fall back to local HEAD.
+/// response and must not fall back to local HEAD. Returns the raw `pr_json`
+/// alongside the head, so a caller that goes on to build a full `PrInfo` can
+/// reuse this read instead of issuing a second `gh pr view` for the same
+/// selector.
 fn read_pr_head_oid(
     gh_bin: &str,
     cwd: &Path,
     selector: &str,
-) -> Result<Option<String>, (String, String)> {
+) -> Result<Option<(String, Value)>, (String, String)> {
     let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
         return Ok(None);
     };
-    pr_head_oid(&pr_json).map(Some).ok_or_else(|| {
+    let head = pr_head_oid(&pr_json).ok_or_else(|| {
         let read = if internal_gh_adapter(gh_bin) {
             "pr_info_rest_parse"
         } else {
             "pr_view_parse"
         };
         (read.to_string(), "missing headRefOid".to_string())
-    })
+    })?;
+    Ok(Some((head, pr_json)))
 }
 
 /// The GraphQL bucket's state, from `gh api rate_limit`.
@@ -2179,6 +2183,7 @@ fn read_pr_info(
     repo_slug: &str,
     author_session: Option<&str>,
     pr_selector: Option<&str>,
+    prefetched_pr_json: Option<Value>,
 ) -> Result<PrInfo, (String, String)> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2199,8 +2204,13 @@ fn read_pr_info(
     // number-based call (`gh api .../pulls/<n>/comments`) already carries the
     // number the first read returned.
     let sel: Vec<&str> = pr_selector.into_iter().collect();
-    // Read 1: PR state + number + head OID + mergeability
-    let Some(pr_json) = read_pr_view(gh_bin, cwd, pr_selector)? else {
+    // Read 1: PR state + number + head OID + mergeability. Reuse the caller's
+    // read when it already resolved this exact selector (e.g. review-coverage
+    // pinning --pr N via read_pr_head_oid) instead of asking gh again.
+    let Some(pr_json) = (match prefetched_pr_json {
+        Some(json) => Some(json),
+        None => read_pr_view(gh_bin, cwd, pr_selector)?,
+    }) else {
         // No PR yet: world-state, not an error. done() is simply false, and
         // the backstop can resolve a stuck no-PR session as NoProgress.
         return Ok(PrInfo {
@@ -7806,6 +7816,7 @@ fn run_done(
         repo_slug,
         author_session,
         None,
+        None,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -9676,21 +9687,29 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // local checkout for the branch-inference path. A failed named-PR read
     // must never fall through to local HEAD: that is how a canonical checkout
     // used to publish a row describing main against a different PR.
-    let branch = git_head_branch(&git_bin, &cwd);
+    // `branch` is read lazily, inside the closure, since it is only ever
+    // needed on the no-PR error path - an explicit --head never calls it.
     let no_pr_payload = || {
         serde_json::json!({
             "coverage": "none",
             "emitted": false,
             "reason": "no PR for the selector",
             "selector": pr,
-            "branch": branch,
+            "branch": git_head_branch(&git_bin, &cwd),
         })
         .to_string()
     };
+    // Set when the (None, Some(selector)) branch below resolves the head via
+    // a `gh pr view` read, so the read_pr_info call further down can reuse
+    // that same response instead of issuing an identical second request.
+    let mut prefetched_pr_json: Option<Value> = None;
     let (head_sha, head_explicit) = match (head, pr.as_deref()) {
         (Some(explicit), _) => (explicit, true),
         (None, Some(selector)) => match read_pr_head_oid(&gh_bin, &cwd, selector) {
-            Ok(Some(resolved)) => (resolved, true),
+            Ok(Some((resolved, pr_json))) => {
+                prefetched_pr_json = Some(pr_json);
+                (resolved, true)
+            }
             Ok(None) => return (3, no_pr_payload()),
             Err((read, tail)) => {
                 let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -9766,6 +9785,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         &inputs.repo_slug,
         author_session.as_deref(),
         pr.as_deref(),
+        prefetched_pr_json,
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
