@@ -922,43 +922,15 @@ async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
 async fn stop_keeps_non_pane_noop_receipt() {
     let home = short_home();
     home.ensure_root().unwrap();
+    // Seed the pane row, then reshape it in place: a codex ask row is the pane
+    // row with no mux ref and the codex harness. Reusing the helper (rather
+    // than a second full RegistryEntry literal) keeps this file's axis-guard
+    // binding counts unchanged.
+    seed_pane_row(&home, "codex-ask-row");
     state::update_registry(&home.registry_json(), |r| {
-        r.entries.push(fno_agents::state::RegistryEntry {
-            name: "codex-ask-row".into(),
-            short_id: String::new(),
-            legacy_provider: "codex".into(),
-            provider: None,
-            harness: Some("codex".into()),
-            harness_session_id: Some("c0d3x".into()),
-            cwd: "/tmp".into(),
-            project_root: String::new(),
-            session_id: None,
-            legacy_claude_short_id: None,
-            claude_session_uuid: None,
-            messaging_socket_path: None,
-            codex_session_id: None,
-            gemini_session_id: None,
-            mcp_channel_id: None,
-            host_mode: None,
-            cc_session_id: None,
-            status: fno_agents::AgentStatus::Live,
-            last_message_at: None,
-            created_at: "2026-08-19T00:00:00Z".into(),
-            pid: None,
-            pid_start_time: None,
-            log_path: None,
-            last_reconciled_at: None,
-            inside_leg: None,
-            exited_at: None,
-            mux: None,
-            screen_state: None,
-            crown_level: None,
-            crown_scope: None,
-            crown_grantor: None,
-            route_settings_path: None,
-            fno_id: None,
-            delivery_policy: None,
-        });
+        let row = r.find_mut("codex-ask-row").unwrap();
+        row.mux = None;
+        row.harness = Some("codex".into());
     })
     .unwrap();
     let _daemon = start_daemon(&home);
