@@ -88,7 +88,10 @@ fi
 # leftover dir with no git metadata of its own, clear it; otherwise refuse so
 # dirty work is never silently destroyed.
 if [[ ! -e "$WORKTREE_PATH/.git" ]]; then
-    rm -rf "$WORKTREE_PATH"
+    # A worktree is the largest thing fno deletes. Trash-moving it reclaims
+    # nothing. command -p rm + /bin/rm, never bare rm. See
+    # docs/architecture/disposable-deletes.md.
+    command -p rm -rf "$WORKTREE_PATH" 2>/dev/null || /bin/rm -rf "$WORKTREE_PATH"
     log_event "removed" "\"reason\":\"unregistered_dir\""
     exit 0
 fi
