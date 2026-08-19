@@ -729,7 +729,17 @@ fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
 const DORMANT_PROBE_CAP: usize = 8;
 /// One wall-clock budget shared by every transcript-truth subprocess in a
 /// daemon pass. The final subprocess receives only the remaining duration.
-const PROBE_PASS_BUDGET: Duration = Duration::from_secs(30);
+/// Keep response overhead inside the client's 30-second request deadline.
+const DEFAULT_PROBE_PASS_BUDGET: Duration = Duration::from_secs(25);
+
+fn probe_pass_budget() -> Duration {
+    std::env::var("FNO_AGENTS_PROBE_PASS_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_PROBE_PASS_BUDGET)
+}
 /// Harness-session cascades per sweep, same rationale as DORMANT_PROBE_CAP.
 const CASCADE_CAP: usize = 10;
 /// Wall-clock bound for one harness removal subprocess. A hung removal must
@@ -1211,6 +1221,7 @@ pub fn gc_sweep(
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let started = Instant::now();
+    let budget = probe_pass_budget();
     let overrun = std::cell::Cell::new(false);
     let summary = gc_sweep_impl(
         home,
@@ -1218,7 +1229,7 @@ pub fn gc_sweep(
         grace_for_harness,
         false,
         &|handle| {
-            let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+            let remaining = budget.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 overrun.set(true);
                 return Err(());
@@ -1228,7 +1239,7 @@ pub fn gc_sweep(
                 remaining.min(Duration::from_secs(5)),
             )
             .map(|probe| probe.state);
-            if started.elapsed() >= PROBE_PASS_BUDGET {
+            if started.elapsed() >= budget {
                 overrun.set(true);
                 return Err(());
             }
@@ -1240,7 +1251,7 @@ pub fn gc_sweep(
     if overrun.get() {
         let _ = emitter.emit(
             "gc_sweep_overrun",
-            &json!({"budget_ms": PROBE_PASS_BUDGET.as_millis()}),
+            &json!({"budget_ms": budget.as_millis()}),
         );
     }
     summary
@@ -1263,6 +1274,7 @@ pub fn gc_sweep_dry_run(
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let started = Instant::now();
+    let budget = probe_pass_budget();
     let overrun = std::cell::Cell::new(false);
     gc_sweep_impl(
         home,
@@ -1270,7 +1282,7 @@ pub fn gc_sweep_dry_run(
         grace_for_harness,
         true,
         &|handle| {
-            let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+            let remaining = budget.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 overrun.set(true);
                 return Err(());
@@ -1280,7 +1292,7 @@ pub fn gc_sweep_dry_run(
                 remaining.min(Duration::from_secs(5)),
             )
             .map(|probe| probe.state);
-            if started.elapsed() >= PROBE_PASS_BUDGET {
+            if started.elapsed() >= budget {
                 overrun.set(true);
                 return Err(());
             }
@@ -4009,9 +4021,10 @@ fn registry_truth_handle(entry: &RegistryEntry) -> String {
 
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     let started = Instant::now();
+    let budget = probe_pass_budget();
     let overrun = std::cell::Cell::new(false);
     let response = handle_list_with_truth(ctx, req, |handle| {
-        let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
+        let remaining = budget.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             overrun.set(true);
             return None;
@@ -4020,7 +4033,7 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
             handle,
             remaining.min(Duration::from_secs(5)),
         );
-        if started.elapsed() >= PROBE_PASS_BUDGET {
+        if started.elapsed() >= budget {
             overrun.set(true);
         }
         result
@@ -4028,7 +4041,7 @@ fn handle_list(ctx: &Ctx, req: &Request) -> Response {
     if overrun.get() {
         let _ = ctx.emitter.emit(
             "list_truth_overrun",
-            &json!({"budget_ms": PROBE_PASS_BUDGET.as_millis()}),
+            &json!({"budget_ms": budget.as_millis()}),
         );
     }
     response

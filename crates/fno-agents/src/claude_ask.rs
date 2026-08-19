@@ -190,11 +190,16 @@ fn family1_truth_probe_retrying(
     timeout: Duration,
     handle: &str,
 ) -> Option<TruthProbe> {
+    let started = Instant::now();
     let first = family1_truth_attempt(command_for_attempt(), timeout, handle, false);
     if !first.crashed {
         return first.probe;
     }
-    family1_truth_attempt(command_for_attempt(), timeout, handle, true).probe
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return None;
+    }
+    family1_truth_attempt(command_for_attempt(), remaining, handle, true).probe
 }
 
 /// The transcript state, LOWERED to `"unreachable"` when the shared verdict

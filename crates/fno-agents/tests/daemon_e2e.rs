@@ -233,6 +233,65 @@ async fn daemon_answers_before_probing_finishes() {
     assert_eq!(completed, 8, "the bounded probe pass must later finish");
 }
 
+#[tokio::test]
+async fn list_returns_partial_rows_before_the_client_deadline() {
+    let _test_guard = daemon_e2e_guard();
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_live_probe_rows(&home, 40);
+    let shim = install_slow_truth_shim(&home);
+    let starts_env = shim.starts.to_string_lossy().into_owned();
+    let finishes_env = shim.finishes.to_string_lossy().into_owned();
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("PATH", shim.path.as_str()),
+            ("FNO_PROBE_STARTS", starts_env.as_str()),
+            ("FNO_PROBE_FINISHES", finishes_env.as_str()),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+            ("FNO_AGENTS_DEAD_ROW_GRACE_SECS", "0"),
+            ("FNO_AGENTS_PROBE_PASS_BUDGET_MS", "500"),
+        ],
+    );
+
+    let started = Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        call(
+            &home,
+            &PathBuf::from(DAEMON_BIN),
+            &Request::new(1, "agent.list", json!({"all": true})),
+        ),
+    )
+    .await
+    .expect("list must return before the client deadline")
+    .expect("list request succeeds");
+    let elapsed = started.elapsed();
+    let agents = response.result().unwrap()["agents"]
+        .as_array()
+        .expect("list returns rows")
+        .len();
+    let probe_starts = line_count(&shim.starts);
+    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+
+    assert_eq!(agents, 40, "the bounded response keeps every stored row");
+    assert!(elapsed < Duration::from_secs(2));
+    assert!(
+        probe_starts >= 1,
+        "the bounded truth pass must actually run"
+    );
+    assert!(
+        events.contains("list_truth_overrun"),
+        "the partial-result path must emit its positive overrun marker"
+    );
+}
+
 #[test]
 fn sigterm_stops_daemon_during_slow_sweep() {
     let _test_guard = daemon_e2e_guard();
