@@ -217,6 +217,17 @@ def test_rest_green_maps_to_rollup_green():
     assert pr_json["state"] == "OPEN"
 
 
+def test_fetch_pr_rest_carries_mergeable_through():
+    """x-4271: `run_status` reads `pr_json["mergeable"]` to gate `ready` on a
+    conflicting PR - the field must survive the REST fetch, not stop at
+    `fetch_pr_info_rest`'s own return value."""
+    pulls = dict(_PULLS, mergeable=False)
+    r = _runner(pulls=pulls, check_runs=[_cr("ci", "completed", "success")])
+    pr_json, reason = _rest.fetch_pr_rest("42", runner=r)
+    assert reason == ""
+    assert pr_json["mergeable"] == "CONFLICTING"
+
+
 def test_rest_in_progress_is_pending_not_red():
     r = _runner(check_runs=[_cr("ci", "in_progress", "")])
     pr_json, _ = _rest.fetch_pr_rest("42", runner=r)
