@@ -2533,8 +2533,9 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
     match tokio::task::spawn_blocking(move || load_registry_asserted(&path)).await {
         Ok(result) => result,
         // A queued-but-not-yet-started blocking task is dropped, not run, when
-        // the runtime shuts down (daemon.rs:76 waits only on already-started
-        // ones) -- a teardown casualty, never a fault in the read itself.
+        // the runtime shuts down (src/bin/daemon.rs:76 waits only on
+        // already-started ones) -- a teardown casualty, never a fault in the
+        // read itself.
         Err(e) if e.is_cancelled() => Err(state::StateError::Cancelled(format!(
             "load_registry task cancelled: {e}"
         ))),
@@ -6712,6 +6713,28 @@ fn fill_random(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The e2e restart-storm test only exercises `state_error_code` when the
+    /// scheduler happens to race a task into shutdown-cancellation, so its
+    /// coverage of the Cancelled -> ShuttingDown mapping is real but silent
+    /// on a run where nothing races. Pin the mapping directly and
+    /// deterministically: Cancelled must classify as ShuttingDown, and every
+    /// other StateError variant must stay Internal.
+    #[test]
+    fn state_error_code_classifies_cancelled_as_shutting_down() {
+        assert_eq!(
+            state_error_code(&state::StateError::Cancelled("task cancelled".into())),
+            ErrorCode::ShuttingDown
+        );
+        assert_eq!(
+            state_error_code(&state::StateError::Io(std::io::Error::other("boom"))),
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            state_error_code(&state::StateError::InvariantViolation("drift".into())),
+            ErrorCode::Internal
+        );
+    }
 
     /// Registry-local projection used only by the address-form unit test.
     fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
