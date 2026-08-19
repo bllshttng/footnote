@@ -561,9 +561,9 @@ def _verdict_one(
                 "report",
             )
 
-    # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
-    # (proved twice by hand); the session must be stopped before the window
-    # opens or it wakes into a duplicate.
+    # A single 429 is terminal for this session but is not provider-wide
+    # authority. The durable provider-outage fold requires two explicit
+    # provider/account rows before any migration lane may act.
     if (
         row.state == "blocked"
         and window == "live"
@@ -575,12 +575,10 @@ def _verdict_one(
         and facts is not None
         and facts.last_event_epoch is not None
     ):
-        reset_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
         return Verdict(
-            row.row_id, row.name, row.state, REROUTE,
-            f"429 resets {reset_utc.strftime('%H:%M:%SZ')}, "
-            f"{_mins(reset_epoch, now_s)}m out",
-            "redispatch",
+            row.row_id, row.name, row.state, LEAVE,
+            "429 terminal for this session; waiting for positive provider quorum",
+            "none",
         )
 
     # wake: blocked or stopped, a transcript exists, and no live 429 window.
@@ -990,6 +988,7 @@ def run_sweep(
     transcript_fn: Optional[Callable[[str], Optional[TailFacts]]] = None,
     claim_fn: Optional[Callable[[str], dict]] = None,
     graph_fn: Optional[Callable[[], dict[str, dict]]] = None,
+    provider_outage_fn: Optional[Callable[[], dict[str, Any]]] = None,
     roster_timeout: Optional[float] = None,
 ) -> tuple[dict, list[Row]]:
     """Build the real seams and classify the whole fleet once. Returns
@@ -1007,6 +1006,20 @@ def run_sweep(
         rows_provider() if rows_provider is not None
         else fleet_rows(timeout=roster_timeout)
     )
+    if provider_outage_fn is None:
+        from fno.agents.provider_outage import empty_report
+
+        provider_outages = empty_report()
+    else:
+        try:
+            provider_outages = provider_outage_fn()
+        except Exception as exc:  # noqa: BLE001 - unreadable evidence refuses action
+            provider_outages = {
+                "instrument": "unknown",
+                "breakers": [],
+                "counts": {"provider_outage_read_failed": 1},
+                "refusals": [{"reason": "provider_outage_read_failed", "detail": repr(exc)}],
+            }
     if not rows:
         return {
             "generated_at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
@@ -1016,6 +1029,7 @@ def run_sweep(
             "counts": {},
             "warnings": [*warnings, ROSTER_REFUSAL],
             "refused": ROSTER_REFUSAL,
+            "provider_outages": provider_outages,
         }, rows
     cwd_by_sid = {r.row_id: r.cwd for r in rows}
     if transcript_fn is None:
@@ -1052,6 +1066,7 @@ def run_sweep(
         "counts": counts,
         "terminal_harness_rows": sum(r.state in _TERMINAL_STATES for r in rows),
         "warnings": warnings,
+        "provider_outages": provider_outages,
     }
     return payload, rows
 
@@ -1099,6 +1114,7 @@ def write_sweep_file(
     *,
     events_signature: str = "",
     terminal_harness_rows: int = 0,
+    provider_outages: Optional[dict[str, Any]] = None,
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
@@ -1125,6 +1141,12 @@ def write_sweep_file(
             "terminal_harness_rows": terminal_harness_rows,
             "signature": signature,
             "events_signature": events_signature,
+            "provider_outages": provider_outages if provider_outages is not None else {
+                "instrument": "measured",
+                "breakers": [],
+                "counts": {},
+                "refusals": [],
+            },
         }
         if last_tick is not None:
             payload["last_tick_epoch"] = last_tick

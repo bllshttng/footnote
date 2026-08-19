@@ -88,14 +88,14 @@ def test_healthy_injectable_row_is_leave():
     assert "does not owe a move" in v.basis
 
 
-def test_sgt_stamp_is_reroute_at_1840_and_wake_at_1850():
+def test_single_sgt_429_is_report_only_until_provider_quorum():
     row = Row("cccc3333-0000", "r1", "blocked", None, "/tmp/r1")
     # 125m silent: past classify_tail's 2h window, so the tail POSITIVELY
     # asserts the session owes its next move (stalled) - the wake gate's
     # resumability marker, not a missing-429 absence.
     [before] = _run([row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)})
-    assert before.verdict == REROUTE
-    assert "18:48:21Z" in before.basis and "8m out" in before.basis
+    assert before.verdict == LEAVE
+    assert "provider quorum" in before.basis
     [after] = _run(
         [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL, age_min=125)}, now_s=NOW_1850
     )
@@ -188,7 +188,7 @@ def test_chatty_attach_cannot_push_a_live_window_out_of_scope():
     assert epoch == datetime(2026, 8, 16, 18, 48, 21, tzinfo=timezone.utc).timestamp()
 
 
-def test_old_passed_plus_new_live_429_is_reroute_not_wake():
+def test_old_passed_plus_new_live_429_waits_for_provider_quorum():
     row = Row("eeee5555-0000", "r2", "blocked", None, "/tmp/r2")
     old = "API Error: 429 rate limit, window resets at 02:10:00 SGT"
     facts = TailFacts(
@@ -200,8 +200,8 @@ def test_old_passed_plus_new_live_429_is_reroute_not_wake():
         "text",
     )
     [v] = _run([row], {"eeee5555-0000": facts})
-    assert v.verdict == REROUTE
-    assert "18:48:21Z" in v.basis
+    assert v.verdict == LEAVE
+    assert "provider quorum" in v.basis
 
 
 def test_identity_joins_on_claim_holder_not_name():
@@ -883,6 +883,34 @@ def test_sweep_file_persists_terminal_harness_residue(monkeypatch, tmp_path):
     assert json.loads(path.read_text())["terminal_harness_rows"] == 3
 
 
+def test_ac12_obs_sweep_payload_and_receipt_include_measured_provider_outages(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+    measured = {
+        "instrument": "measured",
+        "breakers": [{"provider": "zai", "account": "acct-a"}],
+        "counts": {"open": 1},
+        "refusals": [],
+    }
+    rows = [Row("aaaa1111-0000", "w1", "working", None, "/tmp")]
+    payload, _ = watchdog.run_sweep(
+        now_s=NOW_1840,
+        rows_provider=lambda: (rows, []),
+        transcript_fn=lambda sid: _facts("ok"),
+        claim_fn=lambda node: {},
+        graph_fn=lambda: {},
+        provider_outage_fn=lambda: measured,
+    )
+    assert payload["provider_outages"] == measured
+    watchdog.write_sweep_file(
+        "tick", payload["counts"], NOW_1840,
+        provider_outages=payload["provider_outages"],
+    )
+    assert json.loads(path.read_text())["provider_outages"] == measured
+
+
 def test_stopped_row_survives_claude_agents_json(monkeypatch):
     from fno.agents.harnesses import claude as claude_mod
 
@@ -930,6 +958,9 @@ def test_sweep_payload_shape():
     assert payload["generated_at"] == "2026-08-16T18:40:00Z"
     assert payload["verdicts"][0]["verdict"] == LEAVE
     assert payload["terminal_harness_rows"] == 3
+    assert payload["provider_outages"] == {
+        "instrument": "measured", "breakers": [], "counts": {}, "refusals": []
+    }
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
 
@@ -1499,18 +1530,18 @@ def test_a_bounded_caller_spends_its_own_budget_not_the_lanes(monkeypatch):
     assert spent["timeout"] == 1.0
 
 
-def test_the_second_spelling_of_blocked_reaches_every_lane():
+def test_the_second_spelling_of_blocked_reaches_the_quorum_hold():
     """claude spells one state two ways and the lane knew only one.
 
     `busy` was folded onto working by hand; its sibling `needs input` was
-    missed, so a row wearing it could never ghost, reroute or wake - it fell
-    to leave while looking healthy. The fold now comes from the harness map,
-    so this pins the behaviour rather than the table.
+    missed, so a row wearing it could bypass the explicit provider-quorum
+    hold. The fold now comes from the harness map, so this pins the behaviour
+    rather than the table.
     """
     from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
 
     # Every input spelling claude maps onto "Needs input" must reach the
-    # reroute lane. Enumerating the map is the point: a new spelling added
+    # quorum hold. Enumerating the map is the point: a new spelling added
     # there fails this test instead of silently falling to leave.
     blocked_spellings = [
         raw for raw, out in _LIVE_STATUS_INPUT.items() if out == "Needs input"
@@ -1521,7 +1552,8 @@ def test_the_second_spelling_of_blocked_reaches_every_lane():
         assert (state, warning) == ("blocked", ""), raw
         row = Row("cccc3333-0000", "r1", state, None, "/tmp/r1")
         [v] = _run(row and [row], {"cccc3333-0000": _facts(RATE_LIMIT_TAIL)})
-        assert v.verdict == REROUTE, f"{raw} never reached reroute"
+        assert v.verdict == LEAVE, f"{raw} never reached the quorum hold"
+        assert "provider quorum" in v.basis
 
 
 def test_reap_never_fires_on_an_unreadable_transcript():
