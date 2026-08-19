@@ -1068,7 +1068,7 @@ struct PrInfo {
     /// (`CoverageVerdict::Stale`): (login, reviewed sha). Same gate weight as
     /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
     /// different remedy, so the block message names the sha it read and asks
-    /// for a re-read instead of a first read (x-4b82). Nudge-classified
+    /// for a re-read instead of a first read. Nudge-classified
     /// alongside the missing bots so the re-read ask idles like one.
     stale_bots: Vec<(String, String)>,
     /// Blocking inline findings (codex P1 / gemini critical|high) whose
@@ -1284,7 +1284,7 @@ pub enum Freshness {
     /// The PR's own code delta only SHRANK since the review: every raw diff
     /// line still shipping is byte-identical to one the reviewer read, and the
     /// vanished lines are paths the base absorbed on the rebase. A strict
-    /// subset of the reviewed diff; the PR 965 shape, which used to fall
+    /// subset of the reviewed diff; the partly-docs partly-shrink rebase that used to fall
     /// through to `Stale` because the grades were whole-diff and mutually
     /// exclusive.
     CarriedSubset,
@@ -1341,7 +1341,10 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
     if reviewed_sha == head_sha {
         return Freshness::Fresh;
     }
-    let (Some(reviewed), Some(head)) = (facts.reviewed_identity.as_ref(), facts.head_identity.as_ref()) else {
+    let (Some(reviewed), Some(head)) = (
+        facts.reviewed_identity.as_ref(),
+        facts.head_identity.as_ref(),
+    ) else {
         return Freshness::Stale;
     };
     if reviewed.hash != head.hash {
@@ -1375,8 +1378,7 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
 /// above), strictly smaller, and every HEAD line present in the reviewed set.
 fn is_strict_subset(head: &[String], reviewed: &[String]) -> bool {
     head.len() < reviewed.len() && {
-        let have: std::collections::HashSet<&str> =
-            reviewed.iter().map(|s| s.as_str()).collect();
+        let have: std::collections::HashSet<&str> = reviewed.iter().map(|s| s.as_str()).collect();
         head.iter().all(|l| have.contains(l.as_str()))
     }
 }
@@ -2494,7 +2496,7 @@ fn read_pr_info(
         // usage-limit retain (which happened inside compute_review_info) so
         // the two give-up paths never compose (AC6): a usage_limited bot is
         // already out of missing_bots and is never classified here. A STALE
-        // bot is classified alongside a missing one (x-4b82): its remedy is
+        // bot is classified alongside a missing one: its remedy is
         // the same trigger comment, and without classification the session
         // could neither tell whether it had already asked nor idle while
         // waiting for the re-read. Derived from the same issue-comment list,
@@ -4203,7 +4205,7 @@ struct ReviewInfo {
     /// no longer carries: (login, reviewed sha). Same gate weight as
     /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
     /// different remedy, so it stays OUT of `missing_bots` and the block
-    /// message names the sha it read and asks for a re-read (x-4b82).
+    /// message names the sha it read and asks for a re-read.
     stale_bots: Vec<(String, String)>,
 }
 
@@ -4215,9 +4217,7 @@ impl ReviewInfo {
     /// not-passed - only the message differs, never the gate. The caller still
     /// records the drop for telemetry.
     fn all_required_passed(&self) -> bool {
-        self.missing_bots.is_empty()
-            && self.usage_limited.is_empty()
-            && self.stale_bots.is_empty()
+        self.missing_bots.is_empty() && self.usage_limited.is_empty() && self.stale_bots.is_empty()
     }
 }
 
@@ -4278,7 +4278,7 @@ fn compute_review_info(
     // never reconcile - the reader-divergence class x-e601 exists to delete.
     // A STALE verdict lands in `stale_bots`, keeping the sha it read: the
     // remedy is a re-read, a different one from "has not reviewed", and the
-    // block message must be able to say which (x-4b82). The gate weight is
+    // block message must be able to say which. The gate weight is
     // identical either way. A quota refusal lands in `usage_limited` and
     // FAILS the gate closed (x-9ab2): the PR does not merge on a quota
     // bounce, and the loop terminates via DoneAwaitingReview instead of
@@ -9009,49 +9009,29 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             );
         }
         if !pr.missing_bots.is_empty() || !pr.stale_bots.is_empty() {
-            // x-4b82: a stale bot's "missing" is a re-read, not a first read.
-            // Suffix the login with the commit it actually read wherever a
-            // nudge-state message names it - the local-reviewer branch above
-            // names its superseded sha the same way. An unpinned read (empty
-            // sha) gets no suffix; the coverage axis owns that message.
-            let read_note = |login: &str| {
-                match pr.stale_bots.iter().find(|(b, _)| b == login) {
-                    Some((_, sha)) if !sha.is_empty() => {
-                        format!(" (read {}, superseded by this head)", short_sha(sha))
-                    }
-                    _ => String::new(),
+            // A stale bot's "missing" is a re-read, not a first read. The
+            // suffix naming the commit it actually read is formatted HERE and
+            // nowhere else, so the nudge messages, the stale-only sentence,
+            // and the mixed-set tail cannot drift apart about the same bot -
+            // the local-reviewer branch above names its superseded sha the
+            // same way. An unpinned read (empty sha) gets no suffix; the
+            // coverage axis owns that message.
+            let read_note = |login: &str| match pr.stale_bots.iter().find(|(b, _)| b == login) {
+                Some((_, sha)) if !sha.is_empty() => {
+                    format!(" (read {}, superseded by this head)", short_sha(sha))
                 }
+                _ => String::new(),
             };
-            // A stale-only blocker gets its own sentence: the bot responded,
-            // so "has not reviewed" would be the exact lie this branch
-            // deletes, and the nudge states below answer "when did we ask",
-            // never "what did it read".
-            if pr.missing_bots.is_empty() {
-                let items: Vec<String> = pr
-                    .stale_bots
-                    .iter()
-                    .map(|(b, sha)| {
-                        if sha.is_empty() {
-                            b.clone()
-                        } else {
-                            format!("{b} (read {})", short_sha(sha))
-                        }
-                    })
-                    .collect();
-                return format!(
-                    "PR #{}: {} reviewed an older commit whose code no longer matches \
-                     this head - ask for a re-read (a push alone does not re-trigger it).{}",
-                    pr.number,
-                    items.join("; "),
-                    hint("review")
-                );
-            }
             // x-b167: render per nudge state. `hint("review")` is derived from
             // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
             // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
             // the arm-and-tag ritual can never appear on a blocker the same file
             // refuses to idle (the contradiction x-cdc7 removed). NeedsNudge and
-            // Unresponsive lead because they are work/decisions, not waits.
+            // Unresponsive lead because they are work/decisions, not waits. These
+            // branches come BEFORE the stale-only sentence on purpose: a stale
+            // bot in NeedsNudge or Unresponsive state needs the concrete remedy
+            // (the trigger command, the counters, the do-not-arm guidance), and
+            // a generic re-read sentence would strand it.
             if let Some(n) = pr
                 .bot_nudges
                 .iter()
@@ -9104,19 +9084,34 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     hint("review")
                 );
             }
+            // A stale-only blocker with no nudge state worth acting on gets its
+            // own sentence: the bot responded, so "has not reviewed" would be
+            // the exact lie this branch deletes.
+            if pr.missing_bots.is_empty() {
+                let items: Vec<String> = pr
+                    .stale_bots
+                    .iter()
+                    .map(|(b, _)| format!("{b}{}", read_note(b)))
+                    .collect();
+                return format!(
+                    "PR #{}: {} reviewed an older commit whose code no longer matches \
+                     this head - ask for a re-read (a push alone does not re-trigger it).{}",
+                    pr.number,
+                    items.join("; "),
+                    hint("review")
+                );
+            }
             // All NotNudgeable (or not classified): today's exact string + hint
             // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
             let mut names: Vec<String> = pr.missing_bots.clone();
-            names.extend(pr.stale_bots.iter().map(|(b, sha)| {
-                if sha.is_empty() {
-                    b.clone()
-                } else {
-                    format!("{b} (read {}, superseded by this head)", short_sha(sha))
-                }
-            }));
+            names.extend(
+                pr.stale_bots
+                    .iter()
+                    .map(|(b, _)| format!("{b}{}", read_note(b))),
+            );
             return format!(
                 "PR #{}: {} has not reviewed.{}",
                 pr.number,
@@ -10328,11 +10323,7 @@ mod tests {
         }
     }
 
-    fn facts_lines(
-        reviewed: &[&str],
-        head: &[&str],
-        tree: Option<&[&str]>,
-    ) -> FreshnessFacts {
+    fn facts_lines(reviewed: &[&str], head: &[&str], tree: Option<&[&str]>) -> FreshnessFacts {
         FreshnessFacts {
             reviewed_identity: Some(ident_of(reviewed)),
             head_identity: Some(ident_of(head)),
@@ -10351,7 +10342,7 @@ mod tests {
 
     #[test]
     fn freshness_shrunk_diff_carries_as_subset() {
-        // PR 965's specimen: one doc sentence reworded, one test-file hunk
+        // The specimen shape: one doc sentence reworded, one test-file hunk
         // gone because main absorbed it. Every raw line still shipping was
         // read, so the shrunk diff carries instead of costing a re-review.
         let f = facts_lines(
@@ -10381,11 +10372,7 @@ mod tests {
             Freshness::CarriedBaseSync
         );
         assert_eq!(
-            review_freshness(
-                "r",
-                "h",
-                &facts_lines(&["l1"], &["l1", "l2"], None)
-            ),
+            review_freshness("r", "h", &facts_lines(&["l1"], &["l1", "l2"], None)),
             Freshness::Stale
         );
     }
@@ -10971,17 +10958,22 @@ mod tests {
     }
 
     #[test]
-    fn a_required_bot_that_went_stale_returns_to_missing_bots() {
-        // The other reachable path: `missing_bots` drives the presence gate and
-        // the nudge. A required bot whose only verdict sits on a commit it read
-        // two commits ago has not reviewed THIS code, and the correct response
-        // is to ask it to re-read.
+    fn a_required_bot_that_went_stale_lands_in_stale_bots() {
+        // The other reachable path: `stale_bots` carries the same gate weight
+        // `missing_bots` always had. A required bot whose only verdict sits on
+        // a commit it read two commits ago has not reviewed THIS code; the
+        // entry keeps the sha it read so the block message can ask for a
+        // re-read instead of a first read.
         let json = serde_json::json!({"reviews": pr826_reviews(), "comments": []});
         let required = vec!["chatgpt-codex-connector".to_string()];
         let stale = compute_review_info(&json, &required, &|_| Freshness::Stale);
-        assert_eq!(stale.missing_bots, required);
+        assert!(stale.missing_bots.is_empty());
+        assert_eq!(stale.stale_bots.len(), 1);
+        assert_eq!(stale.stale_bots[0].0, "chatgpt-codex-connector");
+        assert!(!stale.all_required_passed());
         let carried = compute_review_info(&json, &required, &|_| Freshness::CarriedDocsOnly);
         assert!(carried.missing_bots.is_empty());
+        assert!(carried.stale_bots.is_empty());
         // Activity timestamp is not a freshness question: a stale review is
         // still activity, and the no-progress probe must keep seeing it.
         assert_eq!(stale.latest_ts, "2026-08-12T17:51:48Z");
@@ -11943,7 +11935,7 @@ mod tests {
             "bot still owed a wait"
         );
 
-        // A stale bot owes a re-read (x-4b82): the same window a missing bot
+        // A stale bot owes a re-read: the same window a missing bot
         // gets, never a clean exit on another bot's quota bounce.
         let mut stale_pending = bounced();
         stale_pending.stale_bots = vec![("gemini-code-assist".to_string(), "00001111".to_string())];
@@ -12165,8 +12157,37 @@ mod tests {
     }
 
     #[test]
+    fn stale_bot_needs_nudge_keeps_the_trigger_command() {
+        // A stale bot classified NeedsNudge needs the concrete remedy the
+        // nudge branch carries (the trigger command, the counters), decorated
+        // with what it read - not the generic re-read sentence.
+        let mut pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::NeedsNudge,
+                0,
+                0,
+                0,
+            )],
+        );
+        pr.missing_bots = vec![];
+        pr.stale_bots = vec![(
+            "chatgpt-codex-connector".to_string(),
+            "deadbeef1234".to_string(),
+        )];
+        assert_eq!(async_wait_class(&pr, "abc", true), None);
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("gh pr comment 618"), "{reason}");
+        assert!(
+            reason.contains("(read deadbeef, superseded by this head)"),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn stale_bot_block_reason_names_the_read_sha_and_a_reread() {
-        // x-4b82 AC1: the bot DID respond, so the message must not read as a
+        // AC1: the bot DID respond, so the message must not read as a
         // first read - it names the commit it read and asks for a re-read.
         // Still idles like any nudgeable outstanding bot.
         let mut pr = bot_review_pr(
@@ -12187,7 +12208,7 @@ mod tests {
         assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
         let reason = build_block_reason(&pr, "abc", true);
         assert!(
-            reason.contains("chatgpt-codex-connector (read 0daa4d6c)"),
+            reason.contains("chatgpt-codex-connector (read 0daa4d6c, superseded by this head)"),
             "{reason}"
         );
         assert!(reason.contains("ask for a re-read"), "{reason}");
@@ -15329,7 +15350,7 @@ mod tests {
     fn compute_review_info_stale_clean_pass_lands_in_stale_bots() {
         // The comment names an older commit: the bot responded, but not to
         // this code - same staleness rule the review-object path applies.
-        // x-4b82: the entry keeps the sha it read and FAILS the gate exactly
+        // The entry keeps the sha it read and FAILS the gate exactly
         // like a missing bot; only the message differs.
         let required = vec!["chatgpt-codex-connector".to_string()];
         let json = serde_json::json!({
@@ -15347,7 +15368,10 @@ mod tests {
         assert!(info.missing_bots.is_empty());
         assert_eq!(
             info.stale_bots,
-            vec![("chatgpt-codex-connector".to_string(), "0000000000".to_string())]
+            vec![(
+                "chatgpt-codex-connector".to_string(),
+                "0000000000".to_string()
+            )]
         );
         assert!(!info.all_required_passed());
     }
