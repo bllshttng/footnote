@@ -853,8 +853,8 @@ fn cascade_harness_session_result_with(
                     "claude cascade has no short id and no session id".into(),
                 );
             };
-            let _snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
-            if claude_row_provably_absent(claude_agents, Some(&short_id)) {
+            let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
+            if claude_row_provably_absent(Some(snapshot), Some(&short_id)) {
                 return CascadeOutcome::AlreadyAbsent(format!(
                     "claude row {short_id} already absent"
                 ));
@@ -5304,13 +5304,23 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             );
         }
     };
-    match tokio::process::Command::new("claude")
+    // Bound the subprocess so a hung `claude` can never wedge this RPC handler
+    // -- the same fix already proven on the background-sweep twin above.
+    // `kill_on_drop`: on timeout the `output()` future is dropped; without
+    // this the hung child keeps running past the response we already gave up
+    // waiting on.
+    let stop = tokio::process::Command::new("claude")
         .arg("stop")
         .arg(&short)
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => {
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(15), stop).await {
+        Err(_) => Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("claude stop {short} timed out"),
+        ),
+        Ok(Ok(o)) if o.status.success() => {
             // Surface a persist failure rather than reporting a clean stop while
             // the registry still reads live (silent-failure review).
             let claude_name = name.to_string();
@@ -5340,7 +5350,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 json!({"stopped": true, "backend": "claude", "short_id": short}),
             )
         }
-        Ok(o) => Response::err(
+        Ok(Ok(o)) => Response::err(
             req.id,
             ErrorCode::Internal,
             format!(
@@ -5348,7 +5358,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 String::from_utf8_lossy(&o.stderr).trim()
             ),
         ),
-        Err(e) => Response::err(
+        Ok(Err(e)) => Response::err(
             req.id,
             ErrorCode::Internal,
             format!("could not exec `claude stop`: {e}"),
@@ -5472,18 +5482,29 @@ async fn handle_rm_with(
     let provably_gone =
         claude_row_provably_absent(claude_agents.as_ref(), claude_row_id(&entry).as_deref());
     if entry.status == AgentStatus::Live && !force && !provably_gone {
-        return Response::err(
-            req.id,
-            ErrorCode::Busy,
+        let row = claude_row_id(&entry).unwrap_or_else(|| "(no harness row id)".into());
+        let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
+        let detail = if entry.harness_name() != "claude" {
+            format!(
+                "agent {name} is still live. Stop it with `fno agents stop {name}`, or pass \
+                 --force."
+            )
+        } else if roster_known {
             format!(
                 "agent {name} is still live. Its harness row {row} is present in \
                  `claude agents --json --all`. Stop it with `fno agents stop {name}`, or \
                  by hand with `claude stop {row}` then `claude rm {row}` (claude takes the \
                  SHORT ID {row}, never the agent name {name}). rm proceeds on its own \
-                 once that row is gone.",
-                row = claude_row_id(&entry).unwrap_or_else(|| "(no harness row id)".into()),
-            ),
-        );
+                 once that row is gone."
+            )
+        } else {
+            format!(
+                "agent {name} is still live, and its harness row {row}'s presence in \
+                 `claude agents --json --all` could not be confirmed (the roster read \
+                 failed). Retry once the roster is readable, or pass --force."
+            )
+        };
+        return Response::err(req.id, ErrorCode::Busy, detail);
     }
     let harness_row_id = claude_row_id(&entry);
     let harness_outcome = cascade_harness_session_result_with(
@@ -5532,13 +5553,19 @@ async fn handle_rm_with(
             );
         }
     }
-    // Force-removing a live agent must stop its worker first, or it leaks a PTY
-    // process that `list`/`stop` can no longer address by name (Codex P2).
-    if entry.status == AgentStatus::Live && force && !stop_worker_confirmed(ctx, &entry).await {
+    // Removing a live agent must stop its own worker first, or it leaks a PTY
+    // process that `list`/`stop` can no longer address by name (Codex P2). The
+    // `provably_gone` path proceeds without `--force`, but it only proves the
+    // HARNESS session is gone; this row's local worker.sock is a separate
+    // process and can still be alive, so it needs the same confirmation.
+    if entry.status == AgentStatus::Live
+        && (force || provably_gone)
+        && !stop_worker_confirmed(ctx, &entry).await
+    {
         return Response::err(
             req.id,
             ErrorCode::Internal,
-            format!("agent {name}: could not stop the worker before force-remove; refusing to orphan a live PTY"),
+            format!("agent {name}: could not stop the worker before removing a live row; refusing to orphan a live PTY"),
         );
     }
     // Orphaned entries are removed with no subprocess action (AC8-FR); the
@@ -5549,13 +5576,24 @@ async fn handle_rm_with(
     // killed the worker, so a swallowed write leaves a dangling row pointing at
     // a dead worker.
     let rm_name = name.clone();
+    // Identity, not just name: `entry` was resolved off-lock, so a respawn
+    // under the same name between resolution and this write is a different
+    // row. Matching name alone would silently drop the NEW (possibly live)
+    // row instead of the one this request actually resolved and tore down --
+    // the same race `dispatch.py`'s `_recipient_identity_key` guards against.
+    let rm_short_id = entry.short_id.clone();
+    let rm_session_id = entry.harness_session_id.clone();
     // retain() cannot fail and cannot report what it dropped, so count across
     // it via the closure's return value: a resolved name that no row in the
     // file actually carries must not report removed:true (the silent no-op
     // mode).
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
-        r.entries.retain(|e| e.name != rm_name);
+        r.entries.retain(|e| {
+            !(e.name == rm_name
+                && e.short_id == rm_short_id
+                && e.harness_session_id == rm_session_id)
+        });
         before - r.entries.len()
     })
     .await
