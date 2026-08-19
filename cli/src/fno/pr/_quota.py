@@ -18,6 +18,17 @@ _SHIM_MARKER = b"fno-gh-proxy"
 _SHIM_HEAD_BYTES = 256
 
 
+class ProxyIdentityError(RuntimeError):
+    """The proxy could not determine its own install directory.
+
+    Raised instead of silently reporting "no proxy dirs" - the exact
+    ambiguity that let resolve_real_gh() mistake the proxy's own shim for a
+    real gh binary and loop forever through os.execve. Callers at the
+    process boundary (gh_proxy.main, _internal_gh.execute) catch this one
+    type and turn it into a clean refusal instead of an unhandled traceback.
+    """
+
+
 def _is_proxy_shim(path: Path) -> bool:
     """Read a candidate's own content: directory identity alone can lie.
 
@@ -48,7 +59,10 @@ def _proxy_dirs() -> set[str]:
     inherited = os.environ.get(_PROXY_DIR_ENV)
     if inherited:
         paths.add(str(Path(inherited).resolve()))
-    paths.add(str(github_cli_proxy_dir().resolve()))
+    try:
+        paths.add(str(github_cli_proxy_dir().resolve()))
+    except Exception as exc:
+        raise ProxyIdentityError(str(exc)) from exc
     return paths
 
 

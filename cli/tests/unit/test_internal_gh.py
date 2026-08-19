@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fno.pr import _internal_gh
+from fno.pr import _internal_gh, _quota
 from fno.pr._proc import Result
 
 
@@ -121,6 +121,16 @@ def test_numeric_option_value_is_not_mistaken_for_pr(monkeypatch):
         ["pr", "view", "--jq", "930", "--json=state"], cwd=None, runner=lambda *a: None
     )
     assert (number, reason) == (42, "")
+
+
+def test_execute_converts_proxy_identity_failure_to_a_result(monkeypatch):
+    def broken():
+        raise _quota.ProxyIdentityError("config load failed")
+
+    monkeypatch.setattr(_quota, "resolve_real_gh", broken)
+    result = _internal_gh.execute("discretionary", ["pr", "view", "930"])
+    assert result.returncode == 2
+    assert "cannot identify its own install directory" in result.stderr
 
 
 def test_ambiguous_pr_selectors_are_rejected():

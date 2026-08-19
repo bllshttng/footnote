@@ -211,6 +211,19 @@ def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatc
     assert seen["env"]["FNO_GH_PROXY_DEPTH"] == "1"
 
 
+def test_main_converts_proxy_identity_failure_to_a_clean_refusal(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gh", "auth", "status"])
+
+    def broken():
+        raise gh_proxy._quota.ProxyIdentityError("config load failed")
+
+    monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", broken)
+    with pytest.raises(SystemExit, match="2"):
+        gh_proxy.main()
+    err = capsys.readouterr().err
+    assert "cannot identify its own install directory" in err
+
+
 def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["gh", "pr", "view", "930", "--json", "reviews"])
     monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", lambda: "/real/gh")

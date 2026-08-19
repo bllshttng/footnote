@@ -75,17 +75,25 @@ def main() -> None:
         raise SystemExit(1)
     args = sys.argv[1:]
     action = classify(args)
-    real = _quota.resolve_real_gh()
-    if not real:
-        print("gh proxy: real gh executable not found", file=sys.stderr)
-        raise SystemExit(127)
-    if action is Action.BROKER:
-        result = _quota.execute_graphql(
-            "discretionary", args, real_gh=real
+    try:
+        real = _quota.resolve_real_gh()
+        if not real:
+            print("gh proxy: real gh executable not found", file=sys.stderr)
+            raise SystemExit(127)
+        if action is Action.BROKER:
+            result = _quota.execute_graphql(
+                "discretionary", args, real_gh=real
+            )
+        else:
+            delegate(real, args)
+            raise AssertionError("os.execv returned")
+    except _quota.ProxyIdentityError as exc:
+        print(
+            f"gh proxy: cannot identify its own install directory, refusing "
+            f"to delegate: {exc}",
+            file=sys.stderr,
         )
-    else:
-        delegate(real, args)
-        raise AssertionError("os.execv returned")
+        raise SystemExit(2) from exc
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:
