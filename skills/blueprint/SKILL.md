@@ -66,6 +66,8 @@ separate mode - a quick plan still carries full frontmatter (`kill_criteria`,
 `claims`, `executor`, `status`). Waves live in the doc's `## Execution Strategy`
 block; there is no `00-INDEX.md` and no phase files.
 
+A batched dispatch can run this skill up to three times in sequence. Each run still produces exactly one `.md`. When two of the three share a shape, step 2d absorbs the sibling into one node before either becomes a plan.
+
 ---
 
 ## Single-doc creation (idea input)

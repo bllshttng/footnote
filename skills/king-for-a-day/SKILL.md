@@ -282,6 +282,16 @@ The alternatives are all worse: hand-spawning into a saturated project oversubsc
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
 Use `fno plan path` for the canonical filename.
 
+**3d. Batch blueprints: up to three per session, one plan per shape.**
+
+One session takes up to **three** blueprints in sequence. A fourth blueprint starts a second dispatch. The number is the rule: a rule with no number is advice nobody applies.
+
+Group the wave by shape before you count dispatches. When one plan can name the same files or fix the same defect from two sides, the two nodes are the same shape. Title words do not decide this. The file and the defect decide it, the same identity test the Consolidation Gate uses (`skills/blueprint/SKILL.md` step 2d).
+
+A shape group becomes ONE node before it becomes one plan. Run `fno backlog supersede <keeper> --replaces <other> --reason "<why>"`, then dispatch the keeper. `plan == PR == node` stays untouched. The waves live in the plan's `## Execution Strategy` block. Reverse with `fno backlog unsupersede <other>`.
+
+Fifteen one-node spawns re-read the repo fifteen times. Each spawn is a process. That volume cost an account.
+
 Note what these two verbs do and do not do.
 They change *how* a dispatcher launches a node it has already selected; they do not make it selectable.
 A plan-less node is not selected by any autonomous path, so setting `--dispatch-verb` on one arms nothing by itself.
@@ -369,7 +379,7 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 
 ### One session per node, across phases
 
-The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds:
+The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds. The blueprint phase is the one exception. One session takes up to three nodes there and hands each back for its own `/fno:target` (3d above).
 
 ```bash
 fno backlog update <node> --dispatch-brief "<sibling facts that bear on this node, or 'none'>"

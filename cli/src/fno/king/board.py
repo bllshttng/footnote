@@ -269,6 +269,7 @@ def build_board(
             SourceRead(error=inputs.ready.error or inputs.claims.error),
             undispatched,
             actionable=True,
+            note="batch: up to 3 blueprints per session; merge same-shape nodes into one waved plan",
         ),
         _queue(
             "stalled_holder",
