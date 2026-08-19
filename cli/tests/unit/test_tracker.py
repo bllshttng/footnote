@@ -278,6 +278,21 @@ def test_sidecar_graph_mode_missing_id_is_empty(tmp_path, monkeypatch, graph_mod
     assert sc == Sidecar(id="ab-missing")
 
 
+def test_sidecar_null_list_fields_degrade_to_empty(tmp_path, monkeypatch, graph_mode):
+    """A graph entry with an explicit null (not absent) list field must not
+    drop the whole node - every other reader already tolerates this shape
+    via `node.get(...) or []`."""
+    g = _write_graph(
+        tmp_path / "graph.json",
+        [{"id": "ab-1", "additional_prs": None, "cost_sessions": None, "sessions": None}],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    sc = load("ab-1")
+    assert sc.additional_prs == []
+    assert sc.cost_sessions == []
+    assert sc.sessions == []
+
+
 def test_sidecar_graph_mode_save_missing_id_raises(tmp_path, monkeypatch, graph_mode):
     g = _write_graph(tmp_path / "graph.json", [{"id": "ab-1"}])
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)

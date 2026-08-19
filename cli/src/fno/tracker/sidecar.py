@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from fno.paths import sidecar_path
 
@@ -83,6 +83,20 @@ class Sidecar(BaseModel):
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+
+    @field_validator("additional_prs", "cost_sessions", "sessions", mode="before")
+    @classmethod
+    def _null_list_is_empty(cls, v):
+        """An explicit ``null`` graph value degrades to [], not a ValidationError.
+
+        ``_apply_graph_defaults`` only setdefaults an ABSENT key; an entry
+        written with e.g. ``"additional_prs": null`` keeps it null, and every
+        other reader of these fields already tolerates that shape via
+        ``node.get(...) or []``. Without this, one such node drops out of
+        load()/load_all() entirely - silently misrouting PR mail, skipping a
+        merge close, or dropping a project from the catch-up sweep.
+        """
+        return [] if v is None else v
 
     def carries_pr(self, pr_number: int) -> bool:
         """True when ``pr_number`` is this item's primary PR or an additional one."""
