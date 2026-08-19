@@ -67,7 +67,7 @@ pub struct DaemonOptions {
     /// that timed out against that silence lazy-start another one. Default
     /// `true`; the opt-out (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's
     /// discretion #5) skips the sweep entirely, so the first `list` reads
-    /// last-recorded status until an idle tick settles it.
+    /// its last recorded liveness until an idle tick settles it.
     pub reconcile_on_start: bool,
     /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
     /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
@@ -1926,6 +1926,12 @@ pub async fn bind_supervisor_socket(
 /// mismatch means something else unlinked and rebound the path out from under
 /// us (an operator `rm`, or a bug elsewhere) -- we no longer own the
 /// reachable path (x-ef7f / x-e98b).
+///
+/// Sound only because the caller is still LISTENING on that inode. An inode
+/// number is free to be recycled once nothing references it, and Linux
+/// recycles eagerly, so comparing numbers would be worthless for a path we had
+/// let go. Our open listener pins ours for the daemon's whole life, so a
+/// replacement file at the same path necessarily gets a different number.
 fn socket_inode_matches(sock: &Path, bound_ino: u64) -> bool {
     std::fs::metadata(sock)
         .map(|m| m.ino() == bound_ino)
@@ -2018,7 +2024,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         // writes the registry under the same advisory lock every reader takes,
         // so a client still reads a whole registry, never a torn one. What is
         // given up is narrower -- the FIRST `list` after a cold start may read
-        // pre-sweep status, one idle tick before the sweep lands. A stale first
+        // pre-sweep rows, one idle tick before the sweep lands. A stale first
         // row is worth strictly less than a daemon nobody can reach.
         let home_sweep = home.clone();
         let emitter_sweep = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -6668,8 +6674,13 @@ mod tests {
     fn socket_inode_matches_detects_unlink_and_rebind() {
         let home = tmp_home("inode-retire");
         let sock = home.supervisor_sock();
-        std::fs::write(&sock, b"").unwrap();
-        let ino = std::fs::metadata(&sock).unwrap().ino();
+        // HOLD the original open for the whole test. In production the daemon
+        // is listening on this inode, which is what keeps its number from being
+        // recycled. Dropping the handle first frees the number, and Linux hands
+        // the very same one to the next file at that path -- the rebind then
+        // reads as a match and the test fails there while passing on macOS.
+        let held = std::fs::File::create(&sock).unwrap();
+        let ino = held.metadata().unwrap().ino();
         assert!(socket_inode_matches(&sock, ino));
 
         std::fs::remove_file(&sock).unwrap();
@@ -6678,6 +6689,7 @@ mod tests {
             !socket_inode_matches(&sock, ino),
             "a rebound path must not match the old inode"
         );
+        drop(held);
     }
 
     fn read_events(home: &AgentsHome) -> Vec<Value> {
