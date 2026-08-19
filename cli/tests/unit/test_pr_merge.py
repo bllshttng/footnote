@@ -265,7 +265,12 @@ def test_plan_dispatch_hold_refuses_sanctioned_merge(monkeypatch, capsys, tmp_pa
 # ---- config + gh gates ----
 
 
-def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
+def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys, tmp_path):
+    # Hermetic hold-check (same pin the `enabled` fixture applies): the hold
+    # gate runs before the enabled skip, so a populated worker HOME scopes
+    # this through a real PR-body fetch that fails closed and reads `held`
+    # here instead of `skipped` (the shape main's own smoke run hit).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
     assert _merge.run_merge(["42"]) == 2
     obj = _last_json(capsys)
