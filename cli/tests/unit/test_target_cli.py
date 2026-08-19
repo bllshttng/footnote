@@ -958,6 +958,77 @@ def _init_env(tmp_path, monkeypatch):
     return ran
 
 
+def _held_graph(tmp_path, monkeypatch):
+    import json
+
+    plan = tmp_path / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking review finding is unresolved\n"
+        "  release_when: The finding is fixed and re-reviewed\n"
+        "  review_on: 2099-08-20\n"
+        "  set_by: king:119e3c52\n---\n",
+        encoding="utf-8",
+    )
+    gp = tmp_path / "graph-held.json"
+    gp.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-5a5c", "status": "ready", "plan_path": str(plan)},
+                    {
+                        "id": "x-1a2b",
+                        "status": "ready",
+                        "contained_in": "x-5a5c",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    return gp
+
+
+def test_target_init_refuses_held_node_before_bootstrap(tmp_path, monkeypatch):
+    _held_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-5a5c"])
+    assert result.exit_code == 2, result.output
+    assert "Blocking review finding is unresolved" in result.output
+    assert "king:119e3c52" in result.output
+    assert "The finding is fixed and re-reviewed" in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_target_init_refuses_child_held_by_delivery_owner(tmp_path, monkeypatch):
+    _held_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-1a2b"])
+    assert result.exit_code == 2, result.output
+    assert "held by plan x-5a5c" in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monkeypatch):
+    _held_graph(tmp_path, monkeypatch)
+    monkeypatch.setenv("TARGET_INPUT", "x-5a5c")
+    result = runner.invoke(app, ["target", "check-dispatch-hold"])
+    assert result.exit_code == 9, result.output
+    assert "king:119e3c52" in result.output
+
+    from pathlib import Path as _P
+    from fno.paths import resolve_plugin_script
+
+    text = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh")).read_text()
+    assert "fno target check-dispatch-hold" in text
+    assert '"$_DH_RC" -eq 9' in text
+
+
 def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
     """AC4: report the delivery unit's id and claim nothing.
 
@@ -1068,14 +1139,16 @@ def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypat
     """No delivery unit on the plan at all -> still a contained node."""
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    result = runner.invoke(app, ["target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert ran == []
     _clear_root_cache()
@@ -1136,15 +1209,17 @@ def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch
     """
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
-        {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
+        {"id": "x-3f8d", "plan_path": str(plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)
 
-    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    result = runner.invoke(app, ["target", "init", "--plan-path", str(plan)])
     assert result.exit_code == 2, result.output
     assert "x-6320" in result.output
     assert ran == []
@@ -1172,11 +1247,13 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     """
     import json
 
+    plan = tmp_path / "one.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-6320", "plan_path": "/p/one.md", "pr_number": 700,
+        {"id": "x-6320", "plan_path": str(plan), "pr_number": 700,
          "completed_at": "2026-07-29T00:00:00+00:00"},
-        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     _init_env(tmp_path, monkeypatch)
@@ -1295,11 +1372,15 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     """
     import json
 
+    owner_plan = tmp_path / "one.md"
+    child_plan = tmp_path / "two.md"
+    owner_plan.write_text("---\nstatus: ready\n---\n")
+    child_plan.write_text("---\nstatus: ready\n---\n")
     gp = tmp_path / "graph.json"
     gp.write_text(json.dumps({"entries": [
-        {"id": "x-6320", "plan_path": "/p/one.md", "superseded_by": "x-9999",
+        {"id": "x-6320", "plan_path": str(owner_plan), "superseded_by": "x-9999",
          "deferred_at": "2026-07-29T00:00:00+00:00"},
-        {"id": "x-261c", "plan_path": "/p/two.md", "contained_in": "x-6320"},
+        {"id": "x-261c", "plan_path": str(child_plan), "contained_in": "x-6320"},
     ]}), encoding="utf-8")
     monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
     ran = _init_env(tmp_path, monkeypatch)

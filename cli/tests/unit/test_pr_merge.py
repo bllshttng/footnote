@@ -235,6 +235,17 @@ def test_invalid_pr_number_exits_1_with_failed_json_on_stderr(capsys):
     assert "invalid pr number" in obj["reason"]
 
 
+def test_plan_dispatch_hold_refuses_sanctioned_merge(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        "fno.pr._hold.merge_hold_reason",
+        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking finding; set_by=king",
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "set_by=king" in obj["reason"]
+
+
 # ---- config + gh gates ----
 
 
@@ -666,6 +677,8 @@ def test_merge_lock_released_after_merge(enabled, monkeypatch, tmp_path, capsys)
 
 def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_path):
     import fno.paths as paths
+
+    monkeypatch.setattr("fno.pr._hold.merge_hold_reason", lambda pr, cwd: None)
 
     def _boom():
         raise RuntimeError("no canonical root")

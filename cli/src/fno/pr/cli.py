@@ -302,6 +302,21 @@ def coverage_check(
     raise typer.Exit(code=_coverage_gate.run_coverage_check(pr_number, recompute=recompute))
 
 
+@pr_app.command("hold-check", hidden=True)
+def hold_check(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Repository working directory."),
+) -> None:
+    """Refuse a PR whose bound plan ancestry carries an active or unreadable hold."""
+    from fno.pr._hold import merge_hold_reason
+
+    reason = merge_hold_reason(pr_number, repo or os.getcwd())
+    if reason:
+        typer.echo(reason, err=True)
+        raise typer.Exit(code=3)
+    typer.echo(f"PR {pr_number}: no plan dispatch hold")
+
+
 @pr_app.command(
     "evidence-check",
     help=(

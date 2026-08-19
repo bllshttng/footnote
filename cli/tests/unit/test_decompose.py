@@ -3056,14 +3056,8 @@ def test_a_refused_decompose_leaves_the_graph_byte_identical(graph_env):
     assert sorted(p.name for p in g.parent.glob("graph.json.bak.*")) == baks_before
 
 
-def test_the_backfill_convergence_leg_cannot_re_stamp_a_released_adoptee(graph_env):
-    """AC6: this is the exact path the finding travels.
-
-    The stamp sits BEFORE the already-adopted `continue` so a legacy
-    half-adopted node converges - which is also what re-applies containment the
-    defer just released. The adoptee keeps its `parent` pointer either way; only
-    the containment record stays gone.
-    """
+def test_defer_keeps_an_existing_adoptee_folded(graph_env):
+    """A reversible pause preserves the already-authored delivery boundary."""
     g, read_entries = graph_env
     _seed_children(g, _epic_child("ab-kid00001"))
     assert _decompose(ADOPT_ONE).exit_code == 0
@@ -3074,11 +3068,11 @@ def test_the_backfill_convergence_leg_cannot_re_stamp_a_released_adoptee(graph_e
 
     assert _invoke(["backlog", "defer", unit, "--reason", "parked"]).exit_code == 0
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
-    assert kid.get("contained_in") is None, "defer should have released it"
+    assert kid.get("contained_in") == unit
 
     assert _decompose(ADOPT_ONE).exit_code == 2
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
-    assert kid.get("contained_in") is None
+    assert kid.get("contained_in") == unit
     assert kid["parent"] == unit
 
 

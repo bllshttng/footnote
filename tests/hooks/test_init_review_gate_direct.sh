@@ -173,10 +173,10 @@ _RC=$?
 [[ "$_RC" -eq 0 ]] || fail "AC5-ERR: absent fno blocked bootstrap (exit $_RC; err: $(cat "$TMP_NOFNO/err.log"))"
 pass "AC5-ERR: script exited 0"
 
-# Both gates share the one `command -v fno` block, so the absent-fno note has
-# to name both (x-e957): a note that mentioned only the review gate would let a
-# reader conclude the containment gate DID run on a host with no `fno`.
-grep -q "fno absent - config.review capability + containment gates not checked" \
+# A free-text TARGET_INPUT (no node-id, no plan path) has no existing hold to
+# check, so an absent `fno` degrades to a note-and-proceed rather than a
+# refusal - the refusal path is exercised separately for a named node/plan.
+grep -q "fno absent - no existing node or plan to hold; proceeding with free-text init" \
   "$TMP_NOFNO/err.log" \
   || fail "AC5-ERR: the degrade was silent (got: $(cat "$TMP_NOFNO/err.log"))"
 pass "AC5-ERR: absent-fno note printed"

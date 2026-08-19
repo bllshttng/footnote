@@ -361,6 +361,19 @@ def test_command_segments_unbalanced_quote_raises():
 
 def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     env = dict(os.environ, FNO_HOME=str(fno_home))
+    # These tests isolate merge-marker and worktree resolution behavior. Give
+    # the new fail-closed hold veto an explicit unheld answer while preserving
+    # the existing fail-open behavior of unrelated missing probe verbs.
+    bin_dir = Path(fno_home).parent / "hook-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    fno = bin_dir / "fno"
+    fno.write_text(
+        '#!/usr/bin/env bash\n'
+        '[[ "$1 $2" == "pr hold-check" ]] && exit 0\n'
+        'exit 1\n'
+    )
+    fno.chmod(0o755)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env.update(extra_env or {})
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     p = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,

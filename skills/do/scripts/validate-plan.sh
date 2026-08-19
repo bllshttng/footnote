@@ -189,6 +189,45 @@ _semantic_validate() {
     fno plan validate "$PLAN_DIR" --execution
 }
 
+_dispatch_hold_validate() {
+    local source_root="" python_bin="" _src=""
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        source_root=$(_fno_source_root)
+    fi
+    [[ -z "$source_root" ]] && return 2
+    local source_pythonpath="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}"
+    local code='from datetime import date
+from pathlib import Path
+import sys
+from pydantic import ValidationError
+from fno.plan._doc import load_plan
+from fno.plan.schema import DispatchHoldBlock
+raw = load_plan(Path(sys.argv[1])).frontmatter.get("dispatch_hold")
+try:
+    hold = DispatchHoldBlock.model_validate(raw)
+except ValidationError as exc:
+    for error in exc.errors():
+        field = ".".join(str(part) for part in error["loc"]) or "dispatch_hold"
+        print("dispatch_hold.%s: %s" % (field, error["msg"]))
+    raise SystemExit(1)
+if hold.review_on < date.today():
+    print(f"PAST:{hold.review_on.isoformat()}")'
+    if [[ -n "$python_bin" ]] && PYTHONPATH="$source_pythonpath" \
+        "$python_bin" -c 'import pydantic, yaml' 2>/dev/null; then
+        PYTHONPATH="$source_pythonpath" "$python_bin" -c "$code" "$PLAN_DIR"
+        return
+    fi
+    if command -v uv >/dev/null 2>&1; then
+        uv run --project "$source_root/cli" python -c "$code" "$PLAN_DIR"
+        return
+    fi
+    return 2
+}
+
 echo "Validating plan: $PLAN_DIR"
 echo ""
 
@@ -239,6 +278,23 @@ except yaml.YAMLError as exc:
             ok "has 'project:' field"
         else
             warn "missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
+        fi
+        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | grep -qE '^dispatch_hold:'; then
+            _hold_out=""
+            if _hold_out=$(_dispatch_hold_validate 2>&1); then
+                ok "dispatch_hold has reason, release_when, review_on, and set_by"
+                if [[ "$_hold_out" == PAST:* ]]; then
+                    warn "dispatch_hold review_on ${_hold_out#PAST:} has passed; hold remains active until removed"
+                fi
+            else
+                _hold_rc=$?
+                if [[ $_hold_rc -eq 2 ]]; then
+                    error "dispatch_hold could not be validated (source fno dependencies unavailable)"
+                else
+                    error "malformed dispatch_hold: ${_hold_out//$'\n'/; }"
+                fi
+            fi
         fi
     else
         error "not a .md plan file: $PLAN_DIR"

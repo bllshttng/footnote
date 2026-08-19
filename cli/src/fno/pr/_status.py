@@ -239,6 +239,15 @@ def _review_lane(pr: str, cwd: Optional[str]) -> bool:
         return True
 
 
+def _merge_hold_reason(pr: str, cwd: Optional[str]) -> Optional[str]:
+    from fno.pr._hold import merge_hold_reason
+
+    try:
+        return merge_hold_reason(int(pr), cwd or os.getcwd())
+    except Exception as exc:  # noqa: BLE001 - hold visibility fails closed
+        return f"dispatch-hold-invalid: {exc}; refusing to assume unheld"
+
+
 def _ready_blockers(
     green: bool,
     verdict: str,
@@ -347,6 +356,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         coverage: Any = dict(_NOT_ASKED_COVERAGE)
         review_lane = False
         code_review_required = False
+        hold_reason = None
     else:
         # Additive review signal (x-705b): computed AFTER the authoritative CI
         # verdict so a slow/failed review read can never delay or corrupt it.
@@ -398,6 +408,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # here is a shape that drifts the moment a key is added on one
             # side only.
             coverage = dict(_UNKNOWN_COVERAGE)
+        hold_reason = _merge_hold_reason(pr, cwd)
 
     blockers = _ready_blockers(
         green,
@@ -408,6 +419,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         head=pr_json.get("headRefOid") or "",
         code_review_required=code_review_required,
     )
+    if hold_reason:
+        blockers.append("dispatch_hold")
     sys.stdout.write(
         json.dumps(
             {
@@ -426,6 +439,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,
                 "review_coverage": coverage,
+                "dispatch_hold": hold_reason,
                 # The obvious "read this, not green": ready iff CI is green AND
                 # no optional finding is unresolved AND review coverage is a
                 # counted pass. Coverage joined the conjunction because `fno

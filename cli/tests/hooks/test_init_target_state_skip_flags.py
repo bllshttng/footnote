@@ -84,6 +84,11 @@ case "$1" in
   backlog) exit 1 ;;                      # backlog get/update -> 1 (no graph)
   paths) exit 0 ;;                        # paths shell-stub -> 0; hook evals stdout (empty => STATE_DIR fallback)
   worktree) exit 0 ;;                     # worktree policy -> 0; hook reads stdout (empty => harness-native default)
+  target)
+    case "$2" in
+      check-dispatch-hold) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   claim)
     case "$2" in
       status|session-pid|acquire) exit 0 ;;  # all -> 0 in bare env
@@ -348,3 +353,35 @@ def test_plan_path_env_lands_in_manifest_with_anchor(tmp_path):
 
     fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
     assert fm.get("plan_path") == f"{bound}#group-2"
+
+
+def _run_without_fno(tmp_path: Path, target_input: str) -> subprocess.CompletedProcess:
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    env = {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin:/bin",
+        "TARGET_START": "1",
+        "TARGET_INPUT": target_input,
+        "TARGET_LOCATION_OK": "main-acknowledged",
+    }
+    return subprocess.run(
+        ["bash", str(_INIT_SCRIPT)],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+
+
+def test_fno_absent_allows_free_text_without_a_hold_source(tmp_path):
+    result = _run_without_fno(tmp_path, "describe a new feature")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / ".fno" / "target-state.md").is_file()
+
+
+def test_fno_absent_refuses_named_node_hold_lookup(tmp_path):
+    result = _run_without_fno(tmp_path, "x-5a5c")
+    assert result.returncode == 2
+    assert "dispatch hold state cannot be checked" in result.stderr
+    assert not (tmp_path / ".fno" / "target-state.md").exists()

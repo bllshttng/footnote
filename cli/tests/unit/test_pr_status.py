@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import json as _json
 
+import pytest
+
 from fno.pr import _reviews, _status
 from fno.pr._proc import Result
+
+
+@pytest.fixture(autouse=True)
+def _no_dispatch_hold(monkeypatch):
+    monkeypatch.setattr(_status, "_merge_hold_reason", lambda pr, cwd: None)
 
 
 def test_all_pass_is_green():
@@ -480,9 +487,43 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
         "review_coverage": {"coverage": "covered", "reviewed_count": 2},
+        "dispatch_hold": None,
         "ready": True,
         "ready_blockers": [],
     }
+
+
+def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "headRefOid": "abc",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 2, "head_sha": "abc"},
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        _status,
+        "_merge_hold_reason",
+        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking; set_by=king",
+    )
+    assert _status.run_status("42") == 0
+    out = _json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["dispatch_hold"]
+    assert "set_by=king" in out["dispatch_hold"]
 
 
 # ---- x-e601: ready conjoins review coverage, ready_blockers names the conjunct ----

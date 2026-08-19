@@ -1302,13 +1302,6 @@ def cmd_apply(
             # cmd_defer verb (cli.py).
             node["completed_at"] = None
             node["deferred_at"] = datetime.now(timezone.utc).isoformat()
-            # Release contained children (x-e957). The sixth writer of this
-            # transition, and the one the helper's own docstring names while
-            # nothing wired it - a deferred unit will never merge, so its
-            # children stay unbuildable and uncloseable.
-            from fno.graph.cli import _release_contained_children
-
-            _release_contained_children(entries, node.get("id"))
             node["deferred_reason"] = d["reason"]
             # Clear the canonical lock field; _normalize_lock_fields re-syncs the
             # session_id mirror and clears the harness stamp at serialize.

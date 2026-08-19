@@ -43,6 +43,11 @@ if [[ -x "$CLI_VENV" ]]; then
   fi
 fi
 
+# These cases exercise the manifest writer after the Python wrapper's policy
+# gates have already passed. Keep the direct-script fallback gates out of this
+# harness; their own tests cover review, containment, and dispatch holds.
+export FNO_TARGET_INIT_GATED=1
+
 # ── T6: syntax check (runs first, cheapest) ──────────────────────────────────
 if bash -n "$INIT_HOOK" 2>/dev/null; then
   pass "T6: bash -n syntax check"

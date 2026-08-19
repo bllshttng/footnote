@@ -590,7 +590,7 @@ def test_heal_is_idempotent_across_repeated_sweeps(world, monkeypatch, dispatche
 # -- sigma round: defects the panel found in the first cut --
 
 
-def test_contained_node_gets_its_own_starvation_reason_not_quarantined():
+def test_contained_node_gets_its_own_starvation_reason_not_quarantined(tmp_path):
     """`quarantined` reads as stale work needing attention; this is neither.
 
     A decomposed epic printed one bogus line per adopted node on every
@@ -603,10 +603,12 @@ def test_contained_node_gets_its_own_starvation_reason_not_quarantined():
     from fno.graph.cli import _starvation_receipts
 
     now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n")
     entries = [
-        _node(KID_A, contained_in=UNIT, plan_path=PLAN,
+        _node(KID_A, contained_in=UNIT, plan_path=str(plan),
               created_at=now.isoformat()),
-        _node(UNIT, plan_path=PLAN, created_at=now.isoformat()),
+        _node(UNIT, plan_path=str(plan), created_at=now.isoformat()),
     ]
     receipts = _starvation_receipts(
         entries, None, True, None, set(), now, 21
@@ -815,13 +817,8 @@ def test_dry_run_never_crashes_on_a_fallible_cascade(world, merged_pr, dispatche
     assert "cascade exploded" in payload["contained_errors"][0]["error"]
 
 
-def test_deferring_a_unit_releases_its_contained_children(world, dispatches):
-    """Completes the set with remove and supersede.
-
-    A deferred unit will not merge, so `_strandable_contained_ids` (keyed on
-    completed_at) can never heal its children while selection and target init
-    keep refusing them.
-    """
+def test_deferring_a_unit_preserves_its_contained_children(world, dispatches):
+    """A reversible pause keeps the delivery unit folded as one unit."""
     from typer.testing import CliRunner
 
     from fno.graph.cli import cli
@@ -835,8 +832,7 @@ def test_deferring_a_unit_releases_its_contained_children(world, dispatches):
     ).exit_code == 0
 
     kid = read()[KID_A]
-    assert kid.get("contained_in") is None, "child left pointing at a deferred unit"
-    # Released, not closed: deferring the unit is not a claim its work shipped.
+    assert kid.get("contained_in") == UNIT
     assert kid.get("completed_at") is None
 
 
@@ -923,69 +919,25 @@ def test_release_parented_children_clears_non_done_revivable():
     assert _release_parented_children(entries, None) == []
 
 
-def test_every_deferred_at_writer_releases_contained_children():
-    """Pins the count so a SEVENTH writer cannot land without wiring the release.
-
-    An enumeration test rather than six behavioral ones: the defect is that a
-    writer exists which does not call the helper, and that is a property of the
-    file, not of any one code path.
-    """
-    import re
-    from pathlib import Path as _P
+def test_reversible_defer_writers_preserve_contained_children():
+    """Direct, maintenance, and triage defers must not unbundle the unit."""
+    import inspect
 
     from fno.graph import cli as gcli
+    from fno.graph import triage
 
-    # Scan EVERY module under fno/graph, not just cli.py. The first version of
-    # this test grepped one file and passed green while triage.py - a writer the
-    # helper's own docstring names - had no release at all.
-    root = _P(gcli.__file__).parent
-    writers: list[tuple[str, int, str]] = []
-    for path in sorted(root.glob("*.py")):
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for i, ln in enumerate(lines):
-            if re.search(r'\["deferred_at"\]\s*=\s*datetime\.now', ln):
-                writers.append((path.name, i, "\n".join(lines[i:i + 12])))
-    assert len(writers) >= 4, f"probe found only {len(writers)} writers - it broke"
-    for name, i, window in writers:
-        assert "_release_contained_children" in window, (
-            f"{name}:{i + 1} writes deferred_at without releasing contained "
-            "children; a dead unit strands them (unbuildable and uncloseable)"
-        )
-        # Name-adjacency is not enough: the call must take the list the mutator
-        # was handed, never an outer pre-lock snapshot. Passing `entries` inside
-        # a mutator whose parameter is `ents` made the release a silent no-op
-        # and this test still passed, which is the whole reason for this half.
-        call = re.search(r'_release_contained_children\(\s*(\w+)', window)
-        assert call, f"{name}:{i + 1}: could not read the helper's first argument"
-        arg = call.group(1)
-        src_lines = (root / name).read_text(encoding="utf-8").splitlines()
-        mutator_param = None
-        # UNBOUNDED walk-back. A 60-line window found nothing for the maintain
-        # legs (their `def` is further up), so the check silently skipped on
-        # exactly the two sites that carried the bug - and a skip that reads as
-        # a pass is the failure this whole test exists to catch.
-        for back in range(i, -1, -1):
-            m = re.match(r'\s*def \w+\((\w+)', src_lines[back])
-            if m:
-                mutator_param = m.group(1)
-                break
-        assert mutator_param is not None, (
-            f"{name}:{i + 1}: no enclosing def found; the probe cannot verify "
-            "the release argument, which must fail rather than skip"
-        )
-        assert arg == mutator_param, (
-            f"{name}:{i + 1}: releases against {arg!r} but the enclosing "
-            f"mutator receives {mutator_param!r} - a pre-lock snapshot is NOT "
-            "persisted, so the release is a silent no-op"
-        )
+    for writer in (gcli.cmd_defer, gcli.cmd_maintain, triage.cmd_apply):
+        assert "_release_contained_children" not in inspect.getsource(writer)
+
+    # Permanent death still releases children so they do not strand forever.
+    assert "_release_contained_children" in inspect.getsource(gcli.cmd_remove)
+    assert "_release_contained_children" in inspect.getsource(gcli.cmd_supersede)
 
 
 def test_release_is_reported_not_silent(world, dispatches):
     """A silent release turns N invisible nodes into buildable ones unannounced.
 
-    The bare "Deferred <id>" receipt gave the operator no way to know what the
-    next selection pass would pick up - and the helper already returned the ids,
-    which every call site discarded.
+    A permanent-death receipt must name the children it makes dispatchable.
     """
     from typer.testing import CliRunner
 
@@ -993,7 +945,7 @@ def test_release_is_reported_not_silent(world, dispatches):
 
     write, _read = world
     write(_world(Path("/tmp")))
-    result = CliRunner().invoke(cli, ["defer", UNIT, "--reason", "parked"])
+    result = CliRunner().invoke(cli, ["remove", UNIT, "--force"])
     assert result.exit_code == 0, result.output
     assert "Released 2 contained node(s)" in result.output
     assert KID_A in result.output and KID_B in result.output
@@ -1007,6 +959,6 @@ def test_release_receipt_is_silent_when_nothing_was_contained(world, dispatches)
 
     write, _read = world
     write([e for e in _world(Path("/tmp")) if e["id"] not in (KID_A, KID_B)])
-    result = CliRunner().invoke(cli, ["defer", UNIT, "--reason", "parked"])
+    result = CliRunner().invoke(cli, ["remove", UNIT, "--force"])
     assert result.exit_code == 0, result.output
     assert "Released" not in result.output

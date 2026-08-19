@@ -633,6 +633,25 @@ def _stacked_base_refusal(command=""):
 # pair arithmetic. Split literals can drift apart, and the drift test pins this
 # definition against the doc's per-invocation ceiling.
 _VETO_PROBE_TIMEOUT = 25
+_HOLD_PROBE_TIMEOUT = 5
+
+
+def _inprocess_dispatch_hold_reason(pr_number):
+    """``(available, reason)`` from the shared Python hold reader."""
+    try:
+        cli_src = Path(__file__).resolve().parent.parent / "cli" / "src"
+        if cli_src.is_dir() and str(cli_src) not in sys.path:
+            sys.path.insert(0, str(cli_src))
+        from fno.pr._hold import merge_hold_reason
+    except (ImportError, ModuleNotFoundError):
+        return False, None
+    try:
+        return True, merge_hold_reason(int(pr_number), os.getcwd())
+    except Exception as exc:  # noqa: BLE001 - an evaluated hold error refuses
+        return True, (
+            f"dispatch hold check unavailable ({type(exc).__name__}); "
+            "refusing to assume unheld"
+        )
 
 
 def _fno_veto_refusal(args, timeout, fallback):
@@ -709,6 +728,40 @@ def _coverage_refusal(command=""):
         timeout=_VETO_PROBE_TIMEOUT,
         fallback=f"PR {pr_number}: review coverage refused",
     )
+
+
+def _dispatch_hold_refusal(command=""):
+    """Fail-closed plan-hold veto for every bare ``gh pr merge`` path."""
+    pr_number = _parse_merge_pr(command)
+    if not pr_number:
+        return None
+    if _targets_other_repo(command):
+        return "cannot verify plan dispatch hold for a merge targeting another repository"
+    available, reason = _inprocess_dispatch_hold_reason(pr_number)
+    if available:
+        return reason
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "timeout": _HOLD_PROBE_TIMEOUT,
+    }
+    try:
+        try:
+            proc = subprocess.run(
+                ["fno", "pr", "hold-check", pr_number],
+                **kwargs,
+            )
+        except FileNotFoundError:
+            proc = subprocess.run(
+                [sys.executable, "-m", "fno.cli", "pr", "hold-check", pr_number],
+                **kwargs,
+            )
+    except Exception as exc:  # noqa: BLE001 - unreadable means held
+        return f"dispatch hold check unavailable ({type(exc).__name__}); refusing to assume unheld"
+    if proc.returncode == 0:
+        return None
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return detail[0] if detail else f"PR {pr_number}: dispatch hold state unreadable"
 
 
 def _check_pr_merge_allowed(command=""):
@@ -1906,6 +1959,10 @@ def main():
             sys.exit(0)
 
     if merge_seg is not None:
+        holdref = _dispatch_hold_refusal(merge_seg)
+        if holdref:
+            _emit("deny", f"[fno dispatch-hold] {holdref}")
+            sys.exit(0)
         # Checked BEFORE the two-factor path, so it vetoes every route that
         # would otherwise allow - including the merge-gate override marker.
         # That marker buys out the review ceremony; a base that no longer leads

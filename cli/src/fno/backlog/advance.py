@@ -258,12 +258,22 @@ def selection_guards(
         keep-plans-unlinked workaround: linking a design doc now lands a
         visible-but-unarmed node instead of arming dispatch.
 
-    Fail-open (epic Errors): any read failure returns None and emits one loud
-    stderr line - the daemon staying alive and dispatching outranks guard
-    completeness. A guard that silently swallowed its own bug would starve the
-    backlog invisibly, the exact failure this feature exists to prevent.
+    Hold reads fail closed before the compatibility guard: an unreadable plan
+    cannot prove a hold is absent. Every remaining guard stays fail-open (epic
+    Errors): a read failure returns None and emits one loud stderr line.
     """
     from datetime import datetime, timezone
+
+    # The plan hold is the one fail-CLOSED policy in this selector. A present
+    # plan whose hold state is malformed or unreadable cannot prove that its
+    # hold is absent, so it must never fall through the broad fail-open
+    # compatibility guard below. The helper also checks parents and the
+    # contained delivery owner.
+    from fno.graph.ladder import dispatch_hold_verdict
+
+    hold = dispatch_hold_verdict(entry, entries_by_id)
+    if hold is not None:
+        return hold.guard_reason
 
     try:
         owner = entry.get("contained_in")

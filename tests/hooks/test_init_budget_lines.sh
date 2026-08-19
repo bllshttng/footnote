@@ -31,6 +31,10 @@ command -v python3 &>/dev/null || skip "python3 not on PATH"
 bash -n "$INIT" || fail "bash -n rejected $INIT (syntax error)"
 pass "init script passes bash -n"
 
+# Budget rendering is exercised after wrapper policy checks. Direct fallback
+# gate behavior has dedicated review, containment, and dispatch-hold tests.
+export FNO_TARGET_INIT_GATED=1
+
 # ── Helper: create an isolated temp repo ────────────────────────────
 # Usage: make_repo <tmpvar> [settings_yaml_content]
 # Sets the variable named by $1 to the temp dir path.

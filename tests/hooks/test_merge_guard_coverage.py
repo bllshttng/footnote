@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HOOK_PATH = REPO_ROOT / "hooks" / "git-protection.py"
 
@@ -48,6 +50,11 @@ def _patch_run(monkeypatch, result):
         return result
 
     monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (False, None),
+    )
     return seen
 
 
@@ -93,6 +100,68 @@ def test_unparseable_pr_is_skipped(monkeypatch):
     assert git_protection._coverage_refusal("gh pr merge my-branch") is None
     assert git_protection._coverage_refusal("gh pr merge") is None
     assert "cmd" not in calls
+
+
+def test_dispatch_hold_veto_refuses_confirmed_hold(monkeypatch):
+    seen = _patch_run(
+        monkeypatch,
+        _Proc(3, stderr="dispatch-hold:x-5a5c: blocking; set_by=king\n"),
+    )
+    msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
+    assert msg == "dispatch-hold:x-5a5c: blocking; set_by=king"
+    assert seen["cmd"] == ["fno", "pr", "hold-check", "900"]
+    assert seen["timeout"] <= 5
+
+
+def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
+    _patch_run(monkeypatch, _Proc(0, stdout="PR 900: no plan dispatch hold\n"))
+    assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
+
+
+def test_dispatch_hold_veto_prefers_inprocess_reader(monkeypatch):
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (True, "dispatch-hold:x-5a5c: blocked"),
+    )
+    monkeypatch.setattr(
+        git_protection.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("subprocess fallback must not run"),
+    )
+    assert "dispatch-hold:x-5a5c" in git_protection._dispatch_hold_refusal(
+        "gh pr merge 900"
+    )
+
+
+def test_dispatch_hold_veto_falls_back_to_source_cli(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        git_protection,
+        "_inprocess_dispatch_hold_reason",
+        lambda _pr: (False, None),
+    )
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "fno":
+            raise FileNotFoundError("fno")
+        return _Proc(0, stdout="PR 900: no plan dispatch hold\n")
+
+    monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
+    assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
+    assert calls[1][:4] == [sys.executable, "-m", "fno.cli", "pr"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [FileNotFoundError("fno"), subprocess.TimeoutExpired("fno", 25)],
+)
+def test_dispatch_hold_veto_fails_closed_when_probe_unavailable(monkeypatch, failure):
+    _patch_run(monkeypatch, failure)
+    msg = git_protection._dispatch_hold_refusal("gh pr merge 900")
+    assert msg and "refusing to assume unheld" in msg
 
 
 def test_other_repo_is_skipped(monkeypatch):

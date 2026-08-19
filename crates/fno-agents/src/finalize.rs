@@ -2101,11 +2101,43 @@ fn covered_head_from_event(cwd: &Path) -> Option<String> {
     latest.filter(|s| !s.is_empty())
 }
 
+fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    if success {
+        return None;
+    }
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    let message = String::from_utf8_lossy(detail).trim().to_string();
+    Some(if message.is_empty() {
+        "dispatch hold state unreadable; refusing to assume unheld".to_string()
+    } else {
+        message
+    })
+}
+
+fn dispatch_hold_refusal(cwd: &Path, number: u64) -> Option<String> {
+    match Command::new("fno")
+        .args(["pr", "hold-check", number.to_string().as_str()])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) => {
+            classify_dispatch_hold_probe(output.status.success(), &output.stdout, &output.stderr)
+        }
+        Err(error) => Some(format!(
+            "dispatch hold check unavailable ({error}); refusing to assume unheld"
+        )),
+    }
+}
+
 fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
     let Some((number, _url)) = gh_pr_ref(cwd) else {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
         return (false, None);
     };
+    if let Some(blocked) = dispatch_hold_refusal(cwd, number) {
+        eprintln!("finalize: auto-merge NOT armed for PR {number}: {blocked}");
+        return (false, Some(blocked));
+    }
     // Stacked-base guard: a PR merged into a base branch that no longer leads to
     // the default branch reports MERGED and ships nothing. This arm reaches
     // `gh pr merge` without passing through `fno pr merge`, so it calls the
@@ -3196,6 +3228,19 @@ mod tests {
                 "{stuck} must never arm auto-merge"
             );
         }
+    }
+
+    #[test]
+    fn dispatch_hold_probe_fails_closed_on_every_non_success() {
+        assert_eq!(classify_dispatch_hold_probe(true, b"unheld", b""), None);
+        assert_eq!(
+            classify_dispatch_hold_probe(false, b"", b"dispatch-hold:x-owner"),
+            Some("dispatch-hold:x-owner".to_string())
+        );
+        assert_eq!(
+            classify_dispatch_hold_probe(false, b"", b""),
+            Some("dispatch hold state unreadable; refusing to assume unheld".to_string())
+        );
     }
 
     #[test]

@@ -46,6 +46,11 @@ trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
 unset CLAUDE_CODE_SESSION_ID CLAUDECODE_SESSION_ID CODEX_THREAD_ID \
       CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID TARGET_TRANSCRIPT_ID 2>/dev/null || true
 
+# This harness exercises identity fields after wrapper policy checks have
+# passed. Direct fallback gate behavior has dedicated review, containment, and
+# dispatch-hold tests.
+export FNO_TARGET_INIT_GATED=1
+
 # ── Helper: create an isolated temp repo ─────────────────────────────
 make_repo() {
   local _varname="$1"
