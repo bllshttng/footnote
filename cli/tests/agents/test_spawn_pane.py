@@ -113,10 +113,15 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     from fno.agents.mux_spawn import dispatch_spawn_pane
 
     runner = kwargs.pop("runner", FakeRunner())
+    provider = kwargs.pop("provider", "claude")
+    # Routed Claude fixtures in this module are z.ai routes. Supply the vendor
+    # axis explicitly so the production seam never has to infer it from env.
+    if provider == "claude" and kwargs.get("route_env") is not None:
+        kwargs.setdefault("route_provider", "zai")
     result = dispatch_spawn_pane(
         name=kwargs.pop("name", "peer"),
         message=kwargs.pop("message", "hello"),
-        provider=kwargs.pop("provider", "claude"),
+        provider=provider,
         cwd=kwargs.pop("cwd", tmp_path),
         runner=runner,
         **kwargs,

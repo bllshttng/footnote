@@ -2349,15 +2349,26 @@ def dispatch_spawn(
             resolve_spawn_route,
         )
 
+        resolved_providers: list[str] = []
         try:
             route_env = resolve_spawn_route(
                 role,
                 route_env,
                 notice=lambda note: print(note, file=sys.stderr),
+                resolved_provider=resolved_providers.append,
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+        if route_provider is None and resolved_providers:
+            route_provider = resolved_providers[-1]
         launch_role = None
+
+    if provider == "claude" and route_env and route_provider is None:
+        raise DispatchAskError(
+            "resolved route has no model-provider axis; refusing to launch because "
+            "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
 
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
@@ -2527,6 +2538,14 @@ def dispatch_spawn(
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
+                    restored_provider = getattr(source_row, "provider", None)
+                    if not restored_provider:
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} has no model-provider "
+                            "axis in its registry row; refusing to relaunch because its "
+                            "provider cap cannot be evaluated; no worker launched",
+                            exit_code=2,
+                        )
                     # An explicit --account COMPOSES with the restored route, the
                     # same way it composes with a flag-supplied one (x-5ed4): the
                     # route wins endpoint+auth+model as one unit through the
@@ -2554,6 +2573,8 @@ def dispatch_spawn(
                         )
                     except RouteCompositionError as exc:
                         raise DispatchAskError(str(exc), exit_code=2) from exc
+                    if route_provider is None:
+                        route_provider = restored_provider
                     # Say so. The Rust `resume` door prints its restore, and a
                     # relaunch that silently changes destination is the failure
                     # shape this whole path exists to remove - a receipt that

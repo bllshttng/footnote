@@ -270,15 +270,54 @@ def test_ac4_err_future_schema_version_reads_forward(tmp_path: Path, monkeypatch
     """
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import SCHEMA_VERSION, load_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 14, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": SCHEMA_VERSION + 1, "agents": []}),
+        encoding="utf-8",
     )
 
     assert load_registry(path=registry_path) == []
+
+
+def test_forward_read_marks_a_skipped_row_incomplete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.registry import SCHEMA_VERSION, load_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION + 1,
+                "agents": [
+                    {
+                        "name": "kept",
+                        "harness": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/kept.log",
+                    },
+                    {
+                        "name": "skipped",
+                        "harness": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/skipped.log",
+                        "status": "future-state",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_registry(path=registry_path)
+    assert [row.name for row in loaded] == ["kept"]
+    assert loaded.complete is False
 
 
 def test_ac4_err_degraded_read_names_both_versions(tmp_path: Path, monkeypatch, capsys) -> None:

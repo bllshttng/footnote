@@ -1011,6 +1011,14 @@ def row_owning_session_id(
     return None
 
 
+class LoadedRegistry(list[AgentEntry]):
+    """Registry rows plus whether a forward read retained every raw row."""
+
+    def __init__(self, rows=(), *, complete: bool = True) -> None:
+        super().__init__(rows)
+        self.complete = complete
+
+
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
@@ -1270,7 +1278,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
-    return entries
+    return LoadedRegistry(entries, complete=not skipped_rows)
 
 
 def register_existing_session(

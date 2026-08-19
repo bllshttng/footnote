@@ -170,6 +170,54 @@ def test_explicit_route_dispatches_plugin_agent_and_attributes_effective_model()
     assert outcome.model == "glm-5.2"
 
 
+def test_explicit_route_runs_provider_gate_across_dispatch(monkeypatch) -> None:
+    from fno.agents import spawn_gate
+
+    events: list[tuple[str, object]] = []
+
+    class _Gate:
+        def release(self) -> None:
+            events.append(("release", None))
+
+    def gate(name, substrate, **kwargs):
+        events.append(("gate", (name, substrate, kwargs)))
+        return _Gate()
+
+    def dispatch(**kwargs):
+        events.append(("dispatch", kwargs["name"]))
+        return SpawnResult(
+            kind="once",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="",
+            reply="[]",
+        )
+
+    monkeypatch.setattr(spawn_gate, "run_gate", gate)
+    harness = "claude"
+    outcome = run_via_agents_spawn(
+        "code_reviewer",
+        "prompt",
+        "diff",
+        provider=harness,
+        cwd=Path("/tmp/x"),
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai"},
+        route_provider="zai",
+        model="glm-5.2",
+        named_agent="fno:code-reviewer",
+        headless=True,
+        dispatch=dispatch,
+    )
+
+    assert outcome.ok is True
+    assert events[0][0] == "gate"
+    _, (name, substrate, kwargs) = events[0]
+    assert name.startswith("review-code_reviewer-claude-")
+    assert substrate == "headless"
+    assert kwargs == {"route_provider": "zai"}
+    assert [event[0] for event in events] == ["gate", "dispatch", "release"]
+
+
 def test_dispatch_timeout_floored_to_one() -> None:
     """int(0.x) == 0 would mean 'no timeout'; floor at 1s (gemini review)."""
     captured: dict = {}

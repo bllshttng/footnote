@@ -1160,16 +1160,20 @@ def cmd_spawn(
         )
 
         intent = f"routed role {role!r}" if role is not None else f"route {route!r}"
+        resolved_providers: list[str] = []
         try:
             route_env = resolve_spawn_route(
                 role,
                 route_env,
                 intent=intent,
                 notice=lambda note: print(note, file=sys.stderr),
+                resolved_provider=resolved_providers.append,
             )
         except RouteCompositionError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=2) from exc
+        if route_provider is None and resolved_providers:
+            route_provider = resolved_providers[-1]
 
     # Per-spawn account overlay (x-d012). Resolve + FAIL CLOSED here, BEFORE the
     # gate, like --route: a refusal spawns nothing, takes no gate slot, and

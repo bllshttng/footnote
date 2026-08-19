@@ -438,6 +438,7 @@ class TestRunGate:
                 AgentEntry(
                     name=f"zai-{index}", harness="claude", provider="zai",
                     cwd="/tmp", log_path="/tmp/log", pid=100 + index,
+                    pid_start_time=1000 + index,
                 )
             )
             guard.release()
@@ -474,11 +475,23 @@ class TestRunGate:
         assert "provider zai" in refused and "cap 2" in refused
         assert "current count unavailable" in refused
 
+    def test_partial_forward_registry_refuses_instead_of_undercounting(
+        self, monkeypatch
+    ):
+        from fno.agents.registry import LoadedRegistry
+
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: LoadedRegistry([], complete=False),
+        )
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
         row = AgentEntry(
             name="zai-live", harness="claude", provider="zai", cwd="/tmp",
-            log_path="/tmp/log", pid=101,
+            log_path="/tmp/log", pid=101, pid_start_time=1001,
         )
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
         monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
@@ -506,9 +519,9 @@ class TestRunGate:
         self, monkeypatch
     ):
         rows = [
-            AgentEntry(name="positive", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=101),
-            AgentEntry(name="stale", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=102),
-            AgentEntry(name="exited", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", status="exited", pid=103),
+            AgentEntry(name="positive", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=101, pid_start_time=1001),
+            AgentEntry(name="stale", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", pid=102, pid_start_time=1002),
+            AgentEntry(name="exited", harness="claude", provider="zai", cwd="/tmp", log_path="/tmp/log", status="exited", pid=103, pid_start_time=1003),
         ]
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         monkeypatch.setattr(
@@ -516,6 +529,44 @@ class TestRunGate:
             lambda pid, _start: {101: True, 102: False, 103: True}[pid],
         )
         assert spawn_gate.provider_live_count("zai") == 1
+
+    def test_live_pid_without_incarnation_token_refuses_but_dead_pid_skips(
+        self, monkeypatch
+    ):
+        row = AgentEntry(
+            name="ambiguous", harness="claude", provider="zai", cwd="/tmp",
+            log_path="/tmp/log", pid=101,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        with pytest.raises(spawn_gate.ProviderCountUnavailable):
+            spawn_gate.provider_live_count("zai")
+
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: False)
+        assert spawn_gate.provider_live_count("zai") == 0
+
+    def test_headless_provider_claim_holds_and_releases_a_lane(
+        self, monkeypatch, capsys
+    ):
+        _settings(monkeypatch, max_live=99, max_lanes={"zai": 2})
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+
+        first = spawn_gate.run_gate("peer-1", "headless", route_provider="zai")
+        second = spawn_gate.run_gate("peer-2", "headless", route_provider="zai")
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("peer-3", "headless", route_provider="zai")
+        assert exc.value.code == spawn_gate.EXIT_PROVIDER_CAP
+        assert "current count 2" in capsys.readouterr().err
+
+        first.release()
+        replacement = spawn_gate.run_gate(
+            "peer-4", "headless", route_provider="zai"
+        )
+        replacement.release()
+        second.release()
 
     def test_pidless_bg_requires_a_readable_positive_roster_marker(
         self, tmp_path, monkeypatch

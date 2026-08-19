@@ -5253,7 +5253,7 @@ mod tests {
         // Legacy Python format: top-level "agents" with provider as the
         // harness identity. Current rows carry harness separately.
         let valid = r#"{"name":"cx","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
-        let valid_current = r#"{"name":"cx","harness":"codex","provider":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
+        let valid_current = r#"{"name":"cx","harness":"codex","cwd":"/tmp/x","log_path":"/tmp/x/l","status":"live"}"#;
         fs::write(
             &reg,
             format!(r#"{{"schema_version":3,"agents":[{valid}]}}"#),

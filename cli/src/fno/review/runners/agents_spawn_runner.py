@@ -119,7 +119,16 @@ def run_via_agents_spawn(
 
     def _call() -> None:
         assert dispatch is not None  # resolved above (passed in or imported)
+        gate = None
         try:
+            if route_provider is not None:
+                from fno.agents.spawn_gate import run_gate
+
+                gate = run_gate(
+                    name,
+                    "headless" if headless else "bg",
+                    route_provider=route_provider,
+                )
             result_holder["value"] = dispatch(
                 name=name,
                 message=composed,
@@ -138,6 +147,9 @@ def run_via_agents_spawn(
             )
         except BaseException as e:  # noqa: BLE001 - funnel into WorkerOutcome
             exc_holder["value"] = e
+        finally:
+            if gate is not None:
+                gate.release()
 
     thread = threading.Thread(target=_call, daemon=True)
     thread.start()

@@ -2021,11 +2021,25 @@ def dispatch_spawn_pane(
             resolve_spawn_route,
         )
 
+        resolved_providers: list[str] = []
         try:
-            route_env = resolve_spawn_route(role, route_env)
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                resolved_provider=resolved_providers.append,
+            )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+        if route_provider is None and resolved_providers:
+            route_provider = resolved_providers[-1]
         launch_role = None
+
+    if provider == "claude" and route_env and route_provider is None:
+        raise DispatchAskError(
+            "resolved route has no model-provider axis; refusing to launch because "
+            "its provider cap cannot be evaluated; no worker launched",
+            exit_code=2,
+        )
 
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a

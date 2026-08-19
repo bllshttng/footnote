@@ -400,9 +400,14 @@ def provider_live_count(provider: str) -> int:
     try:
         from fno.agents.registry import load_registry
 
+        loaded = load_registry()
+        if getattr(loaded, "complete", True) is not True:
+            raise ProviderCountUnavailable(
+                "registry forward read skipped rows; provider count is incomplete"
+            )
         candidates = [
             row
-            for row in load_registry()
+            for row in loaded
             if row.provider == provider and row.status in LIVE_STATUSES
         ]
     except Exception as exc:
@@ -420,8 +425,31 @@ def provider_live_count(provider: str) -> int:
     )
 
     count = 0
+    counted_names: set[str] = set()
     for row in candidates:
         if row.pid is not None:
+            if row.pid_start_time is None:
+                state = _pid_alive(row.pid, None)
+                if state is False:
+                    continue
+                if isinstance(row.mux, dict):
+                    try:
+                        from fno.agents.mux_spawn import _mux_pane_alive
+
+                        pane_state = _mux_pane_alive(row.mux)
+                    except Exception as exc:
+                        raise ProviderCountUnavailable(
+                            f"pane liveness unreadable for {row.name}: {exc}"
+                        ) from exc
+                    if pane_state is True:
+                        count += 1
+                        counted_names.add(row.name)
+                        continue
+                    if pane_state is False:
+                        continue
+                raise ProviderCountUnavailable(
+                    f"process incarnation token missing for {row.name}"
+                )
             state = _pid_alive(row.pid, row.pid_start_time)
             if state is None:
                 raise ProviderCountUnavailable(
@@ -429,8 +457,79 @@ def provider_live_count(provider: str) -> int:
                 )
             if state is True:
                 count += 1
+                counted_names.add(row.name)
             continue
+        if isinstance(row.mux, dict):
+            try:
+                from fno.agents.mux_spawn import _mux_pane_alive
+
+                pane_state = _mux_pane_alive(row.mux)
+            except Exception as exc:
+                raise ProviderCountUnavailable(
+                    f"pane liveness unreadable for {row.name}: {exc}"
+                ) from exc
+            if pane_state is True:
+                count += 1
+                counted_names.add(row.name)
+                continue
+            if pane_state is False:
+                continue
+            raise ProviderCountUnavailable(
+                f"pane liveness unreadable for {row.name}"
+            )
         if row.short_id and row.short_id in bg_live:
+            count += 1
+            counted_names.add(row.name)
+    return count + _provider_live_slot_claims(provider, counted_names)
+
+
+def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
+    """Count provider-tagged headless reservations not represented by rows."""
+    try:
+        from fno.claims.core import claim_status
+
+        root = _gate_claims_root()
+        claims_dir = root / ".fno" / "claims"
+        if not claims_dir.exists():
+            return 0
+        paths = list(claims_dir.glob("worker%3A*.lock"))
+    except Exception as exc:
+        raise ProviderCountUnavailable(
+            f"worker reservations unreadable: {exc}"
+        ) from exc
+
+    count = 0
+    for path in paths:
+        key = unquote(path.name[: -len(".lock")])
+        name = key.removeprefix("worker:")
+        if name in counted_names:
+            continue
+        try:
+            status = claim_status(key, root=root)
+        except Exception as exc:
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} unreadable: {exc}"
+            ) from exc
+        state = status.get("state")
+        if state in ("free", "stale"):
+            continue
+        if state == "corrupted":
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} is corrupted"
+            )
+        metadata = status.get("metadata")
+        model_provider = (
+            metadata.get("model_provider") if isinstance(metadata, dict) else None
+        )
+        if not isinstance(model_provider, str) or not model_provider:
+            raise ProviderCountUnavailable(
+                f"live worker reservation {key} has no model_provider"
+            )
+        if state == "suspect":
+            raise ProviderCountUnavailable(
+                f"worker reservation {key} liveness is suspect"
+            )
+        if state == "live" and model_provider == provider:
             count += 1
     return count
 
@@ -564,13 +663,26 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED)
 
 
-def _acquire_worker_slot(guard: GateGuard, name: str, holder: str) -> None:
+def _acquire_worker_slot(
+    guard: GateGuard,
+    name: str,
+    holder: str,
+    route_provider: Optional[str] = None,
+) -> None:
     key = f"worker:{name}"
     try:
         from fno.claims.core import acquire_claim
 
         acquire_claim(
-            key, holder, ttl_ms=WORKER_CLAIM_TTL_MS, root=_gate_claims_root()
+            key,
+            holder,
+            ttl_ms=WORKER_CLAIM_TTL_MS,
+            metadata=(
+                {"model_provider": route_provider}
+                if route_provider is not None
+                else None
+            ),
+            root=_gate_claims_root(),
         )
         guard._worker_key = key
         guard._worker_holder = holder
@@ -615,7 +727,7 @@ def run_gate(
     if force and provider_cap is None:
         _warn("spawn-gate: forced past cap and RAM floor (--force)")
         if substrate == "headless":
-            _acquire_worker_slot(guard, name, holder)
+            _acquire_worker_slot(guard, name, holder, route_provider)
         return guard
 
     started = time.monotonic()
@@ -690,7 +802,7 @@ def run_gate(
                     "provider cap remains enforced"
                 )
                 if substrate == "headless":
-                    _acquire_worker_slot(guard, name, holder)
+                    _acquire_worker_slot(guard, name, holder, route_provider)
                     guard.release_gate_mutex()
                 return guard
             c = census()
@@ -704,7 +816,7 @@ def run_gate(
                     guard.release()
                     raise
                 if substrate == "headless":
-                    _acquire_worker_slot(guard, name, holder)
+                    _acquire_worker_slot(guard, name, holder, route_provider)
                     guard.release_gate_mutex()
                 # pane/bg: keep the mutex until dispatch returns (the row
                 # exists by then); the caller releases via guard.release().

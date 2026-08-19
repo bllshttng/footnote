@@ -168,6 +168,7 @@ def resolve_spawn_route(
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
     business_lookup: Optional[BusinessRoleLookup] = None,
+    resolved_provider: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve one spawn route; a pre-resolved route must be a complete unit.
 
@@ -204,7 +205,12 @@ def resolve_spawn_route(
     route = (
         dict(route_env)
         if route_env
-        else resolve_route(role, notice=notice, business_lookup=business_lookup)
+        else resolve_route(
+            role,
+            notice=notice,
+            business_lookup=business_lookup,
+            resolved_provider=resolved_provider,
+        )
     )
     if route:
         route_intent = intent or (
@@ -710,6 +716,7 @@ def resolve_route(
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
     business_lookup: Optional[BusinessRoleLookup] = None,
+    resolved_provider: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve per-spawn env overrides for ``role``.
 
@@ -754,7 +761,10 @@ def resolve_route(
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
-    return _route_for_target(pname, model, block, env, notice, ctx=f"role {name!r}")
+    route = _route_for_target(pname, model, block, env, notice, ctx=f"role {name!r}")
+    if route is not None and resolved_provider is not None:
+        resolved_provider(pname)
+    return route
 
 
 def _route_for_target(

@@ -118,7 +118,12 @@ def test_ac7_registry_stores_the_path_never_the_route_contents(tmp_path, monkeyp
     """AC7: the registry file carries a path and no credential."""
     from fno import paths
 
-    _spawn_pane(monkeypatch, tmp_path, route_env=dict(ROUTE_ENV))
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        route_env=dict(ROUTE_ENV),
+        route_provider="zai",
+    )
     raw = paths.agents_registry_path().read_text(encoding="utf-8")
     assert "route-settings" in raw  # the path IS recorded
     assert "ANTHROPIC_AUTH_TOKEN" not in raw
@@ -198,7 +203,7 @@ def test_route_settings_path_for_is_stable_and_route_wins(tmp_path, monkeypatch)
 # --- 1.3: the revive door restores the route, or refuses ---------------------
 
 
-def _routed_claude_row(tmp_path, monkeypatch):
+def _routed_claude_row(tmp_path, monkeypatch, *, provider="zai"):
     """A registry holding one routed claude worker, plus its route file path."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.model_routing import materialize_route_settings
@@ -212,6 +217,7 @@ def _routed_claude_row(tmp_path, monkeypatch):
                 cwd=str(tmp_path),
                 log_path="",
                 harness="claude",
+                provider=provider,
                 short_id="deadbeef",
                 harness_session_id="sess-1",
                 route_settings_path=path,
@@ -341,6 +347,26 @@ def test_an_explicit_account_composes_with_a_restored_route(
     assert seen["route_env"] == ROUTE_ENV, "and the restored route rides with it"
 
 
+def test_a_legacy_routed_row_without_provider_refuses_relaunch(
+    tmp_path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    _routed_claude_row(tmp_path, monkeypatch, provider=None)
+    harness = "claude"
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider=harness,
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert exc.value.exit_code == 2
+    assert "no model-provider axis" in str(exc.value)
+    assert "cap cannot be evaluated" in str(exc.value)
+
+
 def test_a_role_that_resolves_to_nothing_still_restores_the_route(
     tmp_path, monkeypatch
 ) -> None:
@@ -454,7 +480,10 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
 
     path = _routed_claude_row(tmp_path, monkeypatch)
 
+    seen = {}
+
     def _stop(**kw):
+        seen.update(kw)
         raise RuntimeError(f"stop before launch; route={sorted(kw['route_env'] or {})}")
 
     monkeypatch.setattr("fno.agents.dispatch._claude_create_path", _stop)
@@ -467,6 +496,7 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
             resume_session_id="sess-1",
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"
+    assert seen["route_provider"] == "zai", "the recorded provider rides with it"
     assert path in capsys.readouterr().err
 
 
