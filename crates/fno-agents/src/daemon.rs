@@ -1854,16 +1854,29 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 /// (stay resident): that is an absence with two explanations, and exiting on a
 /// transient read failure would trade a moment of caution for a fleet of dead
 /// workers' supervisors.
+///
+/// A worker socket counts as live only if something ANSWERS on it, not if the
+/// file exists: a worker killed by anything that did not reap its socket (the
+/// confirmed-stop path is the only reaper) leaves a stale file behind, and on a
+/// pid-less live row the GC cannot settle it - file-existence liveness would
+/// then pin the daemon forever, one stale socket per home reinstating the
+/// never-exits defect this function exists to close. `worker_socket_reachable`
+/// is the same connect probe the stop path treats as the authoritative
+/// PID-reuse-immune signal.
 fn no_live_worker(home: &AgentsHome) -> bool {
     let path = home.registry_json();
     if !path.exists() {
         return true;
     }
-    let live_sockets = home.scan_worker_sockets();
+    let socket_candidates = home.scan_worker_sockets();
+    let socket_is_live = |short_id: &str| {
+        socket_candidates.iter().any(|s| s == short_id)
+            && std::os::unix::net::UnixStream::connect(home.worker_sock(short_id)).is_ok()
+    };
     state::load_registry(&path)
         .map(|r| {
             !r.entries.iter().any(|e| {
-                live_sockets.contains(&e.short_id)
+                socket_is_live(&e.short_id)
                     || e.pid
                         .map(|p| pid_is_ours(p, e.pid_start_time))
                         .unwrap_or(false)
@@ -3588,8 +3601,17 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
     }
     // Inspect the worker's write-ack: an error response (e.g. PTY writer fault)
     // must surface to the caller, not be reported as a successful ask with an
-    // empty reply (silent-failure #4).
-    match crate::protocol::read_response(&mut conn).await {
+    // empty reply (silent-failure #4). Bounded like every worker ack: a wedged
+    // worker answers "no write-ack" inside the window instead of parking the
+    // handler forever.
+    match tokio::time::timeout(
+        WORKER_ACK_TIMEOUT,
+        crate::protocol::read_response(&mut conn),
+    )
+    .await
+    // Elapsed folds into the same error arm as a read fault.
+    .unwrap_or(Err(crate::protocol::ProtocolError::UnexpectedEof))
+    {
         Ok(ack) if ack.is_err() => {
             let msg = ack
                 .error()
@@ -4942,13 +4964,24 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     Response::ok(req.id, json!({"stopped": true, "short_id": entry.short_id}))
 }
 
+/// Bound on a worker's shutdown ACK (x-3498 review): a wedged worker must not
+/// hang the daemon's stop handler - the client above it would then report the
+/// DAEMON as unresponsive and prescribe killing it, orphaning the very worker
+/// being stopped. No ack inside this window reads as no ack; the caller's
+/// SIGTERM -> SIGKILL escalation is the recovery.
+const WORKER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Fire-and-forget `worker.shutdown` to a worker that must not be left running
 /// (a spawn that failed or lost a name race): connect, ask it to tear down, and
 /// move on. Best-effort by design — the caller is already on an error path.
 async fn best_effort_worker_shutdown(sock: &std::path::Path) {
     if let Ok(mut conn) = UnixStream::connect(sock).await {
         let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
-        let _ = crate::protocol::read_response(&mut conn).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_TIMEOUT,
+            crate::protocol::read_response(&mut conn),
+        )
+        .await;
     }
 }
 
@@ -4959,10 +4992,16 @@ async fn best_effort_worker_shutdown(sock: &std::path::Path) {
 /// while its PTY keeps running, Codex P1).
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
     let sock = ctx.home.worker_sock(&entry.short_id);
-    // 1. Graceful: ask the worker to tear down its PTY child + exit.
+    // 1. Graceful: ask the worker to tear down its PTY child + exit. The ACK
+    //    read is bounded (see WORKER_ACK_TIMEOUT): a worker that is wedged
+    //    must fall through to the escalation below, not park this handler.
     if let Ok(mut conn) = UnixStream::connect(&sock).await {
         let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
-        let _ = crate::protocol::read_response(&mut conn).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_TIMEOUT,
+            crate::protocol::read_response(&mut conn),
+        )
+        .await;
     }
     // 2. Up to the 5s grace for a clean exit. "Down" = the worker's SOCKET is
     //    unreachable, which is the authoritative, PID-reuse-immune liveness
@@ -8846,9 +8885,11 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let home = short_home("idle-sock");
         home.ensure_root().unwrap();
         std::fs::create_dir_all(home.agent_dir("wka")).unwrap();
-        std::fs::write(home.worker_sock("wka"), b"").unwrap();
+        // A REAL listener: since the stale-socket fix, file existence alone
+        // does not pin the daemon - something must answer on the socket.
+        let _listener = std::os::unix::net::UnixListener::bind(home.worker_sock("wka")).unwrap();
         state::update_registry(&home.registry_json(), |r| {
-            // Terminal row, dead pid, but a live worker socket on disk.
+            // Terminal row, dead pid, but a live worker serving on its socket.
             let mut row = ask_row("wka", Some("2020-01-01T00:00:00Z"));
             row.short_id = "wka".to_string();
             r.entries.push(row);
@@ -8856,7 +8897,30 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         .unwrap();
         assert!(
             !no_live_worker(&home),
-            "a live worker socket pins the daemon regardless of what its row says"
+            "a reachable worker socket pins the daemon regardless of what its row says"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn idle_exit_not_held_by_a_stale_socket_file() {
+        // A worker killed without reaping its socket leaves the FILE behind.
+        // Nothing answers on it, so it must not pin the daemon - the exact
+        // stale-file case the connect probe exists for (a pid-less live row
+        // would otherwise make the daemon immortal).
+        let home = short_home("idle-stale");
+        home.ensure_root().unwrap();
+        std::fs::create_dir_all(home.agent_dir("wka")).unwrap();
+        std::fs::write(home.worker_sock("wka"), b"").unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            let mut row = ask_row("wka", None);
+            row.short_id = "wka".to_string();
+            r.entries.push(row);
+        })
+        .unwrap();
+        assert!(
+            no_live_worker(&home),
+            "a socket file nobody answers on is not a live worker"
         );
         std::fs::remove_dir_all(home.root()).ok();
     }

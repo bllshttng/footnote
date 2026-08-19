@@ -755,13 +755,15 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
     })
     .unwrap();
     std::fs::create_dir_all(home.agent_dir("pin1")).unwrap();
-    std::fs::write(home.worker_sock("pin1"), b"").unwrap();
+    // A real listener, not a bare socket file: since the stale-socket fix,
+    // liveness requires something to ANSWER on the socket.
+    let pin_listener = std::os::unix::net::UnixListener::bind(home.worker_sock("pin1")).unwrap();
 
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_IDLE_EXIT_SECS", "3")]);
     let pid = daemon.id();
 
     std::thread::sleep(Duration::from_secs(7));
-    assert!(pid_alive(pid), "a live worker socket pins the daemon");
+    assert!(pid_alive(pid), "a reachable worker socket pins the daemon");
     assert!(
         last_event_of(&home, "daemon_shutting_down").is_none(),
         "no idle event while a worker is live"
@@ -771,6 +773,7 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
         libc::kill(pid as libc::pid_t, libc::SIGTERM);
     }
     let _ = daemon.wait();
+    drop(pin_listener);
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -1007,17 +1010,30 @@ async fn restart_force_recovers_a_wedged_holder() {
     std::thread::sleep(Duration::from_millis(100));
 
     // A verb against the wedge fails within the client's read deadline, not by
-    // hanging. Both halves are asserted: the error NAME (DaemonUnresponsive)
-    // and the bound.
-    let req = Request::new(1, "agent.status", json!({}));
+    // hanging. Driven through a CHILD client with a short injected deadline:
+    // the default (90s, sized above the daemon's legit slow-handler budgets)
+    // is far too long for a test, and the env override must never touch this
+    // process's ambient calls.
     let started = Instant::now();
-    match fno_agents::client::call_if_running(&home, &req).await {
-        Err(ClientError::DaemonUnresponsive(_)) => {}
-        other => panic!("wedged daemon must answer DaemonUnresponsive, got: {other:?}"),
-    }
+    let status_out = Command::new(CLIENT_BIN)
+        .env("FNO_AGENTS_HOME", home.root())
+        .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
+        .args(["status"])
+        .output()
+        .expect("client runs");
     assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "the read deadline bounded the failure"
+        !status_out.status.success(),
+        "a verb against the wedge must fail, got: {:?}",
+        String::from_utf8_lossy(&status_out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&status_out.stderr);
+    assert!(
+        stderr.contains("listening and not serving") || stderr.contains("no response"),
+        "the failure names the wedge shape: {stderr}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the injected deadline bounded the failure"
     );
 
     // The recovery: one verb, no operator kill.
@@ -1036,7 +1052,9 @@ async fn restart_force_recovers_a_wedged_holder() {
     assert!(!pid_alive(wedged_pid), "the wedged holder is gone");
     assert!(pid_alive(outcome.new_pid), "a fresh daemon is serving");
 
-    // And the fresh daemon actually answers.
+    // And the fresh daemon actually answers (in-process: the short injected
+    // deadline belongs to the child client above only).
+    let req = Request::new(1, "agent.status", json!({}));
     let resp = fno_agents::client::call_if_running(&home, &req)
         .await
         .expect("fresh daemon serves after force");
@@ -1084,10 +1102,43 @@ async fn restart_force_refuses_to_signal_a_recycled_pid() {
         "the stranger SURVIVED: a recycled pid is never signalled"
     );
 
-    // Cleanup: the stranger by hand, the fresh daemon gracefully.
+    // The pid-ONLY shape (no start token in the lockfile): bare existence is
+    // not a basis for SIGKILL either - the same standard the daemon applies
+    // to worker kills. A second stranger proves it.
+    let mut stranger2 = Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawn sleep 2");
+    std::fs::write(home.supervisor_lock(), format!("{}\n", stranger2.id())).unwrap();
+    // Retire the daemon the first restart started, so the second force starts
+    // from the planted lockfile against a free socket.
+    unsafe {
+        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    let outcome2 = fno_agents::client::restart_daemon(&home, &PathBuf::from(DAEMON_BIN), true)
+        .await
+        .expect("force-with-pid-only still restarts");
+    assert!(!outcome2.forced, "no kill on a startless lockfile record");
+    let note2 = outcome2.note.expect("the refusal is reported");
+    assert!(
+        note2.contains(&stranger2.id().to_string()),
+        "the note names the pid it declined: {note2}"
+    );
+    assert!(
+        stranger2.try_wait().unwrap().is_none(),
+        "the second stranger SURVIVED: no start token, no SIGKILL"
+    );
+    unsafe {
+        libc::kill(stranger2.id() as libc::pid_t, libc::SIGKILL);
+        libc::kill(outcome2.new_pid as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = stranger2.wait();
+
+    // Cleanup: the first stranger by hand (the first daemon was already
+    // SIGTERMed above, the second in the block above).
     unsafe {
         libc::kill(stranger.id() as libc::pid_t, libc::SIGKILL);
-        libc::kill(outcome.new_pid as libc::pid_t, libc::SIGTERM);
     }
     let _ = stranger.wait();
     std::thread::sleep(Duration::from_millis(200));

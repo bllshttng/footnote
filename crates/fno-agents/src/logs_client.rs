@@ -50,10 +50,25 @@ pub async fn follow(
         eprintln!("fno agents logs: follow request failed: {e}");
         return 1;
     }
-    let ack = match read_response(&mut conn).await {
-        Ok(r) => r,
-        Err(e) => {
+    // The ACK is bounded like every other client read (x-3498 review): a
+    // wedged daemon accepts into the backlog and never answers, and this verb
+    // must fail inside the window rather than hang - the STREAM below the ack
+    // stays unbounded by design, it is the follow itself.
+    let ack = match tokio::time::timeout(crate::client::RESPONSE_DEADLINE, read_response(&mut conn))
+        .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             eprintln!("fno agents logs: no follow ack: {e}");
+            return 1;
+        }
+        Err(_elapsed) => {
+            eprintln!(
+                "fno agents logs: daemon accepted the connection but sent no follow ack within \
+                 {:?} - it is either wedged or still working; `fno agents restart --force` \
+                 recovers a wedged holder",
+                crate::client::RESPONSE_DEADLINE
+            );
             return 1;
         }
     };

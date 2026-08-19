@@ -37,8 +37,9 @@ pub enum ClientError {
     #[error("daemon is not running")]
     DaemonNotRunning,
     #[error(
-        "daemon accepted the connection but sent no response within {0:?} - it is listening \
-         and not serving; `fno agents restart --force` recovers a wedged holder"
+        "daemon accepted the connection but sent no response within {0:?} - it is either \
+         wedged (listening, not serving) or still working a slow handler. `fno agents \
+         restart --force` recovers a wedged holder; retry before assuming one"
     )]
     DaemonUnresponsive(Duration),
 }
@@ -46,10 +47,24 @@ pub enum ClientError {
 /// How long a client waits for the daemon's response frame before declaring it
 /// unresponsive (x-3498). An AF_UNIX connect succeeds into the listen backlog
 /// whether or not anyone ever calls accept, so connect time cannot tell
-/// "saturated" from "serving"; only a bounded read can. Matches the DaemonBusy
-/// wait budget so both wedge symptoms surface on the same timescale instead of
-/// one hanging forever.
-const RESPONSE_DEADLINE: Duration = Duration::from_secs(10);
+/// "saturated" from "serving"; only a bounded read can. The value must sit
+/// ABOVE the daemon's own legitimate worst-case handler budget - a `stop`
+/// escalation alone runs ~42s (bounded shutdown ack + 5s + 5s + 2s), and
+/// `rm --force` chains three of those - or a healthy-but-slow verb fails with
+/// an error whose remedy kills a healthy daemon. 90s is ~2x that worst chain
+/// and still turns the old forever-hang into a bounded failure.
+/// `FNO_AGENTS_RESPONSE_DEADLINE_MS` overrides it (tests drive a wedged-peer
+/// case through a child process so the override never touches a parallel
+/// test's ambient calls).
+pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(90);
+
+fn response_deadline() -> Duration {
+    std::env::var("FNO_AGENTS_RESPONSE_DEADLINE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(RESPONSE_DEADLINE)
+}
 
 /// Read one response, bounded by `deadline` ([`RESPONSE_DEADLINE`] at the call
 /// sites, injected so a unit test can prove the bound without waiting 10s). The
@@ -300,7 +315,7 @@ pub async fn call(
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
     write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, RESPONSE_DEADLINE).await?)
+    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -323,7 +338,7 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         Err(e) => return Err(ClientError::Io(e)),
     };
     write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, RESPONSE_DEADLINE).await?)
+    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +505,27 @@ async fn await_lock_free(home: &AgentsHome) -> bool {
     daemon_lock_is_free(home)
 }
 
+/// Read the lockfile's holder, tolerating the bind window: a daemon takes the
+/// exclusive flock BEFORE it writes its pid into the content, so a `--force`
+/// arriving in those milliseconds sees a held lock and no target. Bounded wait
+/// for the content to appear (or the lock to free, which answers `None` and
+/// lets the caller take the plain-restart path).
+async fn await_lock_holder(home: &AgentsHome) -> Option<(u32, Option<u64>)> {
+    let start = Instant::now();
+    loop {
+        if let Some(holder) = crate::paths::supervisor_lock_holder(home) {
+            return Some(holder);
+        }
+        if daemon_lock_is_free(home) {
+            return None;
+        }
+        if start.elapsed() >= FORCE_LOCK_TIMEOUT {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Lazy-start a fresh daemon and return its pid. Shared by every restart exit.
 async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, RestartError> {
     ensure_daemon(home, daemon_bin).await?;
@@ -525,50 +561,79 @@ pub async fn restart_daemon(
 ) -> Result<RestartOutcome, RestartError> {
     // FORCE BEFORE ANY PROBE: the probe is exactly what a wedge swallows. The
     // lockfile content names the holder (pid + start time, written at bind).
+    // `await_lock_holder` reads the content first and only WAITS when the lock
+    // is held with no content yet (the bind window).
     if force {
-        if let Some((pid, recorded_start)) = crate::paths::supervisor_lock_holder(home) {
-            if crate::daemon::pid_is_ours(pid, recorded_start) {
-                match send_signal(pid, libc::SIGKILL) {
-                    SignalResult::Sent | SignalResult::AlreadyGone => {}
-                    SignalResult::Failed(reason) => {
-                        return Err(RestartError::SigkillFailed { pid, reason })
+        match await_lock_holder(home).await {
+            Some((pid, Some(recorded_start))) => {
+                // The incarnation token is REQUIRED before a SIGKILL:
+                // `pid_is_ours(pid, None)` degrades to bare existence,
+                // which cannot tell our daemon from an unrelated process
+                // that inherited the pid -- the same refusal standard
+                // `stop_claude_pid_confirmed` applies to worker kills.
+                if crate::daemon::pid_is_ours(pid, Some(recorded_start)) {
+                    match send_signal(pid, libc::SIGKILL) {
+                        SignalResult::Sent | SignalResult::AlreadyGone => {}
+                        SignalResult::Failed(reason) => {
+                            return Err(RestartError::SigkillFailed { pid, reason })
+                        }
                     }
-                }
-                if !await_lock_free(home).await {
-                    return Err(RestartError::ForceDidNotFree {
-                        pid,
-                        secs: FORCE_LOCK_TIMEOUT.as_secs(),
+                    if !await_lock_free(home).await {
+                        return Err(RestartError::ForceDidNotFree {
+                            pid,
+                            secs: FORCE_LOCK_TIMEOUT.as_secs(),
+                        });
+                    }
+                    let new_pid = start_fresh(home, daemon_bin).await?;
+                    return Ok(RestartOutcome {
+                        old_pid: Some(pid),
+                        new_pid,
+                        forced: true,
+                        note: None,
                     });
                 }
+                // A recycled pid is never signalled (the same guard the
+                // graceful path applies). The daemon that wrote it is
+                // gone, so a plain restart is both safe and sufficient;
+                // the note records the refusal so the transcript does not
+                // read as a force that fired.
                 let new_pid = start_fresh(home, daemon_bin).await?;
                 return Ok(RestartOutcome {
                     old_pid: Some(pid),
                     new_pid,
-                    forced: true,
-                    note: None,
+                    forced: false,
+                    note: Some(format!(
+                        "--force did not signal pid {pid}: the lockfile's pid is not the \
+                         daemon (recycled?); restarted without it"
+                    )),
                 });
             }
-            // A recycled pid is never signalled (the same guard the graceful
-            // path applies). The daemon that wrote it is gone, so a plain
-            // restart is both safe and sufficient; the note records the
-            // refusal so the transcript does not read as a force that fired.
-            let new_pid = start_fresh(home, daemon_bin).await?;
-            return Ok(RestartOutcome {
-                old_pid: Some(pid),
-                new_pid,
-                forced: false,
-                note: Some(format!(
-                    "--force did not signal pid {pid}: the lockfile's pid is not the daemon \
-                     (recycled?); restarted without it"
-                )),
-            });
+            Some((pid, None)) => {
+                // Content names a pid but no start token: not a basis for
+                // SIGKILL (the writer produces this shape when the
+                // start-time lookup failed, and on platforms without one).
+                let new_pid = start_fresh(home, daemon_bin).await?;
+                return Ok(RestartOutcome {
+                    old_pid: Some(pid),
+                    new_pid,
+                    forced: false,
+                    note: Some(format!(
+                        "--force did not signal pid {pid}: the lockfile records no start \
+                         time, so the pid cannot be proved to be the daemon; restarted \
+                         without it"
+                    )),
+                });
+            }
+            None => {
+                if !daemon_lock_is_free(home) {
+                    // Held, and no holder ever published: a daemon from before
+                    // the lockfile-content change. Loud, never a blind kill.
+                    return Err(RestartError::ForceNoTarget);
+                }
+                // Otherwise nothing to force and no one to report: plain
+                // restart below.
+            }
         }
-        if !daemon_lock_is_free(home) {
-            // Held, but the content names no target: a daemon from before the
-            // lockfile-content change. Loud, never a blind kill.
-            return Err(RestartError::ForceNoTarget);
-        }
-        // No holder recorded and the lock free: nothing to force, plain restart.
     }
 
     // Probe the running daemon for its pid + start time. A down daemon just
@@ -722,7 +787,7 @@ mod drift_restart_tests {
             "the bound did the bounding, not the scheduler"
         );
         assert!(
-            err.to_string().contains("listening and not serving"),
+            err.to_string().contains("listening, not serving"),
             "the error itself teaches the --force remedy"
         );
     }
