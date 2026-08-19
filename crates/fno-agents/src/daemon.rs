@@ -5525,8 +5525,15 @@ async fn handle_rm_with(
     // killed the worker, so a swallowed write leaves a dangling row pointing at
     // a dead worker.
     let rm_name = name.clone();
+    // retain() cannot fail and cannot report what it dropped, so count across
+    // it: a resolved name that no row in the file actually carries must not
+    // report removed:true (this is the MODE A silent no-op, x-76d1).
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = dropped.clone();
     if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        let before = r.entries.len();
         r.entries.retain(|e| e.name != rm_name);
+        counter.store(before - r.entries.len(), std::sync::atomic::Ordering::SeqCst);
     })
     .await
     {
@@ -5534,6 +5541,16 @@ async fn handle_rm_with(
             req.id,
             state_error_code(&e),
             format!("agent {name}: removal did not persist: {e}"),
+        );
+    }
+    if dropped.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!(
+                "agent {name}: resolved to a row the registry does not hold; nothing was removed. \
+                 Re-read it with `fno agents list --json` and rm by the exact `name` field."
+            ),
         );
     }
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
@@ -7312,6 +7329,79 @@ mod tests {
             forced_response.result().unwrap()["harness_reason"],
             "claude rm exited 1"
         );
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_removes_a_row_the_registry_actually_holds() {
+        // AC1-HP: a plain removal reports removed:true and a re-read shows
+        // zero rows for the name.
+        let home = short_home("rmhappy");
+        let row = ask_row("w1", Some("2020-01-01T00:00:00Z"));
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "w1"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_to_report_removed_when_the_row_is_already_gone() {
+        // AC1-NEG (x-76d1 MODE A): the row entry_for_lifecycle resolved is no
+        // longer in the file by the time the write runs (raced away by a
+        // concurrent teardown, e.g. another rm or a direct `claude rm`). The
+        // injected claude_rm closure deletes the row as its side effect,
+        // reproducing that race deterministically: retain() then has nothing
+        // to drop, and the handler must refuse rather than report removed:true.
+        let home = short_home("rmalreadygone");
+        let row = claude_rm_row(
+            "raced-worker",
+            "ccccdddd",
+            "ccccdddd-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "raced-worker"}));
+        let raced_home = home.clone();
+        let snapshots = claude_row_then_absent("ccccdddd", "stopped");
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &snapshots,
+            &move |_| {
+                state::update_registry(&raced_home.registry_json(), |registry| {
+                    registry.entries.retain(|e| e.name != "raced-worker");
+                })
+                .unwrap();
+                Ok(())
+            },
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("registry does not hold"));
         assert!(state::load_registry(&home.registry_json())
             .unwrap()
             .entries
