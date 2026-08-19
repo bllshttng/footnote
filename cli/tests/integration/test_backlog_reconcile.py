@@ -356,6 +356,38 @@ def test_reverse_map_one_gh_call_per_repo(live_cwd):
     assert {r.node_id for r in records} == {"ab-m1", "ab-m2"}
 
 
+def test_reverse_map_budget_defers_remaining_repos_on_a_slow_gh(tmp_path, monkeypatch, capsys):
+    """A wall-clock budget bounds the per-repo gh fan-out (round-9 review fix).
+
+    A --pr-number reconcile now scopes reverse-map to every open ref-less node
+    graph-wide (round 7), so a multi-repo graph can fan out to several repos'
+    worth of gh calls on a single merge - the same unbounded-serial-latency
+    risk cli.py's auto-discovery loop already guards against, applied here.
+    """
+    cwd_a = tmp_path / "repo-a"
+    cwd_b = tmp_path / "repo-b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+
+    calls: list[str] = []
+
+    def _spy(**kw):
+        calls.append(kw["cwd"])
+        return []
+
+    clock = iter([0.0, 1.0, 61.0])
+    monkeypatch.setattr(rec.time, "monotonic", lambda: next(clock))
+
+    entries = [_node("ab-budget-a", cwd=str(cwd_a)), _node("ab-budget-b", cwd=str(cwd_b))]
+    records = scan_merge_drift(entries, list_merged=_spy)
+
+    assert calls == [str(cwd_a)]  # only the first repo's gh call ran
+    assert records == []
+    err = capsys.readouterr().err
+    assert "reverse-map: stopped at its 60s budget" in err
+    assert "ab-budget-b" in err
+
+
 # ---------------------------------------------------------------------------
 # Reverse-map: deleted-worktree cwd falls back to the project root (x-3dd0)
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -27,6 +28,15 @@ from typing import Any, Callable, Iterable, Literal, Optional, Union
 
 # `gh pr view` default timeout; covers network hangs and stuck auth prompts.
 GH_QUERY_TIMEOUT_S = 30.0
+
+# reverse_map_unstamped fires one gh call per distinct repo in its scope
+# (x-59a6 round-9 review fix). A --pr-number call now includes every open
+# ref-less node graph-wide (needed so a stale ref-less node in another
+# project still self-heals), so a multi-repo graph can fan out to several
+# repos' worth of gh calls on a single merge. Same reasoning as cli.py's
+# auto-discovery budget: a count alone still lets a degraded gh burn
+# len(by_cwd)*GH_QUERY_TIMEOUT_S; a wall-clock budget bounds that too.
+REVERSE_MAP_BUDGET_S = 60.0
 
 
 @lru_cache(maxsize=1)
@@ -1020,7 +1030,18 @@ def reverse_map_unstamped(
         )
 
     records: list[MergeDriftRecord] = []
-    for cwd, nodes in by_cwd.items():
+    _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
+    _cwds = list(by_cwd.items())
+    for _i, (cwd, nodes) in enumerate(_cwds):
+        if time.monotonic() >= _deadline:
+            _deferred = [n["id"] for _c, ns in _cwds[_i:] for n in ns]
+            print(
+                f"reverse-map: stopped at its {REVERSE_MAP_BUDGET_S:.0f}s budget "
+                f"(gh is slow or degraded); deferred {len(_deferred)} node(s) to a "
+                f"later sweep: {' '.join(_deferred)}",
+                file=sys.stderr,
+            )
+            break
         try:
             merged = list_merged(cwd=cwd)
         except ReconcileError as exc:

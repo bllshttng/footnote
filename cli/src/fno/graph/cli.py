@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 
 import typer
 
@@ -8170,31 +8170,34 @@ def cmd_reconcile(
             pr_ctx = None
             if not json_out:
                 typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
-        else:
-            if pr_ctx.state != "MERGED":
-                # A binding is a MERGE-time close signal, never a promise on
-                # an OPEN or CLOSED-unmerged PR - the caller could later
-                # abandon or close it unmerged, leaving a claimed node
-                # holding a dead ref. The three real callers (the ritual,
-                # fno pr merge, the bare sweep) only ever reach this with an
-                # already-merged PR; this guards a direct manual
-                # `--pr-number` invocation against the same premature bind.
-                #
-                # Only worth refusing (and reporting) when the body actually
-                # names a trailer: a state-read blip on a PR with NO trailer
-                # at all has nothing to bind either way, and the node this
-                # run is closing almost always closes fine via the ordinary
-                # ref-based scan below - flagging that as a refusal read a
-                # fully successful run as failed (round-8 review fix).
-                if parse_closure_trailer(pr_ctx.body):
-                    closure_refused = (
-                        f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+
+        # A plain `if pr_ctx is not None:` (not try/except/else) so mypy can
+        # narrow pr_ctx to non-None for the rest of this block - it cannot
+        # narrow across a reassignment to None in a sibling `except`.
+        if pr_ctx is not None and pr_ctx.state != "MERGED":
+            # A binding is a MERGE-time close signal, never a promise on
+            # an OPEN or CLOSED-unmerged PR - the caller could later
+            # abandon or close it unmerged, leaving a claimed node
+            # holding a dead ref. The three real callers (the ritual,
+            # fno pr merge, the bare sweep) only ever reach this with an
+            # already-merged PR; this guards a direct manual
+            # `--pr-number` invocation against the same premature bind.
+            #
+            # Only worth refusing (and reporting) when the body actually
+            # names a trailer: a state-read blip on a PR with NO trailer
+            # at all has nothing to bind either way, and the node this
+            # run is closing almost always closes fine via the ordinary
+            # ref-based scan below - flagging that as a refusal read a
+            # fully successful run as failed (round-8 review fix).
+            if parse_closure_trailer(pr_ctx.body):
+                closure_refused = (
+                    f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+                )
+                if not json_out:
+                    typer.echo(
+                        f"warning: reconcile --pr-number: {closure_refused}", err=True,
                     )
-                    if not json_out:
-                        typer.echo(
-                            f"warning: reconcile --pr-number: {closure_refused}", err=True,
-                        )
-                pr_ctx = None
+            pr_ctx = None
 
         if pr_ctx is not None:
             closure_claims = parse_closure_trailer(pr_ctx.body)
@@ -8222,6 +8225,7 @@ def cmd_reconcile(
     # (x-59a6 review fix: this used to fall through to an unscoped scan on
     # every merge, since `node` stays None for a --pr-number-only call, the
     # same shape as a truly bare sweep). An explicit --node still wins.
+    _scan_scope: Optional[Union[str, set[str]]]
     if node is not None:
         _scan_scope = node
     elif pr_number is not None:
