@@ -390,7 +390,10 @@ def cmd_crown(
 
     Run `fno agents register` inside the target session, then run this command
     with its printed handle from another terminal. Agent-originated calls are
-    refused; subordinate grants and succession stay on `spawn --crown`.
+    refused; subordinate grants and succession stay on `spawn --crown`. A row
+    already holding a crown is re-scoped rather than refused: the new territory
+    replaces the old in one atomic write, the level is derived from the new
+    scope, and the receipt reports what was vacated.
     """
     from fno.agents import events
     from fno.agents.crown import CrownPromotionError, promote_existing_session
@@ -407,6 +410,8 @@ def cmd_crown(
         level=receipt["level"],
         scope=receipt["scope"],
         grantor=receipt["grantor"],
+        vacated_scope=receipt["vacated_scope"],
+        vacated_level=receipt["vacated_level"],
     )
     print(json.dumps(receipt))
 
@@ -3090,10 +3095,12 @@ def cmd_rm(
         "--force",
         "-F",
         help=(
-            "Drop the registry entry even when the harness teardown fails "
-            "or refuses (e.g. uncommitted worktree changes). WARNING: "
-            "leaves an orphan session record in that harness's own store, "
-            "named on stderr, for you to clean manually."
+            "Drop the registry entry even when the row is LIVE or the harness "
+            "teardown fails or refuses (e.g. uncommitted worktree changes). "
+            "The process survives for bg and headless rows; a mux-hosted pane "
+            "is killed with it. WARNING: leaves an orphan session record in "
+            "that harness's own store, named on stderr, for you to clean "
+            "manually."
         ),
     ),
 ) -> None:
@@ -3114,8 +3121,10 @@ def cmd_rm(
     Your history is never removed here -- teardown drops the harness's
     index record, not the conversation. On teardown failure the registry
     row is kept so you can retry; ``--force`` drops it anyway and names
-    the orphan in the receipt. A live row is refused, and a blocked row names model
-    rotation as its remedy. Terminal rows need no separate stop first.
+    the orphan in the receipt. A live row is refused by the Rust runtime
+    (the default route; the Python runtime does not gate on liveness), and
+    a blocked row names model rotation as its remedy. Terminal rows need
+    no separate stop first.
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with

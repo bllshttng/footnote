@@ -377,6 +377,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     This is deliberately not a general crown writer. Agent-to-agent grants and
     same-scope succession stay on ``spawn --crown``; this function only closes
     the human workflow where the useful target session already exists.
+
+    A row that already holds a crown is re-scoped, not refused: the new
+    territory replaces the old in the one write below, and the receipt reports
+    what was vacated. The live-holder check is the guard that matters here - it
+    is what keeps two rows from ruling the same territory.
     """
     caller = calling_agent_row()
     if caller is not None:
@@ -401,7 +406,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     try:
         target_name = resolve_agent(handle).entry.name
     except AgentResolutionError as exc:
-        raise CrownPromotionError(str(exc)) from exc
+        raise CrownPromotionError(
+            f"{exc}. `fno agents list` shows every handle you can crown."
+        ) from exc
 
     receipt: dict[str, Any] = {}
 
@@ -409,20 +416,23 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         target = next((row for row in rows if row.name == target_name), None)
         if target is None:
             raise CrownPromotionError(
-                f"no agent matching {handle!r}; the target disappeared before the grant committed"
+                f"no agent matching {handle!r}; the target disappeared before the "
+                "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: target status {target.status!r} is terminal"
+                f"refusing to crown {target.name!r}: target status {target.status!r} "
+                "is terminal. `fno agents list` shows which rows are live; crown "
+                "one of those instead."
             )
-        if any(
-            value is not None
-            for value in (target.crown_level, target.crown_scope, target.crown_grantor)
-        ):
-            raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: it already holds "
-                f"{target.crown_label or 'crown metadata'}"
-            )
+
+        # A row that already holds a crown is re-scoped, not refused: the
+        # replace() below overwrites the old territory in the same write that
+        # stamps the new one, so the vacated scope frees atomically and no
+        # reader ever sees two live crowns or zero. Captured BEFORE the stamp
+        # so the receipt can name what changed hands.
+        vacated_scope = target.crown_scope
+        vacated_level = target.crown_level
 
         holder = next(
             (
@@ -436,8 +446,16 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         )
         if holder is not None:
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: scope {scope!r} is already held "
-                f"by live row {holder.name!r}"
+                f"refusing to crown {target.name!r}: scope {scope!r} is already "
+                f"held by live row {holder.name!r}. Three ways out, cheapest "
+                "first:\n"
+                f"  re-scope the holder   fno agents crown {holder.name} --scope "
+                "<other territory>   (both sessions stay live; retry this "
+                "command after)\n"
+                "  holder looks dead     fno agents reconcile   (a row whose "
+                "harness session is gone flips to orphaned, which frees the "
+                "scope)\n"
+                f"  end the holder        fno agents stop {holder.name}, then retry"
             )
 
         for index, row in enumerate(rows):
@@ -454,6 +472,8 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             level=level,
             scope=scope,
             grantor="human",
+            vacated_scope=vacated_scope,
+            vacated_level=vacated_level,
         )
         return rows
 
