@@ -26,6 +26,10 @@ bash scripts/setup/setup-worktree.sh
 
 The setup script links shared state from canonical: the vault symlink, per-file `.fno/` state, the gitignored `.claude/` subdirs, and the harness config roots. It warns and skips any real (non-symlink) file at a target, leaving real state intact. Tracked files come from git checkout.
 
+## Cargo build storage
+
+Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno worktree cleanup --cargo-targets --apply`: the same repo-wide lifecycle sweep operators can inspect with `fno worktree cleanup --cargo-targets` and apply manually with `--apply`. It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree; protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the optional compiler wrapper at `scripts/lib/cargo-rustc-wrapper.sh`; installed sccache shares compilation with a default 10 GiB `SCCACHE_CACHE_SIZE`, while machines without sccache execute rustc directly.
+
 ## Per-project worktree policy
 
 Every code-payload dispatch routes through `fno worktree ensure`, which resolves a `worktree` policy.

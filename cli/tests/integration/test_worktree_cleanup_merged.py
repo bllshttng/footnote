@@ -13,12 +13,15 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
+SETUP_SRC = REPO_ROOT / "scripts" / "setup" / "setup-worktree.sh"
+runner = CliRunner()
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -83,6 +86,133 @@ def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
         ["bash", str(script), "cleanup", "--older-than", "0d", *flags],
         cwd=str(canon), capture_output=True, text=True,
     )
+
+
+def _cargo_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "cleanup", "--cargo-targets", *flags],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
+def _add_target(canon: Path, name: str, size: int, *, old: bool = False) -> Path:
+    wt = canon / name
+    _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
+    target = wt / "crates" / "fixture" / "target"
+    target.mkdir(parents=True)
+    (target / "artifact.bin").write_bytes(b"x" * size)
+    if old:
+        old_ts = 1_600_000_000
+        os.utime(target / "artifact.bin", (old_ts, old_ts))
+        os.utime(target, (old_ts, old_ts))
+    return target
+
+
+def test_cargo_target_dry_run_reports_projection_without_mutation(repo: Path):
+    old = _add_target(repo, "cargo-old", 2 * 1024 * 1024, old=True)
+    young = _add_target(repo, "cargo-young", 2 * 1024 * 1024)
+
+    r = _cargo_sweep(repo, "--cap-bytes", str(3 * 1024 * 1024), "--target-max-age", "7d")
+
+    assert r.returncode == 0, r.stderr
+    assert "mode=dry-run" in r.stdout
+    assert "before_bytes=" in r.stdout
+    assert "after_bytes=" in r.stdout
+    assert "projected_after_bytes=" in r.stdout
+    assert "cap_bytes=3145728" in r.stdout
+    assert "reason=age" in r.stdout
+    assert old.exists() and young.exists(), "dry-run must not remove either target"
+
+
+def test_cargo_target_apply_reaps_age_then_cap_and_is_idempotent(repo: Path):
+    old = _add_target(repo, "cargo-old", 2 * 1024 * 1024, old=True)
+    young = _add_target(repo, "cargo-young", 2 * 1024 * 1024)
+
+    first = _cargo_sweep(
+        repo,
+        "--cap-bytes", str(3 * 1024 * 1024),
+        "--target-max-age", "7d",
+        "--apply",
+    )
+    second = _cargo_sweep(
+        repo,
+        "--cap-bytes", str(3 * 1024 * 1024),
+        "--target-max-age", "7d",
+        "--apply",
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert "mode=apply" in first.stdout
+    assert "reason=age" in first.stdout
+    assert "after_bytes=" in first.stdout
+    assert "cap_bytes=3145728" in first.stdout
+    assert not old.exists(), "over-age target must be reaped even when one deletion satisfies cap"
+    assert young.exists(), "young target should remain once the cap is satisfied"
+    assert second.returncode == 0, second.stderr
+    assert "reaped=0" in second.stdout
+    assert "reclaimed_bytes=0" in second.stdout
+
+
+def test_cargo_target_apply_refuses_to_delete_rooted_builder(repo: Path):
+    target = _add_target(repo, "cargo-live", 2 * 1024 * 1024, old=True)
+    holder = subprocess.Popen(["sleep", "10"], cwd=target.parent.parent.parent)
+    try:
+        r = _cargo_sweep(
+            repo,
+            "--cap-bytes", "1",
+            "--target-max-age", "0d",
+            "--apply",
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+    assert r.returncode != 0
+    assert "protected" in r.stdout
+    assert "over-cap-protected" in r.stdout
+    assert target.exists(), "a rooted process must protect its worktree target"
+
+
+def test_setup_worktree_runs_the_same_cargo_target_apply_path():
+    text = SETUP_SRC.read_text()
+    assert "fno worktree cleanup --cargo-targets --apply" in text
+    assert "cargo target cleanup failed" in text
+
+
+def test_cargo_target_cli_forwards_explicit_bounds(monkeypatch: pytest.MonkeyPatch):
+    from fno.worktree_cli import cli as worktree_cli
+
+    seen: list[str] = []
+
+    def fake_run(*args: str) -> int:
+        seen.extend(args)
+        return 0
+
+    monkeypatch.setattr(worktree_cli, "_run_lifecycle", fake_run)
+    result = runner.invoke(
+        worktree_cli.app,
+        [
+            "cleanup",
+            "--cargo-targets",
+            "--cap-bytes",
+            "8388608",
+            "--target-max-age",
+            "3d",
+            "--apply",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [
+        "cleanup",
+        "--apply",
+        "--cargo-targets",
+        "--cap-bytes",
+        "8388608",
+        "--target-max-age",
+        "3d",
+    ]
 
 
 def _add_merged(canon: Path, name: str) -> Path:

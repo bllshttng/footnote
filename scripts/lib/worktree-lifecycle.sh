@@ -212,6 +212,164 @@ _wt_all_orphans() {
     return 0
 }
 
+_cargo_target_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+_cargo_target_bytes() {
+    local kib
+    kib="$(du -sk "$1" 2>/dev/null | awk 'NR==1 {print $1}')"
+    [[ "$kib" =~ ^[0-9]+$ ]] || kib=0
+    echo $((kib * 1024))
+}
+
+_cargo_target_inventory() {
+    local output="$1" wt target bytes mtime protection pids
+    : > "$output"
+    while IFS= read -r wt; do
+        [[ -d "$wt" ]] || continue
+        protection="-"
+        if _wt_live "$wt"; then
+            protection="live-session"
+        else
+            pids="$(_wt_pids "$wt")"
+            [[ -n "$pids" ]] && protection="processes:$(printf '%s\n' "$pids" | grep -c .)"
+        fi
+        shopt -s nullglob
+        for target in "$wt/target" "$wt"/crates/*/target; do
+            [[ -d "$target" && ! -L "$target" ]] || continue
+            bytes="$(_cargo_target_bytes "$target")"
+            mtime="$(_cargo_target_mtime "$target")"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$protection" "$wt" "$target" >> "$output"
+        done
+        shopt -u nullglob
+    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
+}
+
+_cargo_target_registered() {
+    local wanted="$1"
+    git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}' | grep -Fqx "$wanted"
+}
+
+_cargo_target_path_is_owned() {
+    local wt="$1" target="$2"
+    [[ -d "$wt" && -d "$target" && ! -L "$target" ]] || return 1
+    case "$target" in
+        "$wt/target"|"$wt"/crates/*/target) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_cargo_target_cleanup() {
+    local cap_bytes="$1" max_age_days="$2" apply="$3"
+    local inventory candidates selected now before_bytes projected_after
+    local mtime bytes protection wt target age_days reason pids
+    local reaped=0 reclaimed=0 protected=0 after_bytes status mode
+
+    if [[ ! "$cap_bytes" =~ ^[1-9][0-9]*$ ]]; then
+        echo "cargo target cleanup: --cap-bytes must be a positive integer" >&2
+        return 1
+    fi
+    if [[ ! "$max_age_days" =~ ^[0-9]+$ ]]; then
+        echo "cargo target cleanup: --target-max-age must be Nd or a non-negative day count" >&2
+        return 1
+    fi
+
+    inventory="$(mktemp -t fno-cargo-targets.XXXXXX)"
+    candidates="$(mktemp -t fno-cargo-candidates.XXXXXX)"
+    selected="$(mktemp -t fno-cargo-selected.XXXXXX)"
+    : > "$candidates"
+    : > "$selected"
+    _cargo_target_inventory "$inventory"
+    now="$(date +%s)"
+    before_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
+    projected_after="$before_bytes"
+
+    while IFS=$'\t' read -r mtime bytes protection wt target; do
+        [[ -n "$target" ]] || continue
+        if [[ "$protection" != "-" ]]; then
+            protected=$((protected + 1))
+            printf 'cargo-target protected bytes=%s reason=%s path=%s\n' "$bytes" "$protection" "$target"
+            continue
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" >> "$candidates"
+    done < "$inventory"
+
+    while IFS=$'\t' read -r mtime bytes wt target; do
+        [[ -n "$target" ]] || continue
+        age_days=$(( (now - mtime) / 86400 ))
+        if [[ "$mtime" -le 0 || "$age_days" -lt "$max_age_days" ]]; then
+            continue
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" "age" >> "$selected"
+        projected_after=$((projected_after - bytes))
+    done < <(sort -n "$candidates")
+
+    if [[ "$projected_after" -gt "$cap_bytes" ]]; then
+        while IFS=$'\t' read -r mtime bytes wt target; do
+            [[ -n "$target" ]] || continue
+            awk -F '\t' -v wanted="$target" '$4 == wanted { found=1 } END { exit !found }' "$selected" && continue
+            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" "cap" >> "$selected"
+            projected_after=$((projected_after - bytes))
+            [[ "$projected_after" -le "$cap_bytes" ]] && break
+        done < <(sort -n "$candidates")
+    fi
+
+    mode="dry-run"
+    if [[ -z "$apply" ]]; then
+        while IFS=$'\t' read -r mtime bytes wt target reason; do
+            [[ -n "$target" ]] || continue
+            printf 'cargo-target would-reap bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
+        done < "$selected"
+        status="ok"
+        [[ "$projected_after" -gt "$cap_bytes" ]] && status="over-cap-protected"
+        printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s reaped=0 reclaimed_bytes=0 protected=%s\n' \
+            "$status" "$mode" "$before_bytes" "$before_bytes" "$projected_after" "$cap_bytes" "$protected"
+        unlink "$inventory" "$candidates" "$selected" 2>/dev/null || true
+        [[ "$status" == "ok" ]]
+        return $?
+    fi
+
+    mode="apply"
+    while IFS=$'\t' read -r mtime bytes wt target reason; do
+        [[ -n "$target" ]] || continue
+        if ! _cargo_target_registered "$wt" || ! _cargo_target_path_is_owned "$wt" "$target"; then
+            printf 'cargo-target kept bytes=%s reason=ownership-recheck path=%s\n' "$bytes" "$target"
+            continue
+        fi
+        if _wt_live "$wt"; then
+            printf 'cargo-target protected bytes=%s reason=live-session-recheck path=%s\n' "$bytes" "$target"
+            protected=$((protected + 1))
+            continue
+        fi
+        pids="$(_wt_pids "$wt")"
+        if [[ -n "$pids" ]]; then
+            printf 'cargo-target protected bytes=%s reason=process-recheck path=%s\n' "$bytes" "$target"
+            protected=$((protected + 1))
+            continue
+        fi
+        rm -rf -- "$target"
+        if [[ ! -e "$target" ]]; then
+            printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
+            reaped=$((reaped + 1))
+            reclaimed=$((reclaimed + bytes))
+        else
+            printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
+        fi
+    done < "$selected"
+
+    _cargo_target_inventory "$inventory"
+    after_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
+    status="ok"
+    if [[ "$after_bytes" -gt "$cap_bytes" ]]; then
+        status="over-cap-protected"
+    fi
+    printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s reaped=%s reclaimed_bytes=%s protected=%s\n' \
+        "$status" "$mode" "$before_bytes" "$after_bytes" "$after_bytes" "$cap_bytes" "$reaped" "$reclaimed" "$protected"
+    unlink "$inventory" "$candidates" "$selected" 2>/dev/null || true
+    [[ "$status" == "ok" ]]
+}
+
 case "${1:-status}" in
     status)
         shift
@@ -237,6 +395,9 @@ case "${1:-status}" in
         MERGED=""
         APPLY=""
         KILL_ORPHANS=""
+        CARGO_TARGETS=""
+        CARGO_CAP_BYTES=68719476736
+        CARGO_MAX_AGE_DAYS=7
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --older-than) DAYS="${2%d}"; OLDER_SET="true"; shift 2 ;;
@@ -245,6 +406,9 @@ case "${1:-status}" in
                 --merged) MERGED="true"; shift ;;
                 --apply) APPLY="true"; shift ;;
                 --kill-orphans) KILL_ORPHANS="true"; shift ;;
+                --cargo-targets) CARGO_TARGETS="true"; shift ;;
+                --cap-bytes) CARGO_CAP_BYTES="$2"; shift 2 ;;
+                --target-max-age) CARGO_MAX_AGE_DAYS="${2%d}"; shift 2 ;;
                 *) shift ;;
             esac
         done
@@ -306,6 +470,15 @@ case "${1:-status}" in
         # from a dead holder, or freshly acquired, must never be removed out
         # from under a different process that has since taken it over.
         trap '[[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
+
+        if [[ -n "$CARGO_TARGETS" ]]; then
+            if [[ -n "$MERGED" || -n "$OLDER_SET" || -n "$PREFIX" || -n "$KILL_ORPHANS" ]]; then
+                echo "worktree cleanup: --cargo-targets cannot be combined with worktree-removal selectors" >&2
+                exit 1
+            fi
+            _cargo_target_cleanup "$CARGO_CAP_BYTES" "$CARGO_MAX_AGE_DAYS" "$APPLY"
+            exit $?
+        fi
 
         # --- merged mode: reap worktrees whose branch already landed ---------
         if [[ -n "$MERGED" ]]; then
