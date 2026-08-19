@@ -8169,12 +8169,21 @@ def cmd_reconcile(
         for r in records:
             if r.closeable and r.pr_number != pr_number and r.pr_number not in discovered:
                 discovered[r.pr_number] = r
-        # Bounded, not because more discovery is wrong, but because each entry
-        # costs one sequential `gh pr view` (up to GH_QUERY_TIMEOUT_S each) - an
-        # unbounded loop on a backlog with many stale closeable records turns
-        # every SessionStart sweep into a serial gh-latency tax. A later sweep
-        # (SessionStart auto-fires often) picks up whatever this run dropped.
+        # Bounded two ways, not because more discovery is wrong, but because
+        # each entry costs one sequential `gh pr view` (up to
+        # GH_QUERY_TIMEOUT_S each) - an unbounded loop on a backlog with many
+        # stale closeable records turns every SessionStart sweep into a
+        # serial gh-latency tax. A COUNT cap alone still lets a degraded gh
+        # (network blip, auth stall) burn up to count*GH_QUERY_TIMEOUT_S -
+        # 20*30s = 10 minutes - turning a hook that used to fail fast into
+        # one that hangs. A wall-clock budget bounds that regardless of the
+        # count cap. A later sweep (SessionStart auto-fires often) picks up
+        # whatever this run dropped either way.
+        import time as _time
+
         _MAX_AUTO_DISCOVER = 20
+        _AUTO_DISCOVER_BUDGET_S = 60.0
+        _deadline = _time.monotonic() + _AUTO_DISCOVER_BUDGET_S
         _dropped = list(discovered.items())[_MAX_AUTO_DISCOVER:]
         if _dropped and not json_out:
             typer.echo(
@@ -8185,6 +8194,15 @@ def cmd_reconcile(
             )
         auto_bound_any = False
         for _pr_num, _rec in list(discovered.items())[:_MAX_AUTO_DISCOVER]:
+            if _time.monotonic() >= _deadline:
+                if not json_out:
+                    typer.echo(
+                        f"reconcile: auto-discovery stopped at its "
+                        f"{_AUTO_DISCOVER_BUDGET_S:.0f}s budget (gh is slow or "
+                        "degraded); the rest defers to a later sweep",
+                        err=True,
+                    )
+                break
             # The record's OWN url or cwd resolves the repo to scope this query
             # and bind to - the graph is CROSS-PROJECT, so a --repo passed for
             # the --pr-number leg above belongs to a DIFFERENT project and must

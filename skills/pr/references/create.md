@@ -212,9 +212,7 @@ Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the b
 # Build title from branch name or primary commit
 TITLE="[type]: [description based on commits]"
 
-gh pr create \
-  --title "$TITLE" \
-  --body "$(cat <<'EOF'
+BODY="$(cat <<'EOF'
 ## Summary
 
 [2-4 bullets derived from commit messages]
@@ -230,10 +228,20 @@ gh pr create \
 ## Linear
 
 [{TEAM}-XXX](https://linear.app/{workspace}/issue/{TEAM}-XXX) (only if Linear configured and ticket exists in commits)
-
-$CLOSURE_TRAILER
 EOF
 )"
+# The quoted heredoc above is a literal template (bracket placeholders, no
+# expansion) - $CLOSURE_TRAILER never belongs inside it. Append it as its own
+# paragraph afterward, with a real (unquoted) variable expansion instead.
+if [[ -n "${CLOSURE_TRAILER:-}" ]]; then
+  BODY="${BODY}
+
+${CLOSURE_TRAILER}"
+fi
+
+gh pr create \
+  --title "$TITLE" \
+  --body "$BODY"
 ```
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
