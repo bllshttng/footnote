@@ -784,6 +784,25 @@ def _park(
     return result
 
 
+def _refuse(
+    request: HandoffRequest,
+    attempt: str,
+    failed_phase: str,
+    reason: str,
+    counts: dict[str, int],
+) -> HandoffResult:
+    """Return a retryable result without creating a terminal receipt."""
+    return HandoffResult(
+        node=request.node,
+        outage_epoch=request.outage_epoch,
+        attempt=attempt,
+        phase="refused",
+        failed_phase=failed_phase,
+        reason=reason,
+        counts=counts,
+    )
+
+
 def run_outage_handoff(
     request: HandoffRequest,
     *,
@@ -830,35 +849,21 @@ def run_outage_handoff(
 
         active_phase = "source_stopped"
         if not deps.refresh_dispatch(dispatch_key, lease_holder):
-            return _park(path, request, attempt, "source_stopped",
-                         "dispatch lease changed before source stop", counts)
+            return _refuse(
+                request, attempt, "source_stopped",
+                "dispatch lease changed before source stop", counts,
+            )
         snapshot = deps.read_snapshot(request)
         _validate_snapshot(request, snapshot)
         _require_same_authority(observed, snapshot)
         evidence = deps.revalidate_evidence(request, snapshot)
         counts["source_evidence"] = evidence.evidence_count
         if not evidence.verified:
-            return HandoffResult(
-                node=request.node,
-                outage_epoch=request.outage_epoch,
-                attempt=attempt,
-                phase="refused",
-                failed_phase="source_stopped",
-                reason=evidence.reason,
-                counts=counts,
-            )
+            return _refuse(request, attempt, "source_stopped", evidence.reason, counts)
         proof = deps.stop_source(snapshot.source)
         counts["source_stop_evidence"] = proof.evidence_count
         if not proof.confirmed_dead:
-            return HandoffResult(
-                node=request.node,
-                outage_epoch=request.outage_epoch,
-                attempt=attempt,
-                phase="refused",
-                failed_phase="source_stopped",
-                reason=proof.reason,
-                counts=counts,
-            )
+            return _refuse(request, attempt, "source_stopped", proof.reason, counts)
         source_dead = True
         _journal(path, phase="source_stopped", request=request, attempt=attempt,
                  stop_kind=proof.kind, source_stop_evidence=proof.evidence_count)
@@ -908,6 +913,15 @@ def run_outage_handoff(
         _journal(path, phase="committed", request=request, attempt=attempt, result=result)
         return result
     except Exception as exc:  # noqa: BLE001 - transaction failures become durable parks
+        failure_counts = {**counts, "errors": 1}
+        if not source_dead:
+            return _refuse(
+                request,
+                attempt,
+                active_phase,
+                f"{type(exc).__name__}: {exc}",
+                failure_counts,
+            )
         if source_dead and spawned is not None:
             try:
                 deps.stop_partial_successor(spawned)
@@ -920,7 +934,7 @@ def run_outage_handoff(
             attempt,
             active_phase,
             f"{type(exc).__name__}: {exc}",
-            {**counts, "errors": 1},
+            failure_counts,
             archive_path=failure_archive,
             successor_row_id=spawned.row_id if spawned else None,
         )

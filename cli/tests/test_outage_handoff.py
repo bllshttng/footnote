@@ -213,6 +213,41 @@ def test_ac7_err_unknown_source_stop_refuses_without_terminal_receipt(tmp_path: 
     assert json.loads(receipts[0].read_text())["phase"] != "parked"
 
 
+def test_ac7_err_dispatch_lease_loss_before_stop_is_nonterminal(tmp_path: Path):
+    calls: list[str] = []
+    deps = replace(_deps(tmp_path, calls), refresh_dispatch=lambda *_args: False)
+
+    result = run_outage_handoff(
+        _request(), deps=deps, journal_root=tmp_path / "journal"
+    )
+
+    assert result.phase == "refused"
+    assert "stop" not in calls
+    assert "archive" not in calls
+    assert all(
+        json.loads(path.read_text())["phase"] != "parked"
+        for path in (tmp_path / "journal").glob("*.json")
+    )
+
+
+def test_ac7_err_exception_before_positive_death_is_nonterminal(tmp_path: Path):
+    calls: list[str] = []
+    deps = replace(
+        _deps(tmp_path, calls),
+        stop_source=lambda _source: (_ for _ in ()).throw(RuntimeError("probe broke")),
+    )
+
+    result = run_outage_handoff(
+        _request(), deps=deps, journal_root=tmp_path / "journal"
+    )
+
+    assert result.phase == "refused"
+    assert "probe broke" in result.reason
+    assert "archive" not in calls
+    assert "claim-release" not in calls
+    assert "spawn" not in calls
+
+
 def test_ac7_con_evidence_drift_under_lease_refuses_before_stop(tmp_path: Path):
     calls: list[str] = []
     deps = replace(
