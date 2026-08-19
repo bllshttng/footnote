@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -1481,7 +1481,7 @@ def cmd_spawn(
 
             try:
                 pane_dispatch = dispatch_spawn_bounded_pane
-                pane_kwargs = dict(
+                pane_kwargs: dict[str, Any] = dict(
                     name=name,
                     message=message,
                     provider=provider,

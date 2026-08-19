@@ -112,17 +112,22 @@ def inspect_target_manifest(worktree: Path) -> ManifestInspection:
     body_holder = _body_field(body, "target_claim_holder")
     if body_key != f"node:{body_node}":
         raise ManifestAuthorityError("manifest body claim key does not name its node")
-    if not all((model.owner_cwd, model.plan_path, model.harness_session_id, body_holder)):
+    owner_cwd, plan_path, harness_session_id = (
+        model.owner_cwd,
+        model.plan_path,
+        model.harness_session_id,
+    )
+    if not (owner_cwd and plan_path and harness_session_id and body_holder):
         raise ManifestAuthorityError("manifest is missing owner, plan, session, or claim authority")
     authority = ManifestAuthority(
         node=body_node,
         claim_holder=body_holder,
-        owner_cwd=str(Path(model.owner_cwd).resolve()),
-        plan_path=str(Path(model.plan_path).resolve()),
+        owner_cwd=str(Path(owner_cwd).resolve()),
+        plan_path=str(Path(plan_path).resolve()),
         branch=_git(worktree, "branch", "--show-current"),
         head=_git(worktree, "rev-parse", "HEAD"),
         worktree_id=str(Path(_git(worktree, "rev-parse", "--git-dir")).resolve()),
-        harness_session_id=model.harness_session_id,
+        harness_session_id=harness_session_id,
     )
     if Path(authority.owner_cwd) != worktree:
         raise ManifestAuthorityError("manifest owner_cwd is not this worktree")

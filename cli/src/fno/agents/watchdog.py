@@ -1285,7 +1285,7 @@ def production_handoff_candidate(
             lambda account, root: dispatch_env(account, repo_root=root)
         )
         route_env_for = route_env_for or (
-            lambda entry: read_route_settings(Path(entry.route_settings_path))
+            lambda entry: read_route_settings(entry.route_settings_path)
             if getattr(entry, "route_settings_path", None) else {}
         )
         runtime_exhausted_fn = runtime_exhausted_fn or _runtime_exhausted

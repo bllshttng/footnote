@@ -212,24 +212,25 @@ def stop_source_exact(
 
     if not source.pid or source.pid_start_time is None:
         return StopProof(False, "process", 0, "pid and process-start token are required")
+    pid, pid_start_time = source.pid, source.pid_start_time
     if pid_probe is None:
         from fno.agents.spawn_gate import _pid_alive
 
         pid_probe = _pid_alive
-    initial = pid_probe(source.pid, source.pid_start_time)
+    initial = pid_probe(pid, pid_start_time)
     evidence = 1 if initial is True else 0
     if initial is not True:
         reason = "unreadable" if initial is None else "already absent without a stop observation"
         return StopProof(False, "process", evidence, f"source process identity is {reason}")
 
     def send(sig: int) -> tuple[bool, str | None]:
-        state = pid_probe(source.pid, source.pid_start_time)
+        state = pid_probe(pid, pid_start_time)
         if state is False:
             return True, None
         if state is not True:
             return False, "process identity changed before signal"
         try:
-            signal_process(source.pid, sig)
+            signal_process(pid, sig)
         except ProcessLookupError:
             return True, None
         except OSError as exc:
@@ -242,9 +243,9 @@ def stop_source_exact(
     if gone:
         return StopProof(True, "process", evidence + 1, "recorded process is dead")
     deadline = time.monotonic() + grace_s
-    state: bool | None = True
+    state = True
     while time.monotonic() < deadline:
-        state = pid_probe(source.pid, source.pid_start_time)
+        state = pid_probe(pid, pid_start_time)
         if state is False:
             return StopProof(True, "process", evidence + 1, "recorded process is dead")
         if state is None:
@@ -255,7 +256,7 @@ def stop_source_exact(
         return StopProof(False, "process", evidence, error)
     if gone:
         return StopProof(True, "process", evidence + 1, "recorded process is dead")
-    state = pid_probe(source.pid, source.pid_start_time)
+    state = pid_probe(pid, pid_start_time)
     if state is False:
         return StopProof(True, "process", evidence + 1, "recorded process is dead")
     reason = "unreadable" if state is None else "still alive"
