@@ -923,7 +923,13 @@ def _redispatch(
     pre_spawn: Optional[Callable[[], bool]] = None,
     flags: Optional[Sequence[str]] = None,
 ) -> bool:
-    """Stop the rate-limited session and respawn ``/target`` on the now-active
+    """Legacy non-outage stop and respawn on an already selected route.
+
+    Quorum-backed provider outages must enter through
+    :func:`recover_provider_outage`; this helper has neither exact source-death
+    proof nor a durable attempt journal and is not an outage migration seam.
+
+    Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
     actually launched (spawn exit 0).
@@ -1024,6 +1030,15 @@ def _redispatch(
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
         return False
+
+
+def recover_provider_outage(request, *, deps, journal_root: Path):
+    """Run the durable path only for a positively quorum-backed outage."""
+    if getattr(request, "quorum_evidence_count", 0) < 2:
+        raise ValueError("provider outage handoff requires quorum evidence")
+    from fno.agents.outage_handoff import run_outage_handoff
+
+    return run_outage_handoff(request, deps=deps, journal_root=journal_root)
 
 
 def _auto_switch_enabled(repo_root: Optional[str] = None) -> bool:

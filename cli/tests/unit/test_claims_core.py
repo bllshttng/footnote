@@ -291,6 +291,26 @@ class TestRelease:
         acquire_claim("k", HOLDER_A, root=tmp_path)
         release_claim("k", HOLDER_A, root=tmp_path)
 
+    def test_strict_release_compares_and_unlinks_under_per_key_mutex(self, tmp_path):
+        import fno.claims.core as claims_core
+
+        acquire_claim("node:x-abcd", HOLDER_A, root=tmp_path)
+        real_read = claims_core.read_claim_file
+        observed = []
+
+        def locked_read(path):
+            mutex = path.with_name(path.name + ".recovery.d")
+            observed.append(mutex.is_dir())
+            return real_read(path)
+
+        with patch.object(claims_core, "read_claim_file", side_effect=locked_read):
+            release_claim(
+                "node:x-abcd", HOLDER_A, strict=True, root=tmp_path
+            )
+
+        assert observed == [True]
+        assert not claim_path("node:x-abcd", root=tmp_path).exists()
+
 
 # ---------------------------------------------------------------------------
 # refresh

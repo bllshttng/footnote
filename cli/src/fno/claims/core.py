@@ -718,32 +718,42 @@ def release_claim(
         raise ClaimValidationError("key and holder must be non-empty")
 
     path = claim_path(key, root=root)
-    if not path.exists():
-        return None
-
-    try:
-        existing = read_claim_file(path)
-    except ClaimGoneAway:
-        return None
-    except ClaimCorrupted:
-        # Corrupted file: we cannot verify ownership. Conservative default
-        # is to leave it for force_release. strict mode surfaces the issue.
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    token = acquire_dir_mutex(
+        recovery_lock,
+        _RECOVERY_LOCK_MAX_WAIT_S,
+        poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
+    )
+    if token is None:
         if strict:
-            raise
+            raise ClaimContended(f"release_claim could not lock {key!r}")
         return None
-
-    if existing.holder != holder:
-        if strict:
-            raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-        return None
-
-    duration_ms = max(0, now_ms() - existing.acquired_at)
     try:
-        path.unlink()
-    except FileNotFoundError:
-        return None
-    emit_claim_released(existing, duration_ms=duration_ms)
-    return existing
+        if not path.exists():
+            return None
+        try:
+            existing = read_claim_file(path)
+        except ClaimGoneAway:
+            return None
+        except ClaimCorrupted:
+            if strict:
+                raise
+            return None
+
+        if existing.holder != holder:
+            if strict:
+                raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
+            return None
+
+        duration_ms = max(0, now_ms() - existing.acquired_at)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return None
+        emit_claim_released(existing, duration_ms=duration_ms)
+        return existing
+    finally:
+        release_dir_mutex(recovery_lock, token)
 
 
 def refresh_claim(
