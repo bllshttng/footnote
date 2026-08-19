@@ -24,6 +24,11 @@ Two traps a stranger inherits (both measured by hand on 2026-08-15):
     manifest, NEVER on a name regex: eight auto-named workers read as
     nobody-on-this-node and were nearly double-dispatched.
   - a wake is confirmed by transcript content, never by a state field.
+
+A third, added 2026-08-19 (x-cd1e): the ``unclaimed`` verdict flags a live row
+whose node carries no claim, and it is ADVISORY. The worker is fine; the record
+is wrong. It never wakes, reroutes or reaps, and its own blind spot is the shape
+that produced the defect - see ``_unclaimed_node_basis``.
 """
 from __future__ import annotations
 
@@ -63,6 +68,12 @@ REROUTE = "reroute"
 WAKE = "wake"
 STALE = "stale"
 LEAVE = "leave"
+#: Advisory only (x-cd1e): the worker is fine, the RECORD is wrong. Never a
+#: wake, never a reroute, never a reap - the action lanes below switch on the
+#: specific verdict, so this one cannot reach any of them. It replaces LEAVE so
+#: the row surfaces in the digest, which is the whole point: nothing today
+#: notices a live worker on a node no claim covers.
+UNCLAIMED = "unclaimed"
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
@@ -283,17 +294,32 @@ def verdicts(
 
     out: list[Verdict] = []
     for row in rows:
-        out.append(
-            _verdict_one(
-                row,
-                facts=facts_by_row.get(row.row_id),
-                claim_for=claim_for,
-                node_state_for=node_state_for,
-                now_s=now_s,
-                quiet_after_s=quiet_after_s,
-                cotenants=_cotenants(row),
-            )
+        verdict = _verdict_one(
+            row,
+            facts=facts_by_row.get(row.row_id),
+            claim_for=claim_for,
+            node_state_for=node_state_for,
+            now_s=now_s,
+            quiet_after_s=quiet_after_s,
+            cotenants=_cotenants(row),
         )
+        # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
+        # rather than at a leave return because there are four of them. Putting
+        # it on one read as protection and left the common case - a healthy
+        # working row whose tail is not stalled - silently uncovered, which is
+        # the first pitfalls entry happening inside the fix for it. Caught by
+        # its own test.
+        #
+        # Only LEAVE is upgraded. Every other verdict already says something
+        # louder and more actionable, and burying it under a record-keeping
+        # note would trade a real signal for an advisory one.
+        if verdict.verdict == LEAVE:
+            unclaimed_basis = _unclaimed_node_basis(row, claim_for)
+            if unclaimed_basis:
+                verdict = verdict._replace(
+                    verdict=UNCLAIMED, basis=f"{verdict.basis}; {unclaimed_basis}"
+                )
+        out.append(verdict)
     return out
 
 
@@ -628,6 +654,33 @@ def _verdict_one(
         else f"no transcript, state {row.state}"
     )
     return Verdict(row.row_id, row.name, row.state, LEAVE, basis, "none")
+
+
+def _unclaimed_node_basis(row: Row, claim_for: Callable[[str], dict]) -> str:
+    """Is this live row working a node that no claim covers?
+
+    BLIND SPOT, stated here beside the two the module header already records.
+    A row whose node did not resolve carries ``node=None`` and cannot be
+    checked, and that is PRECISELY the shape of a worker that never ran
+    ``fno target init``: ``Row.node`` comes from the worktree manifest and then
+    the session-keyed ledger, and both are written downstream of init. So this
+    catches the manifest-written-but-unclaimed case and nothing else. Reading it
+    as "every unclaimed worker is flagged" would make it the same decorative
+    guard this change exists to remove.
+
+    Everything else here degrades to silence. An unresolved node, a claim read
+    that raises, or any state that is not a plain ``free`` reports nothing: an
+    advisory that fires on an unreadable store trains its reader to ignore it.
+    """
+    if not row.node:
+        return ""
+    try:
+        claim = claim_for(row.node)
+    except Exception:  # noqa: BLE001 - a failed read is never a finding
+        return ""
+    if claim.get("state") != "free":
+        return ""
+    return f"node {row.node} carries NO claim while this row is live"
 
 
 def _holder_session(holder: Optional[str]) -> Optional[str]:

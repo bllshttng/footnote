@@ -25,6 +25,7 @@ from fno.agents.watchdog import (
     Row,
     STALE,
     TailFacts,
+    UNCLAIMED,
     Verdict,
     WAKE,
     apply_verdict,
@@ -1896,3 +1897,107 @@ def test_only_the_lane_skip_is_silent(monkeypatch, tmp_path):
     text = err.getvalue()
     assert "held" in text and "already rotated" in text, text
     assert "frozen" in text, text
+
+
+# ---------------------------------------------------------------------------
+# the unclaimed advisory (x-cd1e)
+# ---------------------------------------------------------------------------
+
+
+def test_a_live_row_on_an_unclaimed_node_is_flagged():
+    """Nothing today notices a live worker on a node no claim covers. Seven of
+    nine nodes named by a live worker read free on 2026-08-19."""
+    rows = [Row("cccc3333-0000", "t-x76d1-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0000": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "free"}},
+    )
+    assert v.verdict == UNCLAIMED
+    assert "node x-76d1 carries NO claim while this row is live" in v.basis
+
+
+def test_the_advisory_never_becomes_an_action():
+    """The worker is fine; the record is wrong. A wake, a reroute or a reap on
+    this row would all be wrong, so the action lanes must refuse it."""
+    rows = [Row("cccc3333-0001", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0001": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "free"}},
+    )
+    assert v.action == "none"
+    outcome, _detail = apply_verdict(v, lanes="all")
+    assert outcome != "applied"
+
+
+def test_a_claimed_node_reads_leave_exactly_as_before():
+    rows = [Row("cccc3333-0002", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0002": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "live", "holder": "target-session:cccc3333-0002"}},
+    )
+    assert v.verdict == LEAVE
+
+
+def test_an_unresolved_node_is_never_flagged():
+    """The stated blind spot, pinned. Row.node comes from the worktree manifest
+    then the ledger, both written downstream of `fno target init`, so a worker
+    that never ran init carries node=None and is invisible here. Claiming
+    otherwise would make this the decorative guard it exists to remove."""
+    rows = [Row("cccc3333-0003", "t-worker", "working", None, "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0003": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "free"}},
+    )
+    assert v.verdict == LEAVE
+
+
+def test_an_unreadable_claim_is_not_a_finding():
+    """An advisory that fires on an unreadable store trains its reader to
+    ignore it."""
+    def _boom(_node):
+        raise RuntimeError("claims root gone")
+
+    rows = [Row("cccc3333-0004", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = verdicts(
+        rows,
+        transcript_for=lambda sid: _facts("still going", age_min=2),
+        claim_for=_boom,
+        node_state_for=lambda node: None,
+        now_s=NOW_1840,
+    )
+    # STALE, not LEAVE: the existing reap predicate already refuses to render
+    # an unanswered read as a healthy row. What matters here is that it is not
+    # reported as an unclaimed node.
+    assert v.verdict == STALE
+    assert v.verdict != UNCLAIMED
+
+
+def test_a_suspect_claim_is_not_flagged_as_unclaimed():
+    """Suspect is a claim, and a protected slot. Only a plain free reading is
+    the gap this reports."""
+    rows = [Row("cccc3333-0005", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0005": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "suspect", "holder": "target-session:dead"}},
+    )
+    assert v.verdict == LEAVE
+
+
+def test_the_advisory_reaches_the_digest():
+    """LEAVE rows are filtered out of every report, so a verdict that reported
+    nothing would be a guard nobody ever reads."""
+    from fno.agents.watchdog import digest_text
+
+    v = Verdict("cccc3333-0006", "t-worker", "working", UNCLAIMED,
+                "node x-76d1 carries NO claim while this row is live", "none")
+    payload = {
+        "verdicts": [v._asdict()],
+        "counts": {UNCLAIMED: 1},
+        "terminal_harness_rows": 0,
+    }
+    assert "t-worker" in digest_text(payload)
