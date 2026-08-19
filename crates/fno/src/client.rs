@@ -3042,19 +3042,22 @@ impl View {
         self.menu_usurping_open()
             || self.answers.is_some()
             || self.yard.is_some()
-            || self.nav.is_some()
             || self.peek.is_some()
             || self.digest.is_some()
     }
 
     /// (x-7683) The narrower guard for the ROW/TAB menu paths (right-press
     /// and long-press alike): only overlays a menu would actually USURP -
-    /// text inputs (rename/create/recruit/search/peek_input, whose typed
+    /// text inputs (rename/create/recruit/search/peek_input/nav, whose typed
     /// buffer the menu would orphan) and interactive modals whose keys the
-    /// menu steals. Read-only overlays (peek, nav, digest, answers, yard)
-    /// are deliberately absent: a right-press on a sideline row opened the
-    /// row menu over an open peek BEFORE this diff (the open path clears
-    /// peek itself), and that behavior must survive the guard.
+    /// menu steals. Read-only overlays (peek, digest, answers, yard) are
+    /// deliberately absent: a right-press on a sideline row opened the row
+    /// menu over an open peek BEFORE this diff (the open path clears peek
+    /// itself), and that behavior must survive the guard. `nav` looks
+    /// read-only (cursor + filtered list) but carries a typed query buffer
+    /// like the other text inputs above - row_menu is checked before nav in
+    /// the key router, so leaving it out here let a menu open over an
+    /// in-progress filter and silently swallow every keystroke meant for it.
     fn menu_usurping_open(&self) -> bool {
         self.keys_modal.is_some()
             || self.row_menu.is_some()
@@ -3068,6 +3071,7 @@ impl View {
             || self.recruit.is_some()
             || self.search.is_some()
             || self.peek_input.is_some()
+            || self.nav.is_some()
     }
 
     /// (x-7683) Open the owning agent's row menu for the pane under
@@ -10375,11 +10379,12 @@ async fn handle_stdin(
         // (sideline_row_at -> None) falls through and forwards to the inner app,
         // so pane right-click behavior is untouched (AC3-EDGE).
         // (x-7683) Menu paths are blocked under overlays they would USURP -
-        // text inputs and interactive modals (rename's Enter would run a menu
-        // action; the key router checks row_menu first). Read-only overlays
-        // (peek/nav) deliberately do not block the row/tab paths: a right-press
-        // on a row opened its menu over an open peek before this diff, and the
-        // open path clears peek itself. The pane path keeps the full
+        // text inputs (including nav's typed filter) and interactive modals
+        // (rename's Enter would run a menu action; the key router checks
+        // row_menu first). The read-only peek overlay deliberately does not
+        // block the row/tab paths: a right-press on a row opened its menu
+        // over an open peek before this diff, and the open path clears peek
+        // itself. The pane path keeps the full
         // overlay_open guard: a pane press under ANY overlay always fell
         // through to the pane, and it still does.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) && !view.menu_usurping_open() {
@@ -20356,6 +20361,30 @@ mod tests {
             .unwrap();
         assert!(v.row_menu.is_none(), "no row menu under an open overlay");
         assert!(v.rename.is_some(), "rename survives untouched");
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_on_a_sideline_row_under_nav_opens_nothing() {
+        // nav looks read-only like peek (cursor + filtered list) but carries
+        // a typed query buffer like rename/create/search - a menu opening
+        // over it would swallow every keystroke meant for the filter (the
+        // key router checks row_menu before nav), so it must guard the
+        // row/tab paths the same way rename does, unlike peek.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.nav = Some(super::NavView {
+            query: "w".into(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let mut buf: Vec<u8> = Vec::new();
+        // Right-press on the agent row itself (screen row 1, sideline col).
+        handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;6;2M", &mut buf)
+            .await
+            .unwrap();
+        assert!(v.row_menu.is_none(), "no row menu under an open nav filter");
+        assert!(v.nav.is_some(), "nav survives untouched");
     }
 
     #[tokio::test]
