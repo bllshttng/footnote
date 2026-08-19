@@ -74,9 +74,16 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
 
     class _Gate:
         def retain_revived_worker(
-            self, short, *, worker_name=None, worker_pid=None
+            self,
+            short,
+            *,
+            worker_name=None,
+            worker_pid=None,
+            positive_marker="claude-respawn-ok",
         ):
-            events.append(("retain", short, worker_name, worker_pid))
+            events.append(
+                ("retain", short, worker_name, worker_pid, positive_marker)
+            )
 
         def release_gate_mutex(self):
             events.append("release-mutex")
@@ -112,8 +119,15 @@ def test_routed_respawn_acquires_provider_gate_before_side_effect(monkeypatch):
     assert wake_and_deliver("uuid-full", "wake") == (True, "abc12345")
     assert events == [
         "gate",
+        (
+            "retain",
+            "abc12345",
+            "wk-abc12345",
+            dispatch.os.getpid(),
+            "claude-respawn-pending",
+        ),
         "respawn",
-        ("retain", "abc12345", "wk-abc12345", None),
+        ("retain", "abc12345", "wk-abc12345", None, "claude-respawn-ok"),
         "stamp-live",
         "inject",
         "release-mutex",
@@ -199,9 +213,16 @@ def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypat
 
     class _Gate:
         def retain_revived_worker(
-            self, short, *, worker_name=None, worker_pid=None
+            self,
+            short,
+            *,
+            worker_name=None,
+            worker_pid=None,
+            positive_marker="claude-respawn-ok",
         ):
-            events.append(("retain", short, worker_name, worker_pid))
+            events.append(
+                ("retain", short, worker_name, worker_pid, positive_marker)
+            )
 
         def release_gate_mutex(self):
             events.append("release-mutex")
@@ -232,7 +253,14 @@ def test_respawn_stamp_failure_stops_worker_before_releasing_admission(monkeypat
 
     assert ok is False and detail == "spawn-error-RuntimeError"
     assert events == [
-        ("retain", "abc12345", "wk-abc12345", None),
+        (
+            "retain",
+            "abc12345",
+            "wk-abc12345",
+            dispatch.os.getpid(),
+            "claude-respawn-pending",
+        ),
+        ("retain", "abc12345", "wk-abc12345", None, "claude-respawn-ok"),
         ("stop", "abc12345"),
         "release",
     ]
@@ -253,9 +281,16 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
 
     class _Gate:
         def retain_revived_worker(
-            self, short, *, worker_name=None, worker_pid=None
+            self,
+            short,
+            *,
+            worker_name=None,
+            worker_pid=None,
+            positive_marker="claude-respawn-ok",
         ):
-            events.append(("retain", short, worker_name, worker_pid))
+            events.append(
+                ("retain", short, worker_name, worker_pid, positive_marker)
+            )
 
         def release_gate_mutex(self):
             events.append("release-mutex")
@@ -285,12 +320,19 @@ def test_respawn_stop_failure_retains_provider_reservation(monkeypatch):
 
     assert ok is False and detail == "spawn-error-RuntimeError"
     assert events == [
-        ("retain", "abc12345", "wk-abc12345", 4242),
+        (
+            "retain",
+            "abc12345",
+            "wk-abc12345",
+            dispatch.os.getpid(),
+            "claude-respawn-pending",
+        ),
+        ("retain", "abc12345", "wk-abc12345", 4242, "claude-respawn-ok"),
         "release-mutex",
     ]
 
 
-def test_respawn_reservation_failure_does_not_release_bg_mutex(monkeypatch):
+def test_respawn_reservation_failure_releases_admission_without_respawn(monkeypatch):
     from fno.agents.spawn_gate import ProviderCountUnavailable
 
     _allow_rung2_claim(monkeypatch)
@@ -317,12 +359,16 @@ def test_respawn_reservation_failure_does_not_release_bg_mutex(monkeypatch):
     monkeypatch.setattr(
         "fno.agents.spawn_gate.run_gate", lambda *args, **kwargs: _Gate()
     )
-    monkeypatch.setattr(dispatch, "_respawn_claude_session", lambda s: 0)
+    monkeypatch.setattr(
+        dispatch,
+        "_respawn_claude_session",
+        lambda _short: events.append("respawn") or 0,
+    )
 
     ok, detail = wake_and_deliver("uuid-full", "wake")
 
     assert ok is False and detail == "spawn-error-ProviderCountUnavailable"
-    assert events == ["retain"]
+    assert events == ["retain", "release"]
 
 
 def test_live_roster_skips_rung2_and_forks(monkeypatch):

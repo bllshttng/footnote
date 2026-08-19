@@ -169,6 +169,24 @@ class TestCensus:
         )
         assert spawn_gate.census().count == 1
 
+    def test_live_registry_row_deduplicates_worker_claim(self, monkeypatch):
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: [_row("revived", pid=ALIVE)],
+        )
+        from fno.claims.core import acquire_claim
+        from fno.claims.io import global_claims_root
+
+        acquire_claim(
+            "worker:revived", "h1", ttl_ms=60_000, root=global_claims_root()
+        )
+
+        result = spawn_gate.census()
+
+        assert result.fno_slot_workers == 1
+        assert result.slot_claims == 0
+        assert result.slot_count == 1
+
     def test_subagent_source_is_outside_slot_arithmetic(self, tmp_path, monkeypatch):
         """AC6-INV (x-af92): the sidechain discovery source never feeds census().
 

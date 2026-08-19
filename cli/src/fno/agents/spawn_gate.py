@@ -245,6 +245,7 @@ def census() -> LiveCensus:
     degrades to zero contribution with one warning."""
     out = LiveCensus()
     counted_short_ids: set[str] = set()
+    live_registry_names: set[str] = set()
 
     # claude roster first: display + dedup key for adopted sessions. Kept in the
     # union for `fno agents top`, but excluded from the slot cap (see slot_count).
@@ -333,6 +334,7 @@ def census() -> LiveCensus:
         # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
+        live_registry_names.add(row.name)
         dedup_key = row.short_id or None
         if dedup_key and dedup_key in counted_short_ids:
             continue  # already shown as its roster row in the display union
@@ -353,7 +355,7 @@ def census() -> LiveCensus:
             )
         )
 
-    out.slot_claims = _live_worker_slot_claims(out.warnings)
+    out.slot_claims = _live_worker_slot_claims(out.warnings, live_registry_names)
     return out
 
 
@@ -549,7 +551,9 @@ def _gate_claims_root() -> Path:
     return global_claims_root()
 
 
-def _live_worker_slot_claims(warnings: list[str]) -> int:
+def _live_worker_slot_claims(
+    warnings: list[str], counted_names: Optional[set[str]] = None
+) -> int:
     """Live ``worker:<name>`` slot claims under the GLOBAL claims root."""
     try:
         from fno.claims.core import claim_status
@@ -560,8 +564,11 @@ def _live_worker_slot_claims(warnings: list[str]) -> int:
     if not claims_dir.is_dir():
         return 0
     n = 0
+    counted_names = counted_names or set()
     for f in claims_dir.glob("worker%3A*.lock"):
         key = unquote(f.name[: -len(".lock")])
+        if key.removeprefix("worker:") in counted_names:
+            continue
         try:
             state = claim_status(key, root=root).get("state")
         except Exception:
@@ -612,6 +619,7 @@ class GateGuard:
         *,
         worker_name: Optional[str] = None,
         worker_pid: Optional[int] = None,
+        positive_marker: str = "claude-respawn-ok",
     ) -> None:
         """Convert a BG admission into durable fail-closed worker evidence."""
         if self._route_provider is None or self._spawn_name is None:
@@ -626,9 +634,18 @@ class GateGuard:
             worker_pid=worker_pid,
             metadata={
                 "session_short_id": short_id,
-                "positive_marker": "claude-respawn-ok",
+                "positive_marker": positive_marker,
             },
         )
+
+    def release_worker_reservation(self) -> None:
+        if self._worker_key is None:
+            return
+        key = self._worker_key
+        if not _release_claim_bounded(key, self._worker_holder or ""):
+            return
+        self._worker_key = None
+        self._worker_holder = None
 
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
@@ -641,13 +658,7 @@ class GateGuard:
     def release(self) -> None:
         self._released = True
         self.release_gate_mutex()
-        if self._worker_key is None:
-            return
-        key = self._worker_key
-        if not _release_claim_bounded(key, self._worker_holder or ""):
-            return
-        self._worker_key = None
-        self._worker_holder = None
+        self.release_worker_reservation()
 
 
 def consume_provider_admission(

@@ -6286,22 +6286,27 @@ def wake_and_deliver(
             guard = _acquire_rung2_guard(session_uuid, short)
             if guard is not None:
                 try:
+                    if gate is not None:
+                        # Establish durable provider evidence BEFORE respawn.
+                        # A claim-store failure therefore creates no worker. The
+                        # row name makes both global and provider counts dedupe
+                        # the reservation once registry+roster evidence catches up.
+                        gate.retain_revived_worker(
+                            short,
+                            worker_name=entry.name,
+                            worker_pid=os.getpid(),
+                            positive_marker="claude-respawn-pending",
+                        )
+                        revived_reservation = True
                     if _respawn_claude_session(short) == 0:
                         if gate is not None:
-                            # Move the admission to a worker claim BEFORE any
-                            # fallible registry write. The claim uses the row's
-                            # original name, so provider_live_count deduplicates
-                            # it once registry+roster evidence becomes countable;
-                            # until then it closes the roster-lag window.
-                            transfer_gate = gate
-                            gate = None
-                            transfer_gate.retain_revived_worker(
+                            # Rebind the already-durable reservation to the
+                            # revived process when the roster exposes its PID.
+                            gate.retain_revived_worker(
                                 short,
                                 worker_name=entry.name,
                                 worker_pid=_revived_roster_pid(short),
                             )
-                            gate = transfer_gate
-                            revived_reservation = True
                         try:
                             _stamp_revived_live(entry)
                         except Exception as stamp_error:
@@ -6345,6 +6350,9 @@ def wake_and_deliver(
                         # would spend this one admission twice; durable mail can
                         # retry delivery without creating another incarnation.
                         return False, "respawn-inject-unconfirmed"
+                    if gate is not None and revived_reservation:
+                        gate.release_worker_reservation()
+                        revived_reservation = False
                 finally:
                     try:
                         _release_rung2_guard(session_uuid, guard)
