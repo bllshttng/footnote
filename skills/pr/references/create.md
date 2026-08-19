@@ -192,7 +192,7 @@ For each item line under that heading, in order:
 
 ### 4.6 Add the exact Backlog-Closure trailer
 
-**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5 - every other named node stayed open forever (x-59a6). The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds; free-text mentions never count.
+**Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever (x-59a6). The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
 
 Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph:
 
@@ -202,9 +202,9 @@ if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
 fi
 ```
 
-`fno pr closure-trailer` prints nothing (not an error) when `$NODE_ID` is empty or unresolvable, so `$CLOSURE_TRAILER` is safe to append unconditionally. If the commits or plan show this PR also genuinely ships a node not reachable via `contained_in` (rare - most such cases ARE `contained_in`), add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
+When `$NODE_ID` is empty or unresolvable, `fno pr closure-trailer` prints nothing (not an error), so `$CLOSURE_TRAILER` is safe to append unconditionally. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
 
-Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line and never add an id to it that this command did not produce - a wrong id in an exact trailer silently binds the wrong node at merge.
+Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
 
 ### 5. Create PR
 
@@ -238,7 +238,7 @@ EOF
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
-**Verify the trailer round-tripped.** Best-effort, non-fatal (same posture as step 4.5): a mismatch here means the body `gh pr create` actually wrote differs from what was composed (e.g. a body-length or style gate rewrote it), and merge-time binding would then miss a claim silently.
+**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as step 4.5. A mismatch here means the body `gh pr create` actually wrote differs from what was composed, e.g. a body-length or style gate rewrote it. Merge-time binding then misses a claim silently.
 
 ```bash
 if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
