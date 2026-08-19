@@ -306,6 +306,12 @@ With no code in the diff there is no identity to match, which is the fail-closed
 
 **`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.** In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose. So a skill rewritten after a review carries the earlier verdict forward as fresh coverage. This is deliberate for now, because it matches the existing payload classifier. A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap. Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
 
+### The dispatcher's own ordering matters as much as the carry rule
+
+The carry rule cannot save a review bought by an avoidable rebase. Measured one night (x-b130): a king ordered about ten rebases on one PR and requested a review after each one, buying ten reviews of code that changed once. `CarriedBaseSync` existed the whole time and still could not help, because the carry only ever compares the CURRENT head against the LAST reviewed one - it has nothing to say about a review that was requested and completed before the next rebase moved the head again.
+
+Any dispatcher (a king, `/fno:pr check`, a bg loop) that needs both a rebase and a review on the same PR must order them: batch every pending rebase first, wait for green, THEN request the review once on the final head. A rebase requested after a review is not a smaller version of this mistake - it is the same mistake, since the next review request pays for it again.
+
 ### Named, not closed: the derivation-latency window
 
 A valid attestation can exist while the gate cannot see it, and this PR does not close that.
