@@ -211,6 +211,50 @@ def check_worktree_policy() -> list[str]:
     return problems
 
 
+def check_agent_profiles(settings: object) -> list[str]:
+    """Report stage lanes that cannot launch with their resolved posture."""
+    from fno.agents.spawn_defaults import _substrate_compatible
+
+    agents = getattr(settings, "agents", None)
+    if agents is None:
+        return []
+    defaults = getattr(agents, "defaults", None)
+    profiles = getattr(agents, "profiles", {}) or {}
+
+    def value(obj: object, key: str) -> str:
+        raw = obj.get(key, "") if isinstance(obj, dict) else getattr(obj, key, "")
+        return raw.strip() if isinstance(raw, str) else ""
+
+    problems: list[str] = []
+    for verb, profile in profiles.items():
+        lanes = getattr(profile, "lanes", [])
+        targets = (
+            [(lane, f"agents.profiles.{verb}.lanes[{index}]") for index, lane in enumerate(lanes)]
+            if isinstance(lanes, list) and lanes
+            else [(profile, f"agents.profiles.{verb}")]
+        )
+        for target, path in targets:
+            provider = value(target, "provider") or value(profile, "provider") or value(defaults, "provider")
+            substrate = value(target, "substrate") or value(profile, "substrate") or value(defaults, "substrate")
+            permission = (
+                value(target, "permission_mode")
+                or value(profile, "permission_mode")
+                or value(defaults, "permission_mode")
+            )
+            if provider and substrate and not _substrate_compatible(substrate, provider):
+                problems.append(
+                    f"{path}.substrate = {substrate!r} is incompatible with "
+                    f"resolved provider {provider!r}"
+                )
+            if provider == "codex" and not permission:
+                problems.append(
+                    f"{path}.permission_mode is empty for codex; the default "
+                    "workspace-write sandbox cannot reach ~/.fno, so claims, "
+                    "graph writes, and mail will fail"
+                )
+    return problems
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
@@ -311,7 +355,14 @@ def run_doctor() -> int:
             print(f"  - {reason}")
         print("\nValid policy values: never | harness-native | external.")
 
-    if errors or issues or cap_problems or wt_problems:
+    profile_problems = check_agent_profiles(s)
+    if profile_problems:
+        print(f"\n[doctor] {len(profile_problems)} agent-profile issue(s):")
+        for reason in profile_problems:
+            print(f"  - {reason}")
+        print("\nSet compatible substrate and permission_mode values on each delivery lane.")
+
+    if errors or issues or cap_problems or wt_problems or profile_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")

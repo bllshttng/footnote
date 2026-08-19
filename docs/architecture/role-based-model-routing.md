@@ -137,6 +137,8 @@ config:
 
 The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
 
+`fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor, and it reports a Codex delivery profile or lane whose `permission_mode` is empty: Codex's default workspace-write sandbox cannot reach the claims, graph locks, worktrees, or mail locks under `~/.fno`.
+
 ## `fno route` - legibility + on-the-fly switching
 
 Four verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):

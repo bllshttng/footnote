@@ -235,6 +235,46 @@ def test_check_worktree_policy_clean(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert check_worktree_policy() == []
 
 
+def test_check_agent_profiles_flags_incompatible_substrate() -> None:
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"provider": "codex", "substrate": "bg", "permission_mode": "yolo"}}}
+    )
+    problems = check_agent_profiles(settings)
+    assert len(problems) == 1
+    assert "agents.profiles.target.substrate" in problems[0]
+    assert "bg" in problems[0] and "codex" in problems[0]
+
+
+def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            {"provider": "claude", "substrate": "bg", "route": "zai/glm-5.3[1m]"},
+        ]}}}
+    )
+    assert check_agent_profiles(settings) == []
+
+
+def test_check_agent_profiles_flags_codex_lane_without_permission_mode() -> None:
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            {"provider": "codex", "substrate": "pane"},
+        ]}}}
+    )
+    problems = check_agent_profiles(settings)
+    assert len(problems) == 1
+    assert "agents.profiles.target.lanes[0].permission_mode" in problems[0]
+    assert "codex" in problems[0] and "~/.fno" in problems[0]
+
+
 def test_check_worktree_policy_flags_out_of_enum(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
