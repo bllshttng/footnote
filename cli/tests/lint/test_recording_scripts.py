@@ -79,7 +79,18 @@ def _fno_resolution_errors(paths: list[Path], leaves: set[str]) -> list[str]:
                     continue
                 if not words or words[0] not in {"fno", "fno-py", "fno-agents"}:
                     continue
+                if any(
+                    word in {"fno", "fno-py", "fno-agents"}
+                    and words[index - 1] in {"&&", "||", ";", "|"}
+                    for index, word in enumerate(words[1:], start=1)
+                ):
+                    errors.append(
+                        f"{path}:{line_number}: multiple fno commands on one run line"
+                    )
+                    continue
                 verb_words = words[1:]
+                while verb_words and verb_words[0] in {"--json", "-J"}:
+                    verb_words.pop(0)
                 if words[0] == "fno-agents":
                     verb_words = ["agents", *verb_words]
                 match = next(
@@ -205,6 +216,18 @@ def test_fno_verbs_resolve_against_live_surface(tmp_path):
     agents = tmp_path / "agents.md"
     agents.write_text("```run\nfno-agents loop-check\n```\n\n[capture-at-record]\n")
     assert not _fno_resolution_errors([agents], leaves)
+    root_flag = tmp_path / "root-flag.md"
+    root_flag.write_text(
+        "```run\nfno --json backlog get demo-1234\n```\n\n[capture-at-record]\n"
+    )
+    assert not _fno_resolution_errors([root_flag], leaves)
+    compound = tmp_path / "compound.md"
+    compound.write_text(
+        "```run\nfno status && fno backlog no-such-leaf\n```\n\n[capture-at-record]\n"
+    )
+    assert _fno_resolution_errors([compound], leaves) == [
+        f"{compound}:2: multiple fno commands on one run line"
+    ]
     foreign = tmp_path / "foreign.md"
     foreign.write_text("```run\ngit status\ngh pr view\n```\n\n```expected\nclean\n```\n")
     assert not _fno_resolution_errors([foreign], leaves)

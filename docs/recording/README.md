@@ -27,6 +27,7 @@ Run this block before every recording except L01. L01 records installation itsel
 
 ```run
 export DEMO_ROOT=/Users/Shared/footnote-recording-demo
+set -euo pipefail
 if [ -e "$DEMO_ROOT" ]; then mv "$DEMO_ROOT" "${DEMO_ROOT}.previous.$(date +%Y%m%d%H%M%S)-$$"; fi
 mkdir -p "$DEMO_ROOT/state" "$DEMO_ROOT/plans"
 touch "$DEMO_ROOT/state/.path-migration-done"
@@ -42,8 +43,9 @@ export FNO_CONFIG="$DEMO_ROOT/config.toml"
 test -d "$DEMO_ROOT/repo/.git" || git clone --quiet https://github.com/bllshttng/footnote.git "$DEMO_ROOT/repo"
 git -C "$DEMO_ROOT/repo" checkout --quiet main
 git -C "$DEMO_ROOT/repo" pull --ff-only --quiet
+test "$(git -C "$DEMO_ROOT/repo" rev-parse --abbrev-ref HEAD)" = main
+test "$(git -C "$DEMO_ROOT/repo" rev-parse HEAD)" = "$(git -C "$DEMO_ROOT/repo" rev-parse origin/main)"
 cd "$DEMO_ROOT/repo"
-set -o pipefail
 fno config doctor | sed '/post-merge:/d'
 ```
 
