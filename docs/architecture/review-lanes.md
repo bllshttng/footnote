@@ -231,17 +231,19 @@ An agent given three findings, fixing them in three commits, owed three re-revie
 Across footnote PRs 824-831, PR 828 moved through six heads and PR 830 through five.
 
 Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`.
-It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of four states:
+It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of five states:
 
 - `fresh` - the reviewer read this exact commit.
 - `carried_base_sync` - the PR's own code delta is byte-identical. Any tree difference came from the base moving. A rebase is this shape.
 - `carried_docs_only` - only documentation paths changed since the reviewed commit.
+- `carried_subset` - the code delta only shrank. Every raw diff line still shipping is byte-identical to one the reviewer read; the vanished lines are paths the base absorbed on the rebase.
 - `stale` - everything else, **including every failure path**.
 
 `carried_*` is decided by comparing a **PR code-diff identity** at each commit.
 That identity is the diff from `merge-base(base, sha)` to `sha`, documentation paths dropped, hashed.
 Equal identities mean the code under review is byte-identical, whatever happened to the sha.
 That is what makes a rebase carry and a one-line code fix die.
+A subset is decided one level down, on the sorted raw diff lines the identity keeps beside its hash: the HEAD set contained in the reviewed set is a shrink, and a line the reviewer never saw is new unreviewed code.
 
 `reviewed_sha` comes from a different place per producer, and both were already available.
 
