@@ -2874,7 +2874,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     // rather than falling through to a claude-shaped attach (x-51f6 US1).
     if harness != "claude" {
         eprintln!(
-            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-harness attach is planned for the Phase 6 supervisor."
+            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-provider attach is planned for the Phase 6 supervisor."
         );
         append_agents_event(
             &events_path,
