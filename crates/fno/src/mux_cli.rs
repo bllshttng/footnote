@@ -1662,7 +1662,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
         (removed, ku, sn, kp, false, loaded.notice)
     } else {
-        match crate::squad_store::prune(decide) {
+        match crate::squad_store::prune(decide, live_ref) {
             Ok(o) => (
                 o.removed,
                 o.kept_unknown,
