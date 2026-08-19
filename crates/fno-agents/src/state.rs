@@ -1249,16 +1249,25 @@ fn validate_changed_identities(
 ) -> Result<(), String> {
     use crate::identity::{canonical_handle, legacy_suffix_handle, session_handle_tier};
 
-    let matches = |token: &str, other: &RegistryEntry, include_legacy: bool| {
-        if token == other.name || (!other.short_id.is_empty() && token == other.short_id) {
+    // Tokens come in two kinds, mirroring registry.py. Chosen tokens (the row
+    // name, an explicit transport short id) may not shadow another row's name,
+    // short id, or any session address tier. Minted tokens (the session id and
+    // its canonical handle) shadow only the SAME session: a tier-0 full-id
+    // match. A first-eight overlap between two DIFFERENT sessions is the codex
+    // same-window shape, not a collision - resolution fails closed on the
+    // shared short asking for the full id.
+    let matches = |token: &str, other: &RegistryEntry, same_session_only: bool| {
+        if !same_session_only
+            && (token == other.name || (!other.short_id.is_empty() && token == other.short_id))
+        {
             return true;
         }
         let Some(session_id) = other.harness_session_id.as_deref() else {
             return false;
         };
         match session_handle_tier(token, session_id) {
-            Some(2) => include_legacy,
-            Some(_) => true,
+            Some(0) => true,
+            Some(_) => !same_session_only,
             None => false,
         }
     };
@@ -1267,28 +1276,35 @@ fn validate_changed_identities(
         if before.get(&candidate.name) == Some(&identity_signature(candidate)) {
             continue;
         }
-        let mut strong = BTreeSet::from([candidate.name.clone()]);
+        let mut chosen = BTreeSet::from([candidate.name.clone()]);
         if !candidate.short_id.is_empty() {
-            strong.insert(candidate.short_id.clone());
+            chosen.insert(candidate.short_id.clone());
         }
         let session_id = candidate.harness_session_id.as_deref().unwrap_or("");
+        let mut minted = BTreeSet::new();
         if !session_id.is_empty() {
-            strong.insert(session_id.to_string());
-            strong.insert(canonical_handle(session_id));
+            minted.insert(session_id.to_string());
+            minted.insert(canonical_handle(session_id));
         }
         let legacy = (!session_id.is_empty()).then(|| legacy_suffix_handle(session_id));
         for (other_index, other) in entries.iter().enumerate() {
             if index == other_index {
                 continue;
             }
-            let collision = strong
+            let collision = chosen
                 .iter()
-                .find(|token| matches(token, other, true))
+                .find(|token| matches(token, other, false))
                 .cloned()
+                .or_else(|| {
+                    minted
+                        .iter()
+                        .find(|token| matches(token, other, true))
+                        .cloned()
+                })
                 .or_else(|| {
                     legacy
                         .as_ref()
-                        .filter(|token| matches(token, other, false))
+                        .filter(|token| matches(token, other, true))
                         .cloned()
                 });
             if let Some(token) = collision {
@@ -1770,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn state_update_registry_refuses_new_canonical_handle_collision() {
+    fn state_update_registry_allows_first_eight_overlap_between_sessions() {
         let dir = tmpdir("identity-collision");
         let path = dir.join("registry.json");
         update_registry(&path, |registry| {
@@ -1782,13 +1798,43 @@ mod tests {
         })
         .unwrap();
 
-        let result = update_registry(&path, |registry| {
+        // A first-eight overlap between two DIFFERENT sessions is the codex
+        // same-window shape (UUIDv7 ids share their top bits inside one
+        // time window), not a write-blocking collision: resolution fails
+        // closed on the shared short and the full id still resolves.
+        update_registry(&path, |registry| {
             let mut second = sample_entry("second");
             second.short_id = "transport2".into();
             second.harness = Some("codex".into());
-            // Same first-eight (canonical address) as `first` -> refused. Their
-            // last-eight differs, so this is a canonical-only collision.
+            // Same first-eight (canonical address) as `first`, different
+            // full id -> allowed.
             second.harness_session_id = Some("aaaaaaaa-0000-0000-0000-222222222222".into());
+            registry.entries.push(second);
+        })
+        .unwrap();
+
+        assert_eq!(load_registry(&path).unwrap().entries.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_update_registry_refuses_second_row_claiming_same_full_session_id() {
+        let dir = tmpdir("identity-duplicate-session");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut first = sample_entry("first");
+            first.harness = Some("codex".into());
+            first.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
+            registry.entries.push(first);
+        })
+        .unwrap();
+
+        let result = update_registry(&path, |registry| {
+            let mut second = sample_entry("second");
+            second.harness = Some("codex".into());
+            // SAME full session id under a different row is a tier-0
+            // collision: one session, two rows.
+            second.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
             registry.entries.push(second);
         });
 
