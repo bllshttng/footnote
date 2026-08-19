@@ -2716,6 +2716,9 @@ fn exit_code_for(code: ErrorCode) -> i32 {
         ErrorCode::InvalidParams | ErrorCode::MalformedFrame | ErrorCode::UnknownMethod => 2,
         ErrorCode::ChannelUnknown => 13,
         ErrorCode::Internal => 1,
+        // Distinct from Internal on purpose: a caller racing daemon teardown
+        // can retry, where a real Internal fault should not be retried blind.
+        ErrorCode::ShuttingDown => 19,
     }
 }
 

@@ -120,6 +120,10 @@ pub enum StateError {
     UnsupportedSchemaVersion { found: u32, max: u32 },
     #[error("registry invariant violation: {0}")]
     InvariantViolation(String),
+    /// The blocking-pool task reading the registry was cancelled by daemon
+    /// shutdown before it ran, not by a failure in the read itself.
+    #[error("cancelled during shutdown: {0}")]
+    Cancelled(String),
 }
 
 /// The daemon-owned agent registry (`~/.fno/agents/registry.json`).

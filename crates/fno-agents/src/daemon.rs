@@ -2491,6 +2491,14 @@ where
     let id = req.id;
     match tokio::task::spawn_blocking(move || f(&ctx, &req)).await {
         Ok(resp) => resp,
+        // Same teardown casualty as load_registry_offloaded below: a
+        // queued-but-not-started handler dropped by shutdown, not a fault
+        // in the handler itself.
+        Err(e) if e.is_cancelled() => Response::err(
+            id,
+            ErrorCode::ShuttingDown,
+            format!("handler task cancelled during shutdown: {e}"),
+        ),
         Err(_) => Response::err(id, ErrorCode::Internal, "handler task panicked"),
     }
 }
@@ -2524,9 +2532,28 @@ pub(crate) fn load_registry_asserted(
 async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state::StateError> {
     match tokio::task::spawn_blocking(move || load_registry_asserted(&path)).await {
         Ok(result) => result,
+        // A queued-but-not-yet-started blocking task is dropped, not run, when
+        // the runtime shuts down (src/bin/daemon.rs:76 waits only on
+        // already-started ones) -- a teardown casualty, never a fault in the
+        // read itself.
+        Err(e) if e.is_cancelled() => Err(state::StateError::Cancelled(format!(
+            "load_registry task cancelled: {e}"
+        ))),
         Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
             "load_registry task panicked: {e}"
         )))),
+    }
+}
+
+/// A `StateError::Cancelled` is a teardown casualty, not a fault in the read
+/// or write itself; every other variant stays the catch-all internal fault.
+/// The one classification choke point both `registry_read_failed` and every
+/// `update_registry_offloaded` call site route through, so a shutdown-time
+/// cancellation gets `ShuttingDown` regardless of which verb hit it.
+fn state_error_code(e: &state::StateError) -> ErrorCode {
+    match e {
+        state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
+        _ => ErrorCode::Internal,
     }
 }
 
@@ -2536,11 +2563,8 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
 /// to run) instead of answering from a silently emptied roster. `AgentNotFound`
 /// stays reserved for a successful read with no matching row.
 fn registry_read_failed(id: u64, e: state::StateError) -> Response {
-    Response::err(
-        id,
-        ErrorCode::Internal,
-        format!("registry read failed: {e}"),
-    )
+    let code = state_error_code(&e);
+    Response::err(id, code, format!("registry read failed: {e}"))
 }
 
 /// Offload the blocking read-modify-write of `state::update_registry` to the
@@ -2554,6 +2578,11 @@ where
 {
     match tokio::task::spawn_blocking(move || state::update_registry(&path, f)).await {
         Ok(result) => result,
+        // Same teardown casualty as load_registry_offloaded: a queued write
+        // dropped by shutdown before it ran, never a panic in the write.
+        Err(e) if e.is_cancelled() => Err(state::StateError::Cancelled(format!(
+            "update_registry task cancelled: {e}"
+        ))),
         Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
             "update_registry task panicked: {e}"
         )))),
@@ -3208,7 +3237,7 @@ async fn spawn_claude_stream_lane(
                 "agent_spawn_failed",
                 &json!({"name": name, "short_id": short_id, "reason": "registry_write_failed"}),
             );
-            return Response::err(req.id, ErrorCode::Internal, format!("registry write: {e}"));
+            return Response::err(req.id, state_error_code(&e), format!("registry write: {e}"));
         }
     }
     // Registered live: the worker now owns the claim (its own SessionClaimGuard
@@ -4838,7 +4867,7 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         );
         return Response::err(
             req.id,
-            ErrorCode::Internal,
+            state_error_code(&e),
             format!("agent {name}: worker stopped but registry write failed: {e}"),
         );
     }
@@ -5066,7 +5095,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 {
                     return Response::err(
                         req.id,
-                        ErrorCode::Internal,
+                        state_error_code(&e),
                         format!("claude {name} stopped but registry write failed: {e}"),
                     );
                 }
@@ -5108,7 +5137,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             {
                 return Response::err(
                     req.id,
-                    ErrorCode::Internal,
+                    state_error_code(&e),
                     format!("claude {name} stopped but registry write failed: {e}"),
                 );
             }
@@ -5328,7 +5357,7 @@ async fn handle_rm_with(
     {
         return Response::err(
             req.id,
-            ErrorCode::Internal,
+            state_error_code(&e),
             format!("agent {name}: removal did not persist: {e}"),
         );
     }
@@ -6684,6 +6713,28 @@ fn fill_random(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The e2e restart-storm test only exercises `state_error_code` when the
+    /// scheduler happens to race a task into shutdown-cancellation, so its
+    /// coverage of the Cancelled -> ShuttingDown mapping is real but silent
+    /// on a run where nothing races. Pin the mapping directly and
+    /// deterministically: Cancelled must classify as ShuttingDown, and every
+    /// other StateError variant must stay Internal.
+    #[test]
+    fn state_error_code_classifies_cancelled_as_shutting_down() {
+        assert_eq!(
+            state_error_code(&state::StateError::Cancelled("task cancelled".into())),
+            ErrorCode::ShuttingDown
+        );
+        assert_eq!(
+            state_error_code(&state::StateError::Io(std::io::Error::other("boom"))),
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            state_error_code(&state::StateError::InvariantViolation("drift".into())),
+            ErrorCode::Internal
+        );
+    }
 
     /// Registry-local projection used only by the address-form unit test.
     fn canonical_name_in(registry: &state::Registry, token: &str) -> String {

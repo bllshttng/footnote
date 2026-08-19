@@ -7,7 +7,7 @@
 
 use fno_agents::client::{call, ensure_daemon, ClientError};
 use fno_agents::paths::AgentsHome;
-use fno_agents::protocol::Request;
+use fno_agents::protocol::{ErrorCode, Request};
 use fno_agents::state;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -489,10 +489,20 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // expected, and it is checked for BY NAME below rather than folded into a
     // numeric tolerance, so any other failure still fails this test.
     let mut answered = 0;
+    let mut teardown_casualties = 0;
     let mut failures = Vec::new();
     for v in verbs {
         match v.await {
             Ok(Ok(resp)) if !resp.is_err() => answered += 1,
+            // The daemon answered, but with its own ShuttingDown code: a
+            // blocking-pool read (e.g. the registry) was queued and dropped,
+            // not run, when the incumbent's runtime tore down underneath it.
+            // Matched on the CODE, a stable condition, not on message text --
+            // counted separately from `answered` so this can't mask a storm
+            // where nothing actually got real work done.
+            Ok(Ok(resp)) if resp.error().map(|e| e.code) == Some(ErrorCode::ShuttingDown) => {
+                teardown_casualties += 1
+            }
             Ok(Ok(resp)) => failures.push(format!("{:?}", resp.error())),
             Ok(Err(e)) => failures.push(format!("{e}")),
             Err(e) => failures.push(format!("task join failed: {e}")),
@@ -525,7 +535,8 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     }
     assert!(
         answered > 0,
-        "the restart storm answered nothing at all: {failures:?}"
+        "the restart storm answered nothing at all ({teardown_casualties} raced teardown): \
+         {failures:?}"
     );
 
     // The discriminating assertion, and the reason it is a LATENCY bound rather
