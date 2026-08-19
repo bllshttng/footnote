@@ -1260,7 +1260,7 @@ fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
 
 /// Whether a review verdict still describes the code at HEAD.
 ///
-/// The two `Carried` variants are the reason a carry was granted, recorded on
+/// The `Carried` variants are the reason a carry was granted, recorded on
 /// the event so a carry is auditable and can never be mistaken for a fresh
 /// read. Only `Stale` stops a verdict counting toward coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1274,6 +1274,13 @@ pub enum Freshness {
     CarriedBaseSync,
     /// Only documentation paths changed between the reviewed commit and HEAD.
     CarriedDocsOnly,
+    /// The PR's own code delta only SHRANK since the review: every raw diff
+    /// line still shipping is byte-identical to one the reviewer read, and the
+    /// vanished lines are paths the base absorbed on the rebase. A strict
+    /// subset of the reviewed diff; the PR 965 shape, which used to fall
+    /// through to `Stale` because the grades were whole-diff and mutually
+    /// exclusive.
+    CarriedSubset,
     /// Everything else, including every failure path.
     Stale,
 }
@@ -1285,15 +1292,25 @@ impl Freshness {
     }
 }
 
+/// One side's code-diff identity: the blake3 hash plus the sorted raw diff
+/// lines it was computed over. The hash answers "identical or not"; the line
+/// set also answers "is HEAD a subset of what was reviewed", which is the
+/// [`Freshness::CarriedSubset`] question and cannot be asked of a hash.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodeDiffIdentity {
+    pub hash: String,
+    pub lines: Vec<String>,
+}
+
 /// Pre-computed git facts for one `(reviewed_sha, head_sha)` pair, so
 /// [`review_freshness`] is pure and unit-tests with no git and no repository.
 #[derive(Debug, Clone, Default)]
 pub struct FreshnessFacts {
     /// PR code-diff identity at the reviewed commit (see
     /// [`pr_code_diff_identity`]).
-    pub reviewed_identity: Option<String>,
+    pub reviewed_identity: Option<CodeDiffIdentity>,
     /// The same identity at HEAD.
-    pub head_identity: Option<String>,
+    pub head_identity: Option<CodeDiffIdentity>,
     /// Paths differing between the two TREES (two-dot). `None` on git failure.
     pub tree_paths: Option<Vec<String>>,
 }
@@ -1317,14 +1334,21 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
     if reviewed_sha == head_sha {
         return Freshness::Fresh;
     }
-    let (Some(reviewed), Some(head)) = (
-        facts.reviewed_identity.as_deref(),
-        facts.head_identity.as_deref(),
-    ) else {
+    let (Some(reviewed), Some(head)) = (facts.reviewed_identity.as_ref(), facts.head_identity.as_ref()) else {
         return Freshness::Stale;
     };
-    if reviewed != head {
-        return Freshness::Stale;
+    if reviewed.hash != head.hash {
+        // The code delta changed, but it can still have only SHRUNK: every raw
+        // line still shipping was read, and the lines that vanished are paths
+        // the base absorbed on the rebase. Each raw line carries both blob
+        // shas for one path, so a line present in both sets means that path's
+        // change is byte-identical to what the reviewer read. A strict subset
+        // carries; a superset (new unreviewed code) and a rewrite do not.
+        return if is_strict_subset(&head.lines, &reviewed.lines) {
+            Freshness::CarriedSubset
+        } else {
+            Freshness::Stale
+        };
     }
     // The identities match, so the code under review is unchanged. The tree
     // diff only names WHY, and a carry that cannot name its reason is not
@@ -1336,6 +1360,17 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
         Freshness::CarriedDocsOnly
     } else {
         Freshness::CarriedBaseSync
+    }
+}
+
+/// Strict subset over two SORTED raw-diff line sets: non-empty (an empty HEAD
+/// identity is `None`, never an empty set, per the absence-matching rule
+/// above), strictly smaller, and every HEAD line present in the reviewed set.
+fn is_strict_subset(head: &[String], reviewed: &[String]) -> bool {
+    head.len() < reviewed.len() && {
+        let have: std::collections::HashSet<&str> =
+            reviewed.iter().map(|s| s.as_str()).collect();
+        head.iter().all(|l| have.contains(l.as_str()))
     }
 }
 
@@ -1401,7 +1436,12 @@ fn raw_diff_line_path(line: &str) -> &str {
 /// them compare equal is the absence-matched-against-absence trap above. The
 /// cost is that a documentation-only PR never carries an attestation, which is
 /// the fail-closed direction and matches today's behavior exactly.
-fn pr_code_diff_identity(git_bin: &str, cwd: &Path, base: &str, sha: &str) -> Option<String> {
+fn pr_code_diff_identity(
+    git_bin: &str,
+    cwd: &Path,
+    base: &str,
+    sha: &str,
+) -> Option<CodeDiffIdentity> {
     let out = Command::new(git_bin)
         .args([
             "diff",
@@ -1417,9 +1457,9 @@ fn pr_code_diff_identity(git_bin: &str, cwd: &Path, base: &str, sha: &str) -> Op
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut lines: Vec<&str> = text
+    let mut lines: Vec<String> = text
         .lines()
-        .map(|l| l.trim_end())
+        .map(|l| l.trim_end().to_string())
         .filter(|l| !l.is_empty() && !is_documentation_path(raw_diff_line_path(l)))
         .collect();
     if lines.is_empty() {
@@ -1431,7 +1471,10 @@ fn pr_code_diff_identity(git_bin: &str, cwd: &Path, base: &str, sha: &str) -> Op
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
     }
-    Some(hasher.finalize().to_hex().to_string())
+    Some(CodeDiffIdentity {
+        hash: hasher.finalize().to_hex().to_string(),
+        lines,
+    })
 }
 
 /// Paths differing between two TREES (two-dot), or `None` on git failure.
@@ -1465,7 +1508,7 @@ pub struct FreshnessResolver<'a> {
     /// unresolvable base yields no identity, hence `Stale` - fail closed.
     base_ref: String,
     head_sha: String,
-    head_identity: std::cell::RefCell<Option<Option<String>>>,
+    head_identity: std::cell::RefCell<Option<Option<CodeDiffIdentity>>>,
     cache: std::cell::RefCell<std::collections::HashMap<String, Freshness>>,
 }
 
@@ -1496,7 +1539,7 @@ impl<'a> FreshnessResolver<'a> {
         }
     }
 
-    fn head_identity(&self) -> Option<String> {
+    fn head_identity(&self) -> Option<CodeDiffIdentity> {
         let mut slot = self.head_identity.borrow_mut();
         slot.get_or_insert_with(|| {
             pr_code_diff_identity(self.git_bin, self.cwd, &self.base_ref, &self.head_sha)
@@ -4443,12 +4486,13 @@ fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
 }
 
 /// Order for "which of this reviewer's reviews is the best evidence". Fresh
-/// beats a carry beats stale; the two carry reasons are equally good, since
-/// both mean the code under review is unchanged.
+/// beats a carry beats stale; the carry reasons are equally good, since
+/// all three mean the code under review is unchanged or a subset of what was
+/// read.
 fn freshness_rank(f: Freshness) -> u8 {
     match f {
         Freshness::Fresh => 2,
-        Freshness::CarriedBaseSync | Freshness::CarriedDocsOnly => 1,
+        Freshness::CarriedBaseSync | Freshness::CarriedDocsOnly | Freshness::CarriedSubset => 1,
         Freshness::Stale => 0,
     }
 }
@@ -10177,10 +10221,31 @@ mod tests {
 
     // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────
 
+    fn ident_of(lines: &[&str]) -> CodeDiffIdentity {
+        // Any injective stand-in for the blake3 hash keeps equality tests
+        // honest: equal line sets -> equal identity, different -> different.
+        CodeDiffIdentity {
+            hash: lines.join("\n"),
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     fn facts(reviewed: Option<&str>, head: Option<&str>, tree: Option<&[&str]>) -> FreshnessFacts {
         FreshnessFacts {
-            reviewed_identity: reviewed.map(str::to_string),
-            head_identity: head.map(str::to_string),
+            reviewed_identity: reviewed.map(|h| ident_of(&[h])),
+            head_identity: head.map(|h| ident_of(&[h])),
+            tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    fn facts_lines(
+        reviewed: &[&str],
+        head: &[&str],
+        tree: Option<&[&str]>,
+    ) -> FreshnessFacts {
+        FreshnessFacts {
+            reviewed_identity: Some(ident_of(reviewed)),
+            head_identity: Some(ident_of(head)),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
         }
     }
@@ -10191,6 +10256,61 @@ mod tests {
         assert_eq!(
             review_freshness("abc123", "abc123", &FreshnessFacts::default()),
             Freshness::Fresh
+        );
+    }
+
+    #[test]
+    fn freshness_shrunk_diff_carries_as_subset() {
+        // PR 965's specimen: one doc sentence reworded, one test-file hunk
+        // gone because main absorbed it. Every raw line still shipping was
+        // read, so the shrunk diff carries instead of costing a re-review.
+        let f = facts_lines(
+            &[
+                ":100644 100644 aaa bbb M\tcli/src/a.py",
+                ":100644 100644 ccc ddd M\tcli/tests/test_a.py",
+            ],
+            &[":100644 100644 aaa bbb M\tcli/src/a.py"],
+            Some(&["docs/x.md"]),
+        );
+        let verdict = review_freshness("r1", "h1", &f);
+        assert_eq!(verdict, Freshness::CarriedSubset);
+        assert!(verdict.counts());
+    }
+
+    #[test]
+    fn freshness_subset_does_not_swallow_equal_or_added_lines() {
+        // Equal sets are not a strict subset (they hash equal and take the
+        // tree-paths branch instead), and a HEAD line the reviewer never saw
+        // is new unreviewed code: Stale.
+        assert_eq!(
+            review_freshness(
+                "r",
+                "h",
+                &facts_lines(&["l1", "l2"], &["l1", "l2"], Some(&[]))
+            ),
+            Freshness::CarriedBaseSync
+        );
+        assert_eq!(
+            review_freshness(
+                "r",
+                "h",
+                &facts_lines(&["l1"], &["l1", "l2"], None)
+            ),
+            Freshness::Stale
+        );
+    }
+
+    #[test]
+    fn freshness_absent_identity_stays_stale() {
+        // An identity that failed to compute (None, which is also what an
+        // empty code diff yields) can never carry - absence is not evidence.
+        assert_eq!(
+            review_freshness("r", "h", &facts(None, Some("i"), None)),
+            Freshness::Stale
+        );
+        assert_eq!(
+            review_freshness("r", "h", &facts(Some("i"), None, None)),
+            Freshness::Stale
         );
     }
 

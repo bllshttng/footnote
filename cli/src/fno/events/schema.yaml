@@ -282,8 +282,8 @@ event_types:
                 description: "The commit this reviewer actually read: a github_app review object's `.commit.oid`, or a local attestation's own head_sha. Omitted when unknowable, which the freshness predicate treats as stale (fail closed). Its ABSENCE was the x-5b99 defect: head_sha below is stamped at EVAL time, so a bot verdict rendered hours and commits earlier serialized as coverage for a commit its author never saw."
               freshness:
                 type: string
-                enum: [fresh, carried_base_sync, carried_docs_only, stale]
-                description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
+                enum: [fresh, carried_base_sync, carried_docs_only, carried_subset, stale]
+                description: "Whether reviewed_sha still describes the code at HEAD. `fresh` = the reviewer read this exact commit. `carried_base_sync` = the PR's own code delta is byte-identical and any tree difference came from the base moving (a rebase). `carried_docs_only` = only documentation paths changed since. `carried_subset` = the code delta only shrank: every raw diff line still shipping is byte-identical to one the reviewer read, and the vanished lines are paths the base absorbed on the rebase (a strict subset of the reviewed diff). `stale` = everything else, including every failure path. A carry requires a positive match between two successfully computed code-diff identities; two absences never match. Omitted on a verdict with no review behind it (absent, refused)."
               human_approval:
                 type: boolean
               scope:
