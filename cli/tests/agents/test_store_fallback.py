@@ -571,7 +571,9 @@ def test_registry_write_failure_still_resolves(_registry_home, monkeypatch, caps
 def test_registration_identity_collision_is_never_degraded_to_a_synthesized_row(
     _registry_home,
 ):
-    """A designed ambiguity refusal is not a best-effort registry write failure."""
+    """A store session whose canonical handle equals a registry row's NAME
+    heals under a suffixed name; the shared token stays ambiguous at read
+    rather than the heal silently claiming it."""
     from fno.agents.registry import AgentEntry, write_registry
 
     existing_id = "aaaaaaaa-1111-2222-3333-444455556666"
@@ -587,11 +589,13 @@ def test_registration_identity_collision_is_never_degraded_to_a_synthesized_row(
     ])
     _write_codex_session(_registry_home, store_only_id)
 
-    with pytest.raises(AgentResolutionError, match="canonical handle") as exc:
-        store_fallback.heal_from_harness_store("deadbeef")
+    healed = store_fallback.heal_from_harness_store("deadbeef")
 
-    assert exc.value.ambiguous is True
-    assert [entry.harness_session_id for entry in load_registry()] == [existing_id]
+    assert healed is not None
+    assert healed.name == "deadbeef-2"
+    assert healed.harness_session_id == store_only_id
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("deadbeef")
 
 
 def test_corrupt_store_never_denies_resolution(_registry_home):

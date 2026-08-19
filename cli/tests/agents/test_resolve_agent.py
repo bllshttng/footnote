@@ -14,6 +14,7 @@ import pytest
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
+    register_existing_session,
     resolve_agent,
     resolve_agent_in,
     update_registry,
@@ -84,8 +85,12 @@ def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
         resolve_agent_in([row], "ses_7f3a")
 
 
-def test_update_registry_refuses_new_canonical_handle_collision(tmp_path: Path) -> None:
-    """Normal producers cannot mint two rows sharing one durable mailbox."""
+def test_update_registry_allows_first_eight_overlap_between_sessions(
+    tmp_path: Path,
+) -> None:
+    """Two rows whose sids share first-eight but name different sessions both
+    land: the overlap (any harness, claude included) is read-side ambiguity,
+    not a write collision. Codex hits this on every tiled same-window spawn."""
     reg = _write(
         tmp_path,
         _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-111111111111"),
@@ -94,8 +99,15 @@ def test_update_registry_refuses_new_canonical_handle_collision(tmp_path: Path) 
         "second", "transport2", "aaaaaaaa-0000-0000-0000-222222222222"
     )
 
-    with pytest.raises(AgentResolutionError, match="identity 'aaaaaaaa'"):
-        update_registry(lambda rows: [*rows, second], path=reg)
+    persisted = update_registry(lambda rows: [*rows, second], path=reg)
+
+    assert [entry.name for entry in persisted] == ["first", "second"]
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("aaaaaaaa", path=reg)
+    by_full = resolve_agent(
+        "aaaaaaaa-0000-0000-0000-222222222222", path=reg
+    )
+    assert by_full.entry.name == "second"
 
 
 def test_update_registry_refuses_name_shadowing_existing_handle(tmp_path: Path) -> None:
@@ -124,6 +136,120 @@ def test_update_registry_allows_legacy_suffix_collision(tmp_path: Path) -> None:
     persisted = update_registry(lambda rows: [*rows, second], path=reg)
 
     assert [entry.name for entry in persisted] == ["first", "second"]
+
+
+def _codex(name: str, uuid: str, short: str | None = None) -> AgentEntry:
+    return AgentEntry(
+        name=name,
+        cwd="/w",
+        log_path=f"/tmp/{name}.log",
+        short_id=short,
+        harness="codex",
+        harness_session_id=uuid,
+    )
+
+
+# Codex session ids are UUIDv7: the first eight hex chars are the top 32 bits
+# of a 48-bit millisecond timestamp, so sessions started in one ~65s window
+# share first-eight exactly. A tiled spawn batch therefore mints rows whose
+# canonical handles overlap while the full ids stay distinct.
+_WINDOW_A = "01a0152f-45fd-78f0-b109-78f8dffdeeca"
+_WINDOW_B = "01a0152f-9a2b-74c3-8b0f-11aa22bb33cc"
+# register_existing_session's provider slot holds the harness name; the
+# constant names the value's own axis so the binding never reads as a
+# vendor holding.
+CODEX_HARNESS = "codex"
+
+
+def test_update_registry_allows_same_window_codex_pair_null_short(
+    tmp_path: Path,
+) -> None:
+    """The live spawn shape: two codex rows, no short_id, one time window.
+
+    A first-eight overlap between two DIFFERENT sessions is the documented
+    same-window shape; the write must land and resolution must fail closed
+    asking for the full id, not the spawn die at the registry write.
+    """
+    reg = _write(tmp_path, _codex("gql-codex", _WINDOW_A))
+
+    persisted = update_registry(
+        lambda rows: [*rows, _codex("preflight-codex", _WINDOW_B)], path=reg
+    )
+
+    assert [entry.name for entry in persisted] == ["gql-codex", "preflight-codex"]
+
+
+def test_update_registry_allows_same_window_pair_with_populated_shorts(
+    tmp_path: Path,
+) -> None:
+    """Populating short_id does not change the rule: the collision compared
+    the minted handle against the stored session id, never the stored short."""
+    reg = _write(tmp_path, _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1"))
+
+    persisted = update_registry(
+        lambda rows: [*rows, _claude("second", "transport2", "aaaaaaaa-0000-0000-0000-2")],
+        path=reg,
+    )
+
+    assert [entry.name for entry in persisted] == ["first", "second"]
+
+
+def test_resolve_shared_first_eight_fails_closed_ambiguous(tmp_path: Path) -> None:
+    """Safety moved to the read side: the shared short resolves nothing."""
+    reg = _write(
+        tmp_path,
+        _codex("gql-codex", _WINDOW_A),
+        _codex("preflight-codex", _WINDOW_B),
+    )
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("01a0152f", path=reg)
+    assert resolve_agent(_WINDOW_B, path=reg).entry.name == "preflight-codex"
+
+
+def test_update_registry_refuses_second_row_claiming_same_full_session_id(
+    tmp_path: Path,
+) -> None:
+    reg = _write(tmp_path, _codex("gql-codex", _WINDOW_A))
+    duplicate = _codex("clone-codex", _WINDOW_A)
+
+    with pytest.raises(AgentResolutionError, match="collides with row 'gql-codex'"):
+        update_registry(lambda rows: [*rows, duplicate], path=reg)
+
+
+def test_update_registry_null_id_row_never_collides(tmp_path: Path) -> None:
+    """A row with no short and no session id has no address to match: a null
+    stored id must never read as equal to a new row's minted identity."""
+    bare = AgentEntry(
+        name="legacy-row", harness="claude", cwd="/w", log_path="/tmp/legacy.log"
+    )
+    reg = _write(tmp_path, bare)
+
+    persisted = update_registry(
+        lambda rows: [*rows, _codex("fresh-codex", _WINDOW_A)], path=reg
+    )
+
+    assert [entry.name for entry in persisted] == ["legacy-row", "fresh-codex"]
+
+
+def test_register_existing_session_allows_same_window_generated_handles(
+    tmp_path: Path,
+) -> None:
+    """Hand-started sessions in one codex time window both register: the
+    generated name suffixes on collision, the shared short fails closed at
+    read, and neither registration is refused."""
+    reg = tmp_path / "registry.json"
+
+    first = register_existing_session(
+        provider=CODEX_HARNESS, session_id=_WINDOW_A, cwd="/w", registry_path=reg
+    )
+    second = register_existing_session(
+        provider=CODEX_HARNESS, session_id=_WINDOW_B, cwd="/w", registry_path=reg
+    )
+
+    assert first.name == "01a0152f"
+    assert second.name == "01a0152f-2"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("01a0152f", path=reg)
 
 
 def test_ac4_err_canonical_handle_and_legacy_prefix_are_ambiguous() -> None:
