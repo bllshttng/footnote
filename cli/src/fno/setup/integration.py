@@ -276,6 +276,16 @@ def _agy_adapter_path() -> "Optional[Path]":
     return p if p.is_file() else None
 
 
+def _agy_crown_adapter_path() -> "Optional[Path]":
+    # Same load-shape as _agy_adapter_path for the PreInvocation crown adapter.
+    # agy has no session-start event, so the crown line rides PreInvocation
+    # gated on invocationNum == 0 (first model call == session start).
+    from fno.paths import resolve_plugin_script
+
+    p = resolve_plugin_script("hooks/agy-crown-inject.sh")
+    return p if p.is_file() else None
+
+
 def _agy_install_context() -> None:
     # agy reads .agent/rules in the workspace. Drop a small breadcrumb in the
     # current project so an agy session surfaces footnote's entry points. Best-
@@ -315,9 +325,18 @@ def _agy_is_installed() -> bool:
         # Can't verify the command targets the live adapter; installed iff ANY
         # footnote Stop handler is registered.
         return bool(stop)
-    return any(
+    if not any(
         isinstance(h, dict) and h.get("command") == str(adapter) for h in stop
-    )
+    ):
+        return False
+    # The crown adapter is part of the install when it ships in this install.
+    crown = _agy_crown_adapter_path()
+    if crown is None:
+        return True
+    pre = fn.get("PreInvocation")
+    if not isinstance(pre, list):
+        return False
+    return any(isinstance(h, dict) and h.get("command") == str(crown) for h in pre)
 
 
 def _agy_install() -> IntegrationResult:
@@ -347,6 +366,19 @@ def _agy_install() -> IntegrationResult:
     if not isinstance(fn, dict):
         fn = {}
     fn["Stop"] = [{"type": "command", "command": str(adapter), "timeout": 60}]
+    crown = _agy_crown_adapter_path()
+    if crown is not None:
+        # PreInvocation takes handlers directly under the event key; the matcher
+        # is ignored per agy's schema. The adapter self-gates on invocationNum
+        # == 0, so later invocations inject nothing.
+        fn.setdefault("PreInvocation", [])
+        if not any(
+            isinstance(h, dict) and h.get("command") == str(crown)
+            for h in fn["PreInvocation"]
+        ):
+            fn["PreInvocation"].append(
+                {"type": "command", "command": str(crown), "timeout": 30}
+            )
     data["footnote"] = fn
     try:
         hooks.parent.mkdir(parents=True, exist_ok=True)

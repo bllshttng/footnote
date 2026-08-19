@@ -43,6 +43,24 @@ The fetch is the point: a stale local `origin/main` ref answers zero for a branc
 
 `focus` takes a pane number, not a handle. Resolve the handle with `fno mux where` first, or read the number off `fno mux pane ls`.
 
+## Spawning
+
+Harness-native commands first, overrides only on explicit request. The `fno agents` verbs and the config defaults already resolve names and lanes. When the request itself names the lane, reach for the axis flag.
+
+Every axis is already config-sourced. `agents.defaults.*` fills a bare spawn (provider, model, effort, substrate, permission_mode, route, account), `agents.profiles.<verb>` overlays it per verb, and an explicit flag always wins. A lane set once in config needs no flags at spawn time. That is the line that saves the most re-derivation.
+
+| You are trying to | The trap |
+|---|---|
+| Name the vendor | `--model` alone never does. It is exact passthrough to the provider's own CLI. `-P/--provider` is the vendor axis, and `--provider zai --model glm-5.3` is the same route as `--route zai/glm-5.3`. `--route` fails closed on an unknown vendor or a missing key, and is claude-only. |
+| Name the CLI binary | That is `-H/--harness`. `-P` is not it, and `-H` no longer means headless. |
+| Fire a one-shot | `-p` off spawn is a refusal, not a synonym. `--substrate headless` or `--once` is the one-shot. |
+| Escape an inherited tier remap | `ANTHROPIC_DEFAULT_SONNET_MODEL` and its siblings remap a tier for the whole inherited environment, so a `sonnet` spawn can land on another vendor's model. `env -u` escapes. Pinned by `cli/tests/unit/test_inherited_tier_remap.py` and `cli/tests/unit/test_model_routing.py`. |
+| Spawn through a crippled daemon | `--substrate bg` needs no mux pane, so it survives an EMFILE-crippled daemon. It is claude-only. |
+
+The prompt prefix is per harness: claude `/fno:target`, codex `$fno:target`, opencode prose only, with no slash surface. On codex the `$fno:` token does not reliably expand. An audit of one night's spawns (`scripts/diagnostics/codex-skill-load-audit.py`, 2026-08-18) found the harness `<skill>` injection in 4 of 15 wrapped prompts. The worker's own first-action read of the deployed SKILL.md carried most of the rest. Three of 15 never loaded it. Spawn the skill invocation as the prompt, never prose wrapping it.
+
+The spawn receipt is one line of compact JSON carrying `name`, `short_id`, `harness`, `status`. It does not carry `provider:`. Read the resolved lane with `fno whoami` on the spawned row, never from the spawn receipt.
+
 ## Fleet lifecycle
 
 There is no kill verb on either surface: not `fno agents kill`, not `fno-agents kill`. The reap sequence depends on the substrate.

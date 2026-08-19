@@ -1195,3 +1195,60 @@ class TestForeignProjectRooting:
         link = sd.validate_fallback({"L": [{"harness": "codex", "model": "m"}]})["L"][0]
         sd.link_is_exhausted(link, repo_root=str(tmp_path))
         assert str(seen["root"]) == str(tmp_path)
+
+
+# --- model-implies-vendor mismatch warning (change 5, spawn half) ------------
+
+
+def test_model_vendor_mismatch_warns_naming_both_sides():
+    # --model glm-5.3 with no zai route resolved: the spawn proceeds AND warns,
+    # naming the implied vendor (zai) and the resolved lane (anthropic, the
+    # builtin default harness). Warn-only: nothing is refused or rewritten.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "-m", "glm-5.3", "hi"], err=err, model="opus"
+    )
+    assert "glm-5.3" in out  # the model still rides the argv; nothing is refused
+    msg = err.getvalue()
+    assert "glm-5.3" in msg and "zai" in msg and "anthropic" in msg
+
+
+def test_model_vendor_match_prints_no_warning():
+    # The negative is load-bearing: a matching model must print nothing, or the
+    # warning becomes noise and gets ignored - how tonight's misroute survived.
+    err = io.StringIO()
+    _inject(["spawn", "--name", "w", "-m", "opus", "hi"], err=err, model="opus")
+    assert "implies vendor" not in err.getvalue()
+
+
+def test_route_matching_model_is_silent():
+    # --route owns the vendor; a model half matching it is the intended shape.
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "--route", "zai/glm-5.3", "hi"], err=err, model="opus"
+    )
+    assert "implies vendor" not in err.getvalue()
+
+
+def test_mismatch_warns_with_no_config_at_all():
+    # The warning must not depend on config being present: a bare argv with a
+    # cross-vendor model is the exact operator typo it exists to catch.
+    err = io.StringIO()
+    inject_spawn_defaults(
+        ["spawn", "--name", "w", "-m", "gpt-5.6", "hi"], stderr=err, env={}
+    )
+    assert "openai" in err.getvalue() and "anthropic" in err.getvalue()
+
+
+def test_explicit_route_with_cross_vendor_model_is_silent():
+    # --route zai,glm-5.2 with an explicit --model opus is the documented
+    # deliberate override (the model beats the route's model). No warning:
+    # both halves were named by the caller, not misrouted by a default.
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "-H", "claude", "--route", "zai,glm-5.2",
+         "-m", "opus", "hi"],
+        err=err,
+        model="opus",
+    )
+    assert "implies vendor" not in err.getvalue()

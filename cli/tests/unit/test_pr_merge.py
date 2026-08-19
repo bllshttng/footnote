@@ -229,11 +229,14 @@ def test_missing_pr_exits_1(capsys):
     assert _merge.run_merge([]) == 1
 
 
-def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys):
+def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys, tmp_path):
     # x-04ab removed --invoker; a lingering legacy flag is silently accepted
     # (never an error). The merge proceeds and is gated only by `enabled`, so
     # with auto-merge off it skips (exit 2) exactly as a no-flag call would.
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    # Same hermeticity as the `enabled` fixture: without the pin a populated
+    # per-worker sandbox graph turns this into `held` before `enabled` runs.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     assert _merge.run_merge(["--invoker=anything", "42"]) == 2
     assert _last_json(capsys)["outcome"] == "skipped"
 
@@ -259,8 +262,11 @@ def test_plan_dispatch_hold_refuses_sanctioned_merge(monkeypatch, capsys, tmp_pa
 # ---- config + gh gates ----
 
 
-def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
+def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
+    # Without the pin this pays a live `gh pr view` against the populated
+    # per-worker sandbox graph (network luck, not hermeticity).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     assert _merge.run_merge(["42"]) == 2
     obj = _last_json(capsys)
     assert obj["outcome"] == "skipped"
@@ -269,6 +275,10 @@ def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
 
 def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    # Same hermeticity as the `enabled` fixture: a populated per-worker
+    # sandbox graph makes the hold lookup's closure fetch fail-closed (exit 2)
+    # before the gh-missing check this test exists to pin ever runs.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
     # Isolate from an ambient target-state.md: run_merge with no cwd reads
     # `auto_merge_approved` from the caller's repo state, so a suite run inside
@@ -1827,6 +1837,10 @@ def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
     (tmp_path / ".fno").mkdir()
     _checks_enabled(monkeypatch)
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    # Same hermeticity as the `enabled` fixture: the closure fetch a populated
+    # per-worker sandbox graph triggers answers non-JSON and holds the merge
+    # before any merge command is recorded.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(
         _merge,

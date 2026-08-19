@@ -98,7 +98,19 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
                     "command": "${PLUGIN_ROOT}/hooks/codex-app-server-nudge-session-start.sh",
                 },
             ],
-        }
+        },
+        # The whoami/crown block gets its OWN entry on startup: the combined
+        # wrapper payload is truncated by codex at ~2500 tokens before the
+        # whoami block (position 3 of the combined output) ever lands.
+        {
+            "matcher": "startup",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id inject-fno-agent-whoami --expected inject-fno-agent-whoami -- ${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh",
+                }
+            ],
+        },
     ]
     resolved = hooks[0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(REPO_ROOT))
     assert str(REPO_ROOT / "hooks" / "session-start.sh") in resolved

@@ -874,6 +874,89 @@ exit 2
 // list, stderr-only so --json stdout stays clean).
 // ---------------------------------------------------------------------------
 
+/// A pane-hosted row must never be answered by `agent.stop` with a success:
+/// stop reaches no pane (the row's one live ref is the mux ref), so a success
+/// receipt would report work it did not perform over a live pane. The refusal
+/// names the pane-kill one-liner with the row's own session and pane id, and
+/// the registry row stays live. Keys on `entry.mux`, never the harness, so it
+/// covers claude, codex, opencode, and agy pane rows in one branch.
+#[tokio::test]
+async fn stop_refuses_a_pane_row_and_names_the_pane_kill() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_pane_row(&home, "pane-worker-stop");
+    let _daemon = start_daemon(&home);
+
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.stop", json!({"name": "pane-worker-stop"})),
+    )
+    .await
+    .expect("stop call");
+    assert!(
+        resp.is_err(),
+        "stop must refuse a pane row, got: {:?}",
+        resp.result()
+    );
+    let msg = resp.error().unwrap().message.clone();
+    assert!(
+        msg.contains("fno mux pane kill"),
+        "refusal names the working verb: {msg}"
+    );
+    assert!(msg.contains("main"), "refusal names the session: {msg}");
+    assert!(msg.contains("10"), "refusal names the pane id: {msg}");
+
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    assert_eq!(
+        registry.find("pane-worker-stop").unwrap().status,
+        fno_agents::AgentStatus::Live,
+        "nothing was reported stopped that was not"
+    );
+}
+
+/// A non-pane row with an empty short_id keeps its existing no-op receipt:
+/// the mux refusal must not swallow the genuine codex/gemini arm.
+#[tokio::test]
+async fn stop_keeps_non_pane_noop_receipt() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    // Seed the pane row, then reshape it in place: a codex ask row is the pane
+    // row with no mux ref and the codex harness. Reusing the helper (rather
+    // than a second full RegistryEntry literal) keeps this file's axis-guard
+    // binding counts unchanged.
+    seed_pane_row(&home, "codex-ask-row");
+    state::update_registry(&home.registry_json(), |r| {
+        let row = r.find_mut("codex-ask-row").unwrap();
+        row.mux = None;
+        row.harness = Some("codex".into());
+    })
+    .unwrap();
+    // The reshaped row (empty short_id, no pid, recorded live) is the stale-ask
+    // shape, and the startup reconcile sweep would settle it to Exited before
+    // the stop call lands - which answers `already_exited`, not the no-op arm
+    // under test. Hold the sweep, the documented lever for a seeded row.
+    let _daemon = start_daemon_env(&home, &[("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")]);
+
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.stop", json!({"name": "codex-ask-row"})),
+    )
+    .await
+    .expect("stop call");
+    assert!(
+        !resp.is_err(),
+        "non-pane no-op receipt is unchanged, got: {:?}",
+        resp.error()
+    );
+    let body = resp.result().unwrap().clone();
+    assert_eq!(body["no_op"], json!(true), "receipt: {body}");
+    assert_eq!(body["stopped"], json!(true), "receipt: {body}");
+}
+
 #[tokio::test]
 async fn restart_when_down_starts_fresh() {
     // AC2-EDGE: no daemon running -> restart starts a fresh one and reports it,

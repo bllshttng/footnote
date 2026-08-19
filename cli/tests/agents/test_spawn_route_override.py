@@ -18,6 +18,17 @@ from typer.testing import CliRunner
 
 from fno.paths_testing import use_tmpdir
 
+
+def _receipt_line(output: str) -> str:
+    """The line that IS the JSON receipt. CliRunner mixes stderr into output,
+    so a stderr notice (the inherited tier-remap drop warning) can precede or
+    follow the receipt on machines carrying ANTHROPIC_DEFAULT_*_MODEL."""
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return line
+    raise AssertionError(f"no JSON receipt line in output: {output!r}")
+
 runner = CliRunner()
 
 
@@ -228,7 +239,7 @@ def test_route_allowed_on_capability_enabled_pane(
     # model (glm-5.2) - and NO key holds a harness literal under `provider`.
     # The defect was a receipt reading {"provider": "claude"} for this exact
     # invocation while the worker ran on glm-5.2: the flags took, the receipt lied.
-    receipt = json.loads(result.output.strip().splitlines()[-1])
+    receipt = json.loads(_receipt_line(result.output))
     assert receipt["harness"] == "claude"
     assert receipt["provider"] == "zai"
     assert receipt["model"] == "glm-5.2"
@@ -277,7 +288,7 @@ def test_receipt_model_is_the_effective_model_not_the_routed_one(
     assert captured["model"] == "opus"
     assert captured["route_provider"] == "zai"
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
-    receipt = json.loads(result.output.strip().splitlines()[-1])
+    receipt = json.loads(_receipt_line(result.output))
     assert receipt["model"] == "opus"
     assert receipt["provider"] == "zai"
     assert receipt["harness"] == "claude"

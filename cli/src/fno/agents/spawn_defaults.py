@@ -712,6 +712,85 @@ def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> 
         return False
 
 
+# A model string's implied vendor, by prefix or tier word. A pure string
+# opinion and never a routing input: the warning it drives is advisory, because
+# the pairing is legal and --model is deliberate passthrough (cli.py).
+_MODEL_VENDOR_HINTS: Tuple[Tuple[str, str], ...] = (
+    ("glm-", "zai"),
+    ("gpt-", "openai"),
+    ("deepseek", "deepseek"),
+    ("gemini-", "google"),
+    ("claude-", "anthropic"),
+)
+_MODEL_WORD_VENDORS = {"opus": "anthropic", "sonnet": "anthropic", "haiku": "anthropic"}
+
+# The vendor a harness's own primary lane bills when no route/vendor was named.
+# opencode is operator-configured, so it holds no opinion here.
+_HARNESS_DEFAULT_VENDOR = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "agy": "google",
+}
+
+
+def _implied_vendor(model: Optional[str]) -> Optional[str]:
+    if not model:
+        return None
+    m = model.lower()
+    for prefix, vendor in _MODEL_VENDOR_HINTS:
+        if m.startswith(prefix):
+            return vendor
+    base = m.split("[", 1)[0].split("-", 1)[0]
+    return _MODEL_WORD_VENDORS.get(base)
+
+
+def _warn_model_vendor_mismatch(
+    argv: Sequence[str], err: IO[str], env: Optional[Mapping[str, str]] = None
+) -> None:
+    """Advisory warning when a model string implies a vendor the resolved lane
+    does not match (a glm-* model with no zai route, a gpt-* under a claude
+    harness). Warn, never refuse: the pairing is legal and passthrough is
+    deliberate. Names BOTH sides, because a warning naming only the mismatch
+    does not tell the caller which half to change. Runs on the FINAL argv so
+    explicit flags and injected defaults are judged together. An explicit
+    --route suppresses the warning: the caller named the lane AND the model,
+    which is a deliberate override, not the misroute this catches."""
+    toks = list(argv[1:])
+    model = _flag_value(toks, "--model", "-m")
+    implied = _implied_vendor(model)
+    if not implied:
+        return
+    if _flag_value(toks, "--route") is not None:
+        # Explicit route: a deliberate lane choice beside a deliberate model.
+        # (A config route is never injected beside an explicit model, so a
+        # --route in the final argv is always operator-typed.)
+        return
+    lane = (_flag_value(toks, "--provider", "-P") or "").strip().lower() or None
+    if not lane:
+        # Same lane resolution as the model/effort branches: an explicit -H,
+        # else harness inference from the ambient session, else builtin claude.
+        # Hardcoding claude here would name anthropic as the lane inside a
+        # codex-ambient session and fire a false warning for a correctly
+        # vendored gpt-* model - the noise shape that hides the real misroute.
+        harness = (_flag_value(toks, "--harness", "-H") or "").strip().lower()
+        if not harness:
+            try:
+                from fno.dispatch_flags import resolve_dispatch_provider
+
+                harness = resolve_dispatch_provider(None, env=env)[0] or ""
+            except Exception:
+                harness = ""
+        lane = _HARNESS_DEFAULT_VENDOR.get(harness or "claude")
+    if not lane or lane == implied:
+        return
+    print(
+        f"fno agents spawn: --model {model!r} implies vendor {implied}, but the "
+        f"resolved lane is {lane}; the model rides that lane's CLI as-is. Name "
+        f"the vendor with -P {implied} to route it.",
+        file=err,
+    )
+
+
 def inject_spawn_defaults(
     args: Sequence[str],
     *,
@@ -746,6 +825,7 @@ def inject_spawn_defaults(
     # autogen-name rewrites consider only operator-supplied argv, so config
     # defaults injected below never fight the token form.
     out = normalize_spawn_args(out, stderr=stderr)
+    err = stderr if stderr is not None else sys.stderr
 
     if settings is None:
         try:
@@ -790,6 +870,7 @@ def inject_spawn_defaults(
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account
     ):
+        _warn_model_vendor_mismatch(out, err, env)
         return out
 
     # A spawn carrying --role whose lane resolves to a real route is billed on
@@ -799,7 +880,6 @@ def inject_spawn_defaults(
     # branch below skips injection when resolve_route returns a real route.
     role = _role_of(out[1:])
 
-    err = stderr if stderr is not None else sys.stderr
     has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
 
     inject: List[str] = []
@@ -1118,6 +1198,7 @@ def inject_spawn_defaults(
         # the off-pane passthrough gate re-runs on the final argv, not just the
         # operator's.
         _refuse_off_pane_passthrough(out[1:], err)
+    _warn_model_vendor_mismatch(out, err, env)
     return out
 
 
