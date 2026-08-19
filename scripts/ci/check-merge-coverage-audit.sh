@@ -11,7 +11,10 @@
 #      that a covered verdict existed - never the absence of a refusal: an
 #      absence has two explanations, and only one of them is the outcome.
 #      A merge whose head carries the override marker passes and is reported
-#      BY NAME, so the release valve is counted, not hidden.
+#      BY NAME, so the release valve is counted, not hidden. A merge whose
+#      head carries a patch-id-carried verdict (a "[carried from <sha>]"
+#      description, scripts/ci/coverage-carry.sh) passes and is reported BY
+#      NAME the same way - a third, visible way a head can be green.
 #
 # A first-parent commit with no second parent (a direct push that predates
 # the ruleset) is skipped with a named line, never silently. Squash and rebase
@@ -94,6 +97,10 @@ audit_head() { # <head-sha> <label-for-messages>
     case "$desc" in
       coverage-override*)
         echo "override: $label merged on the override marker ($desc)"
+        return 0
+        ;;
+      *\[carried\ from\ *)
+        echo "carried: $label merged on a verdict carried across a rebase ($desc)"
         return 0
         ;;
     esac

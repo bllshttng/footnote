@@ -106,6 +106,17 @@ expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   'covered\*\|"no review lane"\*' "the refresher preserve list"
 
+# The carry marker: the string coverage-carry.sh WRITES onto a carried
+# verdict's description, and the string the post-merge audit's case pattern
+# READS to name a carried merge. A rename on one side and not the other
+# keeps a carried head reading as an ordinary uncovered head to the audit -
+# see scripts/ci/coverage-carry.sh (the writer) and
+# scripts/ci/check-merge-coverage-audit.sh (the reader).
+expect_fixed "$ROOT/scripts/ci/coverage-carry.sh" \
+  'marker=" [carried from' "the carry script (writer of the carry marker)"
+expect_fixed "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
+  '\[carried\ from\ *)' "the post-merge audit (reader of the carry marker)"
+
 if [ "$fail" = 1 ]; then
   echo "FAIL: coverage context/label drift - the messages above name the surfaces" >&2
   exit 1
