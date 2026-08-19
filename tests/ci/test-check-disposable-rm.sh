@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# tests/ci/test-check-disposable-rm.sh
+#
+# Exercises scripts/ci/check-disposable-rm.sh. The gate must FAIL on a bare
+# `rm` in a guarded file (AC6) and PASS everywhere else (AC7: it is an
+# allowlist, never a repo-wide ban). Every case asserts an exit code; a PASS
+# here is only meaningful because the FAIL cases exist too.
+#
+# Run: bash tests/ci/test-check-disposable-rm.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE="$(cd "${SCRIPT_DIR}/../.." && pwd)/scripts/ci/check-disposable-rm.sh"
+TMP="$(mktemp -d)"
+trap 'command -p rm -rf "$TMP" 2>/dev/null || /bin/rm -rf "$TMP"' EXIT
+
+PASS=0; FAIL=0
+[[ -f "$GATE" ]] || { echo "gate not found at $GATE" >&2; exit 1; }
+
+# run <expected_exit> <label> <args...>: assert the gate's exit code
+run() {
+  local want="$1" label="$2"; shift 2
+  local got
+  bash "$GATE" "$@" >/dev/null 2>&1; got=$?
+  if [[ "$got" -eq "$want" ]]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL: %s\n  want exit %s, got %s\n' "$label" "$want" "$got"
+  fi
+}
+
+# --- AC6: a bare rm in a guarded file fails -----------------------------------
+cat > "$TMP/locked.sh" <<'EOF'
+set -uo pipefail
+rm -rf "$LOCKDIR.reap.$$"
+mkdir "$LOCKDIR" 2>/dev/null
+EOF
+run 1 'bare rm -rf fails' "$TMP/locked.sh"
+
+cat > "$TMP/flagged.sh" <<'EOF'
+rm -f "$tmp" 2>/dev/null || true
+EOF
+run 1 'bare rm -f fails' "$TMP/flagged.sh"
+
+# `command rm` bypasses functions and aliases only, not a PATH entry.
+cat > "$TMP/commandrm.sh" <<'EOF'
+command rm -rf "$X"
+EOF
+run 1 'command rm (no -p) fails: still hits a PATH wrapper' "$TMP/commandrm.sh"
+
+# A QUOTED command word is the classic alias-bypass spelling, and it does not
+# bypass a PATH wrapper either. The gate must catch it before it strips
+# quoted strings (codex peer review P2 on this gate's first ship).
+cat > "$TMP/quotedrm.sh" <<'EOF'
+"rm" -rf "$LOCKDIR"
+'rm' -rf "$TMPHOME"
+EOF
+run 1 'quoted rm command word fails' "$TMP/quotedrm.sh"
+
+# A quoted rm inside another string is prose, not a command. Command-position
+# detection must not flag it (review finding: false positive on prose).
+cat > "$TMP/prose-quote.sh" <<'EOF'
+echo "prefer rm or 'rm' today"
+echo "the spelling \"rm\" is fine here mid-line"
+EOF
+run 0 'quoted rm inside prose strings passes' "$TMP/prose-quote.sh"
+
+# rm as the FIRST word of a quoted string resolves through the user's PATH
+# only when the string is EVALUATED. eval and `<shell> -c` are; a printed
+# message is prose, not a command (review finding: the gate flagged both).
+cat > "$TMP/evalrm.sh" <<'EOF'
+eval "rm -rf $X"
+bash -c 'rm -rf "$Y"'
+EOF
+run 1 'string-indirected rm (eval / -c) fails' "$TMP/evalrm.sh"
+
+cat > "$TMP/echorm.sh" <<'EOF'
+echo "rm -rf failed for lockdir: $X" >&2
+echo 'rm -rf already attempted, see log' >&2
+echo "fix: bash -c 'rm -rf' leaves trash"
+EOF
+run 0 'quote-initial rm inside printed messages passes' "$TMP/echorm.sh"
+
+# A subcommand rm never resolves through the user's PATH, so it is not this
+# gate's subject (review finding: the gate flagged it with wrong advice).
+cat > "$TMP/subrm.sh" <<'EOF'
+git rm -f "$stale"
+docker rm -f "$container"
+EOF
+run 0 'subcommand rm (git / docker) passes' "$TMP/subrm.sh"
+
+# rm after a shell keyword IS command position; the word test must catch it.
+cat > "$TMP/thenrm.sh" <<'EOF'
+if [[ -n "$X" ]]; then rm -rf "$LOCKDIR"; fi
+EOF
+run 1 'rm after then keyword fails' "$TMP/thenrm.sh"
+
+# A guarded file that vanished fails closed.
+run 1 'missing listed file fails closed' "$TMP/does-not-exist.sh"
+
+# --- sanctioned spellings pass -------------------------------------------------
+cat > "$TMP/tworung.sh" <<'EOF'
+command -p rm -rf "$LOCKDIR.reap.$$" 2>/dev/null || /bin/rm -rf "$LOCKDIR.reap.$$"
+command -p rm -f "$s" 2>/dev/null || /bin/rm -f "$s" 2>/dev/null || true
+{ command -p rm -f "$ATTEST" 2>/dev/null || /bin/rm -f "$ATTEST"; } && echo gone
+EOF
+run 0 'two-rung spellings pass' "$TMP/tworung.sh"
+
+# --- no false positives on prose ------------------------------------------------
+cat > "$TMP/prose.sh" <<'EOF'
+# rm -rf, a loser deletes the lockdir the winner just recreated.
+echo "preflight: if no preflight is running, remove it: rm -rf '$LOCKDIR'" >&2
+git worktree prune >/dev/null 2>&1 || true  # drop entries from a prior rm -rf
+EOF
+run 0 'rm inside comments and echo strings passes' "$TMP/prose.sh"
+
+# --- AC7: the default (allowlist) run is not a repo-wide ban -------------------
+# The fixture above is full of bare rm; the default run ignores it because it
+# is not on the allowlist. The real guarded files must pass as shipped.
+run 0 'default allowlist run passes on the shipped tree'
+
+# --- the failure message teaches: names file, line, criterion -------------------
+# Capture first, grep after. A grep -q on a live pipe closes it early, and the
+# gate then SIGPIPEs on its next write. pipefail reads that as a false FAIL
+# (the trap preflight.sh's is_registered comment records).
+MSG="$(bash "$GATE" "$TMP/locked.sh" 2>&1 || true)"
+if printf '%s\n' "$MSG" | grep -q "$TMP/locked.sh:2" \
+   && printf '%s\n' "$MSG" | grep -q 'command -p rm'; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1)); echo 'FAIL: failure message must name file:line and the fix'
+fi
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]]
