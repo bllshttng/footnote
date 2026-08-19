@@ -4,7 +4,7 @@
 #   worktree-lifecycle.sh status                    # List all worktrees
 #   worktree-lifecycle.sh cleanup [--older-than Nd] [--dry-run] [--prefix <prefix>]
 #   worktree-lifecycle.sh cleanup --merged [--apply] [--kill-orphans]
-#   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
+#   worktree-lifecycle.sh archive <branch-or-path>  # Keep branch, remove directory
 set -uo pipefail
 
 # The one "is removing this worktree safe?" answer, shared with
@@ -573,8 +573,37 @@ case "${1:-status}" in
             exit 1
         fi
 
-        WT=".claude/worktrees/$NAME"
-        if [[ -d "$WT" ]]; then
+        WT=""
+        if [[ -d "$NAME" ]]; then
+            CANDIDATE="$(cd "$NAME" 2>/dev/null && pwd -P)"
+            if git worktree list --porcelain 2>/dev/null | grep -Fqx "worktree $CANDIDATE"; then
+                WT="$CANDIDATE"
+            fi
+        fi
+        if [[ -z "$WT" ]]; then
+            _WT_ARCHIVE_MATCHES=()
+            while IFS= read -r candidate; do
+                [[ -n "$candidate" ]] && _WT_ARCHIVE_MATCHES+=("$candidate")
+            done < <(git worktree list --porcelain 2>/dev/null | awk -v target="$NAME" '
+                function base(path, n, parts) {
+                    n = split(path, parts, "/")
+                    return parts[n]
+                }
+                function emit() {
+                    if (path != "" && (branch == target || base(path) == target)) print path
+                }
+                /^worktree / { emit(); path = substr($0, 10); branch = ""; next }
+                /^branch refs\/heads\// { branch = substr($0, 19); next }
+                END { emit() }
+            ')
+            if [[ "${#_WT_ARCHIVE_MATCHES[@]}" -eq 1 ]]; then
+                WT="${_WT_ARCHIVE_MATCHES[0]}"
+            elif [[ "${#_WT_ARCHIVE_MATCHES[@]}" -gt 1 ]]; then
+                echo "Worktree selector is ambiguous: $NAME"
+                exit 1
+            fi
+        fi
+        if [[ -n "$WT" && -d "$WT" ]]; then
             BRANCH=$(cd "$WT" && git branch --show-current)
             if git worktree remove --force "$WT" 2>/dev/null; then
                 echo "Archived: directory removed, branch $BRANCH preserved in git"
@@ -583,7 +612,7 @@ case "${1:-status}" in
                 exit 1
             fi
         else
-            echo "Worktree not found: $WT"
+            echo "Worktree not found: $NAME"
             exit 1
         fi
         ;;

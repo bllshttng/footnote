@@ -85,6 +85,14 @@ def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     )
 
 
+def _archive(canon: Path, target: Path) -> subprocess.CompletedProcess:
+    script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    return subprocess.run(
+        ["bash", str(script), "archive", str(target)],
+        cwd=str(canon), capture_output=True, text=True,
+    )
+
+
 def _add_merged(canon: Path, name: str) -> Path:
     """Worktree whose branch is merged into origin/main (a reap candidate)."""
     wt = canon / name
@@ -102,6 +110,18 @@ def _add_merged_at(canon: Path, wt: Path, name: str) -> Path:
     _git(canon, "merge", "--no-ff", f"feature/{name}", "-m", f"merge {name}")
     _git(canon, "push", "origin", "main")
     return wt
+
+
+# ── archive accepts the path printed by worktree ensure ─────────────────────
+def test_archive_accepts_an_external_worktree_path(repo: Path, tmp_path: Path):
+    wt = tmp_path / "external-base" / "repo" / "archive-me"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/archive-me", "main")
+
+    result = _archive(repo, wt)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not wt.exists()
+    assert "feature/archive-me" in _git(repo, "branch", "--list").stdout
 
 
 # ── AC1-UI: dry-run is the default and mutates nothing ──────────────────────
