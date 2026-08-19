@@ -8179,10 +8179,22 @@ def cmd_reconcile(
                 # fno pr merge, the bare sweep) only ever reach this with an
                 # already-merged PR; this guards a direct manual
                 # `--pr-number` invocation against the same premature bind.
-                closure_refused = f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+                #
+                # Only worth refusing (and reporting) when the body actually
+                # names a trailer: a state-read blip on a PR with NO trailer
+                # at all has nothing to bind either way, and the node this
+                # run is closing almost always closes fine via the ordinary
+                # ref-based scan below - flagging that as a refusal read a
+                # fully successful run as failed (round-8 review fix).
+                if parse_closure_trailer(pr_ctx.body):
+                    closure_refused = (
+                        f"PR #{pr_number} is not merged (state={pr_ctx.state})"
+                    )
+                    if not json_out:
+                        typer.echo(
+                            f"warning: reconcile --pr-number: {closure_refused}", err=True,
+                        )
                 pr_ctx = None
-                if not json_out:
-                    typer.echo(f"warning: reconcile --pr-number: {closure_refused}", err=True)
 
         if pr_ctx is not None:
             closure_claims = parse_closure_trailer(pr_ctx.body)

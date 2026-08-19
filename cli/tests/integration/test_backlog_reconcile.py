@@ -1348,6 +1348,33 @@ def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_un
     assert other["completed_at"] is None  # untouched: our_repo was unresolvable
 
 
+def test_reconcile_pr_number_state_blip_with_no_trailer_never_reads_refused(cli_env, monkeypatch):
+    """Round-8 review fix: a state-read blip on the SEPARATE closure-context
+    fetch (fetch_pr_closure_context) must not report closure_refused when the
+    PR body carries no trailer at all - there is nothing to bind either way,
+    and the node still closes fine via the ordinary ref-based scan below,
+    which reads the PR's merge state independently. Flagging that as a
+    refusal read a fully successful run as failed."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-950001", pr_number=930)])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=930, state="OPEN"),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({930: "MERGED"}))
+
+    result = runner.invoke(
+        app,
+        ["backlog", "reconcile", "--pr-number", "930", "--repo", "test-owner/test-repo", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["closure_refused"] is None
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-950001"}
+
+
 def test_reconcile_pr_number_refuses_binding_an_unmerged_pr(cli_env, monkeypatch):
     """Review fix (x-59a6): a --pr-number call must never bind a trailer
     claim before the PR is actually merged - an OPEN PR could still be

@@ -76,4 +76,11 @@ run "Backlog-Closure:x-59a6" "feature/x-59a6" \
   && pass "no space after colon still passes" \
   || fail "no space after colon should still pass"
 
+# no-space-after-comma: the runtime parser treats a comma as equivalent to a
+# space (round-8 review fix: a second id right after a comma, with no space,
+# used to read as missing even though it binds fine at merge time).
+run "Backlog-Closure:x-cdef,x-59a6" "feature/x-59a6" \
+  && pass "no space after comma still passes" \
+  || fail "no space after comma should still pass"
+
 log "all scenarios passed"
