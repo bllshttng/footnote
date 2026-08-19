@@ -110,13 +110,16 @@ def compute_plan_fidelity(
         # No planned rows in window: nothing to measure, nothing to refuse.
         return _passthrough(planned=0, delivered=0)
 
-    # Re-check the same key on the fold's own output: the pre-filter above is
-    # what makes this fast, this re-check is what keeps it correct regardless
-    # of what the fold does with its input.
-    plan_rows = [
-        r for r in pf["results"]
-        if _plan_key(r.get("plan_path"), r.get("project")) == target
-    ]
+    # No re-check against `target` here: build_plan_fidelity's own internal
+    # join (shipped_by_plan, keyed by _plan_key on each INPUT row's own
+    # plan_path/project) only ever sees the rows we just pre-filtered, so
+    # every row in pf["results"] already belongs to this plan by construction.
+    # A re-check would in fact be WRONG - the fold's result dicts carry
+    # plan_path and session_id but never project (fold.py's `results.append`
+    # calls omit it), so filtering the output on `r.get("project")` compares
+    # every row's project against None and drops everything, silently
+    # zeroing planned/delivered/refused no matter what the ledger holds.
+    plan_rows = pf["results"]
     unjoined = [r for r in plan_rows if r.get("status") == "unjoined"]
     planned = len(plan_rows)
     delivered = planned - len(unjoined)
