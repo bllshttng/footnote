@@ -546,7 +546,7 @@ fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const BASE: Duration = Duration::from_secs(5);
     const PER_HANDLE: Duration = Duration::from_millis(300);
     const CEILING: Duration = Duration::from_secs(60);
-    std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
+    std::cmp::min(BASE + PER_HANDLE * handles.min(200) as u32, CEILING)
 }
 
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
@@ -4957,6 +4957,14 @@ mod tests {
             family1_truth_batch_timeout(10_000),
             Duration::from_secs(60),
             "the bound is capped, not unbounded"
+        );
+        // Saturates rather than wrapping or panicking. Checked by running the
+        // arithmetic, not by reasoning about it: an earlier draft of this
+        // comment asserted `Duration * u32` panicked here, and it does not.
+        assert_eq!(
+            family1_truth_batch_timeout(usize::MAX),
+            Duration::from_secs(60),
+            "an absurd handle count saturates at the ceiling"
         );
     }
 
