@@ -362,7 +362,7 @@ def test_an_unmergeable_pr_is_not_the_kings_work(monkeypatch):
 
 
 def test_a_superseded_red_beside_a_fresh_green_reads_mergeable(monkeypatch):
-    """PRs 917 and 950, the real shape. A force/amend push leaves the
+    """The real shape, hit twice in one night on two different PRs. A force/amend push leaves the
     superseded run's FAILURE sitting beside the fresh run's SUCCESS in the
     same statusCheckRollup, same check name. Flattening every entry's
     conclusion into one set (the pre-fix behavior) poisons that set with the

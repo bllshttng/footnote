@@ -372,7 +372,7 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 
 - **Custom agents** - Codex uses its own agent format. Run `python scripts/sync-codex-agents.py` after agent changes.
 - **Hook-enhanced lifecycle** - hooks enhance but do not fully enforce the pipeline. The orchestrator carries more responsibility for state management.
-- **CI workflow** - the `codex-bootstrap-check.yml` workflow validates setup on every PR. Ensure your changes pass this check.
+- **CI workflow** - `.github/workflows/guards.yml`'s `guards` job validates Codex setup on every PR and push. Ensure your changes pass this check.
 
 ### All providers
 

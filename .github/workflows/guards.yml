@@ -11,11 +11,14 @@ name: guards
 # heterogeneous scripts into one shared runner buys nothing but a collision
 # risk none of them were written to tolerate.
 #
-# Every step after Checkout carries `if: ${{ !cancelled() }}`, so one
-# guard's failure does not skip every later guard in the same job run. A
-# failing step still fails the job (this only controls whether later steps
-# attempt to run), so a real problem in step 3 no longer hides a second
-# real problem in step 9 behind a "skipped" status.
+# Every step after Checkout carries `if: ${{ !cancelled() }}` AND its own
+# `timeout-minutes` (matching its original per-workflow timeout). Together
+# they restore the isolation a separate-job-per-check layout gave for free:
+# `if` means a real FAILURE in step 3 does not skip step 9, and the
+# per-step timeout means a HANG in step 3 cannot silently consume the
+# whole job's shared budget and starve every step after it - a failing
+# step still fails the job either way, this only bounds how much of the
+# shared clock any one step can spend before the rest get their turn.
 #
 # Every step's name and command is verbatim from the workflow it replaces
 # (scripts/ci/check-workflow-manifest.sh's manifest names the source). A step
@@ -61,6 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # v4, matching every one of this job's five sources - unlike the
+      # `guards` job below, nothing folded in here ever pinned v5.
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -83,6 +88,7 @@ jobs:
       # without a matching docs/architecture/ update.
       - name: Check control-plane doc colocation
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         continue-on-error: true
         env:
           BASE_REF: ${{ github.base_ref }}
@@ -91,11 +97,13 @@ jobs:
       # From control-plane-doc-colocation.yml (self-test job).
       - name: Run doc-colocation test harness
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/ci/test_control_plane_doc_colocation.sh
 
       # From loc-ratchet.yml (loc-ratchet job).
       - name: Run LOC ratchet
         if: ${{ !cancelled() }}
+        timeout-minutes: 10
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.base_ref }}
@@ -104,6 +112,7 @@ jobs:
       # From loc-ratchet.yml (self-test job).
       - name: Run loc-ratchet test harness
         if: ${{ !cancelled() }}
+        timeout-minutes: 10
         run: bash tests/ci/test_loc_ratchet.sh
 
       # From oos-tracked.yml (check-oos-tracked job). PR-controlled text (the
@@ -111,6 +120,7 @@ jobs:
       # into `run:`, which would be a shell-injection hole.
       - name: Out-of-scope items reference a tracked node / carveout
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash scripts/ci/check-oos-tracked.sh
@@ -118,15 +128,18 @@ jobs:
       # From oos-tracked.yml (self-test job).
       - name: Run oos-tracked test harness
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/ci/test_oos_tracked.sh
 
       - name: PR-create out-of-scope tracking contract
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/skills/test_pr_oos_tracking_contract.sh
 
       # From pr-body-length.yml (check-pr-body-length job).
       - name: PR body length
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash scripts/ci/check-pr-body-length.sh
@@ -134,6 +147,7 @@ jobs:
       # From pr-body-length.yml (check-pr-body-style job).
       - name: PR body style
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash scripts/ci/check-pr-style.sh
@@ -141,6 +155,7 @@ jobs:
       # From pr-body-length.yml (self-test job).
       - name: Run pr-body-length self-test
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/ci/test_pr_body_length.sh
 
       # From session-url-scan.yml (check-no-session-urls job). PR-controlled
@@ -149,6 +164,7 @@ jobs:
       # hole.
       - name: No claude.ai/code session URLs in commits / title / body
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -193,15 +209,18 @@ jobs:
       # review catch.
       - name: Workflow manifest (no silent workflow-file deletion)
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-workflow-manifest.sh
 
       - name: Run workflow-manifest test harness
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
       # From axis-vocabulary.yml.
       - name: Axis vocabulary ratchet + self-test
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: |
           bash scripts/ci/check-axis-vocabulary.sh --self-test
           bash scripts/ci/check-axis-vocabulary.sh
@@ -209,20 +228,18 @@ jobs:
       # From autonomy-registry.yml.
       - name: autonomy registry ratchet
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-autonomy-registry.sh
 
-      # From codex-bootstrap-check.yml. Its own job carried an isolated
-      # 15-minute timeout; folded into one job with ten other guards, an
-      # unbounded stall here would exhaust the shared job budget and take
-      # all eleven down together instead of just this one (PR 933's own
-      # 15-minute apt stall is the exact shape). A per-step cap on these
-      # three keeps that failure bounded to itself.
+      # From codex-bootstrap-check.yml, whose own job carried the widest
+      # timeout of any folded source (15 minutes) - these three steps are
+      # the ones that have actually stalled to their ceiling before.
       - name: Setup prerequisites
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         # jq ships on ubuntu-latest; apt runs only as an image-drift
         # fallback (an unconditional `apt-get update` once stalled 15
-        # minutes on an unreachable mirror - PR 933).
+        # minutes on an unreachable mirror).
         run: |
           command -v jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
           jq --version
@@ -240,36 +257,43 @@ jobs:
       # From mail-inject-callers.yml.
       - name: mail-inject caller ratchet
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-mail-inject-callers.sh
 
       # From markdown-style.yml.
       - name: Markdown style (added lines)
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-markdown-style.sh origin/main
 
       # From plan-rung-authority.yml.
       - name: One readiness authority (Python table, shell verb, Rust delegation)
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-plan-rung-authority.sh
 
       # From preamble-budget.yml.
       - name: SessionStart preamble byte budget
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-preamble-budget.sh
 
       # From review-invocation-single-source.yml.
       - name: Review invocation single-source check
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-review-invocation-single-source.sh
 
       # From skill-local-evals.yml.
       - name: No skills/<name>/evals/ dead convention
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash scripts/ci/check-no-skill-local-evals.sh
 
       # From tracker-partition.yml.
       - name: Tracker partition gate + self-test
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: |
           bash scripts/ci/check-tracker-partition.sh --self-test
           bash scripts/ci/check-tracker-partition.sh
@@ -277,10 +301,12 @@ jobs:
       # From uv-install-bytecode.yml.
       - name: Bytecode gate + self-test
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: |
           bash scripts/ci/check-uv-install-compiles-bytecode.sh --self-test
           bash scripts/ci/check-uv-install-compiles-bytecode.sh
 
       - name: uv install verify-wait pin (all four provisioning paths)
         if: ${{ !cancelled() }}
+        timeout-minutes: 5
         run: bash tests/ci/test_uv_install_verify_wait.sh
