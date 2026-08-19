@@ -308,7 +308,7 @@ def test_direct_node_spawn_failure_releases_shared_reservation(
     )
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **_k: (_ for _ in ()).throw(DispatchAskError("mux failed", exit_code=7)),
     )
     released: list[tuple[str, str]] = []

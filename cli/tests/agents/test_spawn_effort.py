@@ -250,7 +250,7 @@ def _stub_pane_path(monkeypatch):
 
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
     monkeypatch.setattr(mux_spawn, "resolve_provenance", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
     return received
 
 

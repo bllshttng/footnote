@@ -193,7 +193,7 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
         readiness_rule = "live_prompt_box"
 
     monkeypatch.setattr(
-        mux_mod, "dispatch_spawn_pane", lambda **kw: PaneResult()
+        mux_mod, "dispatch_spawn_bounded_pane", lambda **kw: PaneResult()
     )
     monkeypatch.setattr(mux_mod, "resolve_provenance", lambda *a: None)
     from fno.agents.cli import agents_app

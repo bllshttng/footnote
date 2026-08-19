@@ -103,7 +103,8 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
-        "--node", "--slug", "--plan", "--name",
+        "--node", "--slug", "--plan", "--name", "--recorded-provider",
+        "--tab-id",
         # x-6de8: --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
         # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options

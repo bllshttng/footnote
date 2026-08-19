@@ -2216,8 +2216,8 @@ event_types:
 
   - name: operator_decision
     retention: durable
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno decide list` reads. See docs/architecture/decision-record.md."
-    sources: [target, hook, subagent, test]
+    description: "A durable explicit decision made by an operator, an agent under a grant, or the provider-outage daemon after a transaction reaches committed or parked. Daemon automation records only those terminal transaction results and stamps authority_source=daemon-automation; observations and intermediate phases never become decisions."
+    sources: [target, hook, subagent, daemon, test]
     data:
       required: [decision_id, decision]
       properties:
@@ -3333,6 +3333,73 @@ event_types:
         detail:
           type: string
           description: "The named reason the action was refused."
+
+  - name: provider_breaker_transition
+    description: "The daemon observed a provider/account breaker state transition from durable quorum evidence."
+    sources: [daemon]
+    data:
+      required: [outage_epoch, provider, account, phase, count]
+      properties:
+        outage_epoch:
+          type: string
+        provider:
+          type: string
+        account:
+          type: string
+        phase:
+          type: string
+        count:
+          type: integer
+
+  - name: provider_handoff_transition
+    description: "A cross-provider outage transaction reached a durable terminal phase."
+    sources: [daemon]
+    data:
+      required: [node, outage_epoch, provider, account, phase, count]
+      properties:
+        node:
+          type: string
+        outage_epoch:
+          type: string
+        provider:
+          type: string
+        account:
+          type: string
+        source_provider:
+          type: string
+        source_account:
+          type: string
+        phase:
+          type: string
+        count:
+          type: integer
+        attempt:
+          type: string
+
+  - name: provider_handoff_refused
+    description: "The daemon refused or could not run a provider-outage handoff and left ownership unchanged."
+    sources: [daemon]
+    data:
+      required: [reason, phase, count]
+      properties:
+        node:
+          type: string
+        outage_epoch:
+          type: string
+        provider:
+          type: string
+        account:
+          type: string
+        source_row_id:
+          type: string
+        phase:
+          type: string
+        reason:
+          type: string
+        detail:
+          type: string
+        count:
+          type: integer
   - name: worker_refused
     description: "A live worker's own last turn carries a provider refusal the taxonomy classifies as swap-class. Positive evidence that a worker cannot think, emitted once per (short_id, error_class) so silence is never the only signal. Fires on the FIRST tick after the refusal rather than after recovery.idle_threshold_seconds: a refusal is affirmative evidence and must not wait behind a timer built for silence, nor be suppressed by a stale promise reading done."
     sources: [daemon]

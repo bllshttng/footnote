@@ -7,6 +7,8 @@ agents gate !--record
 agents heal-token !--all-sources
 agents list !--provider
 agents spawn !--output-format
+agents spawn !--bounded-placement
+agents spawn !--recorded-provider
 agents spawn !--squad
 approvals decide !--db
 approvals ls !--db

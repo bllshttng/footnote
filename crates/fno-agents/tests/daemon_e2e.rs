@@ -1422,7 +1422,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
         std::thread::sleep(Duration::from_millis(25));
     }
 
-    // A future-schema store: the tolerant reader keeps the two rows it can
+    // A future-version store: the tolerant reader keeps the two rows it can
     // represent and drops the announced third (an unknown status value).
     // Raw 3, decoded 2.
     let row = |name: &str, status: &str| {
@@ -1430,9 +1430,9 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
             r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"{status}","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
+    let future_schema = fno_agents::state::REGISTRY_SCHEMA_VERSION + 1;
     let fixture = format!(
-        r#"{{"schema_version":{},"agents":[{},{},{}]}}"#,
-        fno_agents::state::REGISTRY_SCHEMA_VERSION + 1,
+        r#"{{"schema_version":{future_schema},"agents":[{},{},{}]}}"#,
         row("worker-alpha", "live"),
         row("worker-beta", "flux"),
         row("worker-gamma", "live")
@@ -1442,7 +1442,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     // HEAL a future-schema fixture mid-race (seen once on a slow CI runner):
     // the healed file is then a valid registry and serving it is correct. A
     // healed file breaks the test's precondition, not the code, so re-seed and
-    // retry. A file still holding the 3-raw-row v15 shape that GETS SERVED is
+    // retry. A file still holding the 3-raw-row future shape that GETS SERVED is
     // the real failure and always panics here.
     let mut attempt = 0;
     loop {

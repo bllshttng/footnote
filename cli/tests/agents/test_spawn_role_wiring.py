@@ -662,7 +662,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
     monkeypatch.setattr(mux_spawn, "resolve_provenance", lambda *a, **k: {})
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: received.update(kwargs)
         or mux_spawn.MuxSpawnResult(
             name=kwargs["name"],
@@ -749,7 +749,7 @@ def test_cmd_spawn_composes_role_route_over_managed_oauth_overlay(
     )
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: spawn_calls.append(kwargs)
         or mux_spawn.MuxSpawnResult(
             name=kwargs["name"],

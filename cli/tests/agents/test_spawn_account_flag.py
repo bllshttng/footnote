@@ -43,7 +43,7 @@ def _stub_pane_path(monkeypatch) -> dict:
             pane_id=1, child_pid=None, session_uuid=None,
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_pane)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_pane)
     return received
 
 
@@ -278,7 +278,7 @@ def test_composed_receipt_names_live_credential_and_payer(monkeypatch, runner):
 def test_account_only_receipt_has_no_credential_fields(monkeypatch, runner):
     """AC3-EDGE (x-8552): an --account spawn with no route emits no auth/bills -
     its receipt stays byte-identical to the pre-x-8552 shape."""
-    received = _stub_pane_path(monkeypatch)
+    _stub_pane_path(monkeypatch)
     import fno.agents.account_env as ae
     from fno.agents.account_env import AccountOverlay
 

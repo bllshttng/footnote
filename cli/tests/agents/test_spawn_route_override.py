@@ -206,7 +206,7 @@ def test_route_allowed_on_capability_enabled_pane(
             session_uuid="u",
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "hi", "--harness", "claude", "--route", "zai,glm-5.2"],
@@ -266,7 +266,7 @@ def test_receipt_model_is_the_effective_model_not_the_routed_one(
             session_uuid="u",
         )
 
-    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_bounded_pane", fake_dispatch)
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "hi", "--harness", "claude",
@@ -352,7 +352,7 @@ def test_route_on_pane_capability_fails_closed_before_gate(
     )
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: pytest.fail("pane dispatch called"),
     )
 
