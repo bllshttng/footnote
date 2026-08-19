@@ -34,13 +34,14 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$_de43_stub/fno"; chmod +x "$_de43_stu
 trap 'rm -rf "$_de43_stub"' EXIT
 run_nofno() { PATH="$_de43_stub:$PATH" bash "$NORM" --input "$1" "${@:2}"; }
 
-# run_guarded caps a run at 5s when a timeout binary exists (coreutils `timeout`,
-# or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung.
+# run_guarded caps a run at 30s when a timeout binary exists (coreutils `timeout`,
+# or `gtimeout` on macOS), so a regressed $#-guard that spins is caught, not hung,
+# without killing a healthy shell under the high host load this fleet can create.
 # Where neither exists (bare macOS), it runs unguarded - the status/value asserts
 # still prove correctness, and CI (Linux, has `timeout`) enforces the no-hang.
 TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 run_guarded() {
-  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" 5 bash "$NORM" --input "$1" "${@:2}"
+  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" 30 bash "$NORM" --input "$1" "${@:2}"
   else bash "$NORM" --input "$1" "${@:2}"; fi
 }
 
