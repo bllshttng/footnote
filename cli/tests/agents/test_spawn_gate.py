@@ -592,6 +592,27 @@ class TestRunGate:
         assert "provider zai" in refused and "cap 2" in refused
         assert "current count unavailable" in refused
 
+    def test_release_failures_are_loud_and_retain_retry_state(
+        self, monkeypatch, capsys
+    ):
+        guard = spawn_gate.GateGuard(
+            _gate_holder="gate-holder",
+            _worker_key="worker:peer",
+            _worker_holder="worker-holder",
+        )
+        monkeypatch.setattr(
+            "fno.claims.core.release_claim",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError("store denied")),
+        )
+
+        guard.release()
+
+        assert guard._gate_holder == "gate-holder"
+        assert guard._worker_key == "worker:peer"
+        refused = capsys.readouterr().err
+        assert "could not release gate mutex" in refused
+        assert "could not release worker reservation worker:peer" in refused
+
     def test_pidless_bg_requires_a_readable_positive_roster_marker(
         self, tmp_path, monkeypatch
     ):

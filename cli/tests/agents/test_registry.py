@@ -279,7 +279,9 @@ def test_ac4_err_future_schema_version_reads_forward(tmp_path: Path, monkeypatch
         encoding="utf-8",
     )
 
-    assert load_registry(path=registry_path) == []
+    loaded = load_registry(path=registry_path)
+    assert loaded == []
+    assert loaded.complete is False
 
 
 def test_forward_read_marks_a_skipped_row_incomplete(

@@ -581,25 +581,30 @@ class GateGuard:
     def release_gate_mutex(self) -> None:
         if self._gate_holder is None:
             return
-        holder, self._gate_holder = self._gate_holder, None
+        holder = self._gate_holder
         try:
             from fno.claims.core import release_claim
 
             release_claim("spawn-gate", holder, root=_gate_claims_root())
-        except Exception:
-            pass
+        except Exception as exc:
+            _warn(f"spawn-gate: could not release gate mutex: {exc}")
+            return
+        self._gate_holder = None
 
     def release(self) -> None:
         self.release_gate_mutex()
         if self._worker_key is None:
             return
-        key, self._worker_key = self._worker_key, None
+        key = self._worker_key
         try:
             from fno.claims.core import release_claim
 
             release_claim(key, self._worker_holder or "", root=_gate_claims_root())
-        except Exception:
-            pass
+        except Exception as exc:
+            _warn(f"spawn-gate: could not release worker reservation {key}: {exc}")
+            return
+        self._worker_key = None
+        self._worker_holder = None
 
 
 class GateRefused(SystemExit):

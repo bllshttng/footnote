@@ -165,6 +165,7 @@ def test_explicit_route_dispatches_plugin_agent_and_attributes_effective_model()
     assert captured["headless"] is True
     assert captured["agent"] == "fno:code-reviewer"
     assert captured["route_env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai"
+    assert captured["route_provider"] is None
     assert captured["model"] == "glm-5.2"
     assert outcome.provider == "claude"
     assert outcome.model == "glm-5.2"
@@ -184,7 +185,7 @@ def test_explicit_route_runs_provider_gate_across_dispatch(monkeypatch) -> None:
         return _Gate()
 
     def dispatch(**kwargs):
-        events.append(("dispatch", kwargs["name"]))
+        events.append(("dispatch", kwargs))
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
@@ -216,6 +217,7 @@ def test_explicit_route_runs_provider_gate_across_dispatch(monkeypatch) -> None:
     assert substrate == "headless"
     assert kwargs == {"route_provider": "zai"}
     assert [event[0] for event in events] == ["gate", "dispatch", "release"]
+    assert events[1][1]["route_provider"] == "zai"
 
 
 def test_dispatch_timeout_floored_to_one() -> None:

@@ -141,6 +141,7 @@ def run_via_agents_spawn(
                 timeout=max(1, int(timeout)),
                 from_name=_FROM_NAME,
                 route_env=route_env,
+                route_provider=route_provider,
                 model=model,
                 agent=named_agent,
                 headless=headless,

@@ -2574,7 +2574,19 @@ def dispatch_spawn(
                     except RouteCompositionError as exc:
                         raise DispatchAskError(str(exc), exit_code=2) from exc
                     if route_provider is None:
-                        route_provider = restored_provider
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} resolves provider "
+                            f"{restored_provider!r}, but provider admission was not "
+                            "evaluated before dispatch; refusing; no worker launched",
+                            exit_code=2,
+                        )
+                    if route_provider != restored_provider:
+                        raise DispatchAskError(
+                            f"route recorded for {source_row.name!r} resolves provider "
+                            f"{restored_provider!r}, but admission was evaluated for "
+                            f"{route_provider!r}; refusing; no worker launched",
+                            exit_code=2,
+                        )
                     # Say so. The Rust `resume` door prints its restore, and a
                     # relaunch that silently changes destination is the failure
                     # shape this whole path exists to remove - a receipt that

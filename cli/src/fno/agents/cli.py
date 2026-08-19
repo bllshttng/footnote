@@ -1302,6 +1302,51 @@ def cmd_spawn(
             guard["reservation_holder"],
         )
 
+    # A resume may restore a recorded route inside dispatch_spawn. Resolve its
+    # separately stored provider axis before admission so the gate judges the
+    # destination the revived worker will actually use.
+    if resume is not None and route_provider is None:
+        from fno.agents.registry import load_registry
+
+        try:
+            loaded = load_registry()
+            if getattr(loaded, "complete", True) is not True:
+                raise RuntimeError("registry forward read is incomplete")
+        except Exception as exc:
+            print(
+                f"resume provider unreadable ({exc}); refusing because its provider "
+                "cap cannot be evaluated; no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from exc
+        source_row = next(
+            (
+                row
+                for row in loaded
+                if row.name == name and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        ) or next(
+            (
+                row
+                for row in loaded
+                if getattr(row, "harness_session_id", None) == resume
+                and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        )
+        if source_row is not None:
+            recorded_provider = getattr(source_row, "provider", None)
+            if not recorded_provider:
+                print(
+                    f"route recorded for {source_row.name!r} has no model-provider "
+                    "axis; refusing because its provider cap cannot be evaluated; "
+                    "no worker launched",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+            route_provider = recorded_provider
+
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
     # that reaches cmd_spawn (the front door execs the binary for bg/headless,

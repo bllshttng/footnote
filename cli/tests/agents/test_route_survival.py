@@ -203,7 +203,9 @@ def test_route_settings_path_for_is_stable_and_route_wins(tmp_path, monkeypatch)
 # --- 1.3: the revive door restores the route, or refuses ---------------------
 
 
-def _routed_claude_row(tmp_path, monkeypatch, *, provider="zai"):
+def _routed_claude_row(
+    tmp_path, monkeypatch, *, provider="zai", session_id="sess-1"
+):
     """A registry holding one routed claude worker, plus its route file path."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.model_routing import materialize_route_settings
@@ -219,7 +221,7 @@ def _routed_claude_row(tmp_path, monkeypatch, *, provider="zai"):
                 harness="claude",
                 provider=provider,
                 short_id="deadbeef",
-                harness_session_id="sess-1",
+                harness_session_id=session_id,
                 route_settings_path=path,
             )
         ]
@@ -341,6 +343,7 @@ def test_an_explicit_account_composes_with_a_restored_route(
             cwd=tmp_path,
             resume_session_id="sess-1",
             account_env={"CLAUDE_CONFIG_DIR": "/cfg"},
+            route_provider="zai",
         )
     assert exc.value.exit_code == 99, "the pair must reach the launch, not be refused"
     assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/cfg"}, "account survives"
@@ -365,6 +368,87 @@ def test_a_legacy_routed_row_without_provider_refuses_relaunch(
     assert exc.value.exit_code == 2
     assert "no model-provider axis" in str(exc.value)
     assert "cap cannot be evaluated" in str(exc.value)
+
+
+def test_a_restored_route_without_prior_provider_admission_refuses(
+    tmp_path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    _routed_claude_row(tmp_path, monkeypatch)
+    harness = "claude"
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider=harness,
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert exc.value.exit_code == 2
+    assert "provider admission was not evaluated" in str(exc.value)
+
+
+def test_cli_resume_gates_the_recorded_provider_before_dispatch(
+    tmp_path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    from fno.agents import spawn_gate
+    from fno.agents.cli import agents_app
+    from fno.agents.dispatch import SpawnResult
+
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    _routed_claude_row(tmp_path, monkeypatch, session_id=session_id)
+    events = []
+
+    class _Gate:
+        def release(self):
+            events.append(("release", None))
+
+    monkeypatch.setattr(
+        spawn_gate,
+        "run_gate",
+        lambda name, substrate, **kwargs: events.append(
+            ("gate", (name, substrate, kwargs))
+        )
+        or _Gate(),
+    )
+
+    def fake_dispatch(**kwargs):
+        events.append(("dispatch", kwargs))
+        return SpawnResult(
+            kind="created",
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            short_id="new12345",
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
+    result = CliRunner().invoke(
+        agents_app,
+        [
+            "spawn",
+            "--name",
+            "router",
+            "go",
+            "--harness",
+            "claude",
+            "--substrate",
+            "bg",
+            "--resume",
+            session_id,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events[0] == (
+        "gate",
+        ("router", "bg", {"force": False, "no_wait": False, "route_provider": "zai"}),
+    )
+    assert events[1][0] == "dispatch"
+    assert events[1][1]["route_provider"] == "zai"
+    assert events[2] == ("release", None)
 
 
 def test_a_role_that_resolves_to_nothing_still_restores_the_route(
@@ -494,6 +578,7 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
             provider="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
+            route_provider="zai",
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"
     assert seen["route_provider"] == "zai", "the recorded provider rides with it"
@@ -528,5 +613,6 @@ def test_a_restored_route_composes_under_managed_marker(
             provider="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
+            route_provider="zai",
         )
     assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"

@@ -1278,7 +1278,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             "are invisible to this process until it is upgraded.",
             file=sys.stderr,
         )
-    return LoadedRegistry(entries, complete=not skipped_rows)
+    return LoadedRegistry(entries, complete=not read_forward and not skipped_rows)
 
 
 def register_existing_session(
