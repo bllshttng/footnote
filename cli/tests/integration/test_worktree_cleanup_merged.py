@@ -17,6 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LIFECYCLE_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh"
 LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
+UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 
 
@@ -55,6 +56,7 @@ def repo(tmp_path: Path) -> Path:
     (canon / "scripts" / "setup").mkdir(parents=True)
     shutil.copy2(LIFECYCLE_SRC, canon / "scripts" / "lib" / "worktree-lifecycle.sh")
     shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
+    shutil.copy2(UNPUSHED_SRC, canon / "scripts" / "lib" / "worktree-unpushed.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -325,6 +327,46 @@ def test_age_sweep_keeps_codex_app_owned_worktree(
     assert wt.exists()
 
 
+def test_age_sweep_keeps_detached_tree_with_unpushed_commits(repo: Path):
+    """The age sweep removes by default and with --force, and a detached tree
+    has no preserved branch to fall back on: force-removing it destroys any
+    commit no remote carries. The same wt_unpushed_count guard the merged
+    sweep uses must hold on this path too."""
+    wt = _add_detached(repo, repo / "wt-age-unpushed")
+    _commit(wt, "age.txt")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (detached HEAD holds unpushed commits)" in r.stdout
+    assert wt.exists(), "age sweep must not force-remove unique commits on a detached HEAD"
+
+
+def test_age_sweep_removes_old_clean_detached_tree(repo: Path):
+    wt = _add_detached(repo, repo / "wt-age-clean")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert not wt.exists(), r.stdout
+    assert "REMOVED" in r.stdout
+
+
+def test_age_sweep_keeps_detached_tree_with_uncommitted_work(repo: Path):
+    """Same loss class as unpushed commits, one step earlier: a detached tree
+    has no branch holding uncommitted content either, and the sweep removes by
+    default with --force. The in-flight eval tree rides this guard via its
+    untracked marker file (cli/src/fno/evals/runner.py)."""
+    wt = _add_detached(repo, repo / "wt-age-dirty")
+    (wt / "scratch.txt").write_text("not on any ref\n")
+
+    r = _age_sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (detached HEAD holds uncommitted work" in r.stdout
+    assert wt.exists(), "age sweep must not force-remove uncommitted work on a detached HEAD"
+
+
 def test_compat_age_sweep_delegates_app_owned_guard(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -339,6 +381,207 @@ def test_compat_age_sweep_delegates_app_owned_guard(
     assert r.returncode == 0, r.stderr
     assert f"SKIP: {wt} (app-owned Codex worktree)" in r.stdout
     assert wt.exists()
+
+
+# ── detached scratch trees: classified by content, not branch name ──────────
+def _add_detached(repo: Path, wt: Path, at: str = "main") -> Path:
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "add", "--detach", str(wt), at)
+    return wt
+
+
+def test_detached_at_remote_tip_is_reap_candidate(repo: Path):
+    """A scratch tree is detached BY CONSTRUCTION; a head that some remote
+    already carries is recreatable, so the sweep must offer it as a candidate
+    instead of keeping it on the branch-name proxy."""
+    wt = _add_detached(repo, repo / "wt-scratch-clean")
+
+    r = _sweep(repo)
+
+    assert r.returncode == 0, r.stderr
+    assert any(
+        "would-archive" in line and str(wt) in line for line in r.stdout.splitlines()
+    ), r.stdout
+    assert wt.exists(), "dry-run must not remove the worktree"
+
+
+def test_apply_reaps_detached_scratch_tree(repo: Path):
+    wt = _add_detached(repo, repo / "wt-scratch-reapme")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not wt.exists(), "clean detached tree with nothing unpushed should be archived" + diag
+
+
+def test_detached_with_local_commits_kept(repo: Path):
+    wt = _add_detached(repo, repo / "wt-scratch-unpushed")
+    _commit(wt, "d.txt")
+
+    r = _sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert "kept (unpushed)" in r.stdout
+    assert wt.exists(), "local-only commits at a detached HEAD must never be removed"
+
+
+def test_preflight_tree_is_permanent(repo: Path):
+    """scripts/ci/preflight.sh pins a scratch worktree named `preflight` and
+    hard-resets it per run; sweeping it would churn its warm caches."""
+    wt = _add_detached(repo, repo / ".claude" / "worktrees" / "preflight")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (permanent)" in r.stdout, diag
+    assert "1 permanent" in r.stdout, diag
+    assert wt.exists(), diag
+
+
+def test_archive_detached_pushed_to_nondefault_remote_branch(repo: Path):
+    """The removal-time gate must agree with the sweep. A detached head that
+    lives on a pushed non-default branch holds nothing unique, yet the
+    default-ref comparison used to refuse it (exit 2), so a sweep that
+    classified the tree as reapable could never actually remove it."""
+    src = repo / "wt-pushed-src"
+    _git(repo, "worktree", "add", str(src), "-b", "feature/pushed", "main")
+    _commit(src, "s.txt")
+    _git(src, "push", "origin", "feature/pushed")
+    sha = _git(src, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "worktree", "remove", str(src))
+    det = _add_detached(repo, repo / "wt-scratch-pushed", at=sha)
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert not det.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_detached_local_only_refused(repo: Path):
+    det = _add_detached(repo, repo / "wt-scratch-local")
+    _commit(det, "l.txt")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2
+    assert "detached HEAD not on any remote" in r.stderr
+    assert det.exists()
+
+
+# ── stale tracking refs: the branch is gone on the server, the ref lives on ─
+def _origin_bare(repo: Path) -> Path:
+    return Path(_git(repo, "remote", "get-url", "origin").stdout.strip())
+
+
+def _detached_at_deleted_remote_branch(repo: Path, name: str) -> Path:
+    """A tree detached at a commit whose remote branch is GONE on the server:
+    the local refs/remotes entry still points at the commit, so only a pruned
+    refresh sees that no remote carries it anymore."""
+    src = repo / f"{name}-src"
+    _git(repo, "worktree", "add", str(src), "-b", f"feature/{name}", "main")
+    _commit(src, f"{name}.txt")
+    _git(src, "push", "origin", f"feature/{name}")
+    sha = _git(src, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "worktree", "remove", str(src))
+    _git(_origin_bare(repo), "branch", "-D", f"feature/{name}")
+    return _add_detached(repo, repo / f"wt-scratch-{name}", at=sha)
+
+
+def test_detached_kept_when_remote_branch_was_deleted(repo: Path):
+    """Judged against the stale tracking ref the count reads 0 and the sweep
+    destroys the only copy of the commit. The pruned refresh must flip the
+    verdict to kept."""
+    wt = _detached_at_deleted_remote_branch(repo, "gone")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "kept (unpushed)" in r.stdout, diag
+    assert wt.exists(), "a commit no remote carries anymore must never be reaped" + diag
+
+
+def test_archive_detached_kept_when_remote_branch_was_deleted(repo: Path):
+    """The removal-time gate must agree with the sweep on the stale-ref case;
+    otherwise a tree the sweep keeps can still be archived by hand against
+    the stale ref."""
+    wt = _detached_at_deleted_remote_branch(repo, "gone2")
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_archive_detached_refused_when_refs_unverifiable(repo: Path):
+    """No network, no verdict. A detached head whose commits the (now
+    unreachable) remote does carry must still be kept when the refresh
+    cannot verify that, not archived against refs that may be stale."""
+    wt = _add_detached(repo, repo / "wt-scratch-unverifiable")
+    _git(repo, "remote", "set-url", "origin", str(repo / "unreachable.git"))
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+
+    r = subprocess.run(
+        ["bash", str(script), str(wt)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 2, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert "not verifiable" in r.stderr, f"stderr={r.stderr}"
+    assert wt.exists(), f"stderr={r.stderr}"
+
+
+def test_dead_secondary_remote_degrades_instead_of_aborting(repo: Path):
+    """fetch --all fails if ANY remote is dead, and one stale account remote
+    must not brick the reclaim verb. Origin stays the merged-check baseline
+    (branched judging continues); the detached tree is kept because its refs
+    cannot be verified against the dead remote - with a receipt that says so,
+    not a phantom unpushed count."""
+    merged = _add_merged(repo, "reapme")
+    det = _add_detached(repo, repo / "wt-scratch-fork")
+    _git(repo, "remote", "add", "fork", str(repo / "dead-fork.git"))
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert not merged.exists(), diag
+    assert "remote refs unverifiable" in r.stdout, diag
+    assert det.exists(), "refs unverifiable against a dead remote must keep detached trees" + diag
+
+
+def test_non_origin_single_remote_detached_still_archives(repo: Path):
+    """The refresh verifies whichever remotes exist. A repo whose only remote
+    is named anything but origin must still archive a detached head that the
+    remote carries; hardcoding origin made every such repo read as
+    permanently unverifiable."""
+    _git(repo, "remote", "rename", "origin", "upstream")
+    det = _add_detached(repo, repo / "wt-scratch-upstream")
+
+    script = repo / "scripts" / "setup" / "archive-worktree.sh"
+    r = subprocess.run(
+        ["bash", str(script), str(det)],
+        cwd=str(repo), capture_output=True, text=True, stdin=subprocess.DEVNULL,
+    )
+
+    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
+    assert not det.exists(), f"stderr={r.stderr}"
 
 
 # ── silent-failure guard: empty-state line is explicit, not silence ─────────

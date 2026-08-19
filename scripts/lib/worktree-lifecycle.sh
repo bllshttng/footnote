@@ -33,6 +33,17 @@ else
     }
 fi
 
+# The detached-HEAD reachability answer, shared with archive-worktree.sh. A
+# partial deploy that dropped the lib keeps everything (count 1), never reaps;
+# its refresh stub keeps today's fetch-what-the-merged-check-needs behavior.
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-unpushed.sh"
+else
+    wt_unpushed_count() { printf '1\n'; }
+    wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
@@ -67,6 +78,16 @@ _wt_app_owned() {
         "$root/"*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Permanent by design: scripts/ci/preflight.sh pins a scratch worktree named
+# `preflight` (hard-reset to the candidate SHA per run, caches deliberately
+# preserved); hermeticity comes from the reset, not from disposal. One
+# predicate for BOTH removal paths so a second permanent tree is a one-line
+# change here, not two loop edits 125 lines apart. See
+# docs/state-root-inventory.md for the recorded entry.
+_wt_permanent() {
+    [[ "$(basename "$1")" == "preflight" ]]
 }
 
 # PIDs actually rooted in the worktree (cwd under it) OR whose cmdline
@@ -286,11 +307,21 @@ case "${1:-status}" in
             # Used only to guard job-record reaping off the canonical path.
             CANONICAL_MAIN="$(git worktree list --porcelain 2>/dev/null | awk 'NR==1{sub(/^worktree /,"");print}')"
 
-            # One fetch up front. A failure aborts loudly rather than reaping
-            # against stale refs (silently keeping everything looks identical
-            # to a clean state, so the failure must be loud).
-            if ! git fetch origin main >/dev/null 2>&1; then
-                echo "worktree cleanup --merged: git fetch origin main failed; aborting (refs would be stale)" >&2
+            # One refresh up front, PRUNED: a branch deleted on the server
+            # leaves its local tracking ref behind, and that stale ref would
+            # vouch for a commit no remote carries (wt_unpushed_count) or a
+            # phantom merged baseline. The shared predicate is
+            # remote-agnostic, so a failure is sorted HERE, where the
+            # origin-keyed baseline lives: origin unreachable aborts loudly
+            # (silently keeping everything looks identical to a clean state,
+            # so that failure must be loud); a dead NON-origin remote
+            # degrades instead of bricking the sweep - detached trees are
+            # kept (their refs cannot be verified) while origin-keyed
+            # judging and the report continue.
+            REFRESH_RC=0
+            wt_refresh_remote_refs "$MAIN_DIR" || REFRESH_RC=$?
+            if [[ "$REFRESH_RC" -ne 0 ]] && ! git fetch --prune origin >/dev/null 2>&1; then
+                echo "worktree cleanup --merged: refresh of origin failed; aborting (refs would be stale)" >&2
                 exit 1
             fi
             if ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
@@ -299,7 +330,7 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0
 
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
@@ -322,6 +353,11 @@ case "${1:-status}" in
                     printf '%-18s %-34s %s\n' "kept (app-owned)" "$branch" "$wt"; N_APP_OWNED=$((N_APP_OWNED + 1)); continue
                 fi
 
+                # 0a. permanent by design (_wt_permanent).
+                if _wt_permanent "$wt"; then
+                    printf '%-18s %-34s %s\n' "kept (permanent)" "$branch" "$wt"; N_PERM=$((N_PERM + 1)); continue
+                fi
+
                 # 1. holds content removal would destroy (tracked only; no
                 #    --ignored so the .fno symlink family is not "dirty"). A
                 #    tracked file MISSING from disk is recoverable from HEAD, so
@@ -335,11 +371,28 @@ case "${1:-status}" in
                     reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
                     printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
-                # 2. merged into origin/main? Detached HEAD (deleted branch) is always kept.
+                # 2. merged into origin/main? A detached HEAD is judged by
+                #    content, not by the branch-name proxy: the tree is kept
+                #    only while it holds commits no remote carries
+                #    (wt_unpushed_count fails toward keep), because scratch
+                #    trees are detached BY CONSTRUCTION and a blanket keep
+                #    meant the disk-reclaim verb could never reap the
+                #    population that grows. Branched trees keep the
+                #    merged-or-upstream logic below unchanged.
                 if [[ "$branch" == "HEAD" || -z "$head" ]]; then
-                    printf '%-18s %-34s %s\n' "kept (unmerged)" "$branch" "$wt"; N_UNMERGED=$((N_UNMERGED + 1)); continue
-                fi
-                if ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
+                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                        # The fail-safe count (1) is indistinguishable from a
+                        # real one in the status column, so the row names an
+                        # unverifiable refresh instead of asserting unpushed
+                        # commits that may not exist.
+                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                            printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt"
+                        else
+                            printf '%-18s %-34s %s\n' "kept (unpushed)" "$branch" "$wt  (remote refs unverifiable)"
+                        fi
+                        N_UNPUSHED=$((N_UNPUSHED + 1)); continue
+                    fi
+                elif ! git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null; then
                     # Not in main. Local-only commits (data loss) = unpushed;
                     # pushed to its own remote but not in main = unmerged (safe).
                     up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
@@ -400,7 +453,7 @@ case "${1:-status}" in
                 _reap_jobs "__MISSING__" "$CANONICAL_MAIN"
             fi
 
-            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED))
+            KEPT=$((N_DIRTY + N_UNPUSHED + N_UNMERGED + N_LIVE + N_PROC + N_SALVAGE + N_NEEDCONF + N_APP_OWNED + N_PERM))
             echo ""
             if [[ "$N_TOTAL" -eq 0 ]]; then
                 echo "No non-canonical worktrees found."
@@ -408,8 +461,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
             fi
             exit 0
         fi
@@ -431,6 +484,16 @@ case "${1:-status}" in
                 continue
             fi
 
+            # Permanent by design on BOTH removal paths (_wt_permanent): the
+            # preflight tree resets to a fresh candidate per run (so its
+            # commit age reads zero while active) and goes 7+ days stale the
+            # moment preflight stops running, which is exactly when this age
+            # sweep fires.
+            if _wt_permanent "$wt"; then
+                echo "  SKIP: $wt (permanent preflight worktree)"
+                continue
+            fi
+
             # Check age
             LAST_COMMIT=$(cd "$wt" 2>/dev/null && git log -1 --format="%ct" 2>/dev/null || echo 0)
             NOW=$(date +%s)
@@ -445,6 +508,34 @@ case "${1:-status}" in
                 fi
 
                 BRANCH=$(cd "$wt" 2>/dev/null && git branch --show-current || echo "unknown")
+                # A detached tree has no branch to preserve, so the --force
+                # below would destroy any commit no remote carries - the exact
+                # loss the merged sweep's wt_unpushed_count guard prevents.
+                # The refresh must run in THIS shell: the count below runs in
+                # a $( ) subshell that cannot carry the freshness flag back,
+                # so refreshing only inside it re-fetches per detached tree.
+                if [[ -z "$BRANCH" ]]; then
+                    # Uncommitted content first, before any network: a detached
+                    # tree has no branch holding it, so --force destroys an
+                    # untracked or modified file as surely as an unpushed
+                    # commit. Same classifier as the merged sweep; the
+                    # in-flight marker cli/src/fno/evals/runner.py drops is
+                    # untracked and rides this guard.
+                    if ! wt_reapable "$wt"; then
+                        reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                        echo "  SKIP: $wt (detached HEAD holds uncommitted work: $reason)"
+                        continue
+                    fi
+                    wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true
+                    if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
+                        if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
+                            echo "  SKIP: $wt (detached HEAD holds unpushed commits)"
+                        else
+                            echo "  SKIP: $wt (remote refs unverifiable; detached HEAD may hold unpushed commits)"
+                        fi
+                        continue
+                    fi
+                fi
                 if [[ -n "$DRY_RUN" ]]; then
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
                 else

@@ -868,15 +868,24 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     let mut daemon = start_daemon(&home);
     // Barrier: wait out the startup reconcile sweep before breaking the
     // registry. The sweep's read-modify-write of a registry it read as VALID
-    // would otherwise overwrite the divergent fixture the moment it lands
-    // between its locked read and its write (a flake seen only in the full
-    // parallel run, where the sweep is slow enough to lose the race).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
+    // would otherwise overwrite the divergent fixture: its read-forward drops
+    // the unrepresentable row and writes the rest back, healing the file so
+    // the lookup reads a valid registry and the test fails with a WRONG
+    // VERDICT instead of a wait problem. So the barrier waits on the sweep's
+    // OWN completion marker, and a marker that never arrives FAILS the test
+    // instead of silently proceeding - a silent timeout here converts "did
+    // not wait" into "lookup succeeded".
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
-        if events.contains("daemon_started") {
+        if events.contains("startup_reconcile_done") || events.contains("startup_reconcile_failed")
+        {
             break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "startup reconcile never finished; breaking the registry now would race the sweep"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     write_divergent_registry(&home);

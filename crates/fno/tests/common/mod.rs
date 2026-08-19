@@ -164,6 +164,9 @@ pub struct ClientHarness {
     /// autospawned server's stderr lands in `<session>.log` here, and the
     /// dir is gone before anyone can read it once the test unwinds.
     scratch_dir: PathBuf,
+    /// Fires when the PTY reader thread hits EOF, so `wait_exit` can barrier
+    /// against a reader the scheduler has not run yet (see `wait_exit`).
+    reader_done: std::sync::mpsc::Receiver<()>,
     // Keep the master alive for the harness lifetime.
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
@@ -231,6 +234,7 @@ impl ClientHarness {
         let mut reader = pty.master.try_clone_reader().unwrap();
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = output.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = reader.read(&mut buf) {
@@ -239,6 +243,7 @@ impl ClientHarness {
                 }
                 sink.lock().unwrap().extend_from_slice(&buf[..n]);
             }
+            let _ = done_tx.send(());
         });
         ClientHarness {
             child,
@@ -247,6 +252,7 @@ impl ClientHarness {
             consumed: 0,
             pane: Pane::new(24, 60),
             scratch_dir: scratch.0.clone(),
+            reader_done: done_rx,
             _master: pty.master,
         }
     }
@@ -394,15 +400,25 @@ impl ClientHarness {
 
     pub fn wait_exit(&mut self, secs: u64) -> portable_pty::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(secs);
-        loop {
+        let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
-                return status;
+                break status;
             }
             if Instant::now() >= deadline {
                 panic!("client did not exit within {secs}s");
             }
             std::thread::sleep(Duration::from_millis(50));
-        }
+        };
+        // Drain barrier: the reader thread sees PTY EOF only after the
+        // child's descriptors close, and a loaded runner can hand THIS
+        // thread the reaped exit before the reader has drained the final
+        // bytes - the version-skew relay read exactly that as "exited
+        // non-zero with empty output". Wait (bounded) for the reader's
+        // completion signal so a raw_output() right after wait_exit() sees
+        // every byte the child wrote; on timeout, proceed with what is
+        // captured rather than fail the suite on harness plumbing.
+        let _ = self.reader_done.recv_timeout(Duration::from_secs(2));
+        status
     }
 }
 
