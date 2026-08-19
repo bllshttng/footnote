@@ -230,6 +230,23 @@ def test_git_writable_args_empty_for_missing_path(tmp_path):
     assert codex_mod.git_writable_args(tmp_path / "nope") == []
 
 
+def test_plan_writable_args_returns_add_dir_for_resolved_plan_dir(
+    tmp_path, monkeypatch
+):
+    """A bounded worker receives its configured plan directory explicitly."""
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+
+    assert codex_mod.plan_writable_args(tmp_path) == ["--add-dir", str(plan_dir)]
+
+
+def test_plan_writable_args_empty_on_resolution_failure(tmp_path, monkeypatch):
+    """Resolution failure adds no malformed argv token."""
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
+
+    assert codex_mod.plan_writable_args(tmp_path) == []
+
+
 # ---------------------------------------------------------------------------
 # sandbox_flag_resume (resume path — restricted surface)
 # ---------------------------------------------------------------------------
@@ -266,11 +283,15 @@ def test_sandbox_flag_resume_never_emits_sandbox_flag():
 # ---------------------------------------------------------------------------
 
 
-def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path):
+def test_sandbox_config_args_resume_pins_mode_and_both_writable_roots(
+    tmp_path, monkeypatch
+):
     import json
     import pathlib
 
     repo = _init_repo(tmp_path / "repo")
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
     out = codex_mod.sandbox_config_args_resume(repo)
 
     assert out[0] == "-c"
@@ -279,11 +300,14 @@ def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path):
     key, _, value = out[3].partition("=")
     assert key == "sandbox_workspace_write.writable_roots"
     assert [pathlib.Path(p).resolve() for p in json.loads(value)] == [
-        (repo / ".git").resolve()
+        (repo / ".git").resolve(),
+        plan_dir.resolve(),
     ]
 
 
-def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_path):
+def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(
+    tmp_path, monkeypatch
+):
     """The reported case: the worktree's gitdir lives under the COMMON dir."""
     import json
     import pathlib
@@ -300,6 +324,9 @@ def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_pa
         ["git", "worktree", "add", "-q", str(wt), "-b", "feat"],
         cwd=repo, check=True,
     )
+    monkeypatch.setattr(
+        codex_mod, "_resolve_plan_dir", lambda cwd: str(tmp_path / "plans")
+    )
 
     out = codex_mod.sandbox_config_args_resume(wt)
     granted = pathlib.Path(json.loads(out[3].partition("=")[2])[0]).resolve()
@@ -308,11 +335,23 @@ def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_pa
     assert (repo / ".git" / "worktrees" / "wt").is_relative_to(granted)
 
 
-def test_sandbox_config_args_resume_empty_outside_a_repo(tmp_path):
+def test_sandbox_config_args_resume_empty_when_no_roots_resolve(
+    tmp_path, monkeypatch
+):
     """A posture we cannot resolve must never break the resume."""
     outside = tmp_path / "plain"
     outside.mkdir()
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
     assert codex_mod.sandbox_config_args_resume(outside) == []
+
+
+def test_git_writable_config_args_empty_when_neither_root_resolves(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(codex_mod, "_git_common_dir", lambda cwd: "")
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: "")
+
+    assert codex_mod.git_writable_config_args(tmp_path) == []
 
 
 def test_resume_argv_repins_bounded_posture_but_not_yolo(tmp_path, monkeypatch):

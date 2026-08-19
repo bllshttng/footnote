@@ -296,6 +296,30 @@ def test_create_bounded_argv_grants_git_metadata_write(tmp_path, fake_popen):
     assert argv.index("exec") < argv.index("--add-dir")
 
 
+def test_create_bounded_argv_grants_plan_directory(
+    tmp_path, fake_popen, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+
+    codex_mod.create(
+        cwd=repo,
+        prompt="do this",
+        from_name="orchestrator",
+        yolo=False,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+    )
+
+    argv = fake_popen.call_args.args[0]
+    grants = [argv[i + 1] for i, token in enumerate(argv) if token == "--add-dir"]
+    assert str(plan_dir) in grants
+    assert str((repo / ".git").resolve()) in [str(Path(p).resolve()) for p in grants]
+
+
 def test_create_full_yolo_argv_omits_git_add_dir(tmp_path, fake_popen):
     """AC2-EDGE: full yolo is already unsandboxed - no grant to make."""
     repo = tmp_path / "repo"
@@ -333,7 +357,7 @@ def test_create_git_add_dir_composes_with_user_add_dir(tmp_path, fake_popen):
     )
 
     argv = fake_popen.call_args.args[0]
-    assert argv.count("--add-dir") == 2
+    assert argv.count("--add-dir") == 3
     assert "/some/shared/dir" in argv
 
 

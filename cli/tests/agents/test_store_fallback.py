@@ -633,7 +633,9 @@ def test_resume_heals_an_unregistered_session(_registry_home):
     )
 
     assert result.exit_code == 0
-    assert result.exec_argv == ["codex", "resume", CODEX_UUID]
+    assert result.exec_argv[0] == "codex"
+    assert result.exec_argv[-2:] == ["resume", CODEX_UUID]
+    assert any("writable_roots=" in arg for arg in result.exec_argv)
     assert result.exec_cwd == "/repo/two"
 
 

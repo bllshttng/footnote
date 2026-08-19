@@ -1799,13 +1799,25 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Option<Value> {
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for unsupported providers.
-fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
-    crate::harness_capabilities::render_session_argv(
+fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
+    let mut argv = crate::harness_capabilities::render_session_argv(
         provider,
         "interactive_resume",
         Some(session_id),
     )
-    .ok()
+    .ok()?;
+    // codex's bounded sandbox re-resolves from config on `resume` (it accepts
+    // neither `--sandbox` nor `--add-dir`), so the git + plan grants must ride
+    // as `-c` tokens spliced right after the `codex` binary token.
+    if provider == "codex" {
+        if let Some(cwd) = cwd {
+            let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
+            if !grant.is_empty() {
+                argv.splice(1..1, grant);
+            }
+        }
+    }
+    Some(argv)
 }
 
 fn interactive_resume_supported(provider: &str) -> bool {
@@ -2477,7 +2489,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return 13;
         }
-        let v = match build_resume_argv(harness, session_id) {
+        let v = match build_resume_argv(harness, session_id, Some(cwd)) {
             Some(v) => v,
             None => {
                 eprintln!(
@@ -4189,22 +4201,29 @@ mod tests {
         assert_eq!(session_id_field("unknown"), None);
 
         assert_eq!(
-            build_resume_argv("codex", "uuid-1"),
-            Some(vec!["codex".into(), "resume".into(), "uuid-1".into()])
+            build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
+            Some(vec![
+                "codex".into(),
+                "-c".into(),
+                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
+                    .into(),
+                "resume".into(),
+                "uuid-1".into(),
+            ])
         );
         assert_eq!(
-            build_resume_argv("claude", "abc123"),
+            build_resume_argv("claude", "abc123", None),
             Some(vec!["claude".into(), "attach".into(), "abc123".into()])
         );
         assert_eq!(
-            build_resume_argv("gemini", "g-1"),
+            build_resume_argv("gemini", "g-1", None),
             Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
         );
         assert_eq!(
-            build_resume_argv("opencode", "ses_1"),
+            build_resume_argv("opencode", "ses_1", None),
             Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
         );
-        assert_eq!(build_resume_argv("agy", "x"), None);
+        assert_eq!(build_resume_argv("agy", "x", None), None);
     }
 
     #[test]

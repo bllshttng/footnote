@@ -67,7 +67,12 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
         execvp=_no_exec,
     )
     assert res.exit_code == 0
-    assert res.exec_argv == ["codex", "resume", "00000000-1111-2222-3333-444444444444"]
+    assert res.exec_argv[0] == "codex"
+    assert res.exec_argv[-2:] == [
+        "resume",
+        "00000000-1111-2222-3333-444444444444",
+    ]
+    assert any("writable_roots=" in arg for arg in res.exec_argv)
     assert res.exec_cwd == "/path/to/workdir"
 
 
@@ -345,7 +350,9 @@ def test_print_command_emits_one_liner() -> None:
     assert res.output.count("\n") == 1, "output should be a single line + final newline"
     # cd into the quoted cwd; then exec the provider command.
     assert "cd " in res.output
-    assert "exec codex resume sess-abc" in res.output
+    assert "exec codex " in res.output
+    assert " resume sess-abc" in res.output
+    assert "writable_roots=" in res.output
     # The space-containing path must be quoted.
     assert "'/path/with space'" in res.output
     # No banner / no leading prose.

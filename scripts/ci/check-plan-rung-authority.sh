@@ -169,7 +169,7 @@ crates/fno-agents/src/nudge.rs:1
 crates/fno-agents/src/opencode_ask.rs:1
 crates/fno-agents/src/paths.rs:5
 crates/fno-agents/src/protocol.rs:5
-crates/fno-agents/src/provider.rs:6
+crates/fno-agents/src/provider.rs:7
 crates/fno-agents/src/readiness.rs:13
 crates/fno-agents/src/roster_progress.rs:7
 crates/fno-agents/src/scrape.rs:10

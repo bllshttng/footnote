@@ -315,14 +315,14 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
     handing it a still-relative pointer is what would break it from a
     subdirectory. Do not "simplify" this back to passing the raw string through.
 
-    Existence, not is_file: a footnote plan is routinely a DIRECTORY (the folder
-    plan whose entry point is 00-INDEX.md, see target/blast.py), so tightening
-    this to is_file() would silently drop the back-fill for every folder plan.
+    A footnote plan can be a file or a directory whose entry point is
+    ``00-INDEX.md``. Resolve that entry point and read it before binding so an
+    existing but unreadable plan cannot start a planless worker.
 
     Fail-CLOSED to None, the opposite of ``_resolve_plan_for_blast`` above and
     deliberately so: an unresolved blast read only forgoes ceremony modulation,
-    while an unverified pointer here lands in a field that can never be
-    corrected. Under uncertainty the recoverable empty beats the permanent guess.
+    while an unverified pointer here makes initialization refuse before the
+    write-once manifest is created.
     """
     try:
         bare, sep, anchor = plan_path.partition("#")
@@ -336,6 +336,9 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
                 resolved = Path(root) / resolved
         if not resolved.exists():
             return None
+        from fno.target.blast import resolve_plan_index
+
+        resolve_plan_index(resolved).read_text(encoding="utf-8")
         return f"{resolved}{sep}{anchor}"
     except Exception:
         return None
@@ -1330,17 +1333,31 @@ def init(
     # resolves no node and stays empty for the legitimate blueprint-then-first-fill
     # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
     #
-    # Gated on the plan resolving to a file, because the manifest is WRITE-ONCE
+    # Gated on the plan resolving to a readable plan, because the manifest is
+    # WRITE-ONCE
     # and `fno state set --field plan_path` accepts a first-fill only while the
     # field is EMPTY (else exit 5). Back-filling a dangling pointer would
     # therefore not just record a bad path, it would close the only legal repair
-    # route; leaving it empty keeps the blueprint-then-first-fill escape open.
+    # route. Continuing empty would instead run a planned node without its plan,
+    # so this path refuses before writing either state.
     # What gets bound is the NORMALIZED pointer the gate proved, never the raw
     # graph string - see _resolve_plan_pointer for why storing the raw form
-    # re-opens the wedge on a `~` path. An explicit --plan-path is NOT gated: the
-    # operator named that path, so a typo must surface as a plan error rather
-    # than be silently dropped.
-    if not plan_path:
+    # re-opens the wedge on a `~` path. An explicit --plan-path goes through the
+    # same read gate: naming a broken path must refuse loudly, never write a
+    # broken pointer or continue planless.
+    if plan_path:
+        explicit_plan = plan_path
+        bound = _resolve_plan_pointer(explicit_plan)
+        if not bound:
+            typer.echo(
+                f"fno target init: REFUSING because the explicit --plan-path "
+                f"does not resolve to a readable plan ({explicit_plan}). "
+                f"Correct --plan-path and retry.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        plan_path = bound
+    else:
         resolved_plan = _resolve_plan_for_blast(None, input_)
         if resolved_plan:
             bound = _resolve_plan_pointer(resolved_plan)
@@ -1348,13 +1365,12 @@ def init(
                 plan_path = bound
             else:
                 typer.echo(
-                    f"fno target init: the node's bound plan_path does not resolve "
-                    f"to an existing path ({resolved_plan}); leaving the manifest plan_path "
-                    f"empty so it stays first-fillable this session "
-                    f"(fno state set --field plan_path). Repair the node itself "
-                    f"with: fno backlog update <id> --plan-path <path>",
+                    f"fno target init: REFUSING because the node's bound plan_path "
+                    f"does not resolve to a readable plan ({resolved_plan}). "
+                    f"Repair the node with: fno backlog update <id> --plan-path <path>",
                     err=True,
                 )
+                raise typer.Exit(code=2)
 
     # Scope denominator gate (x-cbab): a code node dispatched with no plan and no
     # --deliverables makes 'shipped M of N' inexpressible. Fires only for a

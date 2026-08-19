@@ -80,14 +80,20 @@ def test_target_init_shells_through_with_env(monkeypatch, tmp_path):
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
     _clear_root_cache()
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    plan = tmp_path / "p" / "x.md"
+    plan.parent.mkdir()
+    plan.write_text("# Plan\n", encoding="utf-8")
 
-    result = runner.invoke(app, ["target", "init", "--input", "fix-login", "--plan-path", "p/x.md"])
+    result = runner.invoke(
+        app,
+        ["target", "init", "--input", "fix-login", "--plan-path", str(plan)],
+    )
     assert result.exit_code == 0, result.output
     assert captured["cmd"][0] == "bash"
     assert captured["cmd"][1].endswith("hooks/helpers/init-target-state.sh")
     assert captured["env"].get("TARGET_START") == "1"
     assert captured["env"].get("TARGET_INPUT") == "fix-login"
-    assert captured["env"].get("TARGET_PLAN_PATH") == "p/x.md"
+    assert captured["env"].get("TARGET_PLAN_PATH") == str(plan)
     _clear_root_cache()
 
 
@@ -1372,4 +1378,3 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["DISPOSITION"] == "proven"
     assert fields["COLLISION"] == owner
     assert fields["COLLISION_ID"] == foreign
-

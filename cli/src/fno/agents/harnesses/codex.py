@@ -202,27 +202,30 @@ def sandbox_config_args_resume(cwd: Path) -> list[str]:
     Unlike ``--add-dir``, ``writable_roots`` is a whole-value config override
     rather than a repeatable flag, so it replaces any config-level list.
 
-    Returns ``[]`` outside a repo, or on any git failure - a posture we cannot
-    resolve must never break the resume.
+    Returns ``[]`` only when neither writable root resolves.
     """
     grant = git_writable_config_args(cwd)
     return ["-c", "sandbox_mode=workspace-write", *grant] if grant else []
 
 
 def git_writable_config_args(cwd: Path) -> list[str]:
-    """The ``-c`` form of :func:`git_writable_args`, for lanes without ``--add-dir``.
+    """The ``-c`` form of bounded-worker write grants.
 
     Used on its own by the INTERACTIVE resume lane (``codex resume <id>``),
     which reopens a TUI whose sandbox mode is the operator's to choose - so it
-    grants the git root without also re-pinning the mode the way
+    grants the roots without also re-pinning the mode the way
     :func:`sandbox_config_args_resume` does for the headless lane.
+
+    Both roots ride in one override because ``writable_roots`` is a whole-value
+    setting. A second ``-c`` would replace the first grant instead of adding to
+    it.
     """
     import json
 
-    common = _git_common_dir(cwd)
-    if not common:
+    roots = [root for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd)) if root]
+    if not roots:
         return []
-    return ["-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(common)}]"]
+    return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"]
 
 
 def _git_common_dir(cwd: Path) -> str:
@@ -238,6 +241,16 @@ def _git_common_dir(cwd: Path) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _resolve_plan_dir(cwd: Path) -> str:
+    """Absolute configured plan directory for ``cwd``; ``""`` on failure."""
+    try:
+        from fno.paths import plans_content_dir
+
+        return str(plans_content_dir(project_root=cwd))
+    except Exception:
+        return ""
 
 
 def git_writable_args(cwd: Path) -> list[str]:
@@ -261,6 +274,17 @@ def git_writable_args(cwd: Path) -> list[str]:
     """
     common = _git_common_dir(cwd)
     return ["--add-dir", common] if common else []
+
+
+def plan_writable_args(cwd: Path) -> list[str]:
+    """Return ``--add-dir <plan-dir>`` for a bounded worker's plan writes.
+
+    The flag is repeatable, so this composes with the git common-dir grant and
+    caller-provided roots. Resolution failure emits no malformed token; target
+    initialization separately refuses a bound plan it cannot read.
+    """
+    plan_dir = _resolve_plan_dir(cwd)
+    return ["--add-dir", plan_dir] if plan_dir else []
 
 
 def _effective_yolo(yolo: bool, headless_yolo: Optional[bool] = None) -> bool:
@@ -749,6 +773,7 @@ def create(
     # The bounded sandbox refuses git metadata writes; grant the git common dir
     # so the worker can actually commit. Full yolo is already unsandboxed.
     git_args = [] if eff_yolo else git_writable_args(cwd)
+    plan_args = [] if eff_yolo else plan_writable_args(cwd)
     from fno.agents.harness_map import render_session_argv
 
     identity = render_session_argv("codex", "headless_create")
@@ -761,6 +786,7 @@ def create(
         "--skip-git-repo-check",
         *add_dir_args,
         *git_args,
+        *plan_args,
         *sandbox_flag(eff_yolo),
         # Behind `--` (codex's own clap tip): a leading-flag seed must be the
         # prompt positional, not a codex flag.

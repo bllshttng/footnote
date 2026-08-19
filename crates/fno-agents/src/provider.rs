@@ -469,25 +469,104 @@ pub(crate) fn codex_git_writable_args(cwd: &std::path::Path) -> Vec<String> {
     }
 }
 
+/// Resolve the configured plan directory through the same public CLI path used
+/// by blueprinting, then grant it to a bounded codex worker. The resolver is
+/// read-only: `fno plan path` prints a prospective document path and this keeps
+/// only its parent directory.
+pub(crate) fn codex_plan_writable_args(cwd: &std::path::Path) -> Vec<String> {
+    match plan_content_dir(cwd) {
+        Some(plans) => vec!["--add-dir".into(), plans],
+        None => vec![],
+    }
+}
+
 /// Mirror of `codex.py::sandbox_config_args_resume`: re-pin a BOUNDED posture
 /// across `codex exec resume`, which takes neither `--sandbox` nor `--add-dir`
 /// and re-resolves the sandbox from config instead of inheriting the
 /// create-time one. `-c` is the only carrier, so it pins both the mode and the
-/// git writable root that `--add-dir` grants on create.
+/// writable roots that `--add-dir` grants on create.
 ///
 /// Empty on any failure: a posture we cannot resolve must never break a resume.
 pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<String> {
-    let Some(common) = git_common_dir(cwd) else {
+    let grant = codex_writable_config_args(cwd);
+    if grant.is_empty() {
+        return vec![];
+    }
+    let mut args = vec!["-c".into(), "sandbox_mode=workspace-write".into()];
+    args.extend(grant);
+    args
+}
+
+/// The single whole-value `writable_roots` override used by interactive resume
+/// lanes that must grant roots without also changing the operator's sandbox
+/// mode.
+pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
+    let roots: Vec<String> = [git_common_dir(cwd), plan_content_dir(cwd)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if roots.is_empty() {
+        return vec![];
+    }
+    let Ok(encoded) = serde_json::to_string(&roots) else {
         return vec![];
     };
-    // TOML string literal: the only characters needing escape here are `\` and `"`.
-    let quoted = common.replace('\\', "\\\\").replace('"', "\\\"");
     vec![
         "-c".into(),
-        "sandbox_mode=workspace-write".into(),
-        "-c".into(),
-        format!("sandbox_workspace_write.writable_roots=[\"{quoted}\"]"),
+        format!("sandbox_workspace_write.writable_roots={encoded}"),
     ]
+}
+
+fn plan_content_dir(cwd: &std::path::Path) -> Option<String> {
+    let out = match std::process::Command::new("fno")
+        .args(["plan", "path", "--slug", "codex-sandbox-grant"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) if !cwd.exists() => {
+            return Some(
+                resolve_allow_missing(&cwd.join(".fno/plans"))
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+        Err(_) => return None,
+    };
+    if !out.status.success() {
+        return None;
+    }
+    let rendered = String::from_utf8(out.stdout).ok()?;
+    let rendered = rendered.trim();
+    if rendered.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(rendered);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    resolve_allow_missing(&absolute)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+}
+
+fn resolve_allow_missing(path: &std::path::Path) -> std::path::PathBuf {
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    while !cursor.exists() {
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        missing.push(name.to_os_string());
+        cursor.pop();
+    }
+    let mut resolved = std::fs::canonicalize(&cursor).unwrap_or(cursor);
+    for part in missing.into_iter().rev() {
+        resolved.push(part);
+    }
+    resolved
 }
 
 /// Absolute git COMMON dir for `cwd`; `None` outside a repo or on any failure.
@@ -525,6 +604,7 @@ impl Provider for CodexProvider {
         argv.extend(Self::sandbox_create(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_git_writable_args(&ctx.cwd));
+            argv.extend(codex_plan_writable_args(&ctx.cwd));
         }
         if let Some(effort) = ctx.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             argv.push("-c".into());
@@ -1452,6 +1532,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                "--add-dir",
+                "/tmp/example-repo/.fno/plans",
                 "--",
                 "build feature X"
             ]
@@ -1487,6 +1569,76 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_create_and_resume_argv_grant_the_resolved_plan_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let plan_dir = dir.path().join("configured-plans");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let fake_fno = bin.join("fno");
+        std::fs::write(
+            &fake_fno,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                plan_dir.join("probe.md").display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_fno).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_fno, perms).unwrap();
+        let old_path = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", &bin) };
+
+        let mut create_ctx = create_ctx();
+        create_ctx.cwd = dir.path().to_path_buf();
+        let create = CodexProvider.create_argv(&create_ctx);
+        let resume = CodexProvider.resume_argv(&ResumeContext {
+            session_id: "s1".into(),
+            message: "continue".into(),
+            cwd: dir.path().to_path_buf(),
+            from_name: None,
+            yolo: false,
+        });
+
+        match old_path {
+            Some(path) => unsafe { std::env::set_var("PATH", path) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        let grants: Vec<&String> = create
+            .iter()
+            .enumerate()
+            .filter_map(|(i, token)| (token == "--add-dir").then(|| &create[i + 1]))
+            .collect();
+        assert!(grants
+            .iter()
+            .any(|path| *path == &plan_dir.to_string_lossy()));
+        let roots = resume
+            .iter()
+            .find(|arg| arg.starts_with("sandbox_workspace_write.writable_roots="))
+            .expect("writable_roots override present");
+        assert!(roots.contains(plan_dir.to_str().unwrap()));
+        assert_eq!(
+            resume
+                .iter()
+                .filter(|arg| arg.starts_with("sandbox_workspace_write.writable_roots="))
+                .count(),
+            1
+        );
+    }
+
     /// AC7-EDGE: full yolo is already unsandboxed, so there is no grant to make.
     #[test]
     fn codex_create_argv_yolo_omits_the_git_grant() {
@@ -1505,11 +1657,18 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--add-dir"));
     }
 
-    /// AC7-ERR: a non-repo cwd changes no argv and never panics.
+    /// AC7-ERR: a non-repo cwd never panics. The GIT grant is absent (no repo
+    /// to resolve), but the plan-dir grant is independent of git-repo-ness and
+    /// still applies (x-6163).
     #[test]
-    fn codex_create_argv_outside_a_repo_is_unchanged() {
+    fn codex_create_argv_outside_a_repo_omits_only_the_git_grant() {
         let argv = CodexProvider.create_argv(&create_ctx());
-        assert!(!argv.iter().any(|a| a == "--add-dir"));
+        let grants: Vec<&String> = argv
+            .iter()
+            .enumerate()
+            .filter_map(|(i, token)| (token == "--add-dir").then(|| &argv[i + 1]))
+            .collect();
+        assert_eq!(grants, vec!["/tmp/example-repo/.fno/plans"]);
     }
 
     /// The bounded posture does NOT survive `codex exec resume` on its own:
@@ -1601,8 +1760,10 @@ mod tests {
         );
     }
 
+    /// The plan-dir grant is independent of git-repo-ness (x-6163), so even a
+    /// non-repo cwd re-pins `writable_roots` on resume unless yolo.
     #[test]
-    fn codex_resume_argv_omits_sandbox_unless_yolo() {
+    fn codex_resume_argv_grants_plan_dir_outside_a_repo_unless_yolo() {
         let ctx = ResumeContext {
             session_id: "uuid-1".into(),
             message: "m".into(),
@@ -1619,6 +1780,10 @@ mod tests {
                 "uuid-1",
                 "--json",
                 "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=workspace-write",
+                "-c",
+                "sandbox_workspace_write.writable_roots=[\"/x/.fno/plans\"]",
                 "--",
                 "m"
             ]

@@ -63,7 +63,11 @@ def test_pane_argv_threads_effort_and_unset_is_noop():
     claude = build_pane_argv("claude", "hi", CWD, False, "uuid", effort="high")
     codex = build_pane_argv("codex", "hi", CWD, False, None, effort="medium")
     assert claude[-4:] == ["--effort", "high", "--", "hi"]
-    assert ["-c", "model_reasoning_effort=medium"] == codex[5:7]
+    effort_pos = codex.index("model_reasoning_effort=medium")
+    assert codex[effort_pos - 1:effort_pos + 1] == [
+        "-c",
+        "model_reasoning_effort=medium",
+    ]
     assert build_pane_argv("claude", "hi", CWD, False, "uuid", effort=None) == build_pane_argv(
         "claude", "hi", CWD, False, "uuid"
     )

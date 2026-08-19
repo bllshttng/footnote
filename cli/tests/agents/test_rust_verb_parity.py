@@ -611,7 +611,9 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # proving the Rust reader found the agent under the real "agents" key.
     rust = _run_rust(["resume", "cx", "--print-command"], agents)
     assert rust.returncode == 0, rust.stderr
-    assert rust.stdout == "cd /tmp/proj && exec codex resume uuid-9\n"
+    assert rust.stdout.startswith("cd /tmp/proj && exec codex ")
+    assert "writable_roots=" in rust.stdout
+    assert rust.stdout.endswith(" resume uuid-9\n")
     # attach refuses codex (agent FOUND -> the refusal message, not "not found").
     att = _run_rust(["attach", "cx"], agents)
     assert att.returncode == 13

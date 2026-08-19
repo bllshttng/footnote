@@ -118,8 +118,9 @@ def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
 
     Parses TOML for a ``.toml`` suffix (config.toml), YAML otherwise
     (settings.yaml). Returns ({}, False) on any OS or parse error so callers
-    can fall through to the next candidate. Logs a WARNING on parse failure so
-    the user knows their config was not applied.
+    can fall through to the next candidate. Logs a cause-specific WARNING so a
+    missing file, an unreadable file, and malformed content never share one
+    diagnosis.
 
     Returns (data, True) when the file parsed successfully (even if the dict
     is empty, i.e. the file was blank).
@@ -131,7 +132,17 @@ def _load_raw(path: Path) -> tuple[dict[str, object], bool]:
         else:
             data = yaml.safe_load(text)
         return (data if isinstance(data, dict) else {}, True)
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
+    except FileNotFoundError:
+        _LOG.warning("config file at %s is missing; using defaults", path)
+        return ({}, False)
+    except OSError as exc:
+        _LOG.warning(
+            "config file at %s could not be read: %s; using defaults",
+            path,
+            exc,
+        )
+        return ({}, False)
+    except (UnicodeDecodeError, yaml.YAMLError, tomllib.TOMLDecodeError) as exc:
         _LOG.warning(
             "config file at %s failed to parse: %s; using defaults",
             path,
