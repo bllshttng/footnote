@@ -8708,8 +8708,7 @@ def cmd_reconcile(
         name, and a node created via ``fno backlog new`` before being
         claimed by a plan legitimately carries ``project: null``, which a
         name comparison would misread as "not this repo" even when its cwd
-        matches exactly. An unresolvable own root falls back to the old
-        permissive whole-graph behavior rather than a new refusal.
+        matches exactly.
 
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
@@ -8732,7 +8731,13 @@ def cmd_reconcile(
         def _cwd_in_our_repo(_e: dict) -> bool:
             _raw_cwd = _e.get("cwd")
             if not isinstance(_raw_cwd, str) or not _raw_cwd:
-                return False
+                # A no-cwd node can't be proven NOT this repo's, and there is
+                # no cost to including it: reverse_map_unstamped's own scan
+                # already skips a missing/empty cwd unconditionally before it
+                # would ever fire a gh call, so excluding it here would only
+                # add a new failure mode (a genuinely-this-repo node with no
+                # cwd going dark) with no matching benefit (review fix).
+                return True
             _norm = os.path.normpath(os.path.expanduser(_raw_cwd))
             return _norm == _our_root or _norm.startswith(_our_root_prefix)
 
