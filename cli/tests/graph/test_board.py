@@ -1,4 +1,4 @@
-"""`fno backlog board` (x-42cf): three sections, zero GitHub reads.
+"""`fno backlog board`: three sections, zero GitHub reads.
 
 The guarantee under test is "zero API calls", proved with a positive-failure
 instrument rather than an absence: subprocess.run is monkeypatched to RAISE

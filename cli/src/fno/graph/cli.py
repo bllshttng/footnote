@@ -4476,7 +4476,7 @@ def cmd_board(
 
     Reads only the graph and the on-disk pr-status cache, never GitHub: a
     verb whose job is showing the board must never be the thing that
-    exhausts the quota (x-42cf). An unreadable source renders as an explicit
+    exhausts the quota. An unreadable source renders as an explicit
     unknown, never as an empty section.
     """
     from fno.graph.board import compute_board

@@ -72,12 +72,12 @@ def read_row(key: str) -> Optional[dict]:
         return None
 
 
-def newest_row_offline(slug_key: str, pr: str) -> Optional[dict]:
-    """The newest cached row for this PR, by mtime. No network, ever.
+def _rows_newest_first(slug_key: str, pr: str):
+    """Every cached row for (slug_key, pr), newest mtime first. No network.
 
-    Deliberately head-agnostic: the caller has no head and must not fetch
-    one. The row may describe a head the PR has since moved past, so every
-    caller must render it as "as of <ts>", never as the current verdict.
+    Shared by `newest_row_offline` (wants the first readable row) and
+    `cached_status`'s head-unreadable arm (wants the first servable row) so
+    the candidate-collection-and-sort logic lives in exactly one place.
     """
     candidates = []
     for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
@@ -88,8 +88,17 @@ def newest_row_offline(slug_key: str, pr: str) -> Optional[dict]:
     for _, candidate in sorted(candidates, reverse=True):
         row = read_row(candidate.stem)
         if row is not None:
-            return row
-    return None
+            yield row
+
+
+def newest_row_offline(slug_key: str, pr: str) -> Optional[dict]:
+    """The newest cached row for this PR, by mtime. No network, ever.
+
+    Deliberately head-agnostic: the caller has no head and must not fetch
+    one. The row may describe a head the PR has since moved past, so every
+    caller must render it as "as of <ts>", never as the current verdict.
+    """
+    return next(_rows_newest_first(slug_key, pr), None)
 
 
 def _write_row_locked(p: Path, row: dict) -> None:
@@ -172,15 +181,8 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         # PR's newest existing row degraded (unknown, unsettled - keeps the
         # zero-network collapse without ever answering green off data nobody
         # can verify); with no row at all, the loud live read decides.
-        candidates = []
-        for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
-            try:
-                candidates.append((candidate.stat().st_mtime, candidate))
-            except OSError:
-                continue  # a racing prune won; fewer candidates, not a crash
-        for _, candidate in sorted(candidates, reverse=True):
-            row = read_row(candidate.stem)
-            code = _serve(row, stale=True) if row else -1
+        for row in _rows_newest_first(slug_key, pr):
+            code = _serve(row, stale=True)
             if code >= 0:
                 return code
         return run_status(pr, cwd)

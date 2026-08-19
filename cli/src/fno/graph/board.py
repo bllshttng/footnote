@@ -178,6 +178,7 @@ def compute_board(
             (
                 e for e in scoped
                 if isinstance(e.get("id"), str)
+                and not e.get("completed_at")
                 and (e["id"] in live_claimed or e.get("status") == "in_progress")
             ),
             key=board_order,
