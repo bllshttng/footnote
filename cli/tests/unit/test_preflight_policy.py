@@ -1,4 +1,4 @@
-"""Policy tests for opt-in local preflight (x-50a6).
+"""Policy tests for opt-in local preflight.
 
 `local_verification_required` is the ONE function that decides whether a full
 local `scripts/ci/preflight.sh` receipt is required; every Python lane
@@ -129,11 +129,10 @@ def test_fno_config_pin_is_honored(
     """FNO_CONFIG names the only candidate; the key is read, not hardcoded."""
     pinned = tmp_path / "pf-check.toml"
     pinned.write_text("preflight.required = true\n")
-    monkeypatch.setenv("FNO_CONFIG", str(pinned))
-    assert _preflight_required_by_config(tmp_path) is True
+    assert _preflight_required_by_config(tmp_path, {"FNO_CONFIG": str(pinned)}) is True
 
     pinned.write_text("preflight.required = false\n")
-    assert _preflight_required_by_config(tmp_path) is False
+    assert _preflight_required_by_config(tmp_path, {"FNO_CONFIG": str(pinned)}) is False
 
 
 def test_ship_phase_bash_path_asks_the_policy() -> None:
@@ -150,5 +149,28 @@ def test_ship_phase_bash_path_asks_the_policy() -> None:
         "before running scripts/ci/preflight.sh; a guard on one of two reachable "
         "paths is decorative"
     )
-    # The old self-deciding guard must be gone: it never asked the policy.
+    # No second decider beside the policy call: the old self-deciding guard
+    # never asked the policy, and a non_docs grep layer disagreed with the
+    # Python docs-only rule for runtime markdown.
     assert 'FNO_SKIP_PREFLIGHT:-0} != "1" && -x scripts/ci/preflight.sh' not in content
+    assert 'non_docs="' not in content
+
+
+def test_policy_read_uses_the_env_seam_not_os_environ(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The env param controls FNO_SKIP_PREFLIGHT and FNO_CONFIG alike.
+
+    An ambient FNO_CONFIG in the parent shell must not override what a caller
+    injecting env= says the config pin is.
+    """
+    ambient = tmp_path / "ambient.toml"
+    ambient.write_text("preflight.required = true\n")
+    monkeypatch.setenv("FNO_CONFIG", str(ambient))
+    injected = tmp_path / "injected.toml"
+    injected.write_text("preflight.required = false\n")
+
+    assert local_verification_required(cwd=str(tmp_path), env={"FNO_CONFIG": str(injected)}) == (
+        False,
+        "policy-opt-in",
+    )

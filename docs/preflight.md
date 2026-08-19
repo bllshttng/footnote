@@ -180,7 +180,7 @@ Behavior:
 
 ## Ship-phase wiring
 
-Preflight runs before a push only at the policy's request. The single decision point is `fno pr evidence-required`. It reads `config.preflight.required` (default false) plus the `FNO_SKIP_PREFLIGHT=1` escape. The ship phase, `fno pr create`, the worker ship lane, and the batch lane all ask it. The bash path and the Python lanes cannot disagree. A failed or unparsable policy call fails open: no local preflight, and CI verifies the PR head.
+Preflight runs before a push only at the policy's request. The single decision point is `fno pr evidence-required`. It reads `config.preflight.required` (default false) plus the `FNO_SKIP_PREFLIGHT=1` escape. The ship phase, `fno pr create`, the worker ship lane, and the batch lane all ask it. The bash path and the Python lanes cannot disagree. A failed or unparsable policy call fails open on the ship paths: no local preflight, and CI verifies the PR head. The `/pr create` router is stricter. It refuses outright when the policy call itself cannot be evaluated.
 
 On a stock config the pre-push obligation is the focused checks below, each seconds. There is deliberately no wrapper script for them. Every check already runs in CI. A new mandatory local runner rebuilds the gate this contract removes, one rung smaller.
 
@@ -198,7 +198,7 @@ The receipt this mints is **review-entry evidence, not merge eligibility**. `fno
 
 Verdict reuse needs no caller change. It is checked inside `preflight.sh` itself, before the lock. The ship phase and fix loop inherit it from the one invocation they already make. A second push of an unchanged SHA therefore returns instantly. `--force` is there for the rare case a caller wants to re-prove it. The reuse check is deliberately not duplicated in `ship-phase.md` or the fix loop - one implementation, every reachable caller.
 
-The runner guard is an existence check (`[[ -x scripts/ci/preflight.sh ]]`). It no-ops in any repo which does not ship the script. The policy call sits in front of it. Skips stay explicit and auditable: a stock config, `FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only documentation, the vault dir, and `*.md` files). The scripts never self-skip. The skip decision lives in `fno pr evidence-required`.
+The runner guard is an existence check (`[[ -x scripts/ci/preflight.sh ]]`). It no-ops in any repo which does not ship the script. The policy call sits in front of it. Skips stay explicit and auditable: a stock config, `FNO_SKIP_PREFLIGHT=1`, or a docs-only diff (only `docs/`, `internal/`, and the root `README.md`). The scripts never self-skip. The skip decision lives in `fno pr evidence-required`.
 
 ## Running it yourself
 

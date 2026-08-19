@@ -1,4 +1,4 @@
-"""Unit tests for the fno doctor open-file-limit advisory (x-f47a, in x-50a6).
+"""Unit tests for the fno doctor open-file-limit advisory.
 
 The report exists because two observers disagreed and both were right: a
 login shell reads 1048576 while every launchd-spawned worker runs at 256.
@@ -96,6 +96,18 @@ def test_non_darwin_skips_launchd_probe(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(doctor, "_bounded_command", no_launchctl)
     report = _fd_limit_report()
     assert report["launchd_soft"] is None
+    assert report["verdict"] == "ok"
+
+
+def test_linux_unlimited_soft_is_not_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Linux spells RLIM_INFINITY as -1; unlimited must never read as low."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        resource, "getrlimit", lambda _which: (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+    )
+    monkeypatch.setattr(doctor, "_bounded_command", lambda _argv: None)
+    report = _fd_limit_report()
+    assert report["soft"] == resource.RLIM_INFINITY
     assert report["verdict"] == "ok"
 
 

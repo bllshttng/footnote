@@ -849,7 +849,14 @@ def _fd_limit_report() -> dict[str, Any]:
                 report["kern_maxfiles"] = int(kern[1].strip())
             except ValueError:
                 pass
-    measured = [v for v in (report["soft"], report["launchd_soft"]) if isinstance(v, int)]
+    # Linux spells RLIM_INFINITY as -1, which isinstance(int) happily passes;
+    # an unlimited soft limit is the healthiest reading, never "low".
+    healthy = resource.RLIM_INFINITY
+    measured = [
+        v
+        for v in (report["soft"], report["launchd_soft"])
+        if isinstance(v, int) and v != healthy
+    ]
     report["verdict"] = "low" if any(v <= _FD_SOFT_FLOOR for v in measured) else "ok"
     return report
 
@@ -1602,33 +1609,45 @@ def _emit_human(
         floor = fd.get("threshold")
         soft = fd.get("soft")
         launchd = fd.get("launchd_soft")
-        if isinstance(soft, int) and soft <= floor:
+        if launchd is None:
+            # No launchd probe ran (non-darwin): generic raise advice only,
+            # never launchctl/LaunchDaemon lines on a platform without them.
             out(
                 f"fno doctor: open-file soft limit is {soft} in THIS process "
                 f"(floor {floor})."
             )
-        else:
             out(
-                f"fno doctor: open-file soft limit is {soft} in THIS process, but "
-                f"launchd's session default is {launchd} (floor {floor})."
+                "Raise it in the launch context that starts this process "
+                "(shell profile, service unit, or container limits)."
             )
-        kern = fd.get("kern_maxfiles")
-        kern_note = (
-            f"kern.maxfiles is {kern}, so the kernel is not the constraint"
-            if isinstance(kern, int)
-            else "the kernel's own ceiling is far higher than either number"
-        )
-        out(
-            "The limit is inherited from the launch context, not the machine: "
-            f"{kern_note}, and a login shell can read a healthy number while "
-            "every spawned worker starves."
-        )
-        out("Raise it for launchd children: sudo launchctl limit maxfiles 65536 unlimited")
-        out(
-            "The raise only reaches NEWLY launched processes, so restart the "
-            "affected sessions afterwards. Persistence across reboot needs a "
-            "LaunchDaemon plist."
-        )
+        else:
+            if isinstance(soft, int) and isinstance(floor, int) and soft <= floor:
+                out(
+                    f"fno doctor: open-file soft limit is {soft} in THIS process "
+                    f"(floor {floor})."
+                )
+            else:
+                out(
+                    f"fno doctor: open-file soft limit is {soft} in THIS process, but "
+                    f"launchd's session default is {launchd} (floor {floor})."
+                )
+            kern = fd.get("kern_maxfiles")
+            kern_note = (
+                f"kern.maxfiles is {kern}, so the kernel is not the constraint"
+                if isinstance(kern, int)
+                else "the kernel's own ceiling is far higher than either number"
+            )
+            out(
+                "The limit is inherited from the launch context, not the machine: "
+                f"{kern_note}, and a login shell can read a healthy number while "
+                "every spawned worker starves."
+            )
+            out("Raise it for launchd children: sudo launchctl limit maxfiles 65536 unlimited")
+            out(
+                "The raise only reaches NEWLY launched processes, so restart the "
+                "affected sessions afterwards. Persistence across reboot needs a "
+                "LaunchDaemon plist."
+            )
 
     dl = result.get("dead_letter") or {}
     if dl.get("drain_hook_wired") is False:
