@@ -11,7 +11,8 @@ from typing import Callable, Mapping, Optional
 
 from fno.paths import github_cli_proxy_dir
 
-_WRAPPER = "#!/bin/sh\nexec fno-gh-proxy \"$@\"\n"
+PROXY_EXEC_LINE = 'exec fno-gh-proxy "$@"'
+_WRAPPER = f"#!/bin/sh\n{PROXY_EXEC_LINE}\n"
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 _WHICH = shutil.which
 

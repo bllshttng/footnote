@@ -10,6 +10,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
+from fno.setup.github_cli import PROXY_EXEC_LINE
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
@@ -20,21 +21,31 @@ def quota_lock_path() -> Path:
     return graphql_quota_lock()
 
 
+_SHIM_SCAN_BYTES = 65536
+
+
 def _is_proxy_shim(path: Path) -> bool:
     """Is this ``gh`` our own broker shim, judged by content rather than location?
 
     ``github_cli_proxy_dir()`` is TMPDIR-derived, so directory identity only
     recognizes a shim written by a process sharing our TMPDIR. A background job
     or a launchd agent inherits the shim on PATH but computes a different
-    directory, and so fails to recognize it. The shim is a two-line script, so
-    reading it is cheap and cannot drift from what ``ensure_proxy`` writes.
+    directory, and so fails to recognize it. The shim is a two-line script, but
+    a wrapper generator may pad it with extra lines before or after the exec
+    line, so the read is bounded, not gated on total size: ``_SHIM_SCAN_BYTES``
+    comfortably covers any realistic wrapper while staying far below a real
+    compiled ``gh`` binary. The match is anchored to the exec line
+    ``ensure_proxy`` writes (``PROXY_EXEC_LINE``) rather than a bare substring,
+    so a real ``gh`` that merely mentions the proxy name in a comment is not
+    mistaken for the shim.
     """
     try:
-        if path.stat().st_size > 4096:
-            return False
-        return "fno-gh-proxy" in path.read_text(errors="ignore")
+        with path.open("rb") as handle:
+            head = handle.read(_SHIM_SCAN_BYTES)
     except OSError:
         return False
+    text = head.decode("utf-8", errors="ignore")
+    return any(line.strip() == PROXY_EXEC_LINE for line in text.splitlines())
 
 
 def _proxy_dirs() -> set[str]:

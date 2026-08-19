@@ -264,3 +264,38 @@ def test_delegate_environment_strips_an_unrecognized_proxy_shim(monkeypatch, tmp
         str(real_dir),
         "/usr/bin",
     ]
+
+
+def test_is_proxy_shim_detects_a_padded_shim_over_the_old_size_gate(tmp_path):
+    """A shim padded past 4096 bytes must still be recognized as the shim.
+
+    Padding can land on either side of the exec line, so this checks both:
+    trailing padding (the common case) and leading padding, which pushed the
+    exec line past a naive head-bounded read in an earlier version of this fix.
+    """
+    trailing = tmp_path / "gh-trailing"
+    padding = "# padding\n" * 1000
+    trailing.write_text('#!/bin/sh\nexec fno-gh-proxy "$@"\n' + padding)
+    trailing.chmod(0o755)
+    assert trailing.stat().st_size > 4096
+    assert _quota._is_proxy_shim(trailing) is True
+
+    leading = tmp_path / "gh-leading"
+    leading.write_text(("# padding\n" * 500) + '#!/bin/sh\nexec fno-gh-proxy "$@"\n')
+    leading.chmod(0o755)
+    assert leading.stat().st_size > 4096
+    assert _quota._is_proxy_shim(leading) is True
+
+
+def test_is_proxy_shim_does_not_match_a_real_gh_that_mentions_the_name(tmp_path):
+    """A comment merely naming the proxy must not be classified as the shim.
+
+    A bare substring match would misclassify this as the shim, and
+    ``resolve_real_gh``/``delegate_environment`` would then skip a working
+    real ``gh``, turning it into "gh not found".
+    """
+    path = tmp_path / "gh"
+    path.write_text("#!/bin/sh\n# not the fno-gh-proxy wrapper, just mentions it\necho real\n")
+    path.chmod(0o755)
+
+    assert _quota._is_proxy_shim(path) is False
