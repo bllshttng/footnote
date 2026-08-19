@@ -673,16 +673,6 @@ def test_codex_spawn_without_capture_fails_and_reaps_unaddressable_pane(
         )
     assert load_registry() == []
     assert runner.kill_calls
-=======
-    result, _ = _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS)
-
-    row = load_registry()[0]
-    assert row.harness_session_id is None
-    assert row.status == "spawning"
-    assert result.status == "spawning"
-    assert result.session_uuid is None
-    assert result.short_id == ""
-
 
 def test_codex_spawn_with_capture_returns_bound_identity(
     tmp_path: Path, monkeypatch
