@@ -146,7 +146,7 @@ crates/fno-agents/src/agents_config.rs:1
 crates/fno-agents/src/bin/client.rs:68
 crates/fno-agents/src/claims.rs:11
 crates/fno-agents/src/claude_adopt.rs:3
-crates/fno-agents/src/claude_ask.rs:9
+crates/fno-agents/src/claude_ask.rs:11
 crates/fno-agents/src/claude_roster.rs:6
 crates/fno-agents/src/client.rs:30
 crates/fno-agents/src/client_verbs.rs:78
@@ -164,7 +164,7 @@ crates/fno-agents/src/loop_dispatch.rs:6
 crates/fno-agents/src/loop_king.rs:1
 crates/fno-agents/src/loopcheck.rs:62
 crates/fno-agents/src/manifest.rs:2
-crates/fno-agents/src/needs.rs:3
+crates/fno-agents/src/needs.rs:4
 crates/fno-agents/src/nudge.rs:1
 crates/fno-agents/src/opencode_ask.rs:1
 crates/fno-agents/src/paths.rs:3
