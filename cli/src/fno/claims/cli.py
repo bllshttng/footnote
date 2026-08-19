@@ -123,6 +123,12 @@ def _parse_metadata(value: str) -> dict:
     return parsed
 
 
+#: Seconds the roster cross-check may spend shelling out to the harness.
+#: A status read is interactive, so it must answer late-but-honestly
+#: ("roster not consulted") rather than hang a king mid-decision.
+_ROSTER_CROSSCHECK_TIMEOUT_S = 10.0
+
+
 def _node_aware_root(key: str):
     """Resolve the claims root for a key (delegates to the shared helper).
 
@@ -658,17 +664,129 @@ def refresh(
         typer.echo(f"refreshed: {key} (new expires_at={result.expires_at})")
 
 
+#: States in which nobody holds the key, so a reader is about to conclude the
+#: node is free for the taking. ``suspect`` is absent on purpose: a dead pid
+#: inside its TTL still protects the slot and already reads as held.
+_UNHELD_STATES = frozenset({"free", "stale"})
+
+
+def _roster_crosscheck(node_id: str) -> dict:
+    """Ask the fleet roster whether anyone is working ``node_id``.
+
+    Returns the additive fields :func:`status` merges into its output:
+    ``roster_consulted`` (bool), ``roster_rows_scanned`` (int),
+    ``roster_workers`` (list of ``{name, state, cwd}``) and, when the
+    cross-check could not run, ``roster_skip_reason``.
+
+    The join is :func:`fno.agents.watchdog.fleet_rows`, which resolves a row's
+    node from the worktree manifest and then the session-keyed ledger - both
+    machine-written. Never a name regex: eight auto-named workers read as
+    nobody-on-this-node on 2026-08-15 and were nearly double-dispatched, which
+    is recorded in that module's header.
+
+    Distinguishing "scanned and found nothing" from "could not scan" is the
+    whole point, so the degrade signal is explicit rather than inferred from
+    an empty list. ``fleet_rows`` returns ``([], warnings)`` for every failure
+    mode, so no rows PLUS a warning is an instrument that did not run, while
+    no rows and no warning is an honestly empty fleet. Reporting the second as
+    the first would rebuild the ambiguity one layer up.
+
+    A row whose node did not resolve carries ``node=None`` and is invisible
+    here - which is exactly the shape of a worker that never ran ``target
+    init``. The scanned count is the honest ceiling on what was checked.
+    """
+    try:
+        from fno.agents.watchdog import fleet_rows
+
+        rows, warnings = fleet_rows(timeout=_ROSTER_CROSSCHECK_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
+        return {
+            "roster_consulted": False,
+            "roster_rows_scanned": 0,
+            "roster_workers": [],
+            "roster_skip_reason": f"{type(exc).__name__}: {exc}",
+        }
+    if not rows and warnings:
+        return {
+            "roster_consulted": False,
+            "roster_rows_scanned": 0,
+            "roster_workers": [],
+            "roster_skip_reason": warnings[0],
+        }
+    return {
+        "roster_consulted": True,
+        "roster_rows_scanned": len(rows),
+        "roster_workers": [
+            {"name": r.name, "state": r.state, "cwd": r.cwd}
+            for r in rows
+            if r.node == node_id
+        ],
+    }
+
+
+#: A roster row in this state finished its turn. The session is RESUMABLE, so
+#: the row is worth naming, but nobody is driving the node right now and
+#: calling it a live worker would be the same overclaim the cross-check exists
+#: to delete - one word covering two facts.
+_FINISHED_ROW_STATE = "done"
+
+
+def _roster_verdict_line(info: dict) -> str:
+    """One line naming what was consulted and what it found.
+
+    Each string is produced by exactly one outcome, so a caller asserts a
+    positive marker instead of grepping for the absence of the word free - an
+    absence has two explanations and cannot tell them apart, which is the
+    defect this whole cross-check exists to remove.
+
+    Four outcomes, not three: a node whose only roster rows are finished
+    sessions is genuinely unworked, and printing the live-worker alarm for it
+    would train every reader to ignore the alarm.
+    """
+    if not info.get("roster_consulted"):
+        return f"free, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
+    workers = info.get("roster_workers") or []
+    engaged = [w for w in workers if w["state"] != _FINISHED_ROW_STATE]
+    if engaged:
+        rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
+        return f"UNCLAIMED but a live worker is on this node: {rendered}"
+    scanned = f"free, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
+    if workers:
+        rendered = ", ".join(w["name"] for w in workers)
+        return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"
+    return scanned
+
+
 @cli.command()
 def status(
     key: str = typer.Argument(...),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Inspect a single claim. Exit code reflects state for scripting."""
+    """Inspect a single claim. Exit code reflects state for scripting.
+
+    On a ``node:<id>`` key that nobody holds, the roster is cross-checked
+    before the answer is rendered. ``free`` had two explanations the output
+    could not tell apart - nobody is working this, and the claim never got
+    taken - and four kings read the first while getting the second, then
+    staffed a duplicate onto a node that already had a live worker on it.
+
+    Only ``node:`` keys, because only they have a fleet to cross-check
+    against. Every other key renders exactly as before.
+
+    Callers parsing the JSON keep reading ``state``; the roster fields are
+    additive and only appear when the cross-check applies.
+    """
     info = claim_status(key=key, root=_node_aware_root(key))
+    node_id = key[len("node:"):] if key.startswith("node:") else ""
+    crosschecked = bool(node_id) and info.get("state") in _UNHELD_STATES
+    if crosschecked:
+        info.update(_roster_crosscheck(node_id))
     if json_output:
         typer.echo(json.dumps(info))
-    else:
-        typer.echo(json.dumps(info, indent=2))
+        return
+    typer.echo(json.dumps(info, indent=2))
+    if crosschecked:
+        typer.echo(_roster_verdict_line(info))
 
 
 def _merge_claims_across_roots(

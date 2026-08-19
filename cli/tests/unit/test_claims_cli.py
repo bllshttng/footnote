@@ -727,3 +727,103 @@ def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):
     r = runner.invoke(cli, ["status", "walker:/some/root", "--json"])
     assert r.exit_code == 0, r.output
     assert json.loads(r.output)["state"] == "free"
+
+
+# ---------------------------------------------------------------------------
+# node: keys cross-check the roster before rendering "free" (x-cd1e)
+# ---------------------------------------------------------------------------
+
+
+def _row(name, state, node):
+    from fno.agents.watchdog import Row
+
+    return Row(row_id=name, name=name, state=state, node=node, cwd="/tmp/wt")
+
+
+@pytest.fixture
+def fake_roster(monkeypatch):
+    """Install a roster reading. ``rows``/``warnings`` mimic fleet_rows."""
+
+    def _install(rows=(), warnings=(), raises=None):
+        def _fake(*_a, **_kw):
+            if raises is not None:
+                raise raises
+            return list(rows), list(warnings)
+
+        monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _fake)
+
+    return _install
+
+
+def test_free_node_with_a_live_worker_says_so(cwd_tmp, fake_roster):
+    """The state that produced tonight's duplicate PR must not print the same
+    word as an idle node. Asserts the positive string, never the absence of
+    the word free."""
+    fake_roster(rows=[_row("t-x76d1-rmtruth", "working", "x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert r.exit_code == 0, r.output
+    assert "UNCLAIMED but a live worker is on this node: t-x76d1-rmtruth" in r.output
+
+
+def test_free_node_with_nobody_names_the_scan_it_consulted(cwd_tmp, fake_roster):
+    """The row count is the positive marker: a scan of 40 rows finding nothing
+    is a different answer from a scan that never ran, and both used to print
+    the identical word."""
+    fake_roster(rows=[_row("t-other", "working", "x-other")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "free, no live worker found (roster scanned: 1 rows)" in r.output
+
+
+def test_roster_read_failure_never_renders_a_clean_free(cwd_tmp, fake_roster):
+    """An instrument that did not run must not render as an answer."""
+    fake_roster(rows=[], warnings=["claude binary not found on PATH"])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "free, roster not consulted (claude binary not found on PATH)" in r.output
+    assert "no live worker found" not in r.output
+
+
+def test_roster_raising_degrades_loudly(cwd_tmp, fake_roster):
+    fake_roster(raises=RuntimeError("registry exploded"))
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert r.exit_code == 0, r.output
+    assert "roster not consulted (RuntimeError: registry exploded)" in r.output
+
+
+def test_an_honestly_empty_fleet_is_not_a_failed_read(cwd_tmp, fake_roster):
+    """No rows AND no warning is a real zero. Reporting it as 'not consulted'
+    would rebuild the ambiguity one layer up."""
+    fake_roster(rows=[], warnings=[])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "free, no live worker found (roster scanned: 0 rows)" in r.output
+
+
+def test_only_finished_sessions_do_not_raise_the_live_worker_alarm(cwd_tmp, fake_roster):
+    """A `done` row is resumable, not driving. Printing the alarm for it would
+    train every reader to ignore the alarm."""
+    fake_roster(rows=[_row("t-xb0dd-outage", "done", "x-b0dd")])
+    r = runner.invoke(cli, ["status", "node:x-b0dd"])
+    assert "UNCLAIMED but a live worker" not in r.output
+    assert "1 finished session(s) resolved to it: t-xb0dd-outage" in r.output
+
+
+def test_a_held_node_never_pays_for_the_crosscheck(cwd_tmp, monkeypatch):
+    """A live claim already answers the question; the roster fields must not
+    appear and the harness must not be shelled out to."""
+    def _boom(*_a, **_kw):
+        raise AssertionError("roster consulted for a held node")
+
+    monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
+    acquire_claim(key="node:x-held", holder="target-session:s", ttl_ms=60_000)
+    r = runner.invoke(cli, ["status", "node:x-held", "--json"])
+    info = json.loads(r.output)
+    assert info["state"] == "live"
+    assert "roster_consulted" not in info
+
+
+def test_a_non_node_key_is_rendered_exactly_as_before(cwd_tmp, monkeypatch):
+    def _boom(*_a, **_kw):
+        raise AssertionError("roster consulted for a non-node key")
+
+    monkeypatch.setattr("fno.agents.watchdog.fleet_rows", _boom)
+    r = runner.invoke(cli, ["status", "dispatch:x-76d1", "--json"])
+    assert json.loads(r.output) == {"key": "dispatch:x-76d1", "state": "free"}
