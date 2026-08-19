@@ -44,7 +44,7 @@ agents loop-check
 agents needs
 agents resume
 agents rm
-agents spawn !--output-format !--squad
+agents spawn !--bounded-placement !--output-format !--recorded-provider !--squad
 annotate
 annotate list
 approvals
