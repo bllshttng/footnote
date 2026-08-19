@@ -272,6 +272,17 @@ def _coverage_refused_reason(
     prefix = f"coverage {cov_word}: " if cov_word != "covered" else ""
     ev_head = cov.get("head_sha")
     if head and ev_head and head != ev_head:
+        # Pre-branch-field attestations (scope legacy_head_match) admitted on
+        # exact head equality die the moment the head moves: the scoping scan
+        # in local_latest_passes skips an unbranchable line rather than emit a
+        # verdict it cannot attribute, so no row a recompute just built
+        # carries one. A targeted "unscoped attestation at <sha>" branch here
+        # could fire only on a degraded recompute that returned a PRE-move row
+        # still holding such a verdict - an instrument-failure corner on a
+        # transitional cohort - while implying the producer names a shape it
+        # no longer emits. The generic line prescribes the same action, and
+        # for the legacy cohort it is also the honest story: the pass cannot
+        # be scoped to this PR, so re-run the verb at HEAD.
         return (
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"

@@ -1339,6 +1339,49 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
     }
 }
 
+/// Whether a `review_attestation` line is about the PR under evaluation.
+///
+/// The events journal is shared across every worktree of a repo
+/// (setup-worktree.sh links them to one canonical file), so an unscoped scan
+/// reads every branch's attestations into every PR's verdict list. That is
+/// noise in the common case and a false pass in the bad one: `review_freshness`
+/// grants CarriedBaseSync on a code-diff identity match, which two branches
+/// carrying the same delta (a cherry-pick, a duplicate-PR pair) satisfy - and
+/// that shape only exists at DIFFERENT shas, since equal shas return Fresh
+/// before any carry is computed.
+///
+/// Exact head equality is therefore admitted whatever branch the emitter stood
+/// on: a foreign branch cannot share this head sha without being this commit,
+/// and the spawned-reviewer lane depends on it (review-lanes.md) - the
+/// reviewer's worktree necessarily carries a branch of its own (git refuses
+/// two worktrees on one branch), so a branch-only match would read its
+/// exact-HEAD pass as out of scope. The branch arm is what survives a head
+/// move: a same-branch attestation can still carry (x-62a1), while a foreign
+/// branch at a different head stays out of scope - the cherry-pick shape.
+///
+/// Named, not closed: a shared sha proves COMMIT identity, not PR identity.
+/// The event carries no base ref or PR number, so a pass attested for one PR
+/// clears another PR at the same commit with a different base (a
+/// duplicate-PR pair). All PRs here share main as base, so the shape is
+/// exotic; closing it needs `base` in the attestation payload (schema +
+/// producer + this resolver), filed on the follow-up node.
+///
+/// `attested_branch` is empty for every event predating the field (a
+/// detached HEAD now refuses to emit at all). Those fall back to exact head
+/// equality only: a legacy attestation on a moved head is not scopeable and
+/// must not count.
+fn attestation_in_scope(
+    attested_branch: &str,
+    attested_head: &str,
+    head_branch: &str,
+    head_sha: &str,
+) -> bool {
+    if !attested_head.is_empty() && attested_head == head_sha {
+        return true;
+    }
+    !attested_branch.is_empty() && !head_branch.is_empty() && attested_branch == head_branch
+}
+
 /// The path from a `git diff --raw` line (`:<meta>\t<path>`), or `""`.
 /// `--no-renames` guarantees one path per line, so there is no second field.
 fn raw_diff_line_path(line: &str) -> &str {
@@ -1642,7 +1685,7 @@ fn graphql_exhausted_reason(q: &GraphqlQuota) -> String {
 
 /// A configured local reviewer with no head-pinned `pass` attestation.
 #[derive(Debug, Clone, PartialEq)]
-struct UnattestedReviewer {
+pub struct UnattestedReviewer {
     name: String,
     /// A head this reviewer DID attest at, which is no longer HEAD. Always a
     /// PASS and never empty - normalized at construction so `Some` means
@@ -1758,8 +1801,10 @@ fn scan_unrecorded_decisions(
 /// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
 /// reviewer is satisfied when events.jsonl carries a line with
 /// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
-/// stripped on both sides), `data.head_sha == head_sha`, and
-/// `data.verdict == "pass"`.
+/// stripped on both sides), the line in scope for this PR
+/// (`attestation_in_scope`: `data.branch == head_branch`, or the exact head
+/// sha whatever branch it emitted on - a legacy line with no branch counts
+/// only on that exact-head arm), and `data.verdict == "pass"`.
 ///
 /// The gate reads `.is_empty()` and the block message reads the names, so the
 /// decision and the explanation come from ONE scan. When they came from two,
@@ -1775,10 +1820,12 @@ fn scan_unrecorded_decisions(
 /// same class of lie this node exists to delete - so the count is surfaced in
 /// the reason. Mirrors `open_review_findings`, which already does this for
 /// `review_finding`.
-fn unattested_reviewers_scan(
+pub fn unattested_reviewers_scan(
     events_path: &Path,
     reviewers: &[String],
     freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
 ) -> (Vec<UnattestedReviewer>, usize) {
     let unsatisfied_all = || -> Vec<UnattestedReviewer> {
         reviewers
@@ -1835,6 +1882,18 @@ fn unattested_reviewers_scan(
             continue;
         };
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+        // The SAME scope predicate the coverage axis uses (attestation_in_scope),
+        // applied before any freshness call: an attestation from another
+        // branch is not evidence about this PR at all, so it must never reach
+        // `latest_pass` or `other_heads` - recording it as a superseded head
+        // would name a reviewer that never touched this PR.
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
         // The SAME predicate the coverage axis uses, not a second head-equality
         // rule beside it. Leaving this one a bare equality would have made the
         // softening decorative: this is the scan that satisfies
@@ -2072,6 +2131,15 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The PR's head branch, same `gh pr view` round trip as headRefOid. The
+    // scope predicate needs it: attestations are keyed to the branch they
+    // reviewed, and an empty read must pass "" so the predicate fails closed
+    // onto exact head equality.
+    let head_branch = pr_json
+        .get("headRefName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     // GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" (still
     // computing). Only "CONFLICTING" is a definitive no; UNKNOWN must not hold
     // the terminal (it clears on its own). Missing field -> "UNKNOWN".
@@ -2189,7 +2257,7 @@ fn read_pr_info(
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
     let (unattested, malformed_attestations) =
-        unattested_reviewers_scan(events_path, reviewers, &freshness);
+        unattested_reviewers_scan(events_path, reviewers, &freshness, &head_branch, head_sha);
     let reviewers_ok = unattested.is_empty();
     // Coverage reads the same events.jsonl as the attestation scan (its local
     // axis) plus the GitHub review arrays (its github_app axis). Read once;
@@ -2220,6 +2288,8 @@ fn read_pr_info(
             false,
             author_session,
             &freshness,
+            &head_branch,
+            head_sha,
         );
         (
             "none".to_string(),
@@ -2409,6 +2479,8 @@ fn read_pr_info(
             true,
             author_session,
             &freshness,
+            &head_branch,
+            head_sha,
         );
         (
             activity_ts,
@@ -3019,19 +3091,34 @@ struct BotProfile {
     /// ISSUE-comment body markers this bot posts when it is rate-limited and will
     /// never post a review object (PR #214). Empty for a bot never seen to do so.
     usage_markers: &'static [&'static str],
+    /// Body markers for a CLEAN pass this bot posts as a plain issue comment
+    /// rather than a review object. Codex submits a formal review only when it
+    /// has findings (measured on PR #947: the clean pass is the comment `Codex
+    /// Review: Didn't find any major issues. Bravo. Reviewed commit: <sha>`),
+    /// so without reading it a clean pass can never clear the gate and the
+    /// gate is strictly easier to satisfy with a flawed PR than a clean one.
+    /// Lowercased comparison; both apostrophe forms because the bot posts a
+    /// typographic one and a human quoting it may not. Empty for a bot whose
+    /// clean-pass shape was not measured - do not guess a marker.
+    clean_pass_markers: &'static [&'static str],
     nudgeable: bool,
 }
 
 /// The shipped bot table. `chatgpt-codex-connector` is characterized from PR #618
-/// (mention-triggered, ~4-7m latency, 5/5 mentions answered); `gemini-code-assist`
-/// stays `nudgeable: false` with an empty `review_handle` until its trigger is
-/// characterized (Evidence Gaps), which is strictly more than the old lists knew.
+/// (mention-triggered, ~4-7m latency, 5/5 mentions answered) and PR #947 (the
+/// clean-pass comment); `gemini-code-assist` stays `nudgeable: false` with an
+/// empty `review_handle` until its trigger is characterized (Evidence Gaps),
+/// which is strictly more than the old lists knew.
 const BOT_PROFILES: &[BotProfile] = &[
     BotProfile {
         login: "chatgpt-codex-connector",
         review_handle: "@codex review",
         reply_handle: "@chatgpt-codex-connector",
         usage_markers: &["usage limits for code reviews", "codex usage limits"],
+        clean_pass_markers: &[
+            "didn't find any major issues",
+            "didn\u{2019}t find any major issues",
+        ],
         nudgeable: true,
     },
     BotProfile {
@@ -3039,6 +3126,7 @@ const BOT_PROFILES: &[BotProfile] = &[
         review_handle: "",
         reply_handle: "@gemini-code-assist",
         usage_markers: &[],
+        clean_pass_markers: &[],
         nudgeable: false,
     },
 ];
@@ -3560,10 +3648,356 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// bot and proceeding. Add a marker only for a string the bot posts when it
 /// truly will not review; a phrase a real review could quote is not one.
 pub(crate) fn body_is_usage_limit(body: &str) -> bool {
+    let lower = body.to_lowercase();
     BOT_PROFILES
         .iter()
         .flat_map(|p| p.usage_markers.iter())
-        .any(|m| body.contains(m))
+        .any(|m| lower.contains(m))
+}
+
+/// The clean-pass markers for a CONFIGURED login (may differ from the comment
+/// author by case or a `[bot]` suffix, and may be the config's short name -
+/// hence the SYMMETRIC correspond test, not the one-way matches). Empty for a
+/// login with no measured clean-pass shape, which the caller treats as "no
+/// clean-pass evidence".
+fn clean_pass_markers_for(login: &str) -> &'static [&'static str] {
+    BOT_PROFILES
+        .iter()
+        .find(|p| logins_correspond(login, p.login))
+        .map(|p| p.clean_pass_markers)
+        .unwrap_or(&[])
+}
+
+/// The commit a bot comment says it reviewed, from a `Reviewed commit: <hex>`
+/// line. Returns "" when the line is absent or the token is not hex, which
+/// makes the comment unpinned and therefore not evidence: a clean-pass comment
+/// that names no commit cannot be aged, so counting it would be exactly the
+/// unpinned-attestation hole the local axis already refuses. Trailing
+/// punctuation (`.`, `)`, `,`) is stripped so a sentence-embedded sha parses.
+fn reviewed_commit_from_body(body: &str) -> &str {
+    const MARKER: &str = "Reviewed commit:";
+    // The marker match lowercases the body, so the lowercased spelling parses
+    // here too; any other casing stays unpinned, which is the fail-closed no.
+    // A reply QUOTING an earlier marker ("Reviewed commit: (see previous)")
+    // before its own pin must not shadow the real one, so every occurrence
+    // is tried until one yields a hex token.
+    let marker_lc = MARKER.to_lowercase();
+    let mut from = 0;
+    while let Some(idx) = body[from..]
+        .find(MARKER)
+        .map(|i| from + i)
+        .or_else(|| body[from..].find(marker_lc.as_str()).map(|i| from + i))
+    {
+        let token = body[idx + MARKER.len()..]
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        // Trimmed on BOTH ends, not just the trailing one: the bot writes
+        // markdown, so the sha arrives wrapped as often as it arrives bare
+        // (`` `abc1234` ``, `(abc1234)`), and a leading wrapper character left
+        // in place fails the all-hex test and drops a genuine pinned pass.
+        let hex: &str = token.trim_matches(|c: char| !c.is_ascii_hexdigit());
+        if hex.len() >= 7 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return hex;
+        }
+        from = idx + MARKER.len();
+    }
+    ""
+}
+
+/// A clean-pass issue comment by `login` that pins the commit it read, as
+/// `(sha, freshness, createdAt)`. The FRESHEST pinned comment wins, selected
+/// by `freshness_rank` exactly as the review-object path selects among a
+/// bot's reviews: comments arrive oldest-first, so first-match would keep the
+/// verdict pinned to the sha of the FIRST clean pass forever - a bot that
+/// re-reviews after a head move posts a second comment the scan would never
+/// reach, and the gate could never clear through this lane again. A marker
+/// with no pinned sha is not evidence (returns None, never an invented sha),
+/// and the marker must sit at a sentence boundary (`marker_at_sentence_end`).
+/// `createdAt` rides along so `bot_verdict` can order a pass against a later
+/// quota bounce; an absent timestamp compares as the empty string.
+/// A usage-limit comment by a characterized bot login. Shared by rule 2's
+/// later-refusal ordering and rule 3, which previously re-implemented the
+/// same three-part filter inline. The author check is two-part (round 3):
+/// the author's login contains the configured name AND the author resolves
+/// to a known bot profile, so a config short name ("codex") cannot draft
+/// every human whose login contains it into the bot's marker lane.
+fn usage_comment_by(login: &str, c: &Value) -> bool {
+    let author = c
+        .pointer("/author/login")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    login_matches_bot(author, login)
+        && profile_by_author(author).is_some()
+        && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+}
+
+/// A comment's `createdAt`, empty when absent (empty orders as "unknown",
+/// which each caller resolves fail-closed for its own rule).
+fn comment_ts(c: &Value) -> &str {
+    c.get("createdAt").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn clean_pass_review(
+    comments: &[Value],
+    login: &str,
+    freshness: &dyn Fn(&str) -> Freshness,
+) -> Option<(String, Freshness, Option<String>)> {
+    let markers = clean_pass_markers_for(login);
+    if markers.is_empty() {
+        return None;
+    }
+    let mut best: Option<(String, Freshness, Option<String>)> = None;
+    for c in comments {
+        let author = c
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // One-way: the AUTHOR's login must contain the configured name. The
+        // symmetric test lets a human whose login is a substring of the bot's
+        // ("codex" vs "chatgpt-codex-connector") post the pass comment. The
+        // profile guard closes the remaining short-name route (round 3): with
+        // the config naming "codex", containment alone drafts any human whose
+        // login merely contains it, so the author must also resolve to a
+        // characterized bot profile.
+        if !login_matches_bot(author, login) || profile_by_author(author).is_none() {
+            continue;
+        }
+        let body = c.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        if body_is_usage_limit(body) {
+            // A refusal quoting an earlier pass is still a refusal: the usage
+            // marker inside the same body beats the clean-pass quotation that
+            // body carries, exactly as a within-body tie must resolve.
+            continue;
+        }
+        let lower = body.to_lowercase();
+        if !markers.iter().any(|m| marker_at_sentence_end(&lower, m)) {
+            continue;
+        }
+        let sha = reviewed_commit_from_body(body);
+        if sha.is_empty() {
+            continue;
+        }
+        let fresh = freshness(sha);
+        let ts = c
+            .get("createdAt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // On EQUAL rank the later comment wins: keeping first-seen pins the
+        // verdict to the earliest pass of that rank and lets a quota bounce
+        // BETWEEN two equal-rank passes outdate the newer one (PR 917 round
+        // two: the newest pass postdates the bounce and must be the evidence).
+        // "Later" is decided by `ts_after` on the parsed `createdAt`, never by
+        // iteration order: array order is the payload's promise, not ours, and
+        // a raw string compare mis-orders offset-suffixed against Z-suffixed
+        // stamps. Same predicate `bot_verdict` uses on `submittedAt`, so the
+        // two arms of one verdict cannot order the same evidence differently.
+        let better = match best.as_ref() {
+            None => true,
+            Some((_, b, kept_ts)) => {
+                freshness_rank(fresh) > freshness_rank(*b)
+                    || (freshness_rank(fresh) == freshness_rank(*b)
+                        && ts_after(
+                            ts.as_deref().unwrap_or(""),
+                            kept_ts.as_deref().unwrap_or(""),
+                        ))
+            }
+        };
+        if better {
+            best = Some((sha.to_string(), fresh, ts));
+        }
+    }
+    best
+}
+
+/// A clean-pass marker only counts when the SENTENCE it ends is the pass
+/// sentence and what follows is the measured shape: end of body, the `Bravo`
+/// flourish (itself sentence-final), or the `Reviewed commit:` pin (often on
+/// its own line). The bot posts the same clause while REPORTING findings -
+/// `Didn't find any major issues, but 2 minor ones...` and the period form
+/// `...issues. 2 minor ones need attention.` - and a punctuation peek alone
+/// cannot tell a pass from a findings note sharing the clause; the FOLLOW-UP
+/// sentence can. `Bravo` must therefore END its sentence too (round 3):
+/// `Bravo, but...` and `Bravo. 2 minor ones...` are findings notes wearing
+/// the flourish, and a bare `starts_with("bravo")` counted both as passes.
+/// Characterized from the measured specimens (PR #947): a new bot's shape
+/// gets its own profile entry, never a loosened predicate.
+fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
+    // The measured follow-ups to a genuine pass sentence. A newline counts as
+    // a terminator exactly like a period: the measured pin posts as its own
+    // line, and `\n` inside the bot's body is a sentence boundary, not prose.
+    // A quoted line is transparent: the bot's own next sentence is what the
+    // shape judges, and a reply may quote an earlier marker before its pin.
+    fn shaped(t: &str) -> bool {
+        if t.is_empty() {
+            return true;
+        }
+        if let Some(rest) = t.strip_prefix('>') {
+            return shaped(
+                rest.split_once('\n')
+                    .map(|(_, next)| next.trim_start())
+                    .unwrap_or(""),
+            );
+        }
+        t.starts_with("reviewed commit:")
+            || match t.strip_prefix("bravo") {
+                Some(rest) => {
+                    rest.is_empty()
+                        || rest.starts_with(['.', '!', '?', '\n']) && shaped(rest[1..].trim_start())
+                }
+                None => false,
+            }
+    }
+    lower.match_indices(marker).any(|(i, _)| {
+        let rest = lower[i + marker.len()..].trim_start();
+        if shaped(rest) {
+            return true;
+        }
+        for term in ['.', '!', '?', '\n'] {
+            if let Some(next) = rest.strip_prefix(term) {
+                if shaped(next.trim_start()) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// One per-bot verdict from ALL of that bot's evidence. The coverage axis
+/// (`classify_coverage`) and the presence gate (`compute_review_info`) ask
+/// this ONE question through this ONE predicate: independent scans of the
+/// same payload are how a PR ends up `all_required_passed` while coverage
+/// reads `Refused` (or the inverse) and the run wedges between two gates
+/// that never reconcile - the reader-divergence class x-e601 exists to
+/// delete. Precedence, each rule falling through only when its evidence is
+/// absent or does not count:
+/// 1. a review object whose commit still matches HEAD -> `Reviewed`
+/// 2. a pinned clean-pass comment that still counts, unless a usage-limit
+///    comment by the same login POSTDATES it -> `Reviewed`
+/// 3. a usage-limit comment -> `Refused`
+/// 4. a review object that no longer counts -> `Stale` (recorded, not
+///    dropped)
+/// 5. a pinned clean-pass comment that no longer counts -> `Stale`
+/// 6. nothing -> `Absent`
+///
+/// Rule 2 orders by comment `createdAt`: a quota bounce AFTER a pass
+/// outdates it (fail closed on both axes), a bounce BEFORE it does not (the
+/// bot recovered and read the code - a historical refusal is not a life
+/// sentence). Both orderings require positive timestamp evidence; on ties
+/// or absent timestamps the pass stands, symmetrically with the refusal.
+pub(crate) fn bot_verdict(
+    login: &str,
+    reviews: &[Value],
+    comments: &[Value],
+    freshness: &dyn Fn(&str) -> Freshness,
+) -> (CoverageVerdict, String, Option<Freshness>) {
+    // That login's freshest review object, selected by `freshness_rank`
+    // exactly as classify_coverage's known-author scan selects, carrying its
+    // `submittedAt` so the refusal scan below can order it against a later
+    // bounce. The author match is ONE-WAY (login_matches_bot: the author's
+    // login contains the configured name), restoring the presence gate's old
+    // pre-filter: the symmetric test let a drive-by human whose login is a
+    // substring of the bot's ("codex" vs "chatgpt-codex-connector") satisfy
+    // the gate. On EQUAL rank the later-submitted review is the evidence,
+    // mirroring clean_pass_review's equal-rank rule.
+    let mut review: Option<(String, Freshness, String)> = None;
+    for r in reviews {
+        let author = r
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !login_matches_bot(author, login) {
+            continue;
+        }
+        if r.get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
+            continue;
+        }
+        let oid = r
+            .pointer("/commit/oid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let ts = r
+            .get("submittedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let fresh = freshness(oid);
+        let better = match review.as_ref() {
+            None => true,
+            Some((_, b, kept_ts)) => {
+                freshness_rank(fresh) > freshness_rank(*b)
+                    || (freshness_rank(fresh) == freshness_rank(*b) && ts_after(&ts, kept_ts))
+            }
+        };
+        if better {
+            review = Some((oid.to_string(), fresh, ts));
+        }
+    }
+    if let Some((sha, fresh, _)) = review.as_ref() {
+        if fresh.counts() {
+            return (CoverageVerdict::Reviewed, sha.clone(), Some(*fresh));
+        }
+    }
+    let clean = clean_pass_review(comments, login, freshness);
+    if let Some((sha, fresh, clean_ts)) = clean.as_ref() {
+        if fresh.counts() {
+            let later_refusal = comments.iter().any(|c| {
+                if !usage_comment_by(login, c) {
+                    return false;
+                }
+                // ts_after, never a raw compare: offset-suffixed and Z-suffixed
+                // RFC3339 forms mis-order lexicographically, and an UNPARSEABLE
+                // side (an absent clean_ts) reads false - the pass stands,
+                // which is what the rule-2 doc above promises.
+                ts_after(comment_ts(c), clean_ts.as_deref().unwrap_or(""))
+            });
+            if !later_refusal {
+                return (CoverageVerdict::Reviewed, sha.clone(), Some(*fresh));
+            }
+        }
+    }
+    // Rule 3 is timestamp-aware (round 3): a bounce that PREDATES the bot's
+    // own latest evidence does not park the verdict at Refused. The bot
+    // recovered and reviewed; the honest label for a pass that no longer
+    // counts is Stale - ask a re-read, a state with a path back - rather
+    // than Refused, whose only exit is a quota reset nobody can schedule.
+    // Fail direction differs from rule 2 on purpose: rule 2 guards evidence
+    // of a review (absent timestamps keep the pass), this rule guards
+    // permission to arm (an absent side keeps the refusal).
+    let latest_evidence_ts = {
+        let r_ts = review.as_ref().map(|(_, _, t)| t.as_str()).unwrap_or("");
+        let c_ts = clean
+            .as_ref()
+            .map(|(_, _, t)| t.as_deref().unwrap_or(""))
+            .unwrap_or("");
+        if ts_after(c_ts, r_ts) {
+            c_ts
+        } else {
+            r_ts
+        }
+    };
+    let refused = comments.iter().any(|c| {
+        usage_comment_by(login, c)
+            && (comment_ts(c).is_empty()
+                || latest_evidence_ts.is_empty()
+                || ts_after(comment_ts(c), latest_evidence_ts))
+    });
+    if refused {
+        return (CoverageVerdict::Refused, String::new(), None);
+    }
+    if let Some((sha, fresh, _)) = review {
+        return (CoverageVerdict::Stale, sha, Some(fresh));
+    }
+    if let Some((sha, fresh, _)) = clean {
+        return (CoverageVerdict::Stale, sha, Some(fresh));
+    }
+    (CoverageVerdict::Absent, String::new(), None)
 }
 
 /// Per-required-bot review verdict (grilled decision 5 / step 2).
@@ -3643,83 +4077,31 @@ fn compute_review_info(
         .unwrap_or(&[]);
 
     let final_ts = review_activity_ts(reviews_json);
-    let mut passed: Vec<bool> = vec![false; required_bots.len()];
 
-    for r in reviews {
-        let login = r
-            .pointer("/author/login")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
-
-        // A required bot's PRESENCE is the same question the coverage axis
-        // asks, so it goes through the same predicate. Without this the
-        // tightening is decorative on exactly the path that gates a merge: a
-        // required bot whose only verdict sits on a commit it read twelve
-        // hours and two commits ago would still satisfy `reviewed`, and a
-        // fresh local attestation beside it would carry the whole gate. A bot
-        // that goes stale returns to `missing_bots`, where the existing nudge
-        // path asks it to re-read - which is the correct response to "reviewed
-        // an older commit", and a different one from "has not reviewed".
-        if !state.is_empty()
-            && freshness(
-                r.pointer("/commit/oid")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-            )
-            .counts()
-        {
-            for (i, bot) in required_bots.iter().enumerate() {
-                if login_matches_bot(login, bot) {
-                    passed[i] = true;
-                }
-            }
+    // Each required bot's PRESENCE is the same question the coverage axis
+    // asks, through the same ONE predicate (`bot_verdict`): a review object
+    // that still counts, else a pinned clean-pass comment that still counts,
+    // else refusal on a usage-limit comment. Computing this with independent
+    // scans is how `all_required_passed` reads true while coverage reads
+    // `Refused` (or the inverse) and the run wedges between two gates that
+    // never reconcile - the reader-divergence class x-e601 exists to delete.
+    // A stale verdict lands in `missing_bots`, where the nudge path asks for
+    // a re-read - the correct response to "reviewed an older commit", and a
+    // different one from "has not reviewed". A quota refusal lands in
+    // `usage_limited` and FAILS the gate closed (x-9ab2): the PR does not
+    // merge on a quota bounce, and the loop terminates via DoneAwaitingReview
+    // instead of spinning (the PR #214 shape). Scoped to the bot's own
+    // evidence inside bot_verdict, so a stranger's comment never moves a
+    // required bot (AC1-ERR).
+    let mut missing_bots: Vec<String> = Vec::new();
+    let mut usage_limited: Vec<String> = Vec::new();
+    for bot in required_bots {
+        match bot_verdict(bot, reviews, comments, freshness).0 {
+            CoverageVerdict::Reviewed => {}
+            CoverageVerdict::Refused => usage_limited.push(bot.clone()),
+            _ => missing_bots.push(bot.clone()),
         }
     }
-
-    let mut missing_bots: Vec<String> = required_bots
-        .iter()
-        .zip(passed.iter())
-        .filter(|(_, ok)| !**ok)
-        .map(|(bot, _)| bot.clone())
-        .collect();
-
-    // (a) Usage-limit detection. A still-missing required bot that authored a
-    // comment carrying a pinned usage-limit marker is env-blocked, not
-    // hasn't-reviewed-yet: it will never post a review. Move it OUT of
-    // missing_bots into usage_limited so it is not nudged/idled-on (the agent
-    // cannot make a rate-limited bot recover, so a nudge would wedge until
-    // budget death - the PR #214 shape). Unlike PR #214, a usage-limited bot
-    // now FAILS the gate closed (`all_required_passed` is false while
-    // usage_limited is non-empty, x-9ab2): the PR does not merge on a quota
-    // bounce. The loop terminates cleanly via DoneAwaitingReview instead of
-    // spinning. Scoped to the bot's OWN author.login so a stranger's comment
-    // never drops a required bot (AC1-ERR). Only still-missing bots are
-    // scanned, so a bot that actually reviewed is never usage-limited (AC1-EDGE).
-    let mut usage_limited: Vec<String> = Vec::new();
-    missing_bots.retain(|bot| {
-        let rate_limited = comments.iter().any(|c| {
-            let login = c
-                .pointer("/author/login")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !login_matches_bot(login, bot) {
-                return false;
-            }
-            let body = c
-                .get("body")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            body_is_usage_limit(&body)
-        });
-        if rate_limited {
-            usage_limited.push(bot.clone());
-            false
-        } else {
-            true
-        }
-    });
 
     ReviewInfo {
         latest_ts: final_ts,
@@ -3839,6 +4221,20 @@ pub enum AttestationOrigin {
     Unknown,
 }
 
+/// How a local attestation was scoped to this PR: it is scopeable while
+/// scope lasts (`attested_branch`: it named this PR's head branch, or it pins
+/// this PR's exact head sha), or it predates the `branch` field and was
+/// admitted on exact head equality alone (`legacy_head_match`). The second is
+/// the one a refusal must NAME rather than silently drop: a pre-branch-field
+/// attestation on a moved head is unscopeable, and a reader told only "0
+/// reviewed" cannot tell it from nobody-ever-reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationScope {
+    AttestedBranch,
+    LegacyHeadMatch,
+}
+
 /// One reviewer's classification, for the `review_coverage` event and receipts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerVerdict {
@@ -3879,6 +4275,12 @@ pub struct ReviewerVerdict {
     /// nothing to be fresh or stale about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness: Option<Freshness>,
+    /// How this verdict was scoped to the PR under evaluation. Only meaningful
+    /// (and only serialized) on `local_attestation` verdicts: github_app
+    /// evidence is scoped by being a review object ON this PR, so it needs no
+    /// scope field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<AttestationScope>,
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
@@ -3959,6 +4361,9 @@ struct LocalPass {
     /// The head this attestation pinned. Whether it still counts is
     /// [`review_freshness`]'s call, not this scan's.
     head: String,
+    /// The branch the attestation named. Empty only for the legacy exact-head
+    /// fallback, so the verdict can carry the matching scope label.
+    branch: String,
 }
 
 /// Distinct `(reviewer, attester_session_id)` pairs whose LATEST
@@ -3973,13 +4378,19 @@ struct LocalPass {
 /// `unattested_reviewers_scan`'s retraction handling. Pure: scans text, no IO.
 /// Presence-based: counts any reviewer regardless of the configured `reviewers`
 /// list, so a worker-run `/code-review` counts even when `reviewers: []`.
-fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
-    // (reviewer, attester_session_id) -> (head it attested, was it a pass). The
-    // attester lives in the key so cross-session attestations join instead of
-    // replace. The HEAD is no longer a filter, it is a RESULT: which head an
-    // attestation pinned is what the freshness predicate needs, and dropping
-    // every non-matching line here is what made a rebase destroy a review.
-    let mut latest: std::collections::HashMap<(String, Option<String>), (String, bool)> =
+///
+/// Scoped to the PR under evaluation via `attestation_in_scope`: an
+/// out-of-scope line is skipped ENTIRELY (never a verdict, never a stale
+/// entry), which is also what keeps the pair key honest - one session
+/// attesting PR B after PR A no longer overwrites A's pass with B's head.
+fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
+    // (reviewer, attester_session_id) -> (head it attested, branch it named,
+    // was it a pass). The attester lives in the key so cross-session
+    // attestations join instead of replace. The HEAD is no longer a filter, it
+    // is a RESULT: which head an attestation pinned is what the freshness
+    // predicate needs, and dropping every non-matching line here is what made
+    // a rebase destroy a review.
+    let mut latest: std::collections::HashMap<(String, Option<String>), (String, String, bool)> =
         std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -4001,6 +4412,23 @@ fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
         if line_head.is_empty() {
             continue;
         }
+        // The branch this attestation named; empty on every event predating
+        // the field, which attestation_in_scope then admits only on exact
+        // head equality. Once the head moves, a pre-field line emits NO
+        // verdict at all - deliberately: with no branch there is no way to
+        // attribute the pass to THIS PR rather than a foreign one, and
+        // recording it as Stale would pool every PR's legacy passes into
+        // every coverage read (the cross-PR leak this node deletes). The
+        // refusal's action for that cohort is the generic one: re-run the
+        // review verb at HEAD, which emits a branch-scoped event.
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !attestation_in_scope(&line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
         // attester_session_id is the live session that emitted; None on events
         // that predate the field (the whole backlog), which classifies as
@@ -4018,16 +4446,17 @@ fn local_latest_passes(events_text: &str) -> Vec<LocalPass> {
         // which keeps its name key (the config.review.reviewers gate).
         latest.insert(
             (r.trim_start_matches('/').to_string(), attester),
-            (line_head.to_string(), is_pass),
+            (line_head.to_string(), line_branch, is_pass),
         );
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
-        .filter(|(_, (_, pass))| *pass)
-        .map(|((reviewer, attester), (head, _))| LocalPass {
+        .filter(|(_, (_, _, pass))| *pass)
+        .map(|((reviewer, attester), (head, branch, _))| LocalPass {
             reviewer,
             attester,
             head,
+            branch,
         })
         .collect();
     out.sort_by(|a, b| {
@@ -4077,8 +4506,10 @@ pub fn classify_coverage(
     github_read_ok: bool,
     author_session: Option<&str>,
     freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
 ) -> CoverageReport {
-    let local_passes = local_latest_passes(events_text);
+    let local_passes = local_latest_passes(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
 
     if github_read_ok {
@@ -4128,6 +4559,28 @@ pub fn classify_coverage(
                 None => reviewed_authors.push((author.to_string(), oid.to_string(), fresh)),
             }
         }
+        // (1b) A known App whose clean pass is a COMMENT posts no review
+        // object, so the scan above never sees it. Without this, (3) counts a
+        // findings review from an unconfigured App and drops its clean one -
+        // the gate strictly easier to satisfy with a flawed PR than a clean
+        // one, the same defect `bot_verdict` closes for CONFIGURED logins.
+        for c in comments {
+            let author = c
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if author.is_empty()
+                || !author_is_known_bot(author, github_app_logins)
+                || reviewed_authors
+                    .iter()
+                    .any(|(a, _, _)| logins_correspond(a, author))
+            {
+                continue;
+            }
+            if let Some((sha, fresh, _)) = clean_pass_review(comments, author, freshness) {
+                reviewed_authors.push((author.to_string(), sha, fresh));
+            }
+        }
         // (2) One verdict per unique configured login: reviewed if a
         // corresponding author posted, else refused on a usage-limit comment,
         // else absent. Dedup so a login in two lists is one verdict, not two
@@ -4139,45 +4592,14 @@ pub fn classify_coverage(
                 continue;
             }
             seen.push(login.to_string());
-            let hit = reviewed_authors
-                .iter()
-                .find(|(a, _, _)| logins_correspond(a, login));
-            let (verdict, reviewed_sha, fresh) = match hit {
-                // Reviewed at a commit that still describes HEAD, or reviewed
-                // at one that does not. Both are a response; only the first is
-                // coverage. Recording the second as `Stale` rather than
-                // silently dropping it is what makes the tightening auditable.
-                Some((_, sha, f)) => (
-                    if f.counts() {
-                        CoverageVerdict::Reviewed
-                    } else {
-                        CoverageVerdict::Stale
-                    },
-                    sha.clone(),
-                    Some(*f),
-                ),
-                None => {
-                    let refused = comments.iter().any(|c| {
-                        let ca = c
-                            .pointer("/author/login")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        logins_correspond(ca, login)
-                            && body_is_usage_limit(
-                                c.get("body").and_then(|v| v.as_str()).unwrap_or(""),
-                            )
-                    });
-                    (
-                        if refused {
-                            CoverageVerdict::Refused
-                        } else {
-                            CoverageVerdict::Absent
-                        },
-                        String::new(),
-                        None,
-                    )
-                }
-            };
+            // One verdict from the ONE per-bot predicate the presence gate
+            // also reads (`bot_verdict`): every arm - review object, pinned
+            // clean-pass comment, usage refusal, the stale fallbacks - is
+            // shared, so this axis can never answer differently from
+            // `compute_review_info` about the same evidence. The stale
+            // fallbacks keep a responded-but-outdated verdict RECORDED rather
+            // than dropped, which is what makes the tightening auditable.
+            let (verdict, reviewed_sha, fresh) = bot_verdict(login, reviews, comments, freshness);
             verdicts.push(ReviewerVerdict {
                 producer: CoverageProducer::GithubApp,
                 name: login.to_string(),
@@ -4186,6 +4608,7 @@ pub fn classify_coverage(
                 attestation_origin: AttestationOrigin::Unknown,
                 reviewed_sha,
                 freshness: fresh,
+                scope: None,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -4204,6 +4627,7 @@ pub fn classify_coverage(
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
+                    scope: None,
                 });
             }
         }
@@ -4248,6 +4672,7 @@ pub fn classify_coverage(
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
+                    scope: None,
                 });
             }
         }
@@ -4270,6 +4695,16 @@ pub fn classify_coverage(
             attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
             reviewed_sha: lp.head.clone(),
             freshness: Some(fresh),
+            // In-scope guarantees one of exactly two shapes: a line admitted
+            // while scope lasts (branch match, or the exact head sha - both of
+            // which keep the carry reachable on later head moves), or a legacy
+            // line admitted on exact head equality alone. The label lets a
+            // refusal name the second kind rather than drop it silently.
+            scope: Some(if lp.branch.is_empty() {
+                AttestationScope::LegacyHeadMatch
+            } else {
+                AttestationScope::AttestedBranch
+            }),
         });
     }
 
@@ -9595,6 +10030,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let v = &rep.verdicts[0];
         assert_eq!(v.verdict, CoverageVerdict::Stale);
@@ -9619,6 +10056,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::CarriedBaseSync,
+            "",
+            "",
         );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
         assert_eq!(rep.coverage, Coverage::Covered(1));
@@ -9642,6 +10081,8 @@ mod tests {
             // The real predicate, not a stub: an empty sha must reach Stale on
             // its own rather than because a fake said so.
             &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+            "",
+            "",
         );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
         assert_eq!(rep.coverage, Coverage::Covered(0));
@@ -9661,6 +10102,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let line = coverage_receipt_line(&rep);
         // Counted in the tally, NAMED in the next action - the same split the
@@ -9690,6 +10133,8 @@ mod tests {
             true,
             None,
             &|sha| review_freshness(sha, "89bc0b91", &FreshnessFacts::default()),
+            "",
+            "",
         );
         let line = coverage_receipt_line(&rep);
         assert!(
@@ -9708,6 +10153,8 @@ mod tests {
             true,
             None,
             &|_| Freshness::Stale,
+            "",
+            "",
         );
         let line = coverage_receipt_line(&old_commit);
         assert!(line.contains("ask for a re-read"), "{line}");
@@ -9723,6 +10170,24 @@ mod tests {
         .to_string()
     }
 
+    /// Like `attestation_line` but naming the branch the attestation is about -
+    /// the scoping field every post-x-e601 event carries. A legacy line (no
+    /// branch) is admitted only on exact head equality, so tests exercising a
+    /// MOVED head must scope by branch or their fixture silently vanishes.
+    fn attestation_line_on_branch(
+        reviewer: &str,
+        head: &str,
+        verdict: &str,
+        branch: &str,
+    ) -> String {
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
+                     "attester_session_id": "sess-author", "branch": branch}
+        })
+        .to_string()
+    }
+
     #[test]
     fn local_attestation_survives_a_carrying_head_move() {
         // THE x-62a1 relief, and the only relief the measurement supports: an
@@ -9730,10 +10195,18 @@ mod tests {
         // keeps counting. Before this, the scan dropped every line whose head
         // was not byte-equal to the current one, so the mandatory pre-merge
         // rebase destroyed a review that was still entirely valid.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-            Freshness::CarriedBaseSync
-        });
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::CarriedBaseSync,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Reviewed);
         assert_eq!(rep.verdicts[0].reviewed_sha, "oldhead");
         assert_eq!(rep.coverage, Coverage::Covered(1));
@@ -9742,8 +10215,18 @@ mod tests {
     #[test]
     fn local_attestation_dies_on_a_real_code_change() {
         // The other 91%. No rule that refuses to guess can absorb these.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Stale);
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.verdicts[0].verdict, CoverageVerdict::Stale);
         assert_eq!(rep.coverage, Coverage::Covered(0));
     }
@@ -9755,10 +10238,20 @@ mod tests {
         // sit on different commits that both carry.
         let events = format!(
             "{}\n{}",
-            attestation_line("code-review", "headA", "pass"),
-            attestation_line("code-review", "headB", "fail")
+            attestation_line_on_branch("code-review", "headA", "pass", "feature/x"),
+            attestation_line_on_branch("code-review", "headB", "fail", "feature/x")
         );
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "headA",
+        );
         assert!(rep.verdicts.is_empty());
         assert_eq!(rep.coverage, Coverage::Covered(0));
     }
@@ -9768,11 +10261,31 @@ mod tests {
         // Positive local evidence trumps a bot outage (x-0eaf). A STALE local
         // pass is not positive evidence of anything current, so it must not
         // buy `covered` the way a fresh one does.
-        let events = attestation_line("code-review", "oldhead", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Stale);
+        let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(rep.coverage, Coverage::Unknown);
 
-        let fresh = classify_coverage(&[], &[], &events, &[], false, None, &|_| Freshness::Fresh);
+        let fresh = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "currenthead",
+        );
         assert_eq!(fresh.coverage, Coverage::Covered(1));
     }
 
@@ -9789,9 +10302,17 @@ mod tests {
                          "attester_session_id": "sess-peer"}
             })
         );
-        let rep = classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-            Freshness::Fresh
-        });
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         assert_eq!(rep.coverage, Coverage::Covered(2));
         assert_eq!(rep.self_attested_count(), 1);
         let data = coverage_event_data(826, &rep, "h", "", Some("sess-author"));
@@ -9809,7 +10330,17 @@ mod tests {
         // so a future gate on it cannot read absence-of-measurement as
         // absence-of-self-attestation (the x-62a1 aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
-        let rep = classify_coverage(&[], &[], &events, &[], true, None, &|_| Freshness::Fresh);
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         assert_eq!(rep.coverage, Coverage::Covered(1));
         // Every origin is Unknown - the direct statement of "unmeasured".
         assert!(rep
@@ -9828,10 +10359,17 @@ mod tests {
         // happens at classify_coverage time, so the measured report is built
         // with the author - exactly how read_pr_info threads one
         // author_session into both.
-        let measured_rep =
-            classify_coverage(&[], &[], &events, &[], true, Some("sess-author"), &|_| {
-                Freshness::Fresh
-            });
+        let measured_rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
         let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
         assert_eq!(measured["self_attested_count"], serde_json::json!(1));
     }
@@ -9844,16 +10382,34 @@ mod tests {
         // before and the softening purely decorative.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("events.jsonl");
-        std::fs::write(&p, attestation_line("code-review", "oldhead", "pass")).unwrap();
+        std::fs::write(
+            &p,
+            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x"),
+        )
+        .unwrap();
         let reviewers = vec!["code-review".to_string()];
 
-        let carried = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::CarriedBaseSync).0;
+        let carried = unattested_reviewers_scan(
+            &p,
+            &reviewers,
+            &|_| Freshness::CarriedBaseSync,
+            "feature/x",
+            "currenthead",
+        )
+        .0;
         assert!(
             carried.is_empty(),
             "a carried attestation must satisfy the gate"
         );
 
-        let stale = unattested_reviewers_scan(&p, &reviewers, &|_| Freshness::Stale).0;
+        let stale = unattested_reviewers_scan(
+            &p,
+            &reviewers,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "currenthead",
+        )
+        .0;
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].superseded_head.as_deref(), Some("oldhead"));
     }
@@ -10042,12 +10598,22 @@ mod tests {
 
     /// The list half of the scan. Production reads the count too, so this
     /// wrapper lives here rather than as an unused function in the binary.
+    /// `head_branch` "" models a legacy fixture (no branch field, admitted on
+    /// exact head equality); a multi-head fixture passes the branch it named.
     fn unattested_reviewers(
         events_path: &Path,
         reviewers: &[String],
         head_sha: &str,
+        head_branch: &str,
     ) -> Vec<UnattestedReviewer> {
-        unattested_reviewers_scan(events_path, reviewers, &sha_equality_freshness(head_sha)).0
+        unattested_reviewers_scan(
+            events_path,
+            reviewers,
+            &sha_equality_freshness(head_sha),
+            head_branch,
+            head_sha,
+        )
+        .0
     }
 
     /// The gate's boolean view of `unattested_reviewers`, exactly as
@@ -10055,7 +10621,7 @@ mod tests {
     /// unchanged on purpose: promoting the return value to a list must not
     /// move the gate.
     fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
-        unattested_reviewers(events_path, reviewers, head_sha).is_empty()
+        unattested_reviewers(events_path, reviewers, head_sha, "").is_empty()
     }
 
     // ── streak debounce (x-6231) ─────────────────────────────────────────────
@@ -11255,15 +11821,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("absent.jsonl");
         let sigma = vec!["sigma".to_string()];
-        assert!(!unattested_reviewers(&missing, &sigma, "h").is_empty());
+        assert!(!unattested_reviewers(&missing, &sigma, "h", "").is_empty());
 
         let stale = tmp.path().join("stale.jsonl");
         std::fs::write(
             &stale,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&stale, &sigma, "NEW");
+        let out = unattested_reviewers(&stale, &sigma, "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
         assert!(!out[0].failed_at_head);
@@ -11274,7 +11840,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&failed, &sigma, "h");
+        let out = unattested_reviewers(&failed, &sigma, "h", "");
         assert_eq!(out.len(), 1);
         // A head-pinned fail is not a superseded pass; do not offer a stale head.
         assert_eq!(out[0].superseded_head, None);
@@ -11300,7 +11866,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "", "");
         assert_eq!(out.len(), 1, "unpinned evidence must not satisfy the gate");
         assert_eq!(out[0].superseded_head, None);
     }
@@ -11313,10 +11879,10 @@ mod tests {
         let p = tmp.path().join("e.jsonl");
         std::fs::write(
             &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
     }
@@ -11339,8 +11905,13 @@ mod tests {
             ),
         )
         .unwrap();
-        let (out, malformed) =
-            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h"));
+        let (out, malformed) = unattested_reviewers_scan(
+            &p,
+            &["sigma".to_string()],
+            &sha_equality_freshness("h"),
+            "",
+            "h",
+        );
         assert_eq!(out.len(), 1, "a corrupt line never satisfies the gate");
         assert_eq!(malformed, 1, "and it is counted, not silently dropped");
 
@@ -11357,7 +11928,14 @@ mod tests {
         // A clean file adds nothing to the message.
         std::fs::write(&p, r#"{"type":"loop_check","data":{}}"#).unwrap();
         assert_eq!(
-            unattested_reviewers_scan(&p, &["sigma".to_string()], &sha_equality_freshness("h")).1,
+            unattested_reviewers_scan(
+                &p,
+                &["sigma".to_string()],
+                &sha_equality_freshness("h"),
+                "",
+                "h"
+            )
+            .1,
             0
         );
         assert!(!build_block_reason(&reviewers_gate_pr(), "abc", true)
@@ -11375,7 +11953,7 @@ mod tests {
         let p = tmp.path().join("e.jsonl");
         let line = |head: &str, verdict: &str| {
             format!(
-                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}"}}}}"#
+                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}","branch":"feature/x"}}}}"#
             )
         };
         std::fs::write(
@@ -11388,7 +11966,7 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].superseded_head.as_deref(),
@@ -11398,7 +11976,7 @@ mod tests {
 
         // The newest STILL-PASSING head wins when several are valid.
         std::fs::write(&p, [line("AAA", "pass"), line("BBB", "pass")].join("\n")).unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out[0].superseded_head.as_deref(), Some("BBB"));
 
         // Every old head retracted -> nothing to name.
@@ -11413,7 +11991,7 @@ mod tests {
             .join("\n"),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out[0].superseded_head, None);
     }
 
@@ -11428,13 +12006,13 @@ mod tests {
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].superseded_head, None,
@@ -11446,15 +12024,15 @@ mod tests {
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass"}}"#,
+                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
     }
 
@@ -11640,7 +12218,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW");
+        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
     }
@@ -11843,7 +12421,7 @@ mod tests {
             r#"{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["code-review".to_string()], "h");
+        let out = unattested_reviewers(&p, &["code-review".to_string()], "h", "");
         assert!(
             out.is_empty(),
             "code-review should clear on a pass: {out:?}"
@@ -14088,6 +14666,423 @@ mod tests {
         assert!(!info.all_required_passed());
         assert_eq!(info.missing_bots, vec!["gemini-code-assist".to_string()]);
         assert_eq!(info.latest_ts, "2026-06-05T01:00:00Z");
+    }
+
+    // ── clean-pass comments satisfy the required-bot gate too (x-e601 P1) ────
+    //
+    // The coverage axis and the presence gate must agree about the same
+    // comment. Before this, a clean-pass comment marked coverage reviewed
+    // while missing_bots kept naming the bot, so the PR waited forever on a
+    // reviewer that had already passed it.
+
+    fn clean_pass_comment(head: &str) -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": format!(
+                "Codex Review: Didn't find any major issues. Bravo. Reviewed commit: {head}"
+            ),
+            "createdAt": "2026-08-17T02:00:00Z"
+        })
+    }
+
+    #[test]
+    fn compute_review_info_clean_pass_comment_satisfies_the_gate() {
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [clean_pass_comment("abc12345")]
+        });
+        let fresh_at = |sha: &str| {
+            if sha == "abc12345" {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        };
+        let info = compute_review_info(&json, &required, &fresh_at);
+        assert!(info.all_required_passed());
+        assert!(info.missing_bots.is_empty());
+        assert!(info.usage_limited.is_empty());
+    }
+
+    #[test]
+    fn compute_review_info_stale_clean_pass_stays_missing() {
+        // The comment names an older commit: the bot responded, but not to
+        // this code - same staleness rule the review-object path applies.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [clean_pass_comment("0000000000")]
+        });
+        let fresh_at = |sha: &str| {
+            if sha == "abc12345" {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        };
+        let info = compute_review_info(&json, &required, &fresh_at);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    #[test]
+    fn compute_review_info_unpinned_clean_pass_stays_missing() {
+        // A marker with no Reviewed commit line is not evidence on the
+        // coverage axis; it must not be evidence on this one either.
+        let required = vec!["chatgpt-codex-connector".to_string()];
+        let json = serde_json::json!({
+            "reviews": [],
+            "comments": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Review: Didn't find any major issues. Bravo.",
+                "createdAt": "2026-08-17T02:00:00Z"
+            }]
+        });
+        let info = compute_review_info(&json, &required, &|_| Freshness::Fresh);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    // ── one predicate, both axes (PR 917 dual review) ────────────────────────
+    //
+    // bot_verdict is the single per-bot predicate behind BOTH the coverage
+    // axis and the presence gate; these are the shapes where the two
+    // previously answered differently about the same payload.
+
+    fn usage_comment(at: &str) -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "You have reached your Codex usage limits for code reviews",
+            "createdAt": at
+        })
+    }
+
+    fn stale_findings_review() -> Value {
+        serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "state": "COMMENTED",
+            "commit": {"oid": "0000000000"},
+            "submittedAt": "2026-08-17T01:00:00Z"
+        })
+    }
+
+    fn fresh_at_head() -> impl Fn(&str) -> Freshness {
+        |sha: &str| {
+            if sha == "abc12345" {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            }
+        }
+    }
+
+    #[test]
+    fn bot_verdict_fresh_clean_pass_supersedes_stale_review_object() {
+        // The normal fix cycle: findings review at H1, fix push, clean-pass
+        // comment at H2. Coverage used to hold the stale H1 object and never
+        // read the comment while the presence gate passed - the two-gate
+        // wedge. Both now read Reviewed through one predicate.
+        let reviews = vec![stale_findings_review()];
+        let comments = vec![clean_pass_comment("abc12345")];
+        let fresh_at = fresh_at_head();
+        let (verdict, sha, _) =
+            bot_verdict("chatgpt-codex-connector", &reviews, &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+        assert_eq!(sha, "abc12345");
+        let json = serde_json::json!({"reviews": reviews, "comments": comments});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert!(info.all_required_passed());
+    }
+
+    #[test]
+    fn bot_verdict_usage_after_clean_pass_refuses_both_axes() {
+        // Clean pass pinned at HEAD, then a quota bounce. The pass does not
+        // silently outlive the bot's own later refusal, and the presence gate
+        // no longer passes a bot coverage reads as Refused.
+        let comments = vec![
+            clean_pass_comment("abc12345"),
+            usage_comment("2026-08-17T03:00:00Z"),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Refused);
+        let json = serde_json::json!({"reviews": [], "comments": comments});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert!(!info.all_required_passed());
+        assert_eq!(
+            info.usage_limited,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    #[test]
+    fn bot_verdict_clean_pass_recovers_after_earlier_quota_refusal() {
+        // Quota refusal first, bot recovers, reads HEAD clean: the fresh pass
+        // wins on both axes; a historical refusal is not a life sentence.
+        let comments = vec![
+            usage_comment("2026-08-17T01:00:00Z"),
+            clean_pass_comment("abc12345"),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+        let json = serde_json::json!({"reviews": [], "comments": comments});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert!(info.all_required_passed());
+    }
+
+    #[test]
+    fn clean_pass_marker_with_minor_findings_is_not_a_pass() {
+        // The bot posts this exact clause while REPORTING findings; a bare
+        // substring marker cleared both gates on a PR that has them.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues, but 2 minor ones need attention. Reviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        assert!(clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none());
+        let json = serde_json::json!({"reviews": [], "comments": comments});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    // ── round two: the fix round's own review findings ───────────────────────
+
+    #[test]
+    fn human_login_substring_of_bot_cannot_satisfy_the_gate() {
+        // A drive-by human "codex" posting a review object used to clear the
+        // required bot "chatgpt-codex-connector" through the symmetric
+        // correspond test; the gate has always been one-way.
+        let reviews = vec![serde_json::json!({
+            "author": {"login": "codex"},
+            "state": "COMMENTED",
+            "commit": {"oid": "abc12345"}
+        })];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &reviews, &[], &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Absent);
+        let json = serde_json::json!({"reviews": reviews, "comments": []});
+        let info = compute_review_info(&json, &["chatgpt-codex-connector".to_string()], &fresh_at);
+        assert_eq!(
+            info.missing_bots,
+            vec!["chatgpt-codex-connector".to_string()]
+        );
+    }
+
+    #[test]
+    fn period_reworded_findings_note_is_not_a_clean_pass() {
+        // "...issues. 2 minor ones need attention." shares the clause with a
+        // genuine pass; only the FOLLOW-UP sentence separates them.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues. 2 minor ones need attention. Reviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        assert!(clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none());
+    }
+
+    #[test]
+    fn line_broken_clean_pass_with_pin_is_evidence() {
+        // The pin is often its own line; a newline before it is a boundary a
+        // genuine pass must not be dropped over.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues\nReviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("abc12345"));
+    }
+
+    #[test]
+    fn equal_rank_later_pass_replaces_the_earlier_one() {
+        // Pass A (01:00), quota bounce (02:00), pass B (03:00), both passes
+        // equal rank: the NEWEST pass is the evidence, and the bounce between
+        // them must not outdate it. Keeping first-seen manufactured Refused.
+        let pass = |at: &str, sha: &str| {
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": format!("Codex Review: Didn't find any major issues. Bravo. Reviewed commit: {sha}"),
+                "createdAt": at
+            })
+        };
+        let comments = vec![
+            pass("2026-08-17T01:00:00Z", "abc12345"),
+            usage_comment("2026-08-17T02:00:00Z"),
+            pass("2026-08-17T03:00:00Z", "abc12345"),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+    }
+
+    #[test]
+    fn equal_rank_tie_breaks_on_the_stamp_not_the_array_order() {
+        // The same three comments as the test above, delivered NEWEST FIRST.
+        // Array order is the payload's promise, not ours: resolving the
+        // equal-rank tie with `>=` over iteration order picked the 01:00 pass
+        // here, the 02:00 bounce then postdated it, and a required bot fell
+        // through Refused -> usage_limited -> all_required_passed false. The
+        // parsed `createdAt` orders it the same way whatever order it arrives
+        // in, which is the rule `bot_verdict` already applies to `submittedAt`.
+        let pass = |at: &str| {
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Review: Didn't find any major issues. Bravo. Reviewed commit: abc12345",
+                "createdAt": at
+            })
+        };
+        let comments = vec![
+            pass("2026-08-17T03:00:00Z"),
+            pass("2026-08-17T01:00:00Z"),
+            usage_comment("2026-08-17T02:00:00Z"),
+        ];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(
+            got.and_then(|(_, _, ts)| ts).as_deref(),
+            Some("2026-08-17T03:00:00Z"),
+            "the newest equal-rank pass must win regardless of array order"
+        );
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
+    }
+
+    #[test]
+    fn usage_marker_matches_mixed_case() {
+        // The helper's contract is case-insensitive; the pass-vs-bounce
+        // ordering must see a mixed-case bounce as a bounce.
+        let comments = vec![
+            clean_pass_comment("abc12345"),
+            serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "Codex Usage Limits for code reviews reached",
+                "createdAt": "2026-08-17T03:00:00Z"
+            }),
+        ];
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Refused);
+    }
+
+    #[test]
+    fn quoted_marker_does_not_shadow_the_real_pin() {
+        // A reply quoting an unparsable earlier marker keeps the real pin in
+        // the same body visible to the scan.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues. Bravo.\n> Reviewed commit: (see previous)\nReviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("abc12345"));
+    }
+
+    // ── round three: the second fix round's own review findings ─────────────
+
+    #[test]
+    fn bravo_wearing_findings_is_not_a_clean_pass() {
+        // `Bravo` must END its sentence: `Bravo, but...` and `Bravo. 2 minor
+        // ones...` are findings notes wearing the flourish, and a bare
+        // starts_with("bravo") counted both as passes.
+        for body in [
+            "Codex Review: Didn't find any major issues. Bravo, but two minor ones need attention. Reviewed commit: abc12345",
+            "Codex Review: Didn't find any major issues. Bravo. 2 minor ones need attention. Reviewed commit: abc12345",
+        ] {
+            let comments = vec![serde_json::json!({
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": body,
+                "createdAt": "2026-08-17T02:00:00Z"
+            })];
+            let fresh_at = fresh_at_head();
+            assert!(
+                clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none(),
+                "counted as a pass: {body}"
+            );
+            let (verdict, _, _) =
+                bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+            assert_eq!(verdict, CoverageVerdict::Absent, "verdict for: {body}");
+        }
+    }
+
+    #[test]
+    fn bravo_terminated_by_the_pin_line_still_passes() {
+        // The tightening must not eat the measured shape: flourish, sentence
+        // end, pin on its own line.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "Codex Review: Didn't find any major issues. Bravo\nReviewed commit: abc12345",
+            "createdAt": "2026-08-17T02:00:00Z"
+        })];
+        let fresh_at = fresh_at_head();
+        let got = clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at);
+        assert_eq!(got.map(|(s, _, _)| s).as_deref(), Some("abc12345"));
+    }
+
+    #[test]
+    fn quota_bounce_predating_the_bots_latest_evidence_reads_stale() {
+        // A stale review object (01:00) plus an EARLIER bounce (00:00): the
+        // bot recovered and reviewed; parking at Refused has no path back,
+        // while Stale asks a re-read. The inverse ordering still refuses.
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict(
+            "chatgpt-codex-connector",
+            &[stale_findings_review()],
+            &[usage_comment("2026-08-17T00:00:00Z")],
+            &fresh_at,
+        );
+        assert_eq!(verdict, CoverageVerdict::Stale);
+        let (verdict, _, _) = bot_verdict(
+            "chatgpt-codex-connector",
+            &[stale_findings_review()],
+            &[usage_comment("2026-08-17T02:00:00Z")],
+            &fresh_at,
+        );
+        assert_eq!(verdict, CoverageVerdict::Refused);
+    }
+
+    #[test]
+    fn short_name_config_cannot_draft_a_fan_into_the_marker_lane() {
+        // Config may name the bot by a short login ("codex"); containment then
+        // matches any human whose login merely contains it. The comment lanes
+        // require the AUTHOR to be a characterized bot profile, so the fan's
+        // clean-pass marker and quota text are both inert. The review-object
+        // lane is unaffected: a review object carries no marker text to
+        // counterfeit, and the real bot still passes it.
+        let fan = |body: &str| {
+            serde_json::json!({
+                "author": {"login": "codex-fan"},
+                "body": body,
+                "createdAt": "2026-08-17T02:00:00Z"
+            })
+        };
+        let fresh_at = fresh_at_head();
+        let (verdict, _, _) = bot_verdict(
+            "codex",
+            &[],
+            &[
+                fan("Codex Review: Didn't find any major issues. Bravo. Reviewed commit: abc12345"),
+                fan("You have reached your Codex usage limits for code reviews"),
+            ],
+            &fresh_at,
+        );
+        assert_eq!(verdict, CoverageVerdict::Absent);
+        // The real bot under the same short config still reads Reviewed.
+        let (verdict, _, _) =
+            bot_verdict("codex", &[], &[clean_pass_comment("abc12345")], &fresh_at);
+        assert_eq!(verdict, CoverageVerdict::Reviewed);
     }
 
     // ── x-b167 nudge state ────────────────────────────────────────────────────

@@ -250,14 +250,35 @@ That is what makes a rebase carry and a one-line code fix die.
 | `github_app` | the review object's `.commit.oid` | none, already in the `gh pr view --json reviews` payload |
 | `local_attestation` | the attestation's own `data.head_sha` | none, already emitted |
 
-Three separate places ask "has this reviewer reviewed this code", and all three go through the predicate.
-They are the coverage count, the `config.review.reviewers` attestation scan, and the required-bot presence check that drives `missing_bots`.
+Four separate places ask "has this reviewer reviewed this code".
+
+All four go through the predicate: the coverage count, the attestation scan, the presence check behind `missing_bots`, and `finalize`'s arming check.
+
 Fix one and leave the others on a bare equality, and the gate stays exactly as tight as before.
 The softening is then purely decorative.
 
 A `stale` verdict is **recorded, not dropped**.
 `CoverageVerdict::Stale` says a reviewer responded against an older commit.
+
 That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
+
+### Scope: which PR an attestation is about
+
+When a verdict was rendered is freshness's question. Which PR it was rendered for is scope's question, and the two are independent.
+
+The events journal is shared across every worktree of a repo by design: `setup-worktree.sh` links each worktree's `.fno/events.jsonl` to the canonical file. An unscoped scan therefore reads every branch's attestations into every PR's verdict list. Measured on 2026-08-16: five attestations, five heads, five branches, one file.
+
+The fix is the `branch` field on `review_attestation` plus one predicate, `attestation_in_scope`, applied by both scans (`local_latest_passes` and `unattested_reviewers_scan`) before any freshness call. An attestation naming the PR's head branch is in scope. So is any attestation pinning the PR's exact head sha: a foreign branch cannot share this head sha without being this commit. The spawned-reviewer lane needs that arm. Its worktree carries a branch of its own, so a branch-only match reads the reviewer's exact-HEAD pass as out of scope. An event predating the field counts only on that exact-head arm. The legacy line deliberately does not inherit the carry: an attestation on a moved head cannot be scoped to any PR.
+
+Out-of-scope lines are skipped entirely rather than marked stale: a stale verdict says "ask this reviewer to re-read", which is wrong advice about a reviewer on another branch. The verdict records which rule admitted it (`scope: attested_branch | legacy_head_match`), so a refusal under a moved head can name a pre-branch-field attestation.
+
+#### How the producer picks the branch name
+
+`emit-attestation.sh` must write the name GitHub reports as `headRefName`. The local branch name is not always it. A spawned reviewer runs in its own worktree on a branch of its own, because git refuses two worktrees on one branch. There the PR branch is the UPSTREAM. An author worktree is cut from a base branch and tracks it until `push -u` fires at PR create. There the upstream names the base, and the LOCAL name is the PR.
+
+The discriminator is commits, not names. A reviewer worktree sits at the tip of the branch it tracks, so `@{upstream}..HEAD` is empty. An author worktree is ahead by exactly the diff under review. The upstream wins in exactly one case: a zero count, plus an upstream that is not `refs/remotes/origin/HEAD`. The second conjunct keeps a commitless fresh worktree from recording its base. Two earlier spellings both mis-scoped. A literal `main` comparison wrote `branch=develop` on a develop-based repo. The `origin/HEAD` comparison that replaced it did the same on any author worktree tracking a non-default branch. Either one loses the branch arm for the real PR. Either one also leaks the event into scope for any PR whose `headRefName` matches the base name.
+
+The derivation stays local. `gh pr view --json headRefName` answers directly, and it is refused anyway. A network call on the emit path turns a review receipt into something that fails during a GitHub slowdown. A detached HEAD names no branch. The emit refuses rather than write an empty string. An empty string is byte-identical to the pre-branch-field backlog, so it mints a fresh legacy member no carry can scope.
 
 ### What the carry rule does not buy
 
@@ -283,22 +304,19 @@ That is code under any classifier that does not parse Python, and an AST depende
 A documentation-only PR never carries an attestation either.
 With no code in the diff there is no identity to match, which is the fail-closed direction.
 
-**`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.**
-In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose.
-So a skill rewritten after a review carries the earlier verdict forward as fresh coverage.
-This is deliberate for now, because it matches the existing payload classifier.
-A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap.
-Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
+**`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.** In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose. So a skill rewritten after a review carries the earlier verdict forward as fresh coverage. This is deliberate for now, because it matches the existing payload classifier. A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap. Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
 
 ### Named, not closed: the derivation-latency window
 
 A valid attestation can exist while the gate cannot see it, and this PR does not close that.
 
-Raw `review_attestation` events never leave the checkout they are emitted in.
-`scripts/setup/setup-worktree.sh` links `.fno/config.toml`, `.fno/carveouts.jsonl`, and `.fno/codemap.md` into a worktree.
-`events.jsonl` appears zero times in that script, so a worktree's event log is a real per-checkout file.
-Only the DERIVED `review_coverage` aggregate reaches the global `~/.fno/events.jsonl`, written by the Rust runtime.
-So the propagation path is the aggregate, and the aggregate only exists after a loop-check run.
+Raw `review_attestation` events land in the shared journal the moment they are emitted.
+
+`scripts/setup/setup-worktree.sh` links every worktree's `.fno/events.jsonl` to the canonical journal (`link_events_journal`), the same sharing that makes the `branch` field necessary: two worktrees, one log.
+
+But the Python gate reads the DERIVED `review_coverage` aggregate, which the Rust runtime writes only on a loop-check run.
+
+So the propagation path is still the aggregate, and the window below is a derive gap, not a copy gap.
 
 PR #830 is the specimen.
 Its attestation was emitted at 04:12:35 into a worktree-local log.

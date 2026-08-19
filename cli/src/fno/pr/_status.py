@@ -22,10 +22,12 @@ allowed to disagree - a cancelled latest run is red AND unsettled:
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
+    _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
     read_optional_review_state,
     read_review_coverage,
@@ -219,13 +221,94 @@ def coverage_recompute_note(coverage: dict) -> None:
         sys.stderr.write(f"note: coverage recompute: {note}\n")
 
 
+def _review_lane(pr: str, cwd: Optional[str]) -> bool:
+    """Whether the merge gate's coverage guard engages for this PR.
+
+    The SAME lane predicate ``fno pr merge`` reads (``_review_lane_configured``
+    in ``_merge``): a stock install with no lane opts out of review there, so
+    ``ready`` must opt out with it or the two verbs answer opposite ways - the
+    exact divergence this conjunction exists to remove, just inverted onto the
+    no-lane repo (status refusing forever at uncovered 0 while merge merges).
+    Fail-closed (True) on any error, like the merge side.
+    """
+    try:
+        from fno.pr._merge import _review_lane_configured
+
+        return bool(_review_lane_configured(cwd or os.getcwd(), int(pr)))
+    except Exception:
+        return True
+
+
+def _ready_blockers(
+    green: bool,
+    verdict: str,
+    unresolved: object,
+    coverage: dict,
+    review_lane: bool = True,
+    *,
+    head: str = "",
+    code_review_required: bool = False,
+) -> list[str]:
+    """Which conjuncts of ``ready`` fail, in a stable order.
+
+    A bare ``ready: false`` has one explanation per conjunct (CI red, an
+    unresolved optional finding, coverage unknown or uncovered) and a reader
+    cannot tell them apart; the list is the positive marker that names what is
+    holding. ``unknown`` coverage blocks and is named as its own blocker: the
+    reason a read returned unknown is a separate question (x-b56a), this only
+    reports that the answer is missing. Fail-closed everywhere: an unset
+    unresolved count blocks as ``optional_reviews_unknown``, and the coverage
+    conjunct engages wherever the merge gate's coverage guard would
+    (``review_lane``; a repo with no review lane has no coverage answer to
+    fail).
+
+    The coverage conjuncts themselves are the merge gate's own, read through
+    ``_coverage_gate.covered_conjuncts`` - one copy, never a restatement - so
+    ``ready`` cannot pass a row ``fno pr merge`` refuses (missing local pass,
+    stale head pin).
+
+    A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
+    gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has
+    no "would" left to guard. That exemption arrives as ``review_lane=False``
+    from the caller's terminal arm and needs no conjunct of its own here. It
+    had one - a ``merged`` flag - and it was decorative: ``merged`` is only
+    ever True inside the branch that already sets ``review_lane=False``, so it
+    never changed an outcome while reading like the protection its name
+    promised. A guard that cannot fire is worse than no guard, because the
+    next reader budgets for it.
+    """
+    blockers: list[str] = []
+    if not green:
+        blockers.append(f"ci_{verdict}")
+    if unresolved is None or not isinstance(unresolved, int):
+        # None is the read's own "unknown"; a non-int is a contract violation.
+        # Both fail closed as unknown rather than TypeError or a silent pass.
+        blockers.append("optional_reviews_unknown")
+    elif unresolved > 0:
+        blockers.append("optional_reviews_unresolved")
+    if review_lane:
+        cov_word = coverage.get("coverage")
+        if cov_word == "unknown":
+            blockers.append("review_coverage_unknown")
+        else:
+            from fno.pr._coverage_gate import covered_conjuncts
+
+            ok, failed = covered_conjuncts(coverage, head, code_review_required)
+            if not ok:
+                blockers.append(f"review_coverage_{failed}")
+    return blockers
+
+
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
     The exit code is ALWAYS the CI verdict's code (0/1/2/3/4/127) - the review
     fields are additive and advisory (optional stays advisory; an unresolved
-    optional finding on a green PR still exits 0). ``review_reader`` is injectable
-    for tests; it defaults to the real time-boxed read.
+    optional finding on a green PR still exits 0). ``ready`` is the one field
+    that conjoins them all (CI green, optional findings resolved, coverage a
+    counted pass), with ``ready_blockers`` naming any conjunct that failed;
+    a caller branching on the exit code is untouched. ``review_reader`` is
+    injectable for tests; it defaults to the real time-boxed read.
     """
     import sys
 
@@ -249,33 +332,82 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     verdict, code, counts = verdict_for(rollup)
     green = verdict == "green"
 
-    # Additive review signal (x-705b): computed AFTER the authoritative CI verdict
-    # so a slow/failed review read can never delay or corrupt it. Any failure
-    # degrades to "unknown"/None and leaves the CI verdict + exit code untouched.
-    reader = review_reader or read_optional_review_state
-    try:
-        reviews = reader(pr, cwd)
-    except Exception:
-        reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
-    unresolved = reviews.get("optional_reviews_unresolved")
+    # A terminal PR (round 3) has no would-merge left: the coverage conjunct
+    # guards what WOULD merge, and the probes that feed it are live reads a
+    # closed PR can still burn - `gh pr view --json reviews` and a 120s
+    # recompute against a PR that will never merge again. Skip all of them;
+    # the report prints the no-pending answers ([] / 0) rather than `unknown`,
+    # because nothing was failed, it was deliberately not asked.
+    if (pr_json.get("state") or "").upper() in ("MERGED", "CLOSED"):
+        # Any-typed to match the probe arms below, whose reads return the
+        # same untyped dicts; a first binding of `0` would narrow the
+        # variable to int and fail the reassignments' type check.
+        reviews: Any = {"optional_reviews": [], "optional_reviews_unresolved": 0}
+        unresolved: Any = 0
+        coverage: Any = dict(_NOT_ASKED_COVERAGE)
+        review_lane = False
+        code_review_required = False
+    else:
+        # Additive review signal (x-705b): computed AFTER the authoritative CI
+        # verdict so a slow/failed review read can never delay or corrupt it.
+        # Any failure degrades to "unknown"/None and leaves the CI verdict +
+        # exit code untouched.
+        reader = review_reader or read_optional_review_state
+        try:
+            reviews = reader(pr, cwd)
+        except Exception:
+            reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
+        unresolved = reviews.get("optional_reviews_unresolved")
 
-    # x-0eaf: coverage signal, same additive/fail-open discipline as the optional
-    # review read above. Read from the review_coverage event so a human and the
-    # loop see one number (Ownership: Rust computes, Python reads). Recomputed
-    # once when no usable row exists (x-3a3f), so a human report and the merge
-    # gate act on the same number instead of status saying "no coverage" for a
-    # PR merge would clear after one recompute. The PR head rides in from
-    # _fetch: without it the verb would pin the emitted row to the LOCAL
-    # checkout's HEAD, planting a wrong-head row both gates then disagree on.
-    try:
-        coverage = read_review_coverage(
-            int(pr), cwd, head=pr_json.get("headRefOid"), recompute=True
-        )
-    except Exception:
-        # The producer's own sentinel, not a copy of it: a second literal here
-        # is a shape that drifts the moment a key is added on one side only.
-        coverage = dict(_UNKNOWN_COVERAGE)
+        # x-0eaf: coverage signal, same additive/fail-open discipline as the
+        # optional review read above. Read from the review_coverage event so a
+        # human and the loop see one number (Ownership: Rust computes, Python
+        # reads). Recomputed once when no usable row exists (x-3a3f), so a
+        # human report and the merge gate act on the same number instead of
+        # status saying "no coverage" for a PR merge would clear after one
+        # recompute. The PR head rides in from _fetch: without it the verb
+        # would pin the emitted row to the LOCAL checkout's HEAD, planting a
+        # wrong-head row both gates then disagree on. The lane answer comes
+        # BEFORE the coverage read, not beside it: on a no-lane repo the
+        # read's recompute is a 120s subprocess that appends coverage rows
+        # nobody acts on - the exact cost `fno pr merge` skips on this same
+        # boundary - so a conjunct ready ignores must not fire it either.
+        #
+        # ONE probe chain where two ran: required implies lane (a configured
+        # code-review reviewer IS a lane, and the self-review floor that makes
+        # a code payload required is the same floor that makes the lane
+        # exist), so the required probe answers both when true and only a
+        # clean not-required verdict pays for the lane probe. Each predicate
+        # keeps its own fail-closed direction on a thrown probe.
+        code_review_required = False
+        try:
+            from fno.pr import _merge
 
+            code_review_required = bool(
+                _merge._code_review_attestation_required(cwd or os.getcwd(), int(pr))
+            )
+        except Exception:  # noqa: BLE001 - fail closed, like the gate
+            code_review_required = True
+        review_lane = code_review_required or _review_lane(pr, cwd)
+        try:
+            coverage = read_review_coverage(
+                int(pr), cwd, head=pr_json.get("headRefOid"), recompute=review_lane
+            )
+        except Exception:
+            # The producer's own sentinel, not a copy of it: a second literal
+            # here is a shape that drifts the moment a key is added on one
+            # side only.
+            coverage = dict(_UNKNOWN_COVERAGE)
+
+    blockers = _ready_blockers(
+        green,
+        verdict,
+        unresolved,
+        coverage,
+        review_lane,
+        head=pr_json.get("headRefOid") or "",
+        code_review_required=code_review_required,
+    )
     sys.stdout.write(
         json.dumps(
             {
@@ -291,9 +423,19 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,
                 "review_coverage": coverage,
-                # The obvious "read this, not green": ready iff CI is green AND no
-                # optional finding is unresolved. Advisory - never the exit code.
-                "ready": green and unresolved == 0,
+                # The obvious "read this, not green": ready iff CI is green AND
+                # no optional finding is unresolved AND review coverage is a
+                # counted pass. Coverage joined the conjunction because `fno
+                # pr merge` already read it (x-e601): with it absent here, the
+                # two verbs answered opposite ways from one payload and every
+                # ready: true PR refused at the merge gate. The blockers list
+                # names WHICH conjunct failed - a bare false has one
+                # explanation per conjunct and a reader would have to guess.
+                # `covered and reviewed_count > 0` rather than the word alone:
+                # historical events serialize a real zero as `covered`, and
+                # every existing consumer tests both.
+                "ready": not blockers,
+                "ready_blockers": blockers,
             }
         )
         + "\n"

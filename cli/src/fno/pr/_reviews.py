@@ -115,6 +115,22 @@ _UNKNOWN_COVERAGE: dict[str, object] = {
     "stale_verdicts": [],
 }
 
+# A TERMINAL PR (merged or closed) is never ASKED for coverage: the gate guards
+# what WOULD merge and a terminal PR has no would left. Distinct from
+# _UNKNOWN_COVERAGE on purpose - that one means the instrument was asked and
+# failed, and it carries its own `review_coverage_unknown` blocker. Spelling a
+# deliberate skip with the instrument-failed sentinel is the absence-vs-outcome
+# collapse this gate refuses everywhere else: a reader cannot tell "nobody
+# looked because there was nothing to look at" from "the probe died". The
+# counts are 0 and the list empty because that IS the answer, not a guess.
+_NOT_ASKED_COVERAGE: dict[str, object] = {
+    "coverage": "not_asked",
+    "reviewed_count": 0,
+    "self_attested_count": 0,
+    "head_sha": None,
+    "stale_verdicts": [],
+}
+
 
 def _repo_root(cwd: Optional[str] = None) -> Path:
     """Git top-level for ``cwd``, so coverage is found from a subdirectory."""
@@ -501,6 +517,11 @@ def read_review_coverage(
         "head_sha": latest.get("head_sha"),
         "stale_verdicts": _stale_verdicts(latest),
     }
+    # The raw verdict list rides along when present (older events carry none):
+    # the local-pass conjunct scans it, and dropping it here made `fno pr
+    # status` refuse forever on a row `fno pr merge` accepted (round 3, PR 917).
+    if latest.get("verdicts") is not None:
+        shaped["verdicts"] = latest["verdicts"]
     if note:
         shaped["recompute"] = note
     return shaped

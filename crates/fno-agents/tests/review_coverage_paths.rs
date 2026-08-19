@@ -316,10 +316,13 @@ fn new_reader_sites_must_join_the_table() {
     );
 
     // And the gates route through the recompute: both files name the shared
-    // helper, which is the only path to the verb.
+    // helper, which is the only path to the verb. The status row passes
+    // `recompute=review_lane` (not a bare True): the producer spawn is gated
+    // on the same no-lane boundary merge reads, while the read itself still
+    // goes through this helper.
     for (file, needle) in [
         ("_merge.py", "review_coverage_for_gate"),
-        ("_status.py", "recompute=True"),
+        ("_status.py", "recompute=review_lane"),
     ] {
         let text = fs::read_to_string(pr_dir.join(file)).unwrap();
         assert!(
@@ -333,4 +336,53 @@ fn new_reader_sites_must_join_the_table() {
         reviews.contains("\"review-coverage\""),
         "the recompute helper no longer invokes the review-coverage verb"
     );
+}
+
+/// Row-to-path: a row may not name a path that does not exist. The other two
+/// tests prove reachable rows produce events and readers join the table; this
+/// closes the third direction - a SafeDirection row naming a fictitious verb
+/// or symbol passed both, because nothing checked the row's own path exists
+/// (the PR 917 dual-review finding: a row named a verb that existed on main
+/// but not on the branch the row was written for, and the drift-catcher could
+/// never fire).
+#[test]
+fn every_table_row_names_a_path_that_exists() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .ancestors()
+        .nth(2)
+        .expect("crate sits at <repo>/crates/fno-agents");
+    let cli = fs::read_to_string(repo_root.join("cli/src/fno/pr/cli.py")).unwrap();
+    let rust_srcs: Vec<String> = ["src/loopcheck.rs", "src/finalize.rs"]
+        .iter()
+        .map(|s| fs::read_to_string(manifest_dir.join(s)).unwrap())
+        .collect();
+
+    for (path_name, _, _) in path_table() {
+        if let Some(rest) = path_name.strip_prefix("fno pr ") {
+            let verb = rest.split_whitespace().next().unwrap_or("");
+            assert!(
+                !verb.is_empty() && cli.contains(&format!("\"{verb}\"")),
+                "row '{path_name}' names verb '{verb}' that cli/src/fno/pr/cli.py does not register"
+            );
+            continue;
+        }
+        if let Some(open) = path_name.find('(') {
+            let close = path_name.find(')').unwrap_or(path_name.len());
+            let inner = &path_name[open + 1..close];
+            // A named argument sits inside the parens ("(...symbol...)");
+            // call syntax leaves them empty ("decide()"), so fall back to the
+            // token immediately before the '(' - the callee's own name.
+            let symbol = inner
+                .split_whitespace()
+                .next_back()
+                .filter(|s| !s.is_empty())
+                .or_else(|| path_name[..open].split_whitespace().next_back())
+                .unwrap_or("");
+            assert!(
+                !symbol.is_empty() && rust_srcs.iter().any(|t| t.contains(symbol)),
+                "row '{path_name}' names symbol '{symbol}' that no crate source defines"
+            );
+        }
+    }
 }

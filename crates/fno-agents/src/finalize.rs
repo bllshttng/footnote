@@ -1888,6 +1888,16 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
 /// prior loop-check fire), the per-app check below is the fallback: a missing
 /// or usage-limited optional App still withholds so GitHub does not merge
 /// without the review coverage the operator configured.
+///
+/// The per-app check itself is `loopcheck::bot_verdict`, the ONE per-bot
+/// predicate (round 3, PR 917): this scan used to read review objects only,
+/// with no commit pin and no clean-pass lane, so an optional App whose pass is
+/// a pinned clean-pass comment (the shape loop-check and the Python gates
+/// already read) withheld arming forever - three readers, three answers. A
+/// verdict on an older commit now reads Stale and withholds as
+/// `optional-review-stale` rather than arming: arming on a review of a commit
+/// that is no longer HEAD re-arms exactly the post-green race (PR #566 shape)
+/// this gate moved to the terminal fire to escape.
 fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let optional_apps = crate::agents_config::review_optional_apps(cwd);
     if optional_apps.is_empty() {
@@ -1901,7 +1911,12 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
     let output = match Command::new("gh")
-        .args(["pr", "view", "--json", "reviews,comments"])
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "reviews,comments,headRefOid,baseRefName",
+        ])
         .current_dir(cwd)
         .output()
     {
@@ -1932,44 +1947,39 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
         return Some("optional-review-read-failed".to_string());
     };
+    // Freshness resolves against the PR head gh reports, the same pin the
+    // coverage gate uses. An exact-head pin is Fresh with no git call; a moved
+    // head needs the repo's git, and an unresolvable identity reads Stale -
+    // fail closed, never an arming on unpinned evidence.
+    let head = payload
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let base = payload
+        .get("baseRefName")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let resolver = crate::loopcheck::FreshnessResolver::new("git", cwd, base, head);
 
     for app in optional_apps {
-        let reviewed = reviews.iter().any(|review| {
-            let login = review
-                .pointer("/author/login")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let state = review.get("state").and_then(Value::as_str).unwrap_or("");
-            !state.is_empty() && crate::loopcheck::login_matches_bot(login, &app)
-        });
-        if reviewed {
-            continue;
-        }
-
-        let usage_limited = comments.iter().any(|comment| {
-            let login = comment
-                .pointer("/author/login")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let body = comment
-                .get("body")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            crate::loopcheck::login_matches_bot(login, &app)
-                && crate::loopcheck::body_is_usage_limit(&body)
-        });
-        if usage_limited {
-            // x-0eaf finding 1 (retraction): a REFUSED optional App bypasses
-            // the withhold ONLY when coverage is satisfied (a local lane
-            // reviewed). Without coverage, the refused bot still withholds.
-            if coverage_satisfied {
-                continue;
+        let (verdict, _, _) =
+            crate::loopcheck::bot_verdict(&app, reviews, comments, &|sha| resolver.freshness(sha));
+        match verdict {
+            crate::loopcheck::CoverageVerdict::Reviewed => continue,
+            crate::loopcheck::CoverageVerdict::Refused => {
+                // x-0eaf finding 1 (retraction): a REFUSED optional App bypasses
+                // the withhold ONLY when coverage is satisfied (a local lane
+                // reviewed). Without coverage, the refused bot still withholds.
+                if coverage_satisfied {
+                    continue;
+                }
+                return Some(format!("optional-review-usage-limited:{app}"));
             }
-            return Some(format!("optional-review-usage-limited:{app}"));
+            crate::loopcheck::CoverageVerdict::Stale => {
+                return Some(format!("optional-review-stale:{app}"));
+            }
+            _ => return Some(format!("optional-review-outstanding:{app}")),
         }
-
-        return Some(format!("optional-review-outstanding:{app}"));
     }
 
     None

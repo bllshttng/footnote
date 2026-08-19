@@ -1698,6 +1698,55 @@ def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
     assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
 
 
+def test_moved_head_keeps_the_generic_message_for_legacy_attestations_too():
+    """x-e601: a pre-branch-field pass dies with the head move it cannot be
+    scoped past, and the producer emits no verdict for it (an unbranchable
+    line is skipped, never guessed onto this PR's row). The refusal therefore
+    keeps ONE staleness message for every cohort: a targeted legacy branch
+    here could fire only on a degraded recompute returning a pre-move row,
+    and implied the producer names a shape it no longer emits."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "oldhead0deadbeef",
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "oldhead0deadbeef",
+                "scope": "legacy_head_match",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
+    assert "unscoped attestation" not in reason
+    assert "head-pinned by design" in reason
+    assert "re-run the review verb" in reason
+
+
+def test_moved_head_keeps_the_generic_message_for_branch_scoped_passes():
+    """A branch-scoped pass under a moved head is the ordinary staleness case
+    and keeps the ordinary message; no cohort gets a special-case branch."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "oldhead0deadbeef",
+        "verdicts": [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "reviewed_sha": "oldhead0deadbeef",
+                "scope": "attested_branch",
+            }
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
+    assert "unscoped attestation" not in reason
+    assert "head-pinned by design" in reason
+
+
 def test_genuine_zero_refusal_names_the_missing_evidence():
     """A true zero says WHAT is missing (a head-pinned pass) and what to do, not
     just that the number is zero. It must not mention attestation origin:

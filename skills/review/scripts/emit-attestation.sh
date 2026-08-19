@@ -70,6 +70,68 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   exit 1
 }
 
+# The journal is SHARED across worktrees by design (setup-worktree.sh links
+# every worktree's .fno/events.jsonl to canonical), so head_sha alone cannot
+# say which PR an attestation is about: two branches can carry the same code
+# delta and a global head-sha match then counts a foreign review. The branch
+# is what scopes the event to the PR that was reviewed.
+#
+# Record the branch's UPSTREAM short name only when it names a PR branch: a
+# spawned reviewer runs in its own worktree on a branch of its own (git
+# refuses two worktrees on one branch), and a reviewer worktree created from
+# the PR branch tracks it - so the upstream names the branch GitHub reports
+# as headRefName and the LOCAL name never would. But an fno AUTHOR worktree
+# is created off the repo's default branch and tracks IT until `push -u`
+# fires at PR create, so an upstream naming the BASE, not the PR, would
+# mis-scope every pre-push emit and kill the branch-arm carry this field
+# exists to preserve. The base is whatever `refs/remotes/origin/HEAD`
+# actually points at (round 3, PR 917: a literal `main` comparison recorded
+# `branch=develop` on every develop-based repo, scoping the author's
+# feature-branch attestation to a branch no PR would ever carry), falling
+# back to `main` only when the symbolic ref is unset - a fresh clone without
+# it behaves exactly as before. A detached HEAD names no branch at all:
+# refuse rather than record "" - the empty string is byte-identical to the
+# pre-branch-field backlog, so a live emit would mint a fresh legacy member
+# no later carry can scope. git rev-parse is local and free; do NOT reach
+# for `gh pr view` here - a network call on the emit path turns a review
+# receipt into something that fails when GitHub is slow.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+  echo "emit-attestation: detached HEAD names no PR branch (an empty branch field would read as a pre-branch-field event and never carry past a head move); no event emitted" >&2
+  exit 1
+fi
+base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+base="${base#*/}"
+base="${base:-main}"
+upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+# The upstream is the PR branch only when this checkout carries NO WORK OF ITS
+# OWN. That is what separates the two shapes, and the base name never was: an
+# author worktree tracking any branch other than origin/HEAD (origin/HEAD at
+# main, the worktree created off origin/develop) passes the name test and
+# recorded branch=develop - the round-3 `main`-literal bug relocated, since it
+# still loses the branch arm for the real PR AND puts the event in scope for
+# any PR whose headRefName is literally develop. A reviewer worktree sits AT
+# the PR branch tip it tracks, so `@{upstream}..HEAD` is empty; an author
+# worktree has commits ahead of whatever it tracks, which is precisely the
+# diff under review. Count the commits, do not guess from names.
+#
+# The name test stays as the second conjunct, and it is not redundant: a
+# just-created author worktree has zero commits yet, and without it that
+# worktree would record its BASE as the branch. Both must hold.
+#
+# Deliberately NOT `gh pr view --json baseRefName`. It costs a network call on
+# the emit path, which turns a review receipt into something that fails when
+# GitHub is slow, and it does not even close this bug: with a PR based on main
+# and a worktree tracking origin/develop, baseRefName is main, develop != main,
+# and the wrong name is recorded exactly as before.
+ahead=1
+if [[ -n "$upstream" ]]; then
+  ahead="$(git rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 1)"
+fi
+if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; then
+  branch="${upstream#*/}"
+fi
+
 # Record the attesting ACTOR alongside what was certified (x-27c5): without a
 # session, an author attesting its own diff is indistinguishable from an
 # independent reviewer, which clears config.review.reviewers with no trace.
@@ -166,9 +228,10 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
   --arg attester_session_id "$attester_session_id" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id}')"
+  --arg branch "$branch" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,branch:$branch}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2
