@@ -38,7 +38,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Literal, Optional, Sequence
+from typing import Any, Iterator, List, Literal, Optional, Sequence, Tuple
 
 from fno.pr._proc import ToolMissing, run
 
@@ -359,17 +359,13 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     """Whether the PR's diff carries a code payload.
 
     CODE iff any changed file is not documentation. Fails CLOSED - a missing gh,
-    a failed view, or an unparseable file list all classify as code, so a
+    a failed read, or an unparseable file list all classify as code, so a
     degraded probe cannot bypass the coverage guard. An empty file list (no diff
     surfaced) is not code: nothing to review, no gate."""
     if not shutil.which("gh"):
         return True
-    res = _gh(["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], repo)
-    if not res.ok:
-        return True
-    try:
-        names = [str(p) for p in json.loads(res.stdout)]
-    except (ValueError, TypeError):
+    names = _pr_file_paths(pr_number, repo)
+    if names is None:
         return True
     if not names:
         return False
@@ -1080,6 +1076,31 @@ def _live_lane_count() -> int:
         return 0
 
 
+def _pr_base_head_refs(pr_number: int, cwd: str) -> Optional[Tuple[str, str]]:
+    """(base, head) ref names for a PR, or None on any read miss. Shared by
+    `_behind_by` and `_base_move_paths` so the two probes cannot drift apart
+    about how the refs are read; each keeps its own miss polarity."""
+    try:
+        view = _gh(
+            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
+        )
+        if not view.ok:
+            return None
+        try:
+            refs = json.loads(view.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(refs, dict):
+            return None
+        base = refs.get("baseRefName")
+        head = refs.get("headRefName")
+        if not base or not head:
+            return None
+        return str(base), str(head)
+    except Exception:  # noqa: BLE001 - callers carry their own miss semantics
+        return None
+
+
 def _behind_by(pr_number: int, cwd: str) -> int:
     """Commits the PR head is behind its base branch. 0 on any probe miss:
     the hold must never block a merge because our own read failed, but each
@@ -1093,20 +1114,11 @@ def _behind_by(pr_number: int, cwd: str) -> int:
         )
         return 0
 
+    refs = _pr_base_head_refs(pr_number, cwd)
+    if refs is None:
+        return _miss("pr refs unreadable")
+    base, head = refs
     try:
-        view = _gh(
-            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
-        )
-        if not view.ok:
-            return _miss("gh pr view failed")
-        try:
-            refs = json.loads(view.stdout or "{}")
-        except json.JSONDecodeError:
-            return _miss("unparseable pr view output")
-        base = refs.get("baseRefName") if isinstance(refs, dict) else None
-        head = refs.get("headRefName") if isinstance(refs, dict) else None
-        if not base or not head:
-            return _miss("missing base/head ref")
         res = _gh(
             ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
             cwd,
@@ -1122,6 +1134,9 @@ def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
     """Files the BASE branch gained since the PR head diverged, or None on any
     probe miss. The reverse compare ({head}...{base}) names exactly the commits
     the head lacks, so its file list IS the base move an overlap hold measures.
+    A renamed base-side entry contributes BOTH its previous and current
+    filename: a PR still editing the old path is a modify-vs-rename overlap,
+    the exact case the hold exists to catch.
 
     Fails CLOSED, inverting `_behind_by` on purpose: there we did not know
     whether we were behind at all and a read of ours failing must not block a
@@ -1135,26 +1150,18 @@ def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
             f"pr-merge: overlap probe unavailable ({why}); holding for a rebase\n"
         )
 
+    refs = _pr_base_head_refs(pr_number, cwd)
+    if refs is None:
+        return _miss("pr refs unreadable")
+    head, base = refs
     try:
-        view = _gh(
-            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
-        )
-        if not view.ok:
-            return _miss("gh pr view failed")
-        try:
-            refs = json.loads(view.stdout or "{}")
-        except json.JSONDecodeError:
-            return _miss("unparseable pr view output")
-        base = refs.get("baseRefName") if isinstance(refs, dict) else None
-        head = refs.get("headRefName") if isinstance(refs, dict) else None
-        if not base or not head:
-            return _miss("missing base/head ref")
         res = _gh(
             [
                 "api",
                 f"repos/{{owner}}/{{repo}}/compare/{head}...{base}",
                 "--jq",
-                "{truncated: .truncated, names: [.files[].filename]}",
+                "{truncated: .truncated, names: [.files[]"
+                " | ((.filename // empty), (.previous_filename // empty))]}",
             ],
             cwd,
         )
@@ -1169,40 +1176,44 @@ def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
         names = payload.get("names")
         if not isinstance(names, list):
             return _miss("compare payload carries no file list")
-        paths = [str(p) for p in names if str(p)]
-        if payload.get("truncated") or len(paths) >= 300:
-            return _miss(f"compare truncated ({len(paths)} files; caps at 300)")
-        return paths
+        # A non-string entry is shape drift, not a path to drop: str(None) is
+        # the truthy garbage path "None", which would neither match a real
+        # overlap nor trip this breadcrumb. Fail closed on any of them.
+        if not all(isinstance(p, str) and p for p in names):
+            return _miss("compare file list carries non-string entries")
+        if payload.get("truncated") or len(names) >= 300:
+            return _miss(f"compare truncated ({len(names)} files; caps at 300)")
+        return names
     except Exception as exc:  # noqa: BLE001 - fail CLOSED: holding equals today's behavior
         return _miss(f"probe error: {exc}")
 
 
-def _pr_changed_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
-    """The PR's own changed file paths (the same read `_pr_payload_is_code`
-    makes), or None on a probe miss - the same fail-closed contract as
-    `_base_move_paths`: an unknown PR file set cannot prove a non-overlap, so
-    the caller holds. An EMPTY list is not a miss: a PR with no diff cannot
-    overlap anything."""
-    if not shutil.which("gh"):
-        return None
+def _pr_file_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
+    """The PR's own changed file paths, complete, or None on a probe miss.
+
+    Served from the REST files endpoint with --paginate because `gh pr view
+    --json files` caps silently at 100 files (one unpaginated GraphQL page),
+    and a truncated PR side would under-report exactly the side whose overlap
+    the hold decides - the base side already treats its 300-file compare cap as
+    a miss, so the PR side must not fail open where its neighbour fails closed.
+    An EMPTY list is not a miss: a PR with no diff cannot overlap anything."""
     res = _gh(
-        ["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], cwd
+        [
+            "api",
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
+            "--paginate",
+            "--jq",
+            ".[] | .filename // empty",
+        ],
+        cwd,
     )
     if not res.ok:
         sys.stderr.write(
-            "pr-merge: overlap probe unavailable (gh pr view files failed); "
+            "pr-merge: overlap probe unavailable (gh pr files read failed); "
             "holding for a rebase\n"
         )
         return None
-    try:
-        names = [str(p) for p in json.loads(res.stdout)]
-    except (ValueError, TypeError):
-        sys.stderr.write(
-            "pr-merge: overlap probe unavailable (unparseable pr file list); "
-            "holding for a rebase\n"
-        )
-        return None
-    return names
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
 
 
 def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
@@ -1488,9 +1499,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             behind = _behind_by(pr_number, repo)
             if behind > 0:
                 base_paths = _base_move_paths(pr_number, repo)
-                pr_paths = (
-                    None if base_paths is None else _pr_changed_paths(pr_number, repo)
-                )
+                pr_paths = None if base_paths is None else _pr_file_paths(pr_number, repo)
                 if base_paths is None or pr_paths is None:
                     _emit(
                         pr_number,

@@ -49,7 +49,7 @@ class FakeRun:
         self.head_ref = head_ref
         self.head_repo = head_repo
         self.base_repo = base_repo
-        # The overlap hold's probes (x-11ab): the reverse compare's file list
+        # The overlap hold's probes: the reverse compare's file list
         # and the PR's own changed paths. compare_truncated forces the
         # fail-closed miss branch without building a 300-file payload.
         self.base_move_files = base_move_files
@@ -93,10 +93,6 @@ class FakeRun:
                         json.dumps({"headRefOid": self.checks.get("headRefOid", "deadbeefcafe")}) + "\n",
                         "",
                     )
-                if cmd[-1] == "[.files[].path]":
-                    # The overlap probe's PR-side read (x-11ab); None serves
-                    # an empty diff, which proves no overlap rather than a miss.
-                    return Result(0, json.dumps(self.pr_files or []) + "\n", "")
                 if "mergedAt" in cmd:
                     if self.view_fails:
                         return Result(1, "", "gh: could not reach api.github.com")
@@ -124,6 +120,11 @@ class FakeRun:
                 return Result(0, self.view_url + "\n", "")
             if cmd[1] == "api":
                 endpoint = cmd[-1]
+                if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
+                    # The overlap probe's PR-side read (paginated REST, jq
+                    # emits one filename per line); None serves an empty
+                    # diff, which proves no overlap rather than a miss.
+                    return Result(0, "\n".join(self.pr_files or []) + "\n", "")
                 if endpoint.startswith("repos/owner/repo/pulls/") and "/comments" not in endpoint:
                     return Result(
                         0,
@@ -174,7 +175,7 @@ class FakeRun:
                     return Result(0, json.dumps({"statuses": rows}) + "\n", "")
                 if len(cmd) > 2 and "/compare/" in cmd[2]:
                     if any("truncated" in a for a in cmd):
-                        # The overlap probe's reverse compare (x-11ab): one
+                        # The overlap probe's reverse compare: one
                         # payload carries the truncation flag and the names.
                         return Result(
                             0,
