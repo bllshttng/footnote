@@ -31,6 +31,13 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.pr._merge import _find_pr_node_id
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        # A hold is a footnote-graph-resident concept: under an external
+        # tracker backend this repo's graph.json is not the delivery record
+        # of truth, so there is no plan hold to read - never "unreadable".
+        return None
 
     try:
         entries = read_graph(graph_json())

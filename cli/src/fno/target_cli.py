@@ -509,6 +509,13 @@ def _refuse_dispatch_hold(node: Optional[dict]) -> None:
     from fno.graph.ladder import DispatchHoldState, dispatch_hold_verdict
     from fno.graph.store import read_graph
     from fno.paths import graph_json
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        # A hold is a footnote-graph-resident concept: under an external
+        # tracker backend this repo's graph.json is not the delivery record
+        # of truth, so there is no plan hold to enforce here.
+        return
 
     try:
         entries = read_graph(graph_json())
