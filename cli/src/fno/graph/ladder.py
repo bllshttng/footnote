@@ -233,10 +233,13 @@ def dispatch_hold(entry: object) -> DispatchHold:
         return DispatchHold(DispatchHoldState.ABSENT)
     probe = resolve_plan_probe(entry)
     if not probe:
-        return DispatchHold(
-            DispatchHoldState.INVALID,
-            detail="declared plan path cannot be resolved",
-        )
+        return DispatchHold(DispatchHoldState.ABSENT)
+    # Cross-project and temporarily unmounted plan roots are an established
+    # no-signal case: there is no declaration to validate in this process. An
+    # existing file that cannot be parsed is different - its hold state was
+    # reached but is unreadable, and that fails closed below.
+    if not os.path.exists(probe):
+        return DispatchHold(DispatchHoldState.ABSENT)
     fm, readable = _read_frontmatter(probe)
     if not readable or fm is None:
         return DispatchHold(

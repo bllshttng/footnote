@@ -2049,8 +2049,8 @@ def test_selection_guards_blueprinted_plan_is_armed(tmp_path):
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
-def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
-    # A bound plan that cannot be read cannot prove its hold is absent.
+def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
+    # Cross-project and unmounted plan roots carry no declaration to validate.
     now = _gnow()
     node = {
         "id": "c",
@@ -2058,7 +2058,7 @@ def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
         "plan_path": str(tmp_path / "gone.md"),
         "created_at": now.isoformat(),
     }
-    assert adv.selection_guards(node, {"c": node}, now) == "dispatch-hold-invalid:c"
+    assert adv.selection_guards(node, {"c": node}, now) is None
 
 
 def test_selection_guards_dead_ancestor_via_field_not_status():

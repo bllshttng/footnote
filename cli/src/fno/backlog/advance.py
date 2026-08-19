@@ -264,10 +264,11 @@ def selection_guards(
     """
     from datetime import datetime, timezone
 
-    # The plan hold is the one fail-CLOSED policy in this selector. A missing,
-    # malformed, or unreadable bound plan cannot prove that its hold is absent,
-    # so it must never fall through the broad fail-open compatibility guard
-    # below. The helper also checks parents and the contained delivery owner.
+    # The plan hold is the one fail-CLOSED policy in this selector. A present
+    # plan whose hold state is malformed or unreadable cannot prove that its
+    # hold is absent, so it must never fall through the broad fail-open
+    # compatibility guard below. The helper also checks parents and the
+    # contained delivery owner.
     from fno.graph.ladder import dispatch_hold_verdict
 
     hold = dispatch_hold_verdict(entry, entries_by_id)

@@ -621,8 +621,8 @@ def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
     ) is None
 
 
-def test_an_unreadable_plan_fails_closed_through_the_guard(tmp_path):
-    """An unreadable plan cannot prove its plan-level hold is absent."""
+def test_a_missing_plan_remains_no_hold_signal(tmp_path):
+    """A cross-project or unmounted plan has no declaration to validate here."""
     from datetime import datetime, timezone
 
     from fno.backlog.advance import selection_guards
@@ -630,7 +630,7 @@ def test_an_unreadable_plan_fails_closed_through_the_guard(tmp_path):
     node = _ready_row(str(tmp_path / "gone.md"))
     assert selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
-    ) == "dispatch-hold-invalid:x-stale01"
+    ) is None
 
 
 def test_the_policy_set_is_the_one_selection_uses():
@@ -686,8 +686,10 @@ def test_malformed_dispatch_hold_fails_closed(tmp_path, declaration):
 def test_unreadable_bound_plan_fails_closed_for_hold_policy(tmp_path):
     from fno.graph.ladder import DispatchHoldState, dispatch_hold
 
-    missing = {"id": "x-held", "plan_path": str(tmp_path / "missing.md")}
-    assert dispatch_hold(missing).state is DispatchHoldState.INVALID
+    malformed = tmp_path / "malformed.md"
+    malformed.write_text("---\nstatus: ready\ndispatch_hold: [\n")
+    entry = {"id": "x-held", "plan_path": str(malformed)}
+    assert dispatch_hold(entry).state is DispatchHoldState.INVALID
 
 
 def test_dispatch_hold_walks_parent_and_contained_owner(tmp_path):

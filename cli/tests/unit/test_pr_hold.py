@@ -49,7 +49,9 @@ def test_hold_for_pr_returns_attributable_plan_hold(tmp_path, monkeypatch):
 def test_hold_for_pr_fails_closed_when_bound_plan_is_unreadable(tmp_path, monkeypatch):
     graph = _graph(tmp_path, monkeypatch, plan_body="---\nstatus: ready\n---\n")
     data = json.loads(graph.read_text())
-    data["entries"][0]["plan_path"] = str(tmp_path / "missing.md")
+    malformed = tmp_path / "malformed.md"
+    malformed.write_text("---\nstatus: ready\ndispatch_hold: [\n")
+    data["entries"][0]["plan_path"] = str(malformed)
     graph.write_text(json.dumps(data))
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold-invalid:x-5a5c" in reason
