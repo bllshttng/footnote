@@ -104,6 +104,23 @@ def test_scan_pr_ignores_non_graph_ids():
     assert mentions == []  # only one REAL secondary would be needed; here there are none
 
 
+def test_scan_pr_does_not_match_an_id_glued_inside_a_longer_token():
+    # Round-6 review fix: a plain substring search for "x-3a91" would match
+    # "x-3a910" (glued, no boundary) before ever reaching the real, separate
+    # "x-3a91 is blocked_by this" sentence - misclassifying the mention off
+    # the wrong unit's text. Word-boundary matching must skip the decoy.
+    body = (
+        "Ships x-5b99 first.\n"
+        "See old ref x-3a910 for context.\n"
+        "x-3a91 is blocked_by this.\n"
+    )
+    mentions = audit.scan_pr(1, body, NODE_IDS)
+    m = next(m for m in mentions if m.node_id == "x-3a91")
+    assert m.classification == "dependency"
+    assert "blocked_by" in m.source_text
+    assert "x-3a910" not in m.source_text
+
+
 def test_scan_pr_single_mention_is_not_a_secondary():
     # A body naming only ONE real node has no secondary to classify.
     body = "This just fixes x-5b99.\n"

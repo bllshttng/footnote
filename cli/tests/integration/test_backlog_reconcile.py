@@ -1256,6 +1256,45 @@ def test_reconcile_pr_number_scan_scope_ignores_a_cross_repo_number_collision(
     assert other["completed_at"] is None  # untouched: a different repo's node
 
 
+def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_unresolvable(
+    cli_env, monkeypatch,
+):
+    """Round-6 review fix: when this PR's own repo can't be resolved (no
+    --repo, unparseable pr_url), _pr_touch_ids must NOT wildcard-match every
+    bare-number ref into scope - it must refuse the number-based match
+    entirely, exactly like _find_pr_node_id already does when its own slug
+    is unresolvable. Failing open here would let an unrelated cross-repo
+    node sharing this PR's number get pulled into scope and closed."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        # cwd set so the primary claim's own post-bind forward-scan re-query
+        # (which needs SOME repo context) still succeeds via the cwd
+        # fallback, isolating this test to _pr_touch_ids's own scoping
+        # behavior rather than the separate no-repo-context refusal in
+        # scan_merge_drift.
+        _node("ab-800001", cwd=str(graph_path.parent)),  # this PR's own claimed node
+        # Shares pr_number=810 by coincidence; a different repo's node.
+        _node("ab-800002", pr_number=810,
+              pr_url="https://github.com/other-owner/other-repo/pull/810"),
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-800001\n", number=810, url="not-a-url",
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "810", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {c["node_id"] for c in payload["closed"]} == {"ab-800001"}
+    other = next(e for e in _read_entries(graph_path) if e["id"] == "ab-800002")
+    assert other["completed_at"] is None  # untouched: our_repo was unresolvable
+
+
 def test_reconcile_pr_number_refuses_binding_an_unmerged_pr(cli_env, monkeypatch):
     """Review fix (x-59a6): a --pr-number call must never bind a trailer
     claim before the PR is actually merged - an OPEN PR could still be

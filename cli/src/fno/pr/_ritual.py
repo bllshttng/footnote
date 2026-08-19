@@ -389,15 +389,24 @@ class Ritual:
         # trailer names to the PR BEFORE the drift scan the rest of reconcile
         # already ran unconditionally - a PR naming several nodes (only one of
         # which ever got individually stamped at creation) now closes all of
-        # them here, not just the primary. --repo is passed explicitly (never
-        # left to cwd inference) so a same-numbered PR in another repo can
-        # never be mismatched.
+        # them here, not just the primary. --repo is passed explicitly when
+        # resolvable so a same-numbered PR in another repo can never be
+        # mismatched; reconcile's own repo scoping still fails closed on a
+        # bare-number match when this resolution comes up empty (never left
+        # to cwd inference to guess).
         argv = ["backlog", "reconcile", "--pr-number", str(self.ctx.pr), "--json"]
         from fno.graph._reconcile import resolve_current_repo_slug
 
         repo = resolve_current_repo_slug(str(self.canon))
         if repo:
             argv += ["--repo", repo]
+        else:
+            typer.echo(
+                f"warning: could not resolve this repo's slug for PR #{self.ctx.pr}; "
+                "reconcile will scope to exact trailer claims only, skipping any "
+                "bare-number backfill match",
+                err=True,
+            )
         try:
             r = self._sh(argv)
         except subprocess.TimeoutExpired:

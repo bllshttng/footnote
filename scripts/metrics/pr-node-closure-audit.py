@@ -132,7 +132,12 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
                 f"Backlog-Closure: {' '.join(sorted(trailer_ids))}",
             ))
             continue
-        hit = next((u for u in units if nid in u), "")
+        # Word-boundary match, not substring containment: "x-1234" is a
+        # literal substring of the unrelated "x-12345", so a plain `nid in u`
+        # would classify the sentence about x-12345 as if it were about
+        # x-1234 (or vice versa) whenever one happens to embed the other.
+        nid_re = re.compile(rf"\b{re.escape(nid)}\b")
+        hit = next((u for u in units if nid_re.search(u)), "")
         mentions.append(Mention(pr_number, nid, classify_mention(hit), hit))
     return mentions
 

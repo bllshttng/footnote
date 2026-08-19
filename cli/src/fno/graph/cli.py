@@ -8000,7 +8000,7 @@ def cmd_reconcile(
         "trailer to the PR (filling an absent primary or appending to "
         "additional_prs) BEFORE the drift scan below runs, so a PR naming "
         "several nodes closes all of them in this one invocation rather than "
-        "only the one node stamped at creation (x-59a6). All-or-nothing: an "
+        "only the one node stamped at creation. All-or-nothing: an "
         "unknown, malformed, or cross-repo claim binds nothing.",
     ),
     repo: Optional[str] = typer.Option(
@@ -8059,12 +8059,18 @@ def cmd_reconcile(
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
         node. Scoped by repo like every other PR-matching path in this
-        module - a ref with no parseable url is still accepted (best-effort,
-        matching ``_find_pr_node_id``'s established stance).
+        module - a ref with no parseable url is still accepted as
+        best-effort, but an unresolvable OUR OWN repo refuses every
+        number-based match rather than wildcarding it in, matching
+        ``_find_pr_node_id``'s actual stance (it returns ``None`` outright
+        when its own slug is unresolvable, rather than treating that as a
+        pass for every candidate).
         """
         from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
 
         ids = set(_claims)
+        if _our_repo is None:
+            return ids
         for _e in _entries:
             _nid = _e.get("id")
             if not isinstance(_nid, str):
@@ -8073,7 +8079,7 @@ def cmd_reconcile(
                 if _num != _pr_number:
                     continue
                 _ref_repo = repo_slug_from_url(_url)
-                if _our_repo is None or _ref_repo is None or _ref_repo.lower() == _our_repo.lower():
+                if _ref_repo is None or _ref_repo.lower() == _our_repo.lower():
                     ids.add(_nid)
                 break
         return ids

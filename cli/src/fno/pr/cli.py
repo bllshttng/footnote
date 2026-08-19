@@ -450,7 +450,7 @@ def ritual(
     "closure-trailer",
     help=(
         "Print the exact `Backlog-Closure:` trailer for NODE plus its "
-        "contained_in descendants (x-59a6). Compose it into a PR body before "
+        "contained_in descendants. Compose it into a PR body before "
         "`gh pr create` so every node the PR ships gets bound at merge, not "
         "just the one stamped by --pr-number. Prints nothing (exit 0) when "
         "NODE is unresolvable or nothing well-formed remains, so a caller "
