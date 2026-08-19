@@ -166,18 +166,21 @@ def default_codex_sessions_dir() -> Path:
     return Path(os.path.expanduser("~")) / ".codex" / "sessions"
 
 
-def _discover_from_codex_daemon() -> list[dict]:
-    """Codex threads currently loaded in the app-server daemon.
+def _codex_daemon_threads_raw() -> Optional[list[dict]]:
+    """Raw ``threads`` rows the app-server daemon reports, or None.
 
-    The Rust probe owns the Unix-WebSocket protocol. Any missing/stale binary,
-    unavailable daemon, incompatible response, or timeout contributes no rows;
-    recent rollout and registry discovery remain available.
+    None covers every failure mode (missing/stale binary, unavailable daemon,
+    incompatible response, timeout) so a caller can tell "cannot answer" apart
+    from "answered with zero threads" - the pane-binding daemon oracle needs
+    that distinction (x-e336). :func:`_discover_from_codex_daemon` collapses
+    both to ``[]``, which is right for discovery but wrong for a bind
+    correlation that must not treat an unreachable daemon as "nothing new".
     """
     from fno import rust_binary
 
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
-        return []
+        return None
     try:
         proc = subprocess.run(
             [str(binary), "codex-loaded-threads"],
@@ -186,17 +189,30 @@ def _discover_from_codex_daemon() -> list[dict]:
             timeout=_CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     if proc.returncode != 0:
-        return []
+        return None
     try:
         result = json.loads(proc.stdout.strip())
     except (ValueError, AttributeError):
-        return []
+        return None
     if not isinstance(result, dict) or result.get("available") is not True:
-        return []
+        return None
     threads = result.get("threads")
     if not isinstance(threads, list):
+        return None
+    return threads
+
+
+def _discover_from_codex_daemon() -> list[dict]:
+    """Codex threads currently loaded in the app-server daemon.
+
+    The Rust probe owns the Unix-WebSocket protocol. Any missing/stale binary,
+    unavailable daemon, incompatible response, or timeout contributes no rows;
+    recent rollout and registry discovery remain available.
+    """
+    threads = _codex_daemon_threads_raw()
+    if threads is None:
         return []
 
     rows: list[dict] = []

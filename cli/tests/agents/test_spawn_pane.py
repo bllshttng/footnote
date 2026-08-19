@@ -742,6 +742,63 @@ def test_codex_binding_expiry_runs_one_reconcile_backfill(
     assert result.bound is True
 
 
+def test_codex_binds_through_the_daemon_oracle_when_the_fd_probe_misses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-e336: codex 0.148 no longer holds the rollout fd in the pane's own
+    process tree (the app-server daemon it delegates to does), so the fd probe
+    misses every time; the daemon oracle behind it must still bind the row."""
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        mux_spawn, "_codex_daemon_bind", lambda *_args, **_kwargs: session_id
+    )
+
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider=CODEX_HARNESS, codex_binding=False
+    )
+
+    row = load_registry()[0]
+    assert row.harness_session_id == session_id
+    assert result.session_uuid == session_id
+    assert result.bound is True
+
+
+def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two new session ids in this cwd is a race between sibling panes; the
+    daemon oracle refuses to guess (returns None), so the spawn fails exactly
+    like today's binding-window-expired case rather than misbinding."""
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        mux_spawn, "_codex_daemon_bind", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_ids_loaded", lambda *_args, **_kwargs: set()
+    )
+
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="session binding.*reaped"):
+        _spawn(
+            monkeypatch, tmp_path, provider=CODEX_HARNESS, runner=runner,
+            codex_binding=False,
+        )
+    assert load_registry() == []
+    assert runner.kill_calls
+
+
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -941,6 +998,38 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
         "--auto",
     ]
     assert "run" not in opencode and "--session-id" not in opencode
+
+
+def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
+    tmp_path: Path,
+) -> None:
+    """x-e336: codex 0.148 parks a fresh pane on a `Hooks need review` modal
+    that the approvals bypass alone does not clear, and `submit_keys` is
+    unsupported for codex so fno cannot answer it by keystroke - only
+    --dangerously-bypass-hook-trust does, and only on a bypass posture."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    yolo_bool = build_pane_argv("codex", "", tmp_path, True, None)
+    assert "--dangerously-bypass-hook-trust" in yolo_bool
+
+    yolo_mode = build_pane_argv(
+        "codex", "", tmp_path, False, None, permission_mode="yolo"
+    )
+    assert "--dangerously-bypass-hook-trust" in yolo_mode
+
+    sandboxed_default = build_pane_argv("codex", "", tmp_path, False, None)
+    assert "--dangerously-bypass-hook-trust" not in sandboxed_default
+
+    full_auto = build_pane_argv(
+        "codex", "", tmp_path, False, None, permission_mode="full-auto"
+    )
+    assert "--dangerously-bypass-hook-trust" not in full_auto
+
+    explicit_sandbox = build_pane_argv(
+        "codex", "", tmp_path, False, None,
+        permission_mode="workspace-write:on-request",
+    )
+    assert "--dangerously-bypass-hook-trust" not in explicit_sandbox
 
 
 def test_build_pane_argv_delegates_create_identity_to_capability_contract(

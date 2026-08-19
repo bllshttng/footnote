@@ -95,7 +95,7 @@ def test_stop_and_remove_behavior_is_queryable_instead_of_implied():
         assert capabilities(harness)["stop_strategy"] == "registry-noop"
     assert capabilities("codex")["remove_strategy"] == "codex-session-index"
     assert capabilities("codex")["session_binding"] == {
-        "strategy": "rollout-fd", "required": True, "timeout_ms": 60000,
+        "strategy": "rollout-fd-or-daemon", "required": True, "timeout_ms": 60000,
     }
 
 
@@ -107,7 +107,7 @@ def test_dispatch_resolve_exposes_the_machine_readable_harness_contract():
     assert out["stop_strategy"] == "registry-noop"
     assert out["remove_strategy"] == "codex-session-index"
     assert out["session_binding"] == {
-        "strategy": "rollout-fd", "required": True, "timeout_ms": 60000,
+        "strategy": "rollout-fd-or-daemon", "required": True, "timeout_ms": 60000,
     }
     assert out["resume_strategy"]["forms"]["headless_resume"]["tokens"] == [
         "codex", "exec", "resume", "{session_id}"
