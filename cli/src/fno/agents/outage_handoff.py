@@ -533,7 +533,7 @@ def production_handoff_dependencies(
     def read_snapshot(request: HandoffRequest) -> HandoffSnapshot:
         matches = [
             entry for entry in load_registry()
-            if str(entry.harness_session_id or entry.short_id) == request.source_row_id
+            if entry.session_id == request.source_row_id
         ]
         if len(matches) != 1:
             raise ValueError(
@@ -607,7 +607,7 @@ def production_handoff_dependencies(
         entries = load_registry()
         successors = [
             entry for entry in entries
-            if str(entry.harness_session_id or entry.short_id) == spawned.row_id
+            if entry.session_id == spawned.row_id
         ]
         successor_executable = len(successors) == 1 and registry_entry_executable(successors[0])
         same_cwd = successor_executable and Path(successors[0].cwd).resolve() == Path(snapshot.owner_cwd)
@@ -648,7 +648,7 @@ def production_handoff_dependencies(
     def stop_partial(spawned: SpawnReceipt) -> bool:
         entries = [
             entry for entry in load_registry()
-            if str(entry.harness_session_id or entry.short_id) == spawned.row_id
+            if entry.session_id == spawned.row_id
         ]
         if len(entries) != 1:
             return False

@@ -433,7 +433,17 @@ def run_health_canary(
     claim_snapshot: Callable[[], set[str]] = _node_claim_snapshot,
     policy: OutagePolicy | None = None,
 ) -> CanaryProof | None:
-    """Run, stop, and verify one neutral canary without entering node state."""
+    """Run, stop, and verify one neutral canary without entering node state.
+
+    The proof this returns covers ``destination.record_id`` (the account),
+    not the exact ``destination.account_env`` bytes used here. The eventual
+    handoff spawn re-resolves credentials from that same account id
+    (``--dispatch-account``) rather than carrying this env through, so a
+    fresh CanaryProof means "this account currently resolves to a healthy
+    destination", not "the successor will run under these exact values". The
+    gap between the two is a credential rotation, or a resolver answering
+    differently, in the window between this canary and the handoff spawn.
+    """
     if destination.harness not in {"codex", "opencode", "agy"}:
         return None
     resolved_canary = canary_cwd.resolve()
