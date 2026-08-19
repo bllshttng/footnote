@@ -1532,6 +1532,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "workspace-write",
+                "--add-dir",
+                "/tmp/example-repo/.fno/plans",
                 "--",
                 "build feature X"
             ]
@@ -1655,11 +1657,18 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--add-dir"));
     }
 
-    /// AC7-ERR: a non-repo cwd changes no argv and never panics.
+    /// AC7-ERR: a non-repo cwd never panics. The GIT grant is absent (no repo
+    /// to resolve), but the plan-dir grant is independent of git-repo-ness and
+    /// still applies (x-6163).
     #[test]
-    fn codex_create_argv_outside_a_repo_is_unchanged() {
+    fn codex_create_argv_outside_a_repo_omits_only_the_git_grant() {
         let argv = CodexProvider.create_argv(&create_ctx());
-        assert!(!argv.iter().any(|a| a == "--add-dir"));
+        let grants: Vec<&String> = argv
+            .iter()
+            .enumerate()
+            .filter_map(|(i, token)| (token == "--add-dir").then(|| &argv[i + 1]))
+            .collect();
+        assert_eq!(grants, vec!["/tmp/example-repo/.fno/plans"]);
     }
 
     /// The bounded posture does NOT survive `codex exec resume` on its own:
@@ -1751,8 +1760,10 @@ mod tests {
         );
     }
 
+    /// The plan-dir grant is independent of git-repo-ness (x-6163), so even a
+    /// non-repo cwd re-pins `writable_roots` on resume unless yolo.
     #[test]
-    fn codex_resume_argv_omits_sandbox_unless_yolo() {
+    fn codex_resume_argv_grants_plan_dir_outside_a_repo_unless_yolo() {
         let ctx = ResumeContext {
             session_id: "uuid-1".into(),
             message: "m".into(),
@@ -1769,6 +1780,10 @@ mod tests {
                 "uuid-1",
                 "--json",
                 "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=workspace-write",
+                "-c",
+                "sandbox_workspace_write.writable_roots=[\"/x/.fno/plans\"]",
                 "--",
                 "m"
             ]
