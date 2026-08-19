@@ -2240,6 +2240,13 @@ def dispatch_spawn_bounded_pane(
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
     from fno.claims.io import global_claims_root
 
+    provider = spawn_kwargs.get("provider")
+    if provider not in PANE_HOSTABLE_PROVIDERS:
+        raise DispatchAskError(
+            f"unknown provider {provider!r}; pane-hostable providers: "
+            f"{', '.join(PANE_HOSTABLE_PROVIDERS)}",
+            exit_code=2,
+        )
     session = resolve_mux_session(spawn_kwargs.pop("session", None))
     holder = placement_holder or f"mux-placement:{os.getpid()}:{_uuid.uuid4()}"
     key = f"placement:{session}:global"
