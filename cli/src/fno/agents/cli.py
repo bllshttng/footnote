@@ -3347,7 +3347,13 @@ def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
     # about.
     resolved: set[str] = set()
     for row in rows:
-        keys = ({row.name, row.harness_session_id, row.short_id} & wanted) - resolved
+        # `harness_session_id` is Optional, so drop the empties before matching.
+        # A None could never be in `wanted` anyway - that set already excludes
+        # falsy handles - so this narrows the type without changing the match.
+        row_keys = {
+            key for key in (row.name, row.harness_session_id, row.short_id) if key
+        }
+        keys = (row_keys & wanted) - resolved
         if not keys:
             continue
         falsifier = registry_falsifier(row)
@@ -3491,14 +3497,15 @@ def cmd_truth(
 
     from fno.agents.session_truth import render_truth, resolve_session_truth
 
-    if (handle is None) == (handles is None):
-        print(
-            "pass exactly one of: a positional handle, or --handles a,b,c",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
+    # Split rather than one combined test, so the positional narrows to `str`
+    # for the single-handle path below without an assert standing in for the
+    # control flow.
+    usage = "pass exactly one of: a positional handle, or --handles a,b,c"
 
     if handles is not None:
+        if handle is not None:
+            print(usage, file=sys.stderr)
+            raise typer.Exit(code=2)
         # ponytail: handles ride argv. Ceiling is roughly 125 handles at 36
         # chars, under 5 KB and far below ARG_MAX; read the list from stdin if
         # a roster ever outgrows that.
@@ -3530,6 +3537,10 @@ def cmd_truth(
         # Always 0: an unresolvable handle is reported in its own entry, never
         # in an exit code the whole batch would have to share.
         return
+
+    if handle is None:
+        print(usage, file=sys.stderr)
+        raise typer.Exit(code=2)
 
     result = resolve_session_truth(handle)
     falsifier = _registry_falsifier(handle)
