@@ -7063,8 +7063,26 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     let fno_bin =
                         std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-                    match evaluate_plan_fidelity(manifest.plan_path.as_deref(), &fno_bin, &cwd) {
+                    match evaluate_plan_fidelity(
+                        manifest.plan_path.as_deref(),
+                        &fno_bin,
+                        &cwd,
+                        FIDELITY_TIMEOUT,
+                    ) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
+                        // Degraded fails OPEN on the stop decision (same as Absent - a
+                        // hung probe must not wedge the gate that lets a finished
+                        // session stop), but is emitted here so it is never a SILENT
+                        // pass: a probe that keeps timing out stays visible in the
+                        // event log even though it never blocks.
+                        FidelityGate::Degraded { reason } => emit(
+                            "loop_check_fidelity_degraded",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "plan_path": manifest.plan_path,
+                                "reason": reason
+                            }),
+                        ),
                         _ => {}
                     }
                 }
@@ -7957,30 +7975,171 @@ enum FidelityGate {
     Refused {
         reason: String,
     },
+    /// The child ran past `FIDELITY_TIMEOUT` and was killed (x-d21f). Fail
+    /// open on the STOP decision like `Absent` - a hung probe must not wedge
+    /// the gate that exists to let a finished session finally stop - but,
+    /// unlike `Absent`, this is NAMED and carried into the emitted event so a
+    /// timing-out probe is visible, never a silent pass indistinguishable
+    /// from "no plan bound".
+    Degraded {
+        reason: String,
+    },
+}
+
+/// Wall-clock ceiling for the `fno plan fidelity` child (x-d21f). Same bound
+/// as `PROBE_TIMEOUT`, under its own name because this and done_probes gate
+/// different things and must be free to drift independently.
+const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Outcome of a bounded, killable child run: the whole point is that a hang
+/// inside the child (x-8ad8 was one; nothing rules out another) can never
+/// again read as "the read failed" or wedge forever - it reads as exactly
+/// what happened, with the verb and the elapsed time attached at the call
+/// site.
+enum BoundedRun {
+    Stdout(Vec<u8>),
+    TimedOut(std::time::Duration),
+    SpawnFailed,
+    /// `try_wait()` itself errored (e.g. a concurrent reap of the group
+    /// leader) - the bound was never reached, so this must stay distinct
+    /// from `TimedOut` or a wait failure would misreport as "timed out
+    /// after 0s", naming a hang that never happened.
+    WaitFailed,
+}
+
+/// Run `fno_bin args...` under a native wall-clock bound, killing the
+/// child's whole process group on expiry - the same discipline as
+/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
+/// stdout too since the caller needs to parse it as JSON. `Command::output()`
+/// alone has no timeout: it blocks until the child exits, however long that
+/// takes, which is exactly how a hang three calls deep in `fno plan fidelity`
+/// (x-8ad8) turned into loop-check itself hanging forever and stranding the
+/// session behind it. stdout/stderr are drained on background threads for
+/// the same reason `run_probe` drains stderr that way: reading a pipe only
+/// after the child exits deadlocks against a child that fills the pipe
+/// buffer before exiting.
+fn run_bounded(
+    fno_bin: &OsStr,
+    args: &[&str],
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> BoundedRun {
+    use std::os::unix::process::CommandExt;
+
+    let spawned = Command::new(fno_bin)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn();
+
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(_) => return BoundedRun::SpawnFailed,
+    };
+    let pgid = child.id() as i32;
+
+    let mut stdout_pipe = child.stdout.take();
+    let stdout_drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = stdout_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let mut stderr_pipe = child.stderr.take();
+    let stderr_drain = std::thread::spawn(move || {
+        // Nothing reads this back (the caller only wants stdout) - drain to
+        // sink rather than a growing Vec so an unbounded stderr write
+        // doesn't buy an unbounded allocation for bytes no one inspects.
+        if let Some(ref mut p) = stderr_pipe {
+            let _ = std::io::copy(p, &mut std::io::sink());
+        }
+    });
+
+    enum Outcome {
+        Done,
+        TimedOut(std::time::Duration),
+        WaitFailed,
+    }
+
+    let start = std::time::Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break Outcome::Done,
+            Ok(None) => {
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    kill_process_group(&mut child);
+                    break Outcome::TimedOut(elapsed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                // The bound was never reached - this is NOT a timeout, and
+                // must not be reported as one (that would name a hang that
+                // never happened). Still kill the group: an error mid-wait
+                // leaves the child's liveness unknown, and a stray survivor
+                // must not outlive this call.
+                kill_process_group(&mut child);
+                break Outcome::WaitFailed;
+            }
+        }
+    };
+
+    // Reap any descendant still holding a pipe write end (a wrapper script
+    // that forks) so the drain threads see EOF either way.
+    killpg(pgid);
+
+    match outcome {
+        // Captured at the moment the bound was actually crossed, not after
+        // kill_process_group + killpg have run - else the reported duration
+        // is inflated by cleanup cost instead of reflecting the timeout itself.
+        Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
+        Outcome::WaitFailed => BoundedRun::WaitFailed,
+        Outcome::Done => {
+            let stdout = stdout_drain.join().unwrap_or_default();
+            let _ = stderr_drain.join();
+            BoundedRun::Stdout(stdout)
+        }
+    }
 }
 
 /// Run `fno plan fidelity --json` for the bound plan and classify the decision.
 ///
-/// Fail-open on every error path (no fno, non-zero exit, unparseable JSON): the
-/// stop gate must not block on a broken probe. The inversion lives in the Python
-/// core (`fno.plan.fidelity`); Rust only reads the `refused` bool, so there is
-/// one implementation of the join and the gate and the loop cannot drift.
-/// `fno_bin` is resolved by the caller (from `FNO_LOOPCHECK_FNO_BIN`, default
-/// `fno`) so this function is hermetically testable with a stub script.
-fn evaluate_plan_fidelity(plan_path: Option<&str>, fno_bin: &OsStr, cwd: &Path) -> FidelityGate {
+/// Fail-open on every error path (no fno, non-zero exit, unparseable JSON,
+/// timeout): the stop gate must not block on a broken probe. The inversion
+/// lives in the Python core (`fno.plan.fidelity`); Rust only reads the
+/// `refused` bool, so there is one implementation of the join and the gate
+/// and the loop cannot drift. `fno_bin` is resolved by the caller (from
+/// `FNO_LOOPCHECK_FNO_BIN`, default `fno`) so this function is hermetically
+/// testable with a stub script.
+fn evaluate_plan_fidelity(
+    plan_path: Option<&str>,
+    fno_bin: &OsStr,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> FidelityGate {
     let plan = match plan_path {
         Some(p) if !p.is_empty() => p,
         _ => return FidelityGate::Absent,
     };
-    let out = match Command::new(fno_bin)
-        .args(["plan", "fidelity", plan, "--json"])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return FidelityGate::Absent,
-    };
-    classify_plan_fidelity(&out.stdout)
+    match run_bounded(fno_bin, &["plan", "fidelity", plan, "--json"], cwd, timeout) {
+        BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
+        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
+        BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
+            reason: format!(
+                "plan fidelity check timed out after {:.1}s running `{} plan fidelity {} --json` \
+                 and was killed; degraded, not a pass - the fno CLI itself is hanging, \
+                 investigate that command directly",
+                elapsed.as_secs_f64(),
+                fno_bin.to_string_lossy(),
+                plan,
+            ),
+        },
+    }
 }
 
 fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
@@ -9856,11 +10015,11 @@ mod tests {
         let cwd = std::env::temp_dir();
         let missing = Path::new("/definitely/missing/fno");
         assert!(matches!(
-            evaluate_plan_fidelity(None, missing.as_os_str(), &cwd),
+            evaluate_plan_fidelity(None, missing.as_os_str(), &cwd, FIDELITY_TIMEOUT),
             FidelityGate::Absent
         ));
         assert!(matches!(
-            evaluate_plan_fidelity(Some(""), missing.as_os_str(), &cwd),
+            evaluate_plan_fidelity(Some(""), missing.as_os_str(), &cwd, FIDELITY_TIMEOUT),
             FidelityGate::Absent
         ));
     }
@@ -9875,7 +10034,8 @@ mod tests {
             evaluate_plan_fidelity(
                 Some("/x/plan.md"),
                 Path::new("/definitely/missing/fno").as_os_str(),
-                &cwd
+                &cwd,
+                FIDELITY_TIMEOUT
             ),
             FidelityGate::Absent
         ));
@@ -9883,6 +10043,39 @@ mod tests {
             classify_plan_fidelity(b"No such command: fidelity"),
             FidelityGate::Absent
         ));
+    }
+
+    #[test]
+    fn plan_fidelity_gate_degrades_and_names_the_verb_on_timeout() {
+        // x-d21f: a hung `fno plan fidelity` child (x-8ad8 was one concrete
+        // cause; the bound must hold regardless of WHY the child hangs) must
+        // be killed, not waited on forever, and must report as exactly that -
+        // never a silent Absent pass, and never a misattributed message about
+        // some unrelated read.
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\nsleep 30\n");
+        let cwd = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        let gate = evaluate_plan_fidelity(
+            Some("/x/plan.md"),
+            fno.as_os_str(),
+            &cwd,
+            std::time::Duration::from_millis(200),
+        );
+        // The child is killed at the bound, not left to run out its sleep.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        match gate {
+            FidelityGate::Degraded { reason } => {
+                assert!(reason.contains("plan fidelity"), "{reason}");
+                assert!(reason.contains("/x/plan.md"), "{reason}");
+                assert!(reason.contains("timed out"), "{reason}");
+                assert!(!reason.contains("gh read"), "{reason}");
+                // A 200ms bound must read as sub-second, never truncate to a
+                // flat "0s" that misreads as no time having passed at all.
+                assert!(reason.contains("0.2s"), "{reason}");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
     }
 
     // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────
