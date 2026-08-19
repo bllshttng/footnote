@@ -1064,6 +1064,13 @@ struct PrInfo {
     /// usage-limit comment, no review). Named in the terminal-allow message so
     /// an operator sees why the gate proceeded without them (AC1-UI).
     usage_limited: Vec<String>,
+    /// Required bots whose best evidence READ AN OLDER COMMIT
+    /// (`CoverageVerdict::Stale`): (login, reviewed sha). Same gate weight as
+    /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
+    /// different remedy, so the block message names the sha it read and asks
+    /// for a re-read instead of a first read (x-4b82). Nudge-classified
+    /// alongside the missing bots so the re-read ask idles like one.
+    stale_bots: Vec<(String, String)>,
     /// Blocking inline findings (codex P1 / gemini critical|high) whose
     /// thread has no qualifying ack (AC2).
     unaddressed_findings: Vec<Finding>,
@@ -2269,6 +2276,7 @@ fn read_pr_info(
             missing_bots: Vec::new(),
             bot_nudges: Vec::new(),
             usage_limited: Vec::new(),
+            stale_bots: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: false,
             unattested_reviewers: Vec::new(),
@@ -2342,6 +2350,7 @@ fn read_pr_info(
             missing_bots: Vec::new(),
             bot_nudges: Vec::new(),
             usage_limited: Vec::new(),
+            stale_bots: Vec::new(),
             unaddressed_findings: Vec::new(),
             review_skipped: true,
             unattested_reviewers: Vec::new(),
@@ -2427,6 +2436,7 @@ fn read_pr_info(
         missing_bots,
         bot_nudges,
         usage_limited,
+        stale_bots,
         unaddressed_findings,
         coverage,
     ) = if login_skipped {
@@ -2455,6 +2465,7 @@ fn read_pr_info(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             coverage,
         )
     } else {
@@ -2479,35 +2490,45 @@ fn read_pr_info(
         // an optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
-        // Per-missing-bot nudge classification (x-b167), computed AFTER the
+        // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
         // usage-limit retain (which happened inside compute_review_info) so
         // the two give-up paths never compose (AC6): a usage_limited bot is
-        // already out of missing_bots and is never classified here. Derived
-        // from the same issue-comment list, fresh every fire.
+        // already out of missing_bots and is never classified here. A STALE
+        // bot is classified alongside a missing one (x-4b82): its remedy is
+        // the same trigger comment, and without classification the session
+        // could neither tell whether it had already asked nor idle while
+        // waiting for the re-read. Derived from the same issue-comment list,
+        // fresh every fire.
         let now = Utc::now();
         let review_comments = reviews_json
             .get("comments")
             .and_then(|v| v.as_array())
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
+        let classify = |bot: &String| {
+            classify_bot_nudge(
+                bot,
+                review_comments,
+                nudge_config_for(nudge_configs, bot),
+                now,
+            )
+        };
         let bot_nudges: Vec<BotNudge> = info
             .missing_bots
             .iter()
-            .map(|bot| {
-                classify_bot_nudge(
-                    bot,
-                    review_comments,
-                    nudge_config_for(nudge_configs, bot),
-                    now,
-                )
-            })
+            .chain(info.stale_bots.iter().map(|(bot, _)| bot))
+            .map(classify)
             .collect();
         // The "empty bot_nudges = not classified = status quo" contract that
         // async_wait_class and build_block_reason rely on holds only because
         // this is an all-or-nothing map: bot_nudges is either empty or 1:1
-        // with missing_bots. A future partial classification would silently
-        // mis-idle, so pin the invariant here rather than let it drift.
-        debug_assert_eq!(bot_nudges.len(), info.missing_bots.len());
+        // with missing_bots + stale_bots. A future partial classification
+        // would silently mis-idle, so pin the invariant here rather than let
+        // it drift.
+        debug_assert_eq!(
+            bot_nudges.len(),
+            info.missing_bots.len() + info.stale_bots.len()
+        );
         let mut findings_bots: Vec<String> = required_bots.to_vec();
         for b in optional_bots {
             if !findings_bots.iter().any(|x| x == b) {
@@ -2645,6 +2666,7 @@ fn read_pr_info(
             info.missing_bots,
             bot_nudges,
             info.usage_limited,
+            info.stale_bots,
             unaddressed,
             coverage,
         )
@@ -2684,6 +2706,7 @@ fn read_pr_info(
         missing_bots,
         bot_nudges,
         usage_limited,
+        stale_bots,
         unaddressed_findings,
         // Telemetry only (no decision reads this): "no review gate of any kind
         // applied" = the login reads were skipped AND no local reviewers gate.
@@ -2807,6 +2830,7 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
 fn awaiting_review_only(pr: &PrInfo) -> bool {
     !pr.usage_limited.is_empty()
         && pr.missing_bots.is_empty()
+        && pr.stale_bots.is_empty()
         && pr.unaddressed_findings.is_empty()
         && pr.unattested_reviewers.is_empty()
 }
@@ -4175,15 +4199,25 @@ struct ReviewInfo {
     /// a nudge/idle would wedge until budget death; the loop instead terminates
     /// cleanly via `DoneAwaitingReview`. Scoped to the bot's OWN author.login.
     usage_limited: Vec<String>,
+    /// Required bots whose best evidence pins a commit the freshness predicate
+    /// no longer carries: (login, reviewed sha). Same gate weight as
+    /// `missing_bots` - a stale bot still fails `all_required_passed` - but a
+    /// different remedy, so it stays OUT of `missing_bots` and the block
+    /// message names the sha it read and asks for a re-read (x-4b82).
+    stale_bots: Vec<(String, String)>,
 }
 
 impl ReviewInfo {
     /// Every required bot has at least one completed pass. A bot that posted
     /// only a usage-limit (quota) comment has NOT reviewed, so it counts as
     /// not-passed: a quota bounce must fail the gate closed instead of letting
-    /// it proceed (x-9ab2). The caller still records the drop for telemetry.
+    /// it proceed (x-9ab2). A bot that read an older commit is equally
+    /// not-passed - only the message differs, never the gate. The caller still
+    /// records the drop for telemetry.
     fn all_required_passed(&self) -> bool {
-        self.missing_bots.is_empty() && self.usage_limited.is_empty()
+        self.missing_bots.is_empty()
+            && self.usage_limited.is_empty()
+            && self.stale_bots.is_empty()
     }
 }
 
@@ -4242,19 +4276,23 @@ fn compute_review_info(
     // scans is how `all_required_passed` reads true while coverage reads
     // `Refused` (or the inverse) and the run wedges between two gates that
     // never reconcile - the reader-divergence class x-e601 exists to delete.
-    // A stale verdict lands in `missing_bots`, where the nudge path asks for
-    // a re-read - the correct response to "reviewed an older commit", and a
-    // different one from "has not reviewed". A quota refusal lands in
-    // `usage_limited` and FAILS the gate closed (x-9ab2): the PR does not
-    // merge on a quota bounce, and the loop terminates via DoneAwaitingReview
-    // instead of spinning (the PR #214 shape). Scoped to the bot's own
-    // evidence inside bot_verdict, so a stranger's comment never moves a
-    // required bot (AC1-ERR).
+    // A STALE verdict lands in `stale_bots`, keeping the sha it read: the
+    // remedy is a re-read, a different one from "has not reviewed", and the
+    // block message must be able to say which (x-4b82). The gate weight is
+    // identical either way. A quota refusal lands in `usage_limited` and
+    // FAILS the gate closed (x-9ab2): the PR does not merge on a quota
+    // bounce, and the loop terminates via DoneAwaitingReview instead of
+    // spinning (the PR #214 shape). Scoped to the bot's own evidence inside
+    // bot_verdict, so a stranger's comment never moves a required bot
+    // (AC1-ERR).
     let mut missing_bots: Vec<String> = Vec::new();
     let mut usage_limited: Vec<String> = Vec::new();
+    let mut stale_bots: Vec<(String, String)> = Vec::new();
     for bot in required_bots {
-        match bot_verdict(bot, reviews, comments, freshness).0 {
+        let (verdict, read_sha, _) = bot_verdict(bot, reviews, comments, freshness);
+        match verdict {
             CoverageVerdict::Reviewed => {}
+            CoverageVerdict::Stale => stale_bots.push((bot.clone(), read_sha)),
             CoverageVerdict::Refused => usage_limited.push(bot.clone()),
             _ => missing_bots.push(bot.clone()),
         }
@@ -4264,6 +4302,7 @@ fn compute_review_info(
         latest_ts: final_ts,
         missing_bots,
         usage_limited,
+        stale_bots,
     }
 }
 
@@ -7959,7 +7998,7 @@ fn async_wait_class(
     if pr.ci_conclusion.is_ok()
         && !pr.reviewed
         && !pr.review_skipped
-        && !pr.missing_bots.is_empty()
+        && (!pr.missing_bots.is_empty() || !pr.stale_bots.is_empty())
         && pr.unattested_reviewers.is_empty()
         && pr.bot_nudges.iter().all(|n| nudge_class_idlable(&n.class))
     {
@@ -8969,7 +9008,44 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 corrupt
             );
         }
-        if !pr.missing_bots.is_empty() {
+        if !pr.missing_bots.is_empty() || !pr.stale_bots.is_empty() {
+            // x-4b82: a stale bot's "missing" is a re-read, not a first read.
+            // Suffix the login with the commit it actually read wherever a
+            // nudge-state message names it - the local-reviewer branch above
+            // names its superseded sha the same way. An unpinned read (empty
+            // sha) gets no suffix; the coverage axis owns that message.
+            let read_note = |login: &str| {
+                match pr.stale_bots.iter().find(|(b, _)| b == login) {
+                    Some((_, sha)) if !sha.is_empty() => {
+                        format!(" (read {}, superseded by this head)", short_sha(sha))
+                    }
+                    _ => String::new(),
+                }
+            };
+            // A stale-only blocker gets its own sentence: the bot responded,
+            // so "has not reviewed" would be the exact lie this branch
+            // deletes, and the nudge states below answer "when did we ask",
+            // never "what did it read".
+            if pr.missing_bots.is_empty() {
+                let items: Vec<String> = pr
+                    .stale_bots
+                    .iter()
+                    .map(|(b, sha)| {
+                        if sha.is_empty() {
+                            b.clone()
+                        } else {
+                            format!("{b} (read {})", short_sha(sha))
+                        }
+                    })
+                    .collect();
+                return format!(
+                    "PR #{}: {} reviewed an older commit whose code no longer matches \
+                     this head - ask for a re-read (a push alone does not re-trigger it).{}",
+                    pr.number,
+                    items.join("; "),
+                    hint("review")
+                );
+            }
             // x-b167: render per nudge state. `hint("review")` is derived from
             // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
             // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
@@ -8982,10 +9058,11 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 .find(|n| n.class == NudgeClass::NeedsNudge)
             {
                 return format!(
-                    "PR #{}: {} reviews on mention, not on push, and has not been asked. Run:\n  \
+                    "PR #{}: {}{} reviews on mention, not on push, and has not been asked. Run:\n  \
                      gh pr comment {} --body \"{}\"\nthen arm a watcher (nudge {} of {}).{}",
                     pr.number,
                     n.login,
+                    read_note(&n.login),
                     pr.number,
                     n.review_handle,
                     n.nudges + 1,
@@ -8999,12 +9076,13 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 .find(|n| n.class == NudgeClass::Unresponsive)
             {
                 return format!(
-                    "PR #{}: {} did not review after {} nudges over {}m. Nothing further \
+                    "PR #{}: {}{} did not review after {} nudges over {}m. Nothing further \
                      will arrive on its own. Either post the review by hand, or move this \
                      login to config.review.optional_apps (honored-if-present, never waited \
                      on). Not a wait: do not arm a watcher.{}",
                     pr.number,
                     n.login,
+                    read_note(&n.login),
                     n.nudges,
                     n.span_min,
                     hint("review")
@@ -9016,9 +9094,10 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 .find(|n| n.class == NudgeClass::Awaiting)
             {
                 return format!(
-                    "PR #{}: {} nudged {}m ago ({} of {}), awaiting review.{}",
+                    "PR #{}: {}{} nudged {}m ago ({} of {}), awaiting review.{}",
                     pr.number,
                     n.login,
+                    read_note(&n.login),
                     n.newest_age_min,
                     n.nudges,
                     n.ceiling,
@@ -9027,10 +9106,21 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             }
             // All NotNudgeable (or not classified): today's exact string + hint
             // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
+            // A stale bot riding along in a mixed set keeps the note so its
+            // entry does not read as "never responded" (each required bot is in
+            // exactly one of the two lists, so no dedup is needed).
+            let mut names: Vec<String> = pr.missing_bots.clone();
+            names.extend(pr.stale_bots.iter().map(|(b, sha)| {
+                if sha.is_empty() {
+                    b.clone()
+                } else {
+                    format!("{b} (read {}, superseded by this head)", short_sha(sha))
+                }
+            }));
             return format!(
                 "PR #{}: {} has not reviewed.{}",
                 pr.number,
-                pr.missing_bots.join(", "),
+                names.join(", "),
                 hint("review")
             );
         }
@@ -11734,6 +11824,7 @@ mod tests {
             missing_bots: vec![],
             bot_nudges: vec![],
             usage_limited: vec![],
+            stale_bots: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
             unattested_reviewers: vec![],
@@ -11817,6 +11908,7 @@ mod tests {
             missing_bots: vec![],
             bot_nudges: vec![],
             usage_limited: vec![],
+            stale_bots: vec![],
             unaddressed_findings: vec![],
             review_skipped: false,
             unattested_reviewers: vec![],
@@ -11849,6 +11941,15 @@ mod tests {
         assert!(
             !awaiting_review_only(&still_pending),
             "bot still owed a wait"
+        );
+
+        // A stale bot owes a re-read (x-4b82): the same window a missing bot
+        // gets, never a clean exit on another bot's quota bounce.
+        let mut stale_pending = bounced();
+        stale_pending.stale_bots = vec![("gemini-code-assist".to_string(), "00001111".to_string())];
+        assert!(
+            !awaiting_review_only(&stale_pending),
+            "stale bot still owed a re-read"
         );
 
         // A standing blocking finding is work the agent must DO; parking hands
@@ -12061,6 +12162,59 @@ mod tests {
         assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
         let reason = build_block_reason(&pr, "abc", true);
         assert!(reason.contains("has not reviewed"), "{reason}");
+    }
+
+    #[test]
+    fn stale_bot_block_reason_names_the_read_sha_and_a_reread() {
+        // x-4b82 AC1: the bot DID respond, so the message must not read as a
+        // first read - it names the commit it read and asks for a re-read.
+        // Still idles like any nudgeable outstanding bot.
+        let mut pr = bot_review_pr(
+            "chatgpt-codex-connector",
+            vec![bn(
+                "chatgpt-codex-connector",
+                NudgeClass::NotNudgeable,
+                0,
+                0,
+                0,
+            )],
+        );
+        pr.missing_bots = vec![];
+        pr.stale_bots = vec![(
+            "chatgpt-codex-connector".to_string(),
+            "0daa4d6cea7c".to_string(),
+        )];
+        assert_eq!(async_wait_class(&pr, "abc", true), Some("review"));
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("chatgpt-codex-connector (read 0daa4d6c)"),
+            "{reason}"
+        );
+        assert!(reason.contains("ask for a re-read"), "{reason}");
+        assert!(!reason.contains("has not reviewed"), "{reason}");
+    }
+
+    #[test]
+    fn nudge_message_for_a_stale_bot_appends_what_it_read() {
+        // Mixed set: gemini never responded, codex read an older commit. The
+        // Awaiting message names codex, so it must carry the read-note suffix
+        // rather than read as "never responded".
+        let mut pr = bot_review_pr(
+            "gemini-code-assist",
+            vec![
+                bn("gemini-code-assist", NudgeClass::NotNudgeable, 0, 0, 0),
+                bn("chatgpt-codex-connector", NudgeClass::Awaiting, 1, 3, 3),
+            ],
+        );
+        pr.stale_bots = vec![(
+            "chatgpt-codex-connector".to_string(),
+            "111122223333".to_string(),
+        )];
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("chatgpt-codex-connector (read 11112222, superseded by this head)"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -15172,9 +15326,11 @@ mod tests {
     }
 
     #[test]
-    fn compute_review_info_stale_clean_pass_stays_missing() {
+    fn compute_review_info_stale_clean_pass_lands_in_stale_bots() {
         // The comment names an older commit: the bot responded, but not to
         // this code - same staleness rule the review-object path applies.
+        // x-4b82: the entry keeps the sha it read and FAILS the gate exactly
+        // like a missing bot; only the message differs.
         let required = vec!["chatgpt-codex-connector".to_string()];
         let json = serde_json::json!({
             "reviews": [],
@@ -15188,10 +15344,12 @@ mod tests {
             }
         };
         let info = compute_review_info(&json, &required, &fresh_at);
+        assert!(info.missing_bots.is_empty());
         assert_eq!(
-            info.missing_bots,
-            vec!["chatgpt-codex-connector".to_string()]
+            info.stale_bots,
+            vec![("chatgpt-codex-connector".to_string(), "0000000000".to_string())]
         );
+        assert!(!info.all_required_passed());
     }
 
     #[test]
