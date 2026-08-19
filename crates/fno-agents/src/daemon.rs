@@ -1727,6 +1727,23 @@ fn gc_sweep_impl(
 /// Cheap in steady state: no markers -> one dir stat, no roster load. A stop
 /// failure leaves the marker for the next tick (retry); a marker whose session is
 /// already gone is dropped as stale.
+/// Run `claude stop <short>`, refusing to wait past `timeout`. `kill_on_drop`:
+/// on timeout the `output()` future is dropped, so the hung child does not
+/// keep running past the deadline this call gave up at (self-review finding:
+/// this was hand-duplicated at the RPC call site below; one shared helper
+/// now backs both).
+async fn bounded_claude_stop(
+    short: &str,
+    timeout: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let stop = tokio::process::Command::new("claude")
+        .arg("stop")
+        .arg(short)
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(timeout, stop).await
+}
+
 async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     // read_markers (dir list + N file reads) and the roster load/parse are
     // blocking fs; run them off the async runtime so a slow disk or a large
@@ -1771,17 +1788,10 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
         match crate::terminal_stop::stop_decision(short) {
             crate::terminal_stop::StopAction::Stop(short) => {
                 // Bound the subprocess so a hung `claude` can never wedge the
-                // sweep. A timeout leaves the marker for the next tick.
-                // `kill_on_drop`: on timeout the `output()` future is dropped;
-                // without this the hung child keeps running, and since the
-                // marker is retried every tick that would leak a subprocess per
-                // tick — the exact failure this feature exists to prevent.
-                let stop = tokio::process::Command::new("claude")
-                    .arg("stop")
-                    .arg(&short)
-                    .kill_on_drop(true)
-                    .output();
-                let stopped = tokio::time::timeout(Duration::from_secs(15), stop).await;
+                // sweep. A timeout leaves the marker for the next tick, since
+                // it is retried every tick, which is the failure this feature
+                // exists to prevent.
+                let stopped = bounded_claude_stop(&short, Duration::from_secs(15)).await;
                 match stopped {
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
                     Ok(Ok(o)) if o.status.success() => {
@@ -5305,17 +5315,9 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             );
         }
     };
-    // Bound the subprocess so a hung `claude` can never wedge this RPC handler
-    // -- the same fix already proven on the background-sweep twin above.
-    // `kill_on_drop`: on timeout the `output()` future is dropped; without
-    // this the hung child keeps running past the response we already gave up
-    // waiting on.
-    let stop = tokio::process::Command::new("claude")
-        .arg("stop")
-        .arg(&short)
-        .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(Duration::from_secs(15), stop).await {
+    // Bound the subprocess so a hung `claude` can never wedge this RPC
+    // handler, the same way the background-sweep twin above is bounded.
+    match bounded_claude_stop(&short, Duration::from_secs(15)).await {
         Err(_) => Response::err(
             req.id,
             ErrorCode::Internal,
@@ -5483,12 +5485,27 @@ async fn handle_rm_with(
     let provably_gone =
         claude_row_provably_absent(claude_agents.as_ref(), claude_row_id(&entry).as_deref());
     if entry.status == AgentStatus::Live && !force && !provably_gone {
-        let row = claude_row_id(&entry).unwrap_or_else(|| "(no harness row id)".into());
+        let row_id = claude_row_id(&entry);
+        let row = row_id
+            .clone()
+            .unwrap_or_else(|| "(no harness row id)".into());
         let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
         let detail = if entry.harness_name() != "claude" {
             format!(
                 "agent {name} is still live. Stop it with `fno agents stop {name}`, or pass \
                  --force."
+            )
+        } else if row_id.is_none() {
+            // claude_row_provably_absent short-circuits to `false` (not
+            // provably gone) whenever the row id is None, independent of the
+            // roster -- so presence was never actually checked here, and the
+            // roster_known branch's "is present in" claim plus its runnable
+            // `claude stop <row>` commands would both be false (self-review
+            // finding).
+            format!(
+                "agent {name} is still live, but it has no resolvable harness row id, so \
+                 its presence in `claude agents --json --all` cannot be checked. Stop it \
+                 with `fno agents stop {name}`, or pass --force."
             )
         } else if roster_known {
             format!(
@@ -5600,9 +5617,21 @@ async fn handle_rm_with(
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| {
+            // A `None` captured here means the harness session was unbound at
+            // resolution time, not that it must stay unbound: a concurrent
+            // late_bind_codex_sessions can persist `Some` on this SAME row
+            // before this write lands. Treating that as a mismatch (self-review
+            // finding) would read the very race name+short_id+created_at exist
+            // to survive as a reason to refuse the removal. Only a captured
+            // `Some` that disagrees with the current row is a real identity
+            // mismatch.
+            let session_matches = match &rm_session_id {
+                Some(sid) => e.harness_session_id.as_deref() == Some(sid.as_str()),
+                None => true,
+            };
             !(e.name == rm_name
                 && e.short_id == rm_short_id
-                && e.harness_session_id == rm_session_id
+                && session_matches
                 && e.created_at == rm_created_at)
         });
         before - r.entries.len()

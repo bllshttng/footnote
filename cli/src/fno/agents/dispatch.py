@@ -113,6 +113,7 @@ def _update_registry_if_recipient_unchanged(
     *,
     registry_path: Optional[Path] = None,
     registry_lock_timeout: Optional[float] = None,
+    decline_reason: Optional[list[str]] = None,
 ) -> bool:
     """Apply a post-side-effect write only to the selected recipient.
 
@@ -120,6 +121,13 @@ def _update_registry_if_recipient_unchanged(
     selects a concrete row. Every call then carries that row's identity through
     the final registry-wide lock so a writer that does not honor the per-name
     lock cannot make a replacement inherit the registry mutation.
+
+    `decline_reason`, when passed, gets one of `"row_removed"` (no row this
+    name any more) or `"identity_changed"` (a row exists but is not the one
+    the caller resolved) appended on a declined write -- callers that need to
+    tell those apart for telemetry (self-review finding: both used to log as
+    the same `RecipientIdentityChanged`, hiding a removed-entirely row behind
+    the restamp-race label) read it after the call.
     """
     applied = False
 
@@ -130,6 +138,10 @@ def _update_registry_if_recipient_unchanged(
             len(matches) != 1
             or _recipient_identity_key(matches[0]) != expected_identity
         ):
+            if decline_reason is not None:
+                decline_reason.append(
+                    "row_removed" if not matches else "identity_changed"
+                )
             return entries
         applied = True
         return updater(entries)
@@ -3703,11 +3715,13 @@ def rm_agent(
             # gemini: registry-only. No teardown arm -- the provider is
             # deprecated, so a speculative one would be untestable guesswork.
 
+            decline_reason: list[str] = []
             try:
                 registry_changed = _update_registry_if_recipient_unchanged(
                     name,
                     _recipient_identity_key(existing),
                     lambda entries: [e for e in entries if e.name != name],
+                    decline_reason=decline_reason,
                 )
             except (OSError, RegistryVersionError) as exc:
                 events.emit(
@@ -3726,6 +3740,7 @@ def rm_agent(
                     exit_code=12,
                 ) from exc
             if not registry_changed:
+                row_removed = decline_reason and decline_reason[0] == "row_removed"
                 events.emit(
                     "agent_removed",
                     name=name,
@@ -3734,8 +3749,16 @@ def rm_agent(
                     force=force,
                     registry_changed=False,
                     teardown_error=teardown_error,
-                    error="recipient identity changed during harness removal",
-                    error_type="RecipientIdentityChanged",
+                    error=(
+                        "resolved row removed entirely during harness removal"
+                        if row_removed
+                        else "recipient identity changed during harness removal"
+                    ),
+                    error_type=(
+                        "RecipientRowRemoved"
+                        if row_removed
+                        else "RecipientIdentityChanged"
+                    ),
                 )
                 raise DispatchAskError(
                     f"agent {name!r}: resolved to a row the registry does not hold, "
