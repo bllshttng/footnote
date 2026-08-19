@@ -44,12 +44,12 @@ fi
 
 if [[ -n "$MISSING" ]]; then
   echo "check-workflow-manifest: manifest lists workflow(s) that no longer exist:" >&2
-  printf '  %s\n' $MISSING >&2
+  printf '  %s\n' "${MISSING[@]}" >&2
   echo "  Remove the stale line(s) from scripts/ci/workflow-manifest.txt, or restore the file." >&2
 fi
 if [[ -n "$UNLISTED" ]]; then
   echo "check-workflow-manifest: workflow(s) present but not in the manifest:" >&2
-  printf '  %s\n' $UNLISTED >&2
+  printf '  %s\n' "${UNLISTED[@]}" >&2
   echo "  Add each to scripts/ci/workflow-manifest.txt in the same PR that added the file." >&2
 fi
 exit 1

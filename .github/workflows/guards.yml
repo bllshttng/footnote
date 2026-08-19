@@ -27,7 +27,19 @@ name: guards
 # a structural guard, and stays its own workflow.
 
 on:
+  # `edited` is load-bearing for guards-pr: control-plane-doc-colocation.yml,
+  # loc-ratchet.yml, oos-tracked.yml and pr-body-length.yml each triggered on
+  # [opened, synchronize, reopened, edited] on purpose, because their fix path
+  # IS a PR-body edit (add a loc-exception line, cite a tracked node, trim the
+  # body) with no new commit. A bare `pull_request:` defaults to
+  # [opened, synchronize, reopened] and drops that path silently - the gate
+  # would still be red (or stale) after the exact edit meant to clear it. The
+  # `guards` job also re-runs on a body-only edit as a result; that is an
+  # accepted extra ~112s, not a target to filter back out here, since a
+  # job-level skip on `edited` risks reporting a required check as `skipped`
+  # instead of leaving the prior `success` untouched.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
