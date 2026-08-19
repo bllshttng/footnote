@@ -2636,7 +2636,6 @@ def dispatch_spawn_pane(
         # Exact placement answers --json so the server authors the receipt
         # (anchor/direction/fallback); Python never synthesizes those from the
         # requested flags (AC1-UI). Legacy spawns keep the plain pane-id stdout.
-        exact = bool(at)
         json_receipt = bool(at or tab_id)
         if json_receipt:
             run_args.append("--json")
