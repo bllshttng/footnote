@@ -426,6 +426,7 @@ class Ritual:
                 errs = len(obj.get("contained_errors") or [])
                 sync_obj = obj.get("sync_catchup") or {}
                 sync_outcome = sync_obj.get("outcome") if isinstance(sync_obj, dict) else None
+                closure_refused = obj.get("closure_refused")
                 if held:
                     # Held open, not clean: the PR merged but the promise gate
                     # refused the close (x-40be). status=ok detail=closed=0
@@ -437,6 +438,15 @@ class Ritual:
                         "reconcile",
                         _DEFERRED,
                         f"closed={len(closed)} held_open={len(held)}: {ids}{more}",
+                    )
+                elif closure_refused:
+                    # The trailer-claimed nodes (if any) never got bound - a
+                    # flaky gh query, cross-repo mismatch, or unmerged PR
+                    # refusal. Never silently readable as "no-drift": that
+                    # would mask a real closure failure until some later
+                    # unrelated sweep happens to rediscover it (round-7 review).
+                    self._emit(
+                        "reconcile", _DEFERRED, f"closure binding refused: {closure_refused}",
                     )
                 elif errs or sync_outcome == "failed":
                     # reconcile exits 0 here (only unresolvable PRs exit 4), so

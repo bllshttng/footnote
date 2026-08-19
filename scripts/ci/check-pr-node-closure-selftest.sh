@@ -69,4 +69,11 @@ run "Backlog-Closure: x-cdef" "feature/x-cdef-1234" \
   && pass "all-hex suffix never invents a second candidate" \
   || fail "all-hex suffix should not invent a bogus second candidate"
 
+# no-space-after-colon: the runtime parser (fno.pr.closure) accepts zero
+# spaces after "Backlog-Closure:" - the gate must too (round-7 review fix:
+# reproduced live pre-fix, where this well-formed trailer read as missing).
+run "Backlog-Closure:x-59a6" "feature/x-59a6" \
+  && pass "no space after colon still passes" \
+  || fail "no space after colon should still pass"
+
 log "all scenarios passed"

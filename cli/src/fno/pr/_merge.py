@@ -602,10 +602,14 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     or stamps a node itself, so a PR naming several nodes closes all of them,
     not just the one this process happens to find first.
 
-    Repo scoping is MANDATORY, never a cwd guess: without a resolvable repo
-    the call is refused rather than risking a same-numbered PR in a different
-    repository. Best-effort: any failure is a non-fatal stderr note; never
-    blocks the merge.
+    Repo scoping is mandatory: without SOME resolvable repo the call is
+    refused rather than risking a same-numbered PR in a different repository.
+    The PR's own url is tried first; a cwd guess (this function's own
+    checkout, already known to be the one that just merged) is the fallback,
+    not a first resort - low-risk here specifically because the call runs in
+    the checkout that owns the merge, unlike a bare-number scan elsewhere in
+    this feature that refuses a cwd guess outright. Best-effort: any failure
+    is a non-fatal stderr note; never blocks the merge.
 
     Before delegating, backfills ``pr_number`` onto a node this PR's URL
     already matches but that has no ``pr_number`` yet (a partial stamp, or an

@@ -80,7 +80,14 @@ trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^Backlog-Closure:[[:space:]]
 
 missing=()
 for cand in "${candidates[@]}"; do
-  if ! printf '%s' "$trailer_line" | grep -qE "(^|[[:space:]])${cand}([[:space:]]|,|\$)"; then
+  # The preceding boundary also accepts ":" - the runtime parser
+  # (fno.pr.closure._TRAILER_LINE_RE, `[ \t]*` after the colon) accepts ZERO
+  # spaces after "Backlog-Closure:", so "Backlog-Closure:x-59a6" closes the
+  # node correctly at merge time. trailer_line here still carries the
+  # "Backlog-Closure:" prefix (grep returns the whole matched line, not a
+  # capture group), so without ":" in the alternation this gate would report
+  # a well-formed, runtime-parseable trailer as missing (round-7 review fix).
+  if ! printf '%s' "$trailer_line" | grep -qE "(^|[[:space:]]|:)${cand}([[:space:]]|,|\$)"; then
     missing+=("$cand")
   fi
 done

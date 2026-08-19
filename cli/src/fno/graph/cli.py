@@ -8040,6 +8040,22 @@ def cmd_reconcile(
     )
     from fno.paths import retro_pending_dir
 
+    # --node + --pr-number together is refused rather than silently
+    # mis-scoped: --pr-number's own binding step (below) binds EVERY node the
+    # PR's trailer claims, unconditional on --node, but the scan/close scope
+    # would then collapse to the single --node id - leaving newly-bound
+    # sibling claims stamped with a live PR ref but never closed until some
+    # later, unrelated sweep happens to revisit them (round-6/7 review,
+    # flagged twice with no caller ever exercising this combination). Loud
+    # refusal beats a latent gap a future caller could silently trip.
+    if node is not None and pr_number is not None:
+        raise typer.BadParameter(
+            "--node and --pr-number are mutually exclusive: --pr-number "
+            "already scopes the scan to every node its own trailer claims, "
+            "which --node cannot narrow without silently stranding the "
+            "other claimed nodes stamped-but-unclosed. Run them separately."
+        )
+
     # A truly unscoped, no-args sweep (SessionStart, a bare manual run) - the
     # only shape allowed to touch the whole graph: revert detection, the
     # stranded-epic self-heal, and an unbounded forward/reverse scan. A
@@ -8052,9 +8068,20 @@ def cmd_reconcile(
         _entries: list[dict], _pr_number: int, _claims: list[str], _our_repo: Optional[str],
     ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
-        own claims, plus any node already carrying ``_pr_number`` as a ref
-        (stamped at creation, before this feature existed). Pure in-memory
-        walk - no I/O - so scoping the scan to this set costs nothing extra.
+        own claims, any node already carrying ``_pr_number`` as a ref
+        (stamped at creation, before this feature existed), plus every OPEN
+        node with NO PR ref at all. Pure in-memory walk - no I/O - so scoping
+        the scan to this set costs nothing extra.
+
+        The last group exists because ``scan_merge_drift`` passes this exact
+        scope straight through to ``reverse_map_unstamped`` (its reverse
+        branch-name-map pass), which is what closes a node whose session
+        died before the pr_number stamp landed. Omitting ref-less nodes here
+        would silently zero out that entire pass on every ``--pr-number``
+        call - the node's own branch names it, but a scope with nothing in
+        it matches nothing. Including them costs nothing extra either: that
+        pass makes its own gh call per node's cwd regardless of scope size,
+        and is already repo-scoped by construction (one cwd's repo per call).
 
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
@@ -8069,6 +8096,10 @@ def cmd_reconcile(
         from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
 
         ids = set(_claims)
+        for _e in _entries:
+            _rid = _e.get("id")
+            if isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e):
+                ids.add(_rid)
         if _our_repo is None:
             return ids
         for _e in _entries:

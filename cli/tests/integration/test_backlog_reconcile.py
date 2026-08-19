@@ -1256,6 +1256,59 @@ def test_reconcile_pr_number_scan_scope_ignores_a_cross_repo_number_collision(
     assert other["completed_at"] is None  # untouched: a different repo's node
 
 
+def test_reconcile_refuses_node_and_pr_number_together(cli_env):
+    """Round-6/7 review fix: --node + --pr-number is refused rather than
+    silently mis-scoped - --pr-number's own bind step would bind every
+    trailer-claimed node unconditional on --node, but the scan/close scope
+    would collapse to just --node, stranding the other claims stamped but
+    never closed."""
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [_node("ab-900001")])
+
+    result = runner.invoke(
+        app, ["backlog", "reconcile", "--node", "ab-900001", "--pr-number", "1"],
+    )
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_path, monkeypatch):
+    """Round-7 review fix: a --pr-number call must still reach a node with NO
+    PR ref at all (session died before the pr_number stamp landed) via the
+    reverse branch-name map, exactly as _reconcile_merged_pr_node's own
+    docstring claims - not just the trailer-claimed node this PR names."""
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-100050"),  # claimed by PR 269's trailer
+        _node("ab-rmap2", cwd=str(tmp_path)),  # ref-less; only its branch name ties it to PR 268
+    ])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-100050\n", number=269,
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({269: "MERGED"}))
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{
+            "number": 268, "url": "https://github.com/o/r/pull/268",
+            "headRefName": "feature/ab-rmap2", "mergedAt": "2026-07-08T00:00:00Z",
+        }],
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "269", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-100050", "ab-rmap2"}
+
+    node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rmap2")
+    assert node["pr_number"] == 268  # reverse-map backfilled its own recovered ref
+
+
 def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_unresolvable(
     cli_env, monkeypatch,
 ):

@@ -26,7 +26,7 @@ class FakeRunner:
                  spawn_rc=0, agent_rows=None, branch="feat/x", state="MERGED",
                  reconcile_held=None, reconcile_candidates=None,
                  reconcile_contained=None, reconcile_errors=(),
-                 reconcile_sync_outcome=None):
+                 reconcile_sync_outcome=None, reconcile_closure_refused=None):
         self.calls: list[list[str]] = []
         self._diff = (diff_files, additions, deletions)
         self._deferred = deferred or []
@@ -36,6 +36,7 @@ class FakeRunner:
         self._contained = reconcile_contained or ()
         self._errors = reconcile_errors
         self._sync_outcome = reconcile_sync_outcome
+        self._closure_refused = reconcile_closure_refused
         self._claim_rc = claim_rc
         self._spawn_rc = spawn_rc
         self._rows = agent_rows or []
@@ -71,6 +72,8 @@ class FakeRunner:
                 payload["contained_errors"] = list(self._errors)
             if self._sync_outcome:
                 payload["sync_catchup"] = {"outcome": self._sync_outcome}
+            if self._closure_refused:
+                payload["closure_refused"] = self._closure_refused
             return Result(0, json.dumps(payload), "")
         if sub == "backlog" and "find" in argv:
             import json
@@ -275,6 +278,19 @@ def test_reconcile_held_open_reads_deferred_never_ok(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "step=reconcile status=deferred" in out
     assert "held_open=2: x-ffc9, x-6c67" in out
+    assert "step=reconcile status=ok" not in out
+
+
+def test_reconcile_closure_refused_reads_deferred_never_ok(tmp_path, capsys):
+    """Round-7 review fix: leg_stamp ignored `closure_refused` entirely, so a
+    flaky gh query during trailer binding (no other drift found) read as a
+    clean "no-drift" run - masking a real closure failure that a --json call
+    site already had the answer for in its own response body."""
+    r = _bare(tmp_path, FakeRunner(reconcile_closure_refused="could not query PR #7: timeout"))
+    r.leg_stamp()
+    out = capsys.readouterr().out
+    assert "step=reconcile status=deferred" in out
+    assert "closure binding refused: could not query PR #7: timeout" in out
     assert "step=reconcile status=ok" not in out
 
 

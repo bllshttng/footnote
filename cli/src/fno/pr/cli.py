@@ -469,10 +469,22 @@ def closure_trailer(
     from fno.paths import graph_json
     from fno.pr.closure import render_pr_closure_trailer
 
+    from fno.graph._constants import is_wellformed_node_id
+
     try:
         entries = read_graph(graph_json())
     except Exception:
         return
+    # render_pr_closure_trailer silently drops a malformed id with no other
+    # signal - a bare-hex or slug typo in --extra would otherwise ship with
+    # the trailer one node short and no one the wiser (round-7 review fix).
+    dropped = [e for e in extra if not is_wellformed_node_id(e)]
+    if dropped:
+        typer.echo(
+            f"warning: dropping malformed --extra id(s) from the trailer: "
+            f"{', '.join(dropped)} (need the full <prefix>-<hex> form)",
+            err=True,
+        )
     line = render_pr_closure_trailer(entries, node, extra_ids=list(extra))
     if line:
         typer.echo(line)
