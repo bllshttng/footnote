@@ -468,8 +468,15 @@ def closure_trailer(
     from fno.graph.store import read_graph
     from fno.paths import graph_json
     from fno.pr.closure import render_pr_closure_trailer
+    from fno.tracker import active_backend_name
 
     from fno.graph._constants import is_wellformed_node_id
+
+    if active_backend_name() != "graph":
+        # graph.json is not the delivery record of truth under an external
+        # tracker backend - nothing to render from, matching this command's
+        # own contract (prints nothing, exit 0, on any unresolvable input).
+        return
 
     try:
         entries = read_graph(graph_json())
