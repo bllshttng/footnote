@@ -2290,10 +2290,16 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
     // I/O (a connect per socket candidate), so the arm spawns it and reads
-    // the completed verdict on a later tick. `None` = no verdict yet; a taken
-    // verdict is consumed exactly once.
+    // the completed verdict on a later tick. A verdict is only ever consumed
+    // when it is still FRESH: the request activity it ran under is unchanged
+    // (a served request resets the idle clock) AND the registry it read has
+    // not been written since (a pane-substrate worker spawns by writing the
+    // registry directly, with no daemon contact - the mtime is the one
+    // positive marker of that). Anything stale is discarded unread.
     let idle_probe_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let idle_probe_verdict = Arc::new(std::sync::Mutex::new(None::<bool>));
+    let idle_probe_verdict: Arc<
+        std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
+    > = Arc::new(std::sync::Mutex::new(None));
 
     // THE RULE FOR THIS LOOP (x-ef7f): nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -2446,13 +2452,28 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let flag = Arc::clone(&idle_probe_in_flight);
                         let home = ctx.home.clone();
                         let verdict = Arc::clone(&idle_probe_verdict);
+                        let probe_activity = last_activity;
                         tokio::task::spawn_blocking(move || {
                             let _gate = SweepGate(flag);
-                            *verdict.lock().unwrap() = Some(no_live_worker(&home));
+                            let no_worker = no_live_worker(&home);
+                            // mtime AFTER the reads: a registry write that
+                            // raced the probe is caught by the change.
+                            let mtime = std::fs::metadata(home.registry_json())
+                                .ok()
+                                .and_then(|m| m.modified().ok());
+                            *verdict.lock().unwrap() = Some((no_worker, probe_activity, mtime));
                         });
                     }
-                    let no_worker = idle_probe_verdict.lock().unwrap().take();
-                    if no_worker == Some(true) {
+                    let verdict = idle_probe_verdict.lock().unwrap().take();
+                    let fresh = verdict.is_some_and(|(no_worker, probe_activity, probe_mtime)| {
+                        let mtime_now = std::fs::metadata(ctx.home.registry_json())
+                            .ok()
+                            .and_then(|m| m.modified().ok());
+                        no_worker
+                            && probe_activity == last_activity
+                            && mtime_now == probe_mtime
+                    });
+                    if fresh {
                         emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                         let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
                         emit_state(&ctx.emitter, DaemonState::ShuttingDown);
