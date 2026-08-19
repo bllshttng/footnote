@@ -99,7 +99,7 @@ def test_unconfirmed_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner)
 
     monkeypatch.setattr(
         mux_spawn,
-        "dispatch_spawn_pane",
+        "dispatch_spawn_bounded_pane",
         lambda **kwargs: mux_spawn.MuxSpawnResult(
             name=kwargs["name"],
             provider=kwargs["provider"],
