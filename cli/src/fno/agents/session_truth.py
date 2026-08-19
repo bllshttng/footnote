@@ -57,7 +57,9 @@ STALLED_AFTER_S = 2 * 3600
 # it, but its verdict reads reachable for anything dead inside it, and that gap
 # is exactly where a stale-live worker hides (a fleet of dead workers once sat
 # in it at 20 to 58 minutes idle, every one reporting live). Ordering and
-# display only: no verdict, falsifier, or reap decision keys off this constant.
+# It is also the progress axis's positive-evidence window: a written `working`
+# state older than this resolves to progress unknown, never advancing. No
+# reachability, falsifier, or reap decision keys off this constant.
 STALE_ATTENTION_S = 600
 
 # Tail depth: enough to find the last assistant turn past trailing tool/user

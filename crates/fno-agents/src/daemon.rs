@@ -3949,7 +3949,8 @@ fn is_refused(observed_model: &Value, harness: &str, route_settings_path: Option
 /// row first (`reachability` absent or `unreachable` -- AC12-FR, the
 /// compatibility-fallback case included, since an unmeasured row has no
 /// progress state to report either), then the refusal predicate, then the
-/// truth-state arms.
+/// truth-state arms plus the measured transcript age. A written `working`
+/// state is not progress evidence when its transcript stopped advancing.
 pub(crate) fn progress_from_truth(
     probe: Option<&crate::claude_ask::TruthProbe>,
     harness: &str,
@@ -3964,7 +3965,11 @@ pub(crate) fn progress_from_truth(
         return ("refused", "model-refused");
     }
     match probe.map(|p| p.state.as_str()) {
-        Some("working" | "watching") => ("advancing", "transcript-turn"),
+        Some("working" | "watching") => match probe.and_then(|p| p.last_activity_age_s) {
+            None => ("unknown", "no-evidence"),
+            Some(age) if age >= STALE_ATTENTION_S => ("unknown", "silent"),
+            Some(_) => ("advancing", "transcript-turn"),
+        },
         Some("your-move") => ("awaiting-operator", "operator-turn"),
         Some("done") => ("parked", "promise"),
         Some("stalled") => ("unknown", "silent"),
@@ -4151,8 +4156,11 @@ where
             // operator, parked, or refused" -- read off the SAME probe, so a
             // refused-but-reachable row is never rendered as a fourth
             // reachability value.
-            let (progress, progress_basis) =
-                progress_from_truth(truth.as_ref(), e.harness_name(), e.route_settings_path.as_deref());
+            let (progress, progress_basis) = progress_from_truth(
+                truth.as_ref(),
+                e.harness_name(),
+                e.route_settings_path.as_deref(),
+            );
             // A probe that did not answer is the same situation Python's
             // resolver reports as `no-transcript` (its dominant cause here is
             // the routine exit-13 miss), so both emitters say the same thing
@@ -4161,175 +4169,187 @@ where
                 .map(|t| t.observed_model)
                 .filter(|v| !v.is_null())
                 .unwrap_or_else(|| json!({"kind": "no-transcript"}));
-            (e, rendered_status, observed_model, evidence, progress, progress_basis)
+            (
+                e,
+                rendered_status,
+                observed_model,
+                evidence,
+                progress,
+                progress_basis,
+            )
         })
         .collect();
     let mut entries: Vec<Value> = classified
         .into_iter()
-        .filter(|(_e, rendered_status, _observed, _evidence, _progress, _progress_basis)| {
-            if let Some(ref st) = filter_status {
-                if rendered_status != &st.as_str() {
-                    return false;
-                }
-            }
-            true
-        })
-        .map(|(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
-            let (reachability, basis, last_activity_age_s, last_event_at, last_message) = evidence;
-            // Return the full row shape matching Python's serialize_entry. The
-            // key set is pinned by schemas/agents-list-row.json, asserted here
-            // and by the Python test; edit that file before adding a key.
-            // Fields present in RegistryEntry are mapped directly; fields absent from
-            // the Rust registry are emitted as null with a NOTE citing the carveout.
-            //
-            // live_status remains null because the daemon does not duplicate the
-            // harness supervisor view. `status`, however, is the family-1
-            // transcript verdict attached above; stored registry status is only
-            // lifecycle metadata and cannot prove read-side liveness or death.
-            //
-            // session_id: Python uses the provider-specific resume id (short_id
-            // for claude since v9, codex_session_id for codex, gemini_session_id
-            // for gemini). The Rust registry stores these in separate optional
-            // fields; we replicate the Python resolution logic here.
-            // Provider-specific resume id, falling back to the generic
-            // `session_id` when the provider field is None (matches Python's
-            // resolution + the resolve_session_id helper below; gemini-code-assist
-            // medium on PR #361 — without the fallback a row with only the generic
-            // session_id set would report null here).
-            let resume_id: Option<String> = match e.harness_name() {
-                "claude" => e
-                    .transport_short()
-                    .map(str::to_string)
-                    .or_else(|| e.session_id.clone()),
-                "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
-                "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
-                // Python writes opencode ids to the canonical harness_session_id
-                // and drops `session_id` on write (it is Rust-set only), so
-                // falling through would report null for every opencode row. Same
-                // resolution as `to_agent_entry` and `client_verbs::session_id_field`.
-                "opencode" => e
-                    .harness_session_id
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| e.session_id.clone()),
-                _ => e.session_id.clone(),
-            };
-            let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
-            let short_id: Value = e
-                .transport_short()
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null);
-            let log_path: Value = e
-                .log_path
-                .as_deref()
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null);
-            // The mailbox address, mirroring `fno.agents.format.row_address`.
-            // This projection is the one `fno agents list` takes whenever an
-            // installed binary is present, so a column emitted Python-side only
-            // would be missing from the path nearly every reader uses -- which
-            // is exactly how this row shape drifted before. `short_id` is a
-            // fallback for claude ONLY, where the transport key IS the first
-            // eight; elsewhere it is a daemon worker key and would advertise a
-            // mailbox nothing drains.
-            let address: Value = e
-                .harness_session_id
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| Value::String(canonical_handle(s)))
-                .or_else(|| {
-                    if e.harness_name() == "claude" {
-                        e.transport_short().map(|s| Value::String(s.to_string()))
-                    } else {
-                        None
+        .filter(
+            |(_e, rendered_status, _observed, _evidence, _progress, _progress_basis)| {
+                if let Some(ref st) = filter_status {
+                    if rendered_status != &st.as_str() {
+                        return false;
                     }
-                })
-                .unwrap_or(Value::Null);
-            // Same formatter as Python's `AgentEntry.crown_label`, so the two
-            // surfaces render an identical descriptor for the same row. Python
-            // tests the scope for falsiness (`self.crown_scope or '?'`), so the
-            // empty string has to fall back here too, not just None.
-            let crown: Value = match e.crown_level {
-                Some(level) => Value::String(format!(
-                    "L{level} {}",
-                    e.crown_scope
-                        .as_deref()
+                }
+                true
+            },
+        )
+        .map(
+            |(e, rendered_status, observed_model, evidence, progress, progress_basis)| {
+                let (reachability, basis, last_activity_age_s, last_event_at, last_message) =
+                    evidence;
+                // Return the full row shape matching Python's serialize_entry. The
+                // key set is pinned by schemas/agents-list-row.json, asserted here
+                // and by the Python test; edit that file before adding a key.
+                // Fields present in RegistryEntry are mapped directly; fields absent from
+                // the Rust registry are emitted as null with a NOTE citing the carveout.
+                //
+                // live_status remains null because the daemon does not duplicate the
+                // harness supervisor view. `status`, however, is the family-1
+                // transcript verdict attached above; stored registry status is only
+                // lifecycle metadata and cannot prove read-side liveness or death.
+                //
+                // session_id: Python uses the provider-specific resume id (short_id
+                // for claude since v9, codex_session_id for codex, gemini_session_id
+                // for gemini). The Rust registry stores these in separate optional
+                // fields; we replicate the Python resolution logic here.
+                // Provider-specific resume id, falling back to the generic
+                // `session_id` when the provider field is None (matches Python's
+                // resolution + the resolve_session_id helper below; gemini-code-assist
+                // medium on PR #361 — without the fallback a row with only the generic
+                // session_id set would report null here).
+                let resume_id: Option<String> = match e.harness_name() {
+                    "claude" => e
+                        .transport_short()
+                        .map(str::to_string)
+                        .or_else(|| e.session_id.clone()),
+                    "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
+                    "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
+                    // Python writes opencode ids to the canonical harness_session_id
+                    // and drops `session_id` on write (it is Rust-set only), so
+                    // falling through would report null for every opencode row. Same
+                    // resolution as `to_agent_entry` and `client_verbs::session_id_field`.
+                    "opencode" => e
+                        .harness_session_id
+                        .clone()
                         .filter(|s| !s.is_empty())
-                        .unwrap_or("?")
-                )),
-                None => Value::Null,
-            };
-            json!({
-                "name": e.name,
-                // `harness` is the sole identity axis, and it names the CLI,
-                // never the model vendor. The `provider` alias that sat beside
-                // it carried this same harness value, so a worker routed to
-                // another vendor still listed `provider: claude` and read as
-                // proof the route had fallen back. `observed_model`
-                // below is the honest answer to that question.
-                "harness": e.harness_name(),
-                "harness_session_id": e.harness_session_id,
-                "short_id": short_id,
-                "session_id": session_id,
-                "address": address,
-                "cwd": e.cwd,
-                "created_at": e.created_at,
-                "last_message_at": e.last_message_at,
-                "status": rendered_status,
-                // The reachability triple, from the same probe the rendered
-                // word above came from. `fno agents list` is where `peek` and
-                // the census helpers below send a reader for this evidence, and
-                // the default `list` is THIS projection whenever an installed
-                // binary is present -- so emitting it Python-side only left the
-                // documented field missing on the path readers actually take.
-                "reachability": reachability,
-                "basis": basis,
-                // The orthogonal progress axis, from the same probe as the
-                // reachability triple above (fno.agents.reachability.classify_progress).
-                "progress": progress,
-                "progress_basis": progress_basis,
-                "last_activity_age_s": last_activity_age_s,
-                // The absolute stamp of the newest transcript activity and the
-                // flattened LAST-turn text, from the same probe as the age -
-                // the pair that makes a wedged-but-`working` row visible. Null
-                // when the probe never answered, which an absent reading must
-                // render as, never a fresh one.
-                "last_event_at": last_event_at,
-                "last_message": last_message,
-                "live_status": null,
-                // The model this worker is ACTUALLY answering as, from the same
-                // family-1 probe that produced `status` above -- so the daemon
-                // never grows a second transcript reader that could disagree
-                // with the truth verb about the same session.
-                "observed_model": observed_model,
-                // Architecture C (plan ab-70faa65b): additive keys, never removing
-                // live_status (Locked #4 back-compat). `pid` is the worker pid for
-                // a PTY agent, null for a one-shot ask (no managed process). The
-                // pid is cleared when a PTY row reconciles to exited (Locked #7),
-                // so it never lingers as a misleading liveness signal.
-                // `last_reconciled_at` is the raw RFC3339 of the last probe (null
-                // when never reconciled); the client renders it as the CHECKED age.
-                "pid": e.pid,
-                "last_reconciled_at": e.last_reconciled_at,
-                "log_path": log_path,
-                // The mux hosting ref ({session, pane_id}) for a pane-hosted row,
-                // else null. A pane row's short_id is empty, so this is the only
-                // key that says where such a worker actually lives; without it a
-                // caller reads a bound pane worker as unhosted.
-                "mux": e.mux,
-                // Crown (US9): the compact descriptor plus the raw fields, so a
-                // minion can resolve who to escalate to.
-                "crown": crown,
-                "crown_level": e.crown_level,
-                "crown_scope": e.crown_scope,
-                "crown_grantor": e.crown_grantor,
-                // Superset of Python's serialize_entry: project_root is retained
-                // as the daemon's native grouping key (existing daemon_e2e
-                // contract) alongside the shared parity fields. Python list
-                // has no project_root; the extra key is a harmless superset.
-                "project_root": e.project_root,
-            })
-        })
+                        .or_else(|| e.session_id.clone()),
+                    _ => e.session_id.clone(),
+                };
+                let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
+                let short_id: Value = e
+                    .transport_short()
+                    .map(|s| Value::String(s.to_string()))
+                    .unwrap_or(Value::Null);
+                let log_path: Value = e
+                    .log_path
+                    .as_deref()
+                    .map(|s| Value::String(s.to_string()))
+                    .unwrap_or(Value::Null);
+                // The mailbox address, mirroring `fno.agents.format.row_address`.
+                // This projection is the one `fno agents list` takes whenever an
+                // installed binary is present, so a column emitted Python-side only
+                // would be missing from the path nearly every reader uses -- which
+                // is exactly how this row shape drifted before. `short_id` is a
+                // fallback for claude ONLY, where the transport key IS the first
+                // eight; elsewhere it is a daemon worker key and would advertise a
+                // mailbox nothing drains.
+                let address: Value = e
+                    .harness_session_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(canonical_handle(s)))
+                    .or_else(|| {
+                        if e.harness_name() == "claude" {
+                            e.transport_short().map(|s| Value::String(s.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(Value::Null);
+                // Same formatter as Python's `AgentEntry.crown_label`, so the two
+                // surfaces render an identical descriptor for the same row. Python
+                // tests the scope for falsiness (`self.crown_scope or '?'`), so the
+                // empty string has to fall back here too, not just None.
+                let crown: Value = match e.crown_level {
+                    Some(level) => Value::String(format!(
+                        "L{level} {}",
+                        e.crown_scope
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("?")
+                    )),
+                    None => Value::Null,
+                };
+                json!({
+                    "name": e.name,
+                    // `harness` is the sole identity axis, and it names the CLI,
+                    // never the model vendor. The `provider` alias that sat beside
+                    // it carried this same harness value, so a worker routed to
+                    // another vendor still listed `provider: claude` and read as
+                    // proof the route had fallen back. `observed_model`
+                    // below is the honest answer to that question.
+                    "harness": e.harness_name(),
+                    "harness_session_id": e.harness_session_id,
+                    "short_id": short_id,
+                    "session_id": session_id,
+                    "address": address,
+                    "cwd": e.cwd,
+                    "created_at": e.created_at,
+                    "last_message_at": e.last_message_at,
+                    "status": rendered_status,
+                    // The reachability triple, from the same probe the rendered
+                    // word above came from. `fno agents list` is where `peek` and
+                    // the census helpers below send a reader for this evidence, and
+                    // the default `list` is THIS projection whenever an installed
+                    // binary is present -- so emitting it Python-side only left the
+                    // documented field missing on the path readers actually take.
+                    "reachability": reachability,
+                    "basis": basis,
+                    // The orthogonal progress axis, from the same probe as the
+                    // reachability triple above (fno.agents.reachability.classify_progress).
+                    "progress": progress,
+                    "progress_basis": progress_basis,
+                    "last_activity_age_s": last_activity_age_s,
+                    // The absolute stamp of the newest transcript activity and the
+                    // flattened LAST-turn text, from the same probe as the age -
+                    // the pair that makes a wedged-but-`working` row visible. Null
+                    // when the probe never answered, which an absent reading must
+                    // render as, never a fresh one.
+                    "last_event_at": last_event_at,
+                    "last_message": last_message,
+                    "live_status": null,
+                    // The model this worker is ACTUALLY answering as, from the same
+                    // family-1 probe that produced `status` above -- so the daemon
+                    // never grows a second transcript reader that could disagree
+                    // with the truth verb about the same session.
+                    "observed_model": observed_model,
+                    // Architecture C (plan ab-70faa65b): additive keys, never removing
+                    // live_status (Locked #4 back-compat). `pid` is the worker pid for
+                    // a PTY agent, null for a one-shot ask (no managed process). The
+                    // pid is cleared when a PTY row reconciles to exited (Locked #7),
+                    // so it never lingers as a misleading liveness signal.
+                    // `last_reconciled_at` is the raw RFC3339 of the last probe (null
+                    // when never reconciled); the client renders it as the CHECKED age.
+                    "pid": e.pid,
+                    "last_reconciled_at": e.last_reconciled_at,
+                    "log_path": log_path,
+                    // The mux hosting ref ({session, pane_id}) for a pane-hosted row,
+                    // else null. A pane row's short_id is empty, so this is the only
+                    // key that says where such a worker actually lives; without it a
+                    // caller reads a bound pane worker as unhosted.
+                    "mux": e.mux,
+                    // Crown (US9): the compact descriptor plus the raw fields, so a
+                    // minion can resolve who to escalate to.
+                    "crown": crown,
+                    "crown_level": e.crown_level,
+                    "crown_scope": e.crown_scope,
+                    "crown_grantor": e.crown_grantor,
+                    // Superset of Python's serialize_entry: project_root is retained
+                    // as the daemon's native grouping key (existing daemon_e2e
+                    // contract) alongside the shared parity fields. Python list
+                    // has no project_root; the extra key is a harmless superset.
+                    "project_root": e.project_root,
+                })
+            },
+        )
         .collect();
     // Attention order: evidence of neglect first, the same order the mux
     // table and the Python list lane apply (all three assert against one
@@ -9663,6 +9683,16 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
     }
 
+    fn probe_with_age(
+        state: &str,
+        reachability: &str,
+        age_s: Option<f64>,
+    ) -> Option<crate::claude_ask::TruthProbe> {
+        let mut probe = probe_with_verdict(state, reachability).unwrap();
+        probe.last_activity_age_s = age_s;
+        Some(probe)
+    }
+
     /// The verdict OUTRANKS the transcript state, which is the whole point of
     /// putting it on the wire: a session whose process died forty minutes ago
     /// still reads `working` from its transcript, and mapping that state is how
@@ -9721,7 +9751,11 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     /// A verdict-carrying probe with an explicit `observed_model`, for the
     /// progress-axis tests below (`probe_with_verdict` above always carries
     /// `Value::Null`, which is `no-transcript` and can never refuse).
-    fn probe_observed(state: &str, reachability: &str, observed_model: Value) -> Option<crate::claude_ask::TruthProbe> {
+    fn probe_observed(
+        state: &str,
+        reachability: &str,
+        observed_model: Value,
+    ) -> Option<crate::claude_ask::TruthProbe> {
         Some(crate::claude_ask::TruthProbe {
             state: state.into(),
             reachability: Some(reachability.into()),
@@ -9736,15 +9770,27 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     #[test]
     fn progress_ac1_ac2_done_is_parked_working_is_advancing() {
         assert_eq!(
-            progress_from_truth(probe_with_verdict("done", "reachable").as_ref(), "claude", None),
+            progress_from_truth(
+                probe_with_verdict("done", "reachable").as_ref(),
+                "claude",
+                None
+            ),
             ("parked", "promise")
         );
         assert_eq!(
-            progress_from_truth(probe_with_verdict("working", "reachable").as_ref(), "claude", None),
+            progress_from_truth(
+                probe_with_verdict("working", "reachable").as_ref(),
+                "claude",
+                None
+            ),
             ("advancing", "transcript-turn")
         );
         assert_eq!(
-            progress_from_truth(probe_with_verdict("your-move", "reachable").as_ref(), "claude", None),
+            progress_from_truth(
+                probe_with_verdict("your-move", "reachable").as_ref(),
+                "claude",
+                None
+            ),
             ("awaiting-operator", "operator-turn")
         );
     }
@@ -9774,7 +9820,12 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
     #[test]
     fn progress_ac5_unmeasured_observed_model_kinds_never_refuse() {
-        for kind in ["no-transcript", "not-file-backed", "no-model-yet", "unreadable"] {
+        for kind in [
+            "no-transcript",
+            "not-file-backed",
+            "no-model-yet",
+            "unreadable",
+        ] {
             let (verdict, _) = progress_from_truth(
                 probe_observed("working", "reachable", json!({"kind": kind})).as_ref(),
                 "claude",
@@ -9787,8 +9838,39 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     #[test]
     fn progress_ac6_stalled_is_unknown_silent_never_parked() {
         assert_eq!(
-            progress_from_truth(probe_with_verdict("stalled", "reachable").as_ref(), "claude", None),
+            progress_from_truth(
+                probe_with_verdict("stalled", "reachable").as_ref(),
+                "claude",
+                None
+            ),
             ("unknown", "silent")
+        );
+    }
+
+    #[test]
+    fn progress_deliberately_wedged_open_turn_is_live_but_not_advancing() {
+        let probe = probe_with_age("working", "reachable", Some(STALE_ATTENTION_S + 1.0));
+        assert_eq!(
+            rendered_status_from_truth(probe.as_ref(), true),
+            "live",
+            "the process and reachability axes still say live"
+        );
+        assert_eq!(
+            progress_from_truth(probe.as_ref(), "claude", None),
+            ("unknown", "silent"),
+            "an open turn with no transcript advance past the window is not progressing"
+        );
+    }
+
+    #[test]
+    fn progress_unreadable_activity_age_is_unknown_never_advancing() {
+        assert_eq!(
+            progress_from_truth(
+                probe_with_age("working", "reachable", None).as_ref(),
+                "claude",
+                None,
+            ),
+            ("unknown", "no-evidence")
         );
     }
 
@@ -9796,7 +9878,11 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn progress_ac7_unreachable_is_unknown_no_evidence_regardless_of_state() {
         for state in ["working", "done", "your-move", "stalled"] {
             assert_eq!(
-                progress_from_truth(probe_with_verdict(state, "unreachable").as_ref(), "claude", None),
+                progress_from_truth(
+                    probe_with_verdict(state, "unreachable").as_ref(),
+                    "claude",
+                    None
+                ),
                 ("unknown", "no-evidence"),
                 "state={state}"
             );

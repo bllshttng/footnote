@@ -176,6 +176,7 @@ def list_agents(
             observed_model=observed_model,
             harness=entry.harness,
             route_settings_path=entry.route_settings_path,
+            last_activity_age_s=truth.get("last_activity_age_s"),
         )
         rendered_status = WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:

@@ -109,6 +109,7 @@ def _progress_map(workers: list[LiveWorker]) -> dict[str, Optional[str]]:
             observed_model=truth.get("observed_model"),
             harness=w.harness,
             route_settings_path=entry.route_settings_path,
+            last_activity_age_s=truth.get("last_activity_age_s"),
         )
         out[w.name] = prog.verdict
     return out

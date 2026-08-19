@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from fno.agents.session_truth import (
+    STALE_ATTENTION_S,
     STALLED_AFTER_S,
     _humanize_age,
     resolve_session_truth,
@@ -220,6 +221,7 @@ def classify_progress(
     observed_model: Optional[dict],
     harness: Optional[str],
     route_settings_path: Optional[str],
+    last_activity_age_s: Optional[int],
 ) -> Progress:
     """Pure classifier for the progress axis. Never raises.
 
@@ -227,16 +229,26 @@ def classify_progress(
     has no progress state, and inventing one for it is the collapse again);
     then the refusal predicate (Locked Decision 3 -- structural, never reads
     the transcript's prose, so a reworded refusal message cannot break it);
-    then the truth-state arms. The refusal test MUST run before the
-    truth-state arms: a refused worker emits exactly one assistant message
+    then the truth-state arms plus the measured transcript age. The refusal
+    test MUST run before the truth-state arms: a refused worker emits exactly one assistant message
     and stops, so the transcript tail reads ``working`` for two hours and
     ``stalled`` after that, and testing state first would report
-    ``advancing`` for the exact row this axis exists to catch.
+    ``advancing`` for the exact row this axis exists to catch. A ``working`` or
+    ``watching`` state is only advancing while its measured transcript age is
+    inside :data:`STALE_ATTENTION_S`; an absent age is unreadable evidence and
+    resolves to ``unknown``.
     """
     if reachability == UNREACHABLE:
         return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
     if _is_refused(observed_model, harness, route_settings_path):
         return Progress(REFUSED, MODEL_REFUSED)
+    if truth_state in ("working", "watching") and last_activity_age_s is None:
+        return Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
+    if (
+        truth_state in ("working", "watching")
+        and last_activity_age_s >= STALE_ATTENTION_S
+    ):
+        return Progress(PROGRESS_UNKNOWN, SILENT)
     if truth_state in ("working", "watching"):
         return Progress(ADVANCING, TRANSCRIPT_TURN)
     if truth_state == "your-move":

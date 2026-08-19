@@ -771,7 +771,10 @@ fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
             .unwrap_or("unknown model");
         items.push(NeedItem {
             kind: "worker_refused".to_string(),
-            session_id: e.harness_session_id.clone().unwrap_or_else(|| e.name.clone()),
+            session_id: e
+                .harness_session_id
+                .clone()
+                .unwrap_or_else(|| e.name.clone()),
             // No ledger resolution here (this leg is registry-derived, not
             // event-derived, unlike every other item in this file) -- the
             // client joins on `name` instead, same as `carveout_age_item` /
@@ -780,7 +783,10 @@ fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
             name: Some(e.name.clone()),
             title: Some(format!("{} refused: answering as {model}", e.name)),
             ts: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            evidence: format!("{} is alive and reachable but answering as {model}, not a claude model", e.name),
+            evidence: format!(
+                "{} is alive and reachable but answering as {model}, not a claude model",
+                e.name
+            ),
             live: false, // stamped by stamp_liveness
         });
     }

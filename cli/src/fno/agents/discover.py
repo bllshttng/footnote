@@ -858,6 +858,7 @@ class DiscoveredSession:
             observed_model=self.observed_model,
             harness=self.agent,
             route_settings_path=None,
+            last_activity_age_s=self.last_activity_age_s,
         )
         return {
             "handle": self.handle,

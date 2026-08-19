@@ -30,8 +30,10 @@ from fno.agents.reachability import (
     TRANSCRIPT_TURN,
     UNREACHABLE,
     Progress,
+    classify_reachability,
     classify_progress,
 )
+from fno.agents.session_truth import STALE_ATTENTION_S
 
 _REFUSED_MODEL = {"kind": "observed", "model": "glm-5.2[1m]"}
 
@@ -43,6 +45,7 @@ def _refused_kwargs(**overrides) -> dict:
         observed_model=_REFUSED_MODEL,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=1,
     )
     kwargs.update(overrides)
     return kwargs
@@ -55,6 +58,7 @@ def test_ac1_done_and_reachable_is_parked() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=1,
     )
     assert got == Progress(PARKED, PROMISE)
 
@@ -66,6 +70,7 @@ def test_ac2_working_and_reachable_is_advancing() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=1,
     )
     assert got == Progress(ADVANCING, TRANSCRIPT_TURN)
 
@@ -77,6 +82,7 @@ def test_ac2b_your_move_is_awaiting_operator() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=1,
     )
     assert got == Progress(AWAITING_OPERATOR, OPERATOR_TURN)
 
@@ -107,9 +113,48 @@ def test_ac6_stalled_is_unknown_silent_never_parked() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=STALE_ATTENTION_S + 1,
     )
     assert got == Progress(PROGRESS_UNKNOWN, SILENT)
     assert got.verdict != PARKED
+
+
+def test_deliberately_wedged_open_turn_is_reachable_but_not_advancing() -> None:
+    """A live process with an open turn and no output must not look healthy.
+
+    ``working`` is the transcript-tail shape for an open turn until the
+    two-hour reap-safety threshold expires. The ten-minute activity age is the
+    positive-progress boundary: beyond it, the worker is still reachable but
+    there is no evidence that it is advancing.
+    """
+    age_s = STALE_ATTENTION_S + 1
+    reach = classify_reachability(
+        truth_state="working",
+        age_s=age_s,
+        falsifier=None,
+    )
+    got = classify_progress(
+        truth_state="working",
+        reachability=reach.verdict,
+        observed_model=None,
+        harness="claude",
+        route_settings_path=None,
+        last_activity_age_s=age_s,
+    )
+    assert reach.verdict == REACHABLE
+    assert got == Progress(PROGRESS_UNKNOWN, SILENT)
+
+
+def test_unreadable_activity_age_is_unknown_never_advancing() -> None:
+    got = classify_progress(
+        truth_state="working",
+        reachability=REACHABLE,
+        observed_model=None,
+        harness="claude",
+        route_settings_path=None,
+        last_activity_age_s=None,
+    )
+    assert got == Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
 
 
 def test_ac7_unreachable_is_unknown_no_evidence_regardless_of_truth_state() -> None:
@@ -120,6 +165,7 @@ def test_ac7_unreachable_is_unknown_no_evidence_regardless_of_truth_state() -> N
             observed_model=None,
             harness="claude",
             route_settings_path=None,
+            last_activity_age_s=1,
         )
         assert got == Progress(PROGRESS_UNKNOWN, NO_EVIDENCE), state
 
@@ -147,6 +193,7 @@ def test_ac9_no_transcript_evidence_is_unknown_no_evidence() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=None,
     )
     assert got == Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
 
@@ -156,6 +203,7 @@ def test_ac9_no_transcript_evidence_is_unknown_no_evidence() -> None:
         observed_model=None,
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=None,
     )
     assert got_unknown_state == Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
 
@@ -173,6 +221,7 @@ def test_ac18_a_missing_transcript_never_yields_refused_or_parked() -> None:
         observed_model={"kind": "no-transcript"},
         harness="claude",
         route_settings_path=None,
+        last_activity_age_s=None,
     )
     assert got == Progress(PROGRESS_UNKNOWN, NO_EVIDENCE)
 
