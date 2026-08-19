@@ -2715,7 +2715,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
         ErrorCode::Busy => 18,
         ErrorCode::InvalidParams | ErrorCode::MalformedFrame | ErrorCode::UnknownMethod => 2,
         ErrorCode::ChannelUnknown => 13,
-        ErrorCode::Internal => 1,
+        ErrorCode::Internal | ErrorCode::ShuttingDown => 1,
     }
 }
 

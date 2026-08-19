@@ -2524,6 +2524,12 @@ pub(crate) fn load_registry_asserted(
 async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state::StateError> {
     match tokio::task::spawn_blocking(move || load_registry_asserted(&path)).await {
         Ok(result) => result,
+        // A queued-but-not-yet-started blocking task is dropped, not run, when
+        // the runtime shuts down (daemon.rs:76 waits only on already-started
+        // ones) -- a teardown casualty, never a fault in the read itself.
+        Err(e) if e.is_cancelled() => Err(state::StateError::Cancelled(format!(
+            "load_registry task cancelled: {e}"
+        ))),
         Err(e) => Err(state::StateError::Io(std::io::Error::other(format!(
             "load_registry task panicked: {e}"
         )))),
@@ -2536,11 +2542,11 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
 /// to run) instead of answering from a silently emptied roster. `AgentNotFound`
 /// stays reserved for a successful read with no matching row.
 fn registry_read_failed(id: u64, e: state::StateError) -> Response {
-    Response::err(
-        id,
-        ErrorCode::Internal,
-        format!("registry read failed: {e}"),
-    )
+    let code = match e {
+        state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
+        _ => ErrorCode::Internal,
+    };
+    Response::err(id, code, format!("registry read failed: {e}"))
 }
 
 /// Offload the blocking read-modify-write of `state::update_registry` to the

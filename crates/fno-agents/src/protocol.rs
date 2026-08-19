@@ -237,6 +237,10 @@ pub enum ErrorCode {
     ChannelUnknown,
     /// Catch-all internal fault; daemon stays up, surfaces this.
     Internal,
+    /// A blocking-pool task was cancelled because the daemon is shutting
+    /// down, not because anything went wrong. A racing caller lost a read
+    /// or write to teardown; the fault is not internal to the operation.
+    ShuttingDown,
 }
 
 /// Method namespace, derived from the `<namespace>.<verb>` method prefix.
