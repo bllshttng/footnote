@@ -201,16 +201,9 @@ def enabled(monkeypatch, tmp_path):
         "fno.pr._reviews.publish_coverage_status",
         lambda pr, head=None, cwd=None, repo=None, gate_verdict=None: (True, ""),
     )
-    # Hermetic hold-check: point graph_json at a file that does not exist so
-    # hold_for_pr's by_id is always empty and it returns None without a live
-    # `gh pr view --json ...body...` fetch. Session-scoped HOME sandboxing
-    # (conftest.py) is per-worker, not per-test, so an unpinned graph_json
-    # here would pick up nodes another test in this worker wrote earlier -
-    # FakeRun's generic `gh pr view` fallback answers a bare URL, not JSON,
-    # so a fetch that should never fire (this PR names no held node) instead
-    # trips hold_for_pr's fail-closed path (round-11 review fix exposed
-    # this).
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    # The graph_json hermeticity pin this fixture used to carry is closed at
+    # the reader now: the autouse _hermetic_merge_hold_gate fixture in
+    # tests/conftest.py defaults hold_for_pr to no hold for every test.
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -230,15 +223,10 @@ def test_missing_pr_exits_1(capsys):
     assert _merge.run_merge([]) == 1
 
 
-def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys, tmp_path):
+def test_legacy_invoker_flag_is_accepted_not_rejected(monkeypatch, capsys):
     # x-04ab removed --invoker; a lingering legacy flag is silently accepted
     # (never an error). The merge proceeds and is gated only by `enabled`, so
     # with auto-merge off it skips (exit 2) exactly as a no-flag call would.
-    # Hermetic hold-check (same pin the `enabled` fixture applies): without it,
-    # a CI worker whose session HOME graph was populated by an earlier test
-    # scopes the hold lookup through a real PR-body fetch, which fails closed
-    # and reads as `held` here instead of `skipped`.
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
     assert _merge.run_merge(["--invoker=anything", "42"]) == 2
     assert _last_json(capsys)["outcome"] == "skipped"
@@ -265,12 +253,7 @@ def test_plan_dispatch_hold_refuses_sanctioned_merge(monkeypatch, capsys, tmp_pa
 # ---- config + gh gates ----
 
 
-def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys, tmp_path):
-    # Hermetic hold-check (same pin the `enabled` fixture applies): the hold
-    # gate runs before the enabled skip, so a populated worker HOME scopes
-    # this through a real PR-body fetch that fails closed and reads `held`
-    # here instead of `skipped` (the shape main's own smoke run hit).
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=False))
     assert _merge.run_merge(["42"]) == 2
     obj = _last_json(capsys)
@@ -279,11 +262,6 @@ def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys, tmp_path):
 
 
 def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
-    # Hermetic hold-check (same pin the `enabled` fixture applies): an
-    # unsandboxed graph_json lets a populated worker HOME scope the hold
-    # lookup into the PR-body fetch, and THAT gh failure holds the merge
-    # before the very gate this test exists to exercise.
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
     # Isolate from an ambient target-state.md: run_merge with no cwd reads
@@ -992,15 +970,6 @@ def _checks_enabled(monkeypatch):
         _merge,
         "_load_auto_merge",
         lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
-    )
-    # Hermetic hold-check (same pin the `enabled` fixture applies, on a stable
-    # nonexistent path because this helper is also called directly): without
-    # it a populated CI-worker HOME graph turns the PR-body fetch's failure
-    # into a `held` that never reaches the checks logic these fixtures exist
-    # to drive.
-    monkeypatch.setattr(
-        "fno.paths.graph_json",
-        lambda: _Path("/nonexistent-fno-hermetic-graph.json"),
     )
 
 

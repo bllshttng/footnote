@@ -172,6 +172,31 @@ def _hermetic_claim_reap(monkeypatch):
     monkeypatch.setattr(claims_core, "reap_dead_claims", _noop_reap)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_merge_hold_gate(monkeypatch):
+    """Default the plan-level merge hold gate to no hold.
+
+    ``hold_for_pr`` (consulted by every merge via ``merge_hold_reason``)
+    reads the graph first and pays a live PR-body fetch whenever the graph
+    carries any node. The HOME sandbox is ONE shared tmpdir per pytest
+    process, so an earlier test in this worker that wrote a node makes every
+    later merge test scope that fetch for real; the CI runner has no working
+    gh, the fetch fails closed, and the merge reads ``held`` for a reason no
+    test arranged.
+    Which tests fall to it moves with worker scheduling, which is what made
+    it look like a race. Closed at the reader, same pattern as
+    ``_hermetic_promise_carveout_gate`` above - the fifth channel of the
+    ambient-state-leak class (CI sees the leak in both directions, local
+    authenticated gh hides it). Tests that exercise the real reader override
+    it (``test_pr_hold.py`` restores the function for the whole module;
+    ``test_plan_dispatch_hold_refuses_sanctioned_merge`` patches
+    ``merge_hold_reason`` above this seam).
+    """
+    import fno.pr._hold as hold
+
+    monkeypatch.setattr(hold, "hold_for_pr", lambda pr_number, cwd: None)
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation
 # ---------------------------------------------------------------------------
