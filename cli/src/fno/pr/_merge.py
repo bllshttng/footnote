@@ -1376,7 +1376,11 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
 
 
-def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
+def _checks_verdict(
+    pr_number: int,
+    repo: str,
+    ignore_contexts: Sequence[str] = (),
+) -> tuple[str, dict, str]:
     """CI verdict for the PR plus the head it describes.
 
     Borrows `verdict_for` rather than hand-rolling a statusCheckRollup read: a
@@ -1406,6 +1410,11 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     if data is None:
         return _miss(reason or "REST checks read failed")
     rollup = data.get("statusCheckRollup") or []
+    ignored = set(ignore_contexts)
+    if ignored:
+        # StatusContexts use `context`; CheckRuns use `name`. Keep those
+        # namespaces distinct so a same-named real check is never discarded.
+        rollup = [entry for entry in rollup if entry.get("context") not in ignored]
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
     # `gh pr view` does not expose - its statusCheckRollup entries carry no
@@ -1479,7 +1488,15 @@ def _do_merge(
     verified_head = ""
     if auto_merge.require_checks_pass:
         try:
-            verdict, counts, head_read = _checks_verdict(pr_number, repo)
+            ignore_contexts: Sequence[str] = ()
+            if gate_verdict is not None:
+                from fno.pr import _coverage_gate, _reviews
+
+                if gate_verdict[0] == _coverage_gate.COVERED:
+                    ignore_contexts = (_reviews.COVERAGE_STATUS_CONTEXT,)
+            verdict, counts, head_read = _checks_verdict(
+                pr_number, repo, ignore_contexts=ignore_contexts
+            )
         except ToolMissing:
             _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
             return 127
@@ -1680,7 +1697,12 @@ def _do_merge(
 
     # Unrecovered failure: classify and report.
     reason = first_line
-    if re.search(r"protected", output, re.IGNORECASE):
+    if "fno/review-coverage" in output:
+        reason = (
+            "fno/review-coverage is still required after its success status was "
+            "published; GitHub may not have observed the update yet - retry the merge"
+        )
+    elif re.search(r"protected", output, re.IGNORECASE):
         reason = "branch protected"
     elif re.search(r"not mergeable", output, re.IGNORECASE):
         reason = "not mergeable (conflicts or base changed)"

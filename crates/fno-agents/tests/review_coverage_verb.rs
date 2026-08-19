@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const HEAD: &str = "deadbeefdeadbeefdeadbeef00000001";
+const LOCAL_HEAD: &str = "localheadlocalheadlocalhead00000001";
 
 /// gh: OPEN PR #1 at HEAD, green CI, one COMMENTED review by the configured
 /// bot at HEAD (counts as reviewed), no inline comments. git: HEAD echo, with
@@ -312,6 +313,11 @@ exit 1"#,
     let data: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(data["coverage"], serde_json::json!("unknown"));
     assert_eq!(data["pr"], serde_json::json!(842));
+    assert_eq!(
+        data["head_sha"], "",
+        "failed PR read must not use local HEAD"
+    );
+    assert_ne!(data["head_sha"], HEAD);
     // Exit-4 stdout additionally carries the stdout-only quota diagnostic
     // (null here: the stub cannot answer `api rate_limit` either); the
     // persisted row keeps the bare schema, so compare with the keys stripped.
@@ -380,7 +386,7 @@ fn stale_attestation_recomputes_to_stale() {
     assert_eq!(local["verdict"], serde_json::json!("stale"), "{local}");
 }
 
-/// `--pr` selects the PR by number: all four branch-resolved gh calls carry
+/// `--pr` selects the PR by number: every branch-resolved gh call carries
 /// it. Without it the argv is the stop hook's own branch-resolved form (the
 /// parity test above exercises that path with the same stub, which only
 /// answers branch-resolved queries).
@@ -444,6 +450,54 @@ exit 1"#,
     }
 }
 
+/// An explicit PR selector pins the emitted row to that PR's head even when
+/// the command runs from a checkout whose local HEAD is different.
+#[test]
+fn pr_selector_resolves_the_pr_head_not_the_checkout_head() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "selected-head");
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefOid"; then
+  echo '{{"state":"OPEN","number":842,"headRefName":"feature/selected","headRefOid":"{HEAD}","mergeable":"MERGEABLE","baseRefName":"main"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'; exit 0; fi
+if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "reviews"; then echo '{{"reviews":[],"comments":[]}}'; exit 0; fi
+exit 1"#,
+        ),
+    );
+    let git = make_script(bins.path(), "git", &format!("echo {LOCAL_HEAD}"));
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--pr".to_string(),
+        "842".to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 0, "{json}");
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(data["head_sha"], serde_json::json!(HEAD));
+    assert_ne!(data["head_sha"], serde_json::json!(LOCAL_HEAD));
+    assert_eq!(last_coverage(&project).unwrap()["head_sha"], HEAD);
+}
+
 /// No PR for the selector -> exit 3, nothing emitted (nothing to cover).
 #[test]
 fn no_pr_for_selector_exits_3() {
@@ -475,4 +529,68 @@ exit 1"#,
     ]);
     assert_eq!(code, 3);
     assert!(last_coverage(&project).is_none(), "nothing was emitted");
+}
+
+/// The refusal names both the optional numeric selector and the branch the
+/// branch-inference path would have used.
+#[test]
+fn no_pr_refusal_names_selector_and_inferred_branch() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "nopr-diagnostic");
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+echo 'no pull requests found for branch "main"' >&2
+exit 1"#,
+    );
+    let git = make_script(
+        bins.path(),
+        "git",
+        &format!(
+            r#"case "$*" in
+  *"branch --show-current"*) echo main ;;
+  *) echo {LOCAL_HEAD} ;;
+esac"#,
+        ),
+    );
+
+    let fire = |selector: Option<&str>| {
+        let mut args = vec![
+            "review-coverage".to_string(),
+            "--cwd".to_string(),
+            cwd.display().to_string(),
+        ];
+        if let Some(selector) = selector {
+            args.extend(["--pr".to_string(), selector.to_string()]);
+        }
+        args.extend([
+            "--events".to_string(),
+            project.display().to_string(),
+            "--global-events".to_string(),
+            global.display().to_string(),
+            format!("--gh-bin={}", gh.display()),
+            format!("--git-bin={}", git.display()),
+            "--global-settings".to_string(),
+            "/nonexistent/global-settings.yaml".to_string(),
+            "--author-harness".to_string(),
+            "none".to_string(),
+        ]);
+        run_review_coverage_capture(&args)
+    };
+
+    let (code, json) = fire(Some("842"));
+    assert_eq!(code, 3, "{json}");
+    let out: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(out["reason"], "no PR for the selector");
+    assert_eq!(out["selector"], "842");
+    assert_eq!(out["branch"], "main");
+
+    let (code, json) = fire(None);
+    assert_eq!(code, 3, "{json}");
+    let out: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(out["reason"], "no PR for the selector");
+    assert!(out["selector"].is_null());
+    assert_eq!(out["branch"], "main");
 }
