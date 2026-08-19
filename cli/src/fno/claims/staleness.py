@@ -126,19 +126,38 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
 def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, str]:
     """Classify one claim for GC: can its holder be PROVEN dead from this host?
 
-    The single liveness authority for reaping - three conditions, all
-    required:
+    The single liveness authority for reaping. Two proofs, and which one a
+    claim needs depends on how it declares its own death:
 
-      1. Same machine, by machine_id (never by hostname - see module header).
-         An off-machine or unverifiable claim cannot be proven dead here.
-      2. Pid absent, or pid reused (create_time > acquired_at). This is
-         exactly what makes ``is_live`` return False for a reason other than
-         being off-machine.
-      3. No live TTL. A dead-pid-but-unexpired claim is SUSPECT, not STALE:
-         the TTL still protects the slot for a respawned worker.
+      * An EXPIRED TTL is a wall-clock fact. The holder named the moment its
+        lease ends, that moment passed, and reading a clock needs no access to
+        the holder's machine. Such a claim is provably dead from anywhere.
+      * PID LIVENESS is a local measurement. Proving it needs same-machine
+        (by machine_id, never by hostname - see the module header) plus a pid
+        that is absent or reused (create_time > acquired_at). Off-machine, that
+        proof is unavailable and the claim stays opaque, exactly as
+        coordination.md specifies. Weakening this arm would let one machine
+        reap another's live claims.
 
-    No age threshold: age is a guess, pid liveness is a measurement, and a
-    measurement beats an inference. GC must never reap on age alone.
+    A dead-pid-but-unexpired TTL claim is SUSPECT, not STALE: the TTL still
+    protects the slot for a respawned worker. And on this machine an expired
+    TTL whose pid is still live reads LIVE (the hybrid arm in ``classify``),
+    so the expiry arm never reaps a running local session.
+
+    Host-independent expiry is what keeps the store from filling forever
+    (x-cd1e). ``machine_id`` is authoritative when present, but a claim written
+    before that field existed - or by a process that could not read the OS id -
+    carries only a hostname, and this machine's hostname MOVES: one box wrote
+    ``BB16s-MBP``, ``BB16s-MacBook-Pro.local`` and a tailnet name within an
+    hour. Those rows can never satisfy a same-machine proof, so under a
+    host-gated sweep they were unreapable for the rest of the disk's life.
+    Archiving one changes no liveness answer anywhere: ``classify`` already
+    reads an expired claim as not LIVE, so ``list_claims`` already excludes it
+    and ``acquire_claim`` already treats the key as recoverable.
+
+    No age threshold: age is a guess, expiry and pid liveness are both
+    measurements, and a measurement beats an inference. GC must never reap on
+    age alone.
 
     Returns ``(provably_dead, bucket)`` where ``bucket`` is one of
     ``"offhost"``/``"suspect"``/``"live"`` - only meaningful when
@@ -146,7 +165,11 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     bool and the bucket, so a caller scanning many claims (or re-verifying
     one under a mutex) never pays for it twice.
     """
-    if not is_same_machine(claim.host, claim.machine_id):
+    # The same-machine gate guards the PID arm only. An expired TTL carries its
+    # own proof, so it must reach classify() even from a host we cannot verify.
+    if not is_expired(claim, now=now) and not is_same_machine(
+        claim.host, claim.machine_id
+    ):
         return False, "offhost"
     state = classify(claim, now=now)
     if state is ClaimState.STALE:

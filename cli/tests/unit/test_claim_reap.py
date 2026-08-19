@@ -85,6 +85,85 @@ class TestIsProvablyDead:
         assert is_provably_dead(claim) is False
 
 
+class TestExpiredTTLIsHostIndependent:
+    """x-cd1e: an expired TTL is provably dead from any host.
+
+    The measured leak: this machine wrote claims as ``BB16s-MBP``,
+    ``BB16s-MacBook-Pro.local`` and a tailnet name within one hour. Rows
+    predating the ``machine_id`` field carry only that moving name, so a
+    host-gated sweep could never satisfy its same-machine proof and kept them
+    forever. Expiry is a clock reading, not a local measurement, so it needs no
+    such proof.
+    """
+
+    def test_expired_ttl_off_host_is_reapable(self):
+        claim = Claim(
+            key="k", holder="h", acquired_at=now_ms() - 120_000,
+            expires_at=now_ms() - 60_000, pid=_dead_pid(),
+            host="bb16s-macbook-pro.bigeye-truck.ts.net",
+            machine_id="not-this-machine",
+        )
+        assert is_provably_dead(claim) is True
+
+    def test_expired_ttl_off_host_with_a_live_local_pid_is_still_reapable(self):
+        """The pid arm cannot rescue it: that pid belongs to another machine's
+        namespace, so a locally-live number proves nothing about the holder.
+        """
+        claim = Claim(
+            key="k", holder="h", acquired_at=now_ms() - 120_000,
+            expires_at=now_ms() - 60_000, pid=os.getpid(),
+            host="some-other-host", machine_id="not-this-machine",
+        )
+        assert is_provably_dead(claim) is True
+
+    def test_off_host_pid_liveness_claim_is_still_kept(self):
+        """The pid arm keeps its same-machine proof. Only expiry travels."""
+        claim = Claim(
+            key="k", holder="h", acquired_at=now_ms() - 60_000, expires_at=None,
+            pid=_dead_pid(), host="some-other-host", machine_id="not-this-machine",
+        )
+        provably_dead, bucket = classify_for_sweep(claim)
+        assert (provably_dead, bucket) == (False, "offhost")
+
+    def test_off_host_unexpired_ttl_is_still_kept(self):
+        claim = Claim(
+            key="k", holder="h", acquired_at=now_ms(),
+            expires_at=now_ms() + 60_000, pid=_dead_pid(),
+            host="some-other-host", machine_id="not-this-machine",
+        )
+        provably_dead, bucket = classify_for_sweep(claim)
+        assert (provably_dead, bucket) == (False, "offhost")
+
+    def test_expired_ttl_on_this_machine_with_a_live_pid_is_still_live(self):
+        """The hybrid arm survives: a suspended local session keeps its slot.
+
+        ``acquired_at`` has to postdate this process's own create_time, or
+        ``is_live`` reads the pid as reused and the claim is dead for an
+        unrelated reason - which would pass this assertion for the wrong one.
+        """
+        started = int(psutil.Process(os.getpid()).create_time() * 1000)
+        claim = Claim(
+            key="k", holder="h", acquired_at=started + 1,
+            expires_at=now_ms() - 1, pid=os.getpid(),
+            host=socket.gethostname(),
+        )
+        provably_dead, bucket = classify_for_sweep(claim)
+        assert (provably_dead, bucket) == (False, "live")
+
+    def test_hostname_drift_between_two_claims_does_not_change_the_verdict(self):
+        """The two spellings one box wrote in one hour reap identically."""
+        verdicts = {
+            host: is_provably_dead(
+                Claim(
+                    key="k", holder="h", acquired_at=now_ms() - 120_000,
+                    expires_at=now_ms() - 60_000, pid=_dead_pid(), host=host,
+                )
+            )
+            for host in ("BB16s-MBP", "BB16s-MacBook-Pro.local")
+        }
+        assert verdicts == {"BB16s-MBP": True, "BB16s-MacBook-Pro.local": True}
+
+
 class TestClassifyForSweepMatchesIsProvablyDead:
     """is_provably_dead is a thin bool-only view of classify_for_sweep
     (staleness.py) - both share one implementation rather than being kept
