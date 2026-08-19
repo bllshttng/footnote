@@ -1597,14 +1597,11 @@ fn pr_head_oid(pr_json: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Resolve a numeric PR selector without consulting the checkout branch.
-/// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
-/// response and must not fall back to local HEAD.
-fn read_pr_head_oid(
+fn read_pr_view(
     gh_bin: &str,
     cwd: &Path,
-    selector: &str,
-) -> Result<Option<String>, (String, String)> {
+    selector: Option<&str>,
+) -> Result<Option<Value>, (String, String)> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let metadata_read = if rest_adapter {
         "pr_info_rest"
@@ -1616,22 +1613,47 @@ fn read_pr_head_oid(
     } else {
         "pr_view_parse"
     };
+    let mut args = vec!["pr", "view"];
+    if let Some(selector) = selector {
+        args.push(selector);
+    }
+    args.extend(["--json", PR_VIEW_FIELDS]);
     let out = Command::new(gh_bin)
-        .args(["pr", "view", selector, "--json", PR_VIEW_FIELDS])
+        .args(args)
         .current_dir(cwd)
         .output()
         .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
     if !out.status.success() {
-        if is_no_pr_stderr(&out.stderr) {
-            return Ok(None);
-        }
-        return Err((metadata_read.to_string(), stderr_tail(&out.stderr)));
+        return if is_no_pr_stderr(&out.stderr) {
+            Ok(None)
+        } else {
+            Err((metadata_read.to_string(), stderr_tail(&out.stderr)))
+        };
     }
-    let pr_json: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))?;
-    pr_head_oid(&pr_json)
+    serde_json::from_slice(&out.stdout)
         .map(Some)
-        .ok_or_else(|| (metadata_parse.to_string(), "missing headRefOid".to_string()))
+        .map_err(|_| (metadata_parse.to_string(), String::new()))
+}
+
+/// Resolve a numeric PR selector without consulting the checkout branch.
+/// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
+/// response and must not fall back to local HEAD.
+fn read_pr_head_oid(
+    gh_bin: &str,
+    cwd: &Path,
+    selector: &str,
+) -> Result<Option<String>, (String, String)> {
+    let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
+        return Ok(None);
+    };
+    pr_head_oid(&pr_json).map(Some).ok_or_else(|| {
+        let read = if internal_gh_adapter(gh_bin) {
+            "pr_info_rest_parse"
+        } else {
+            "pr_view_parse"
+        };
+        (read.to_string(), "missing headRefOid".to_string())
+    })
 }
 
 /// The GraphQL bucket's state, from `gh api rate_limit`.
@@ -2159,16 +2181,6 @@ fn read_pr_info(
     pr_selector: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
     let rest_adapter = internal_gh_adapter(gh_bin);
-    let metadata_read = if rest_adapter {
-        "pr_info_rest"
-    } else {
-        "pr_view"
-    };
-    let metadata_parse = if rest_adapter {
-        "pr_info_rest_parse"
-    } else {
-        "pr_view_parse"
-    };
     let checks_read = if rest_adapter {
         "pr_status_rest"
     } else {
@@ -2186,57 +2198,33 @@ fn read_pr_info(
     // argv byte-identical to the stop hook's branch-resolved form. The one
     // number-based call (`gh api .../pulls/<n>/comments`) already carries the
     // number the first read returned.
-    let sel: Vec<&str> = match pr_selector {
-        Some(n) => vec![n],
-        None => vec![],
-    };
     // Read 1: PR state + number + head OID + mergeability
-    let pr_view_out = Command::new(gh_bin)
-        .args(["pr", "view"])
-        .args(&sel)
-        .args([
-            "--json",
-            // baseRefName rides along for the freshness predicate's merge-base
-            // (x-5b99). Same call, same round trip, no new API cost.
-            PR_VIEW_FIELDS,
-        ])
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
-
-    if !pr_view_out.status.success() {
-        if is_no_pr_stderr(&pr_view_out.stderr) {
-            // No PR yet: world-state, not an error. done() is simply false
-            // ("no PR for HEAD"), and the backstop can resolve a stuck
-            // no-PR session as NoProgress rather than freezing forever.
-            return Ok(PrInfo {
-                state: PrState::None,
-                number: 0,
-                head_oid: String::new(),
-                ci_conclusion: CiConclusion::None,
-                failing_checks: Vec::new(),
-                ci_has_pending: false,
-                mergeable: "UNKNOWN".to_string(),
-                latest_review_ts: "none".to_string(),
-                reviewed: false,
-                missing_bots: Vec::new(),
-                bot_nudges: Vec::new(),
-                usage_limited: Vec::new(),
-                unaddressed_findings: Vec::new(),
-                review_skipped: false,
-                unattested_reviewers: Vec::new(),
-                malformed_attestations: 0,
-                coverage: CoverageReport {
-                    coverage: Coverage::Covered(0),
-                    verdicts: Vec::new(),
-                },
-            });
-        }
-        return Err((metadata_read.to_string(), stderr_tail(&pr_view_out.stderr)));
-    }
-
-    let pr_json: Value = serde_json::from_slice(&pr_view_out.stdout)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))?;
+    let Some(pr_json) = read_pr_view(gh_bin, cwd, pr_selector)? else {
+        // No PR yet: world-state, not an error. done() is simply false, and
+        // the backstop can resolve a stuck no-PR session as NoProgress.
+        return Ok(PrInfo {
+            state: PrState::None,
+            number: 0,
+            head_oid: String::new(),
+            ci_conclusion: CiConclusion::None,
+            failing_checks: Vec::new(),
+            ci_has_pending: false,
+            mergeable: "UNKNOWN".to_string(),
+            latest_review_ts: "none".to_string(),
+            reviewed: false,
+            missing_bots: Vec::new(),
+            bot_nudges: Vec::new(),
+            usage_limited: Vec::new(),
+            unaddressed_findings: Vec::new(),
+            review_skipped: false,
+            unattested_reviewers: Vec::new(),
+            malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: Vec::new(),
+            },
+        });
+    };
 
     let state = PrState::from_gh_str(
         pr_json
