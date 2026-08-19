@@ -75,7 +75,7 @@ Reads performed when a promise is seen. Each is skipped when the corresponding m
 | Read | Skipped when |
 |---|---|
 | 1. PR exists for HEAD commit (`gh pr view`) | `no_ship: true` |
-| 2. CI is green on that PR (`gh pr checks`) | `no_ship: true` OR `ci.declared_none: true` in settings |
+| 2. CI is green on that PR (`gh pr checks`, deduped to the latest run per check name before classifying so a superseded run never reads as current red) | `no_ship: true` OR `ci.declared_none: true` in settings |
 | 3. Every required bot has a completed review pass (`gh pr view --json reviews,comments`) | `no_external: true` in manifest |
 | 4. No unaddressed blocking inline finding (`gh api /pulls/N/comments`) | same as Read 3 |
 

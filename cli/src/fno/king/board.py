@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
+from fno.pr._status import _classify, _latest_per_name
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
@@ -420,21 +421,18 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
     for pr in rows:
         if pr.get("mergeable") != "MERGEABLE":
             continue
-        # A rollup row is either a check run (conclusion + status, where a
-        # running one has a NULL conclusion) or a status context (state). Reading
-        # `conclusion` alone would score a check that is still running as
-        # neither failed nor pending, so a PR with CI in flight would read
-        # green. Every field each shape carries is collected, and a green
-        # verdict needs the absence of every unfinished and failed marker.
-        states: set[str] = set()
-        for check in pr.get("statusCheckRollup") or []:
-            for key in ("conclusion", "status", "state"):
-                value = check.get(key)
-                if value:
-                    states.add(str(value).upper())
-        if states & {"FAILURE", "CANCELLED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED"}:
+        # Dedup to the latest run per check name/context BEFORE classifying -
+        # same fix as `_status._latest_per_name`, and load-bearing for the same
+        # reason: a force/amend push leaves a superseded FAILURE or CANCELLED
+        # beside the fresh SUCCESS in the rollup, and reading every entry's
+        # conclusion into one flat set poisons that set with the stale result.
+        # A body gate that re-ran green then still read red here, twice, the
+        # night this was measured.
+        deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
+        classes = {_classify(c) for c in deduped}
+        if "fail" in classes:
             continue
-        if states & {"PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED"}:
+        if "pending" in classes:
             continue
         ready.append({"number": pr.get("number"), "title": pr.get("title")})
     return SourceRead(payload=ready), warnings

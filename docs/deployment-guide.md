@@ -170,39 +170,7 @@ python scripts/sync-codex-agents.py
 
 ### Codex Bootstrap Check
 
-The repository includes a GitHub Actions workflow at `.github/workflows/codex-bootstrap-check.yml`:
-
-```yaml
-name: Codex Bootstrap Check
-
-on:
-  pull_request:
-  push:
-    branches:
-      - main
-
-jobs:
-  codex-bootstrap:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: Run Codex setup (no package setup)
-        run: |
-          bash scripts/setup.sh --provider codex --skip-package-setup
-
-      - name: Run doctor checks
-        run: |
-          bash scripts/doctor.sh
-```
-
-This workflow validates that the plugin bootstraps correctly on a clean Ubuntu environment with Codex as the provider.
+The Codex bootstrap check validates that the plugin bootstraps correctly on a clean Ubuntu environment with Codex as the provider. It runs as the "Run Codex setup (no package setup)" and "Run doctor checks" steps. Both live inside `.github/workflows/guards.yml`'s `guards` job, consolidated there with 10 other structural guards.
 
 ### Adding your own CI checks
 
@@ -404,7 +372,7 @@ The external loop runner (`scripts/run-target-loop.sh`) re-invokes the CLI until
 
 - **Custom agents** - Codex uses its own agent format. Run `python scripts/sync-codex-agents.py` after agent changes.
 - **Hook-enhanced lifecycle** - hooks enhance but do not fully enforce the pipeline. The orchestrator carries more responsibility for state management.
-- **CI workflow** - the `codex-bootstrap-check.yml` workflow validates setup on every PR. Ensure your changes pass this check.
+- **CI workflow** - `.github/workflows/guards.yml`'s `guards` job validates Codex setup on every PR and push. Ensure your changes pass this check.
 
 ### All providers
 

@@ -1,0 +1,25 @@
+# scripts/ci/workflow-manifest.txt
+#
+# Every workflow file under .github/workflows/ that is expected to exist.
+# check-workflow-manifest.sh diffs this against the live directory listing.
+# Deleting a workflow file is deleting a trap somebody already hit,
+# so a removal not paired with an edit here is a red check, not a review
+# catch a reviewer has to remember to make. Adding a workflow needs a line
+# here too, in the same PR.
+cli-ci.yml
+coverage-context-parity.yml
+crates-publish.yml
+deferred-census.yml
+executor-routing.yml
+guards.yml
+install-script-portability.yml
+internal-refs.yml
+merge-coverage-audit.yml
+nightly-release-tag.yml
+pitfalls.yml
+provider-smoke.yml
+release-binaries.yml
+release-wheels.yml
+review-coverage-gate.yml
+rust-ci.yml
+stacked-base-guard.yml

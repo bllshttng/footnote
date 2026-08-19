@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
-WORKFLOW = ROOT / ".github" / "workflows" / "preamble-budget.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "guards.yml"
 # One spelling of the heading. Two tests assert on its ABSENCE, and an
 # absence assertion against a string the script never emits cannot fail.
 DESCRIPTIONS_HEADING = "descriptions (always-loaded skill + agent pointers):"
@@ -252,53 +252,31 @@ def test_two_positional_roots_are_rejected(tmp_path: Path) -> None:
     assert "expected at most one repo root" in result.stderr
 
 
-def _covered_by(path: str, filters: list[str]) -> bool:
-    """True when a GitHub paths filter would make `path` fire the job."""
-    for entry in filters:
-        if entry == path:
-            return True
-        if entry.endswith("/**") and path.startswith(entry[:-2]):
-            return True
-    return False
+def test_preamble_budget_step_is_unconditionally_reachable() -> None:
+    """AC9-EDGE: no measured path can make the job unreachable.
 
-
-def test_workflow_filter_covers_every_measured_path() -> None:
-    """AC9-EDGE: no measured path can change without making the job reachable.
-
-    Coverage, not literal membership: `skills/**` subsumes the individual
-    `skills/using-fno/SKILL.md` entry it replaced, and it has to, because the
-    gate now measures every `skills/*/SKILL.md` description. A filter that named
-    only using-fno would leave the descriptions ceiling unreachable from CI.
+    preamble-budget.yml used to gate on a `paths:` filter, and this test used
+    to assert that filter covered every measured path (`skills/**` subsuming
+    the `skills/using-fno/SKILL.md` entry it replaced, since the gate measures
+    every `skills/*/SKILL.md` description - a narrower filter would leave the
+    descriptions ceiling unreachable from CI). The check was consolidated
+    into guards.yml's `guards` job, which the plan's own name-consumer sweep
+    requires to carry NO `paths:` filter at all (it runs on every push and
+    pull_request unconditionally) - a strictly stronger guarantee than any
+    path list could give, so there is nothing left to enumerate against.
     """
-    raw = WORKFLOW.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(raw)
-    triggers = workflow[True]
-    push_paths = triggers["push"]["paths"]
-    pull_request_paths = triggers["pull_request"]["paths"]
-    measured = [
-        "AGENTS.md",
-        "CLAUDE.md",
-        ".claude/rules/worktrees.md",
-        "skills/using-fno/SKILL.md",
-        "skills/mail/SKILL.md",
-        "skills/target/SKILL.md",
-        "scripts/ci/check-preamble-budget.sh",
-        ".github/workflows/preamble-budget.yml",
-    ]
-
-    uncovered = [p for p in measured if not _covered_by(p, push_paths)]
-    assert not uncovered, f"paths the workflow would not fire on: {uncovered}"
-    assert push_paths == pull_request_paths
-    assert "&preamble_budget_paths" in raw
-    assert "*preamble_budget_paths" in raw
-
-
-def test_workflow_filter_would_miss_an_unlisted_path() -> None:
-    """Negative control: the coverage helper can actually return False."""
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    push_paths = workflow[True]["push"]["paths"]
-
-    assert not _covered_by("cli/src/fno/doctor.py", push_paths)
+    triggers = workflow[True]
+    assert "paths" not in (triggers.get("push") or {}), (
+        "guards.yml's push trigger gained a paths filter - the "
+        "preamble-budget step (and every other consolidated check) needs "
+        "unconditional reachability, not a filtered one"
+    )
+    assert "paths" not in (triggers.get("pull_request") or {}), (
+        "guards.yml's pull_request trigger gained a paths filter"
+    )
+    step_names = [s.get("name", "") for s in workflow["jobs"]["guards"]["steps"]]
+    assert "SessionStart preamble byte budget" in step_names
 
 
 def test_doctor_report_is_silent_when_gate_is_absent(tmp_path: Path) -> None:

@@ -1,0 +1,22 @@
+name: guards-setup
+description: >
+  Python + uv for guards.yml's two jobs, so they cannot drift on what a
+  guard run is given the way the two jobs' Checkout versions already did
+  once in this same file's history. Checkout itself stays a separate step
+  in each caller: a local composite action can only be resolved AFTER the
+  repository is already checked out, so it cannot check itself out.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: ${{ !cancelled() }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      if: ${{ !cancelled() }}
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"

@@ -296,7 +296,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
         "cli",
         # The canary is EXPECTED to fail under --ambient dirty; that failure is
         # the positive control, not a defect. Running it as part of the ordinary
-        # suite would make smoke-dirty red on every commit, and a job that is
+        # suite would make this job red on every commit, and a job that is
         # always red teaches people to ignore it exactly as fast as one that is
         # always green. It is exercised deliberately, in BOTH lanes, by
         # tests/ci/test_hermetic_lanes.sh, which is where the assertion belongs.
