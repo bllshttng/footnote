@@ -63,6 +63,18 @@ Nothing failed.
 Two directories, one name, two axes: a reader who learns one cannot predict the other.
 The harness package is now `cli/src/fno/agents/harnesses/`, and the harness docs are now `docs/harnesses/`.
 
+## Named exception: the `agents.defaults.provider` config key
+
+One config key breaks the naming convention on purpose. The guard cannot reach it.
+
+`agents.defaults.provider` carries harness values (`claude/codex/gemini/agy/opencode`) and loses to `-H`. The flag `-P/--provider` carries vendor values. The same word names two axes.
+
+The value rule reads a key's harness values as correct, because they are legal for the harness axis. Only the name collides, and the guard reads file contents, not key names.
+
+Set the vendor axis with `agents.defaults.route` (vendor/model, position-carried). Treat `agents.defaults.provider` as the harness default it behaves as.
+
+The key is deliberately not renamed here. A rename breaks every config that set it. It needs its own node with a deprecation path.
+
 ## Effort: one axis, three harness spellings
 
 The caller sets one value on the effort axis. Each harness spells the reasoning-effort parameter differently, and `thinking.type` and `reasoning.effort` are both effort, just spelled differently.
