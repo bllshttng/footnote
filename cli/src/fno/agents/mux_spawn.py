@@ -1161,6 +1161,31 @@ def _mesh_env_wrapper(
             for _k in SCRUB_AUTH_VARS:
                 unset += ["-u", _k]
         pairs += [f"{k}={v}" for k, v in composed.items()]
+    # The inherited-model scrub runs OUTSIDE the account/route block above: the
+    # hole was the unrouted default path, which is most spawns. Claude-shaped
+    # like SCRUB_AUTH_VARS (these are all ANTHROPIC_* vars, so stripping them
+    # from a non-claude pane would be unrelated); env(1) is left-to-right
+    # last-wins and `unset` renders before `pairs`, so a composed route's own
+    # model vars still win. `env -u` on an unset var is a harmless no-op.
+    if provider == "claude":
+        from fno.agents.model_routing import (
+            incoherent_model_env_notice,
+            incoherent_model_env_unset_args,
+            overlay_restores_model_env,
+        )
+
+        _flags = incoherent_model_env_unset_args()
+        if _flags:
+            unset += _flags
+            # The names ride the flag pairs (-u NAME), so the notice reads
+            # them back rather than scanning the env a second time.
+            print(
+                incoherent_model_env_notice(
+                    _flags[1::2],
+                    routed=overlay_restores_model_env(account_env, resolved_route),
+                ),
+                file=sys.stderr,
+            )
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE

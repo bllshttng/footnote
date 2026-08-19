@@ -457,9 +457,11 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // (pr-watch, hooks, any caller) writes into a tree a reinstall may be
     // deleting; see docs/architecture/cli-lazy-imports.md.
     //
-    // The install is retried on exactly one failure signature: ENOTEMPTY from
-    // uv's removal walk racing a concurrent importer's bytecode rewrite (the
-    // residual window the doc names). Any other non-zero exit - auth, network,
+    // The install is retried on two transient failure signatures: ENOTEMPTY
+    // from uv's removal walk racing a concurrent importer's bytecode rewrite
+    // (the residual window the doc names), and ETXTBSY at the uv spawn itself
+    // (a writer still holds the binary open at exec time). Any other non-zero
+    // exit - auth, network,
     // disk - fails immediately, because retrying it would only reprint the same
     // error. Each attempt's uv output is re-emitted verbatim, and success is
     // accepted only after a positive marker (entrypoint + shipped bytecode),
@@ -473,10 +475,19 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         {
             Ok(o) => o,
             Err(e) => {
+                // ETXTBSY (os error 26): a writer still holds the uv binary
+                // open at exec time - uv self-updating under this spawn, or
+                // on a runner the wrapper a caller wrote microseconds ago.
+                // Transient like the ENOTEMPTY race below, so the same capped
+                // loop absorbs it instead of failing the install.
+                if e.raw_os_error() == Some(26) && attempt < INSTALL_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
                 return Err(BootErr::new(
                     1,
                     format!("could not run uv to install the fno wheel: {e}"),
-                ))
+                ));
             }
         };
         // Re-emit both streams exactly as an inherited-status run would have,
@@ -1825,6 +1836,64 @@ mod tests {
 
         install_wheel(&uv, "fno").expect("retry absorbs the signature race");
         assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "3");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_wheel_retries_a_uv_spawn_that_is_transiently_busy() {
+        // ETXTBSY at exec (os error 26): a writer still holds the uv binary
+        // open when we spawn it. Seen on a 2026-08-18 CI run against the fake
+        // uv a test had written microseconds earlier. Reproduced here by
+        // holding the script open for writing past the first retry, so the
+        // retry loop provably absorbs a real ETXTBSY instead of surfacing
+        // "could not run uv" on the first exec.
+        let root = env::temp_dir().join(format!("fno-uvbusy-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let tool_dir = root.join("tools");
+        fs::create_dir_all(tool_dir.join("fno/bin")).unwrap();
+        fs::create_dir_all(tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__"))
+            .unwrap();
+        fs::write(
+            tool_dir.join("fno/lib/python3.13/site-packages/fno/__pycache__/x.pyc"),
+            "",
+        )
+        .unwrap();
+        fs::write(tool_dir.join("fno/bin/fno-py"), "#!/bin/sh\n").unwrap();
+        // Executable, as uv writes it: the marker verifies with `-x`.
+        fs::set_permissions(
+            tool_dir.join("fno/bin/fno-py"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let counter = root.join("attempts");
+        let script = format!(
+            "#!/bin/sh\n\
+             case \"$1 $2\" in\n\
+             'tool dir') echo '{}'; exit 0;;\n\
+             'tool install') n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; exit 0;;\n\
+             esac; exit 64\n",
+            tool_dir.display(),
+            c = counter.display()
+        );
+        let uv = root.join("uv");
+        fs::write(&uv, script).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Released at 400ms; the retry re-execs at ~300ms and ~600ms, so the
+        // first spawn provably hits ETXTBSY and a later one provably runs.
+        // The falsification binds on Linux (the kernel denies exec of any
+        // file a writer holds open); macOS does not enforce that, so there
+        // this degrades to a happy-path run.
+        let held = uv.clone();
+        let writer = thread::spawn(move || {
+            let f = fs::OpenOptions::new().write(true).open(&held).unwrap();
+            thread::sleep(Duration::from_millis(400));
+            drop(f);
+        });
+
+        install_wheel(&uv, "fno").expect("a busy-at-exec uv is retried, not fatal");
+        assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "1");
+        writer.join().unwrap();
         fs::remove_dir_all(&root).ok();
     }
 

@@ -169,15 +169,23 @@ The built-in `zai` provider already routes the background (haiku) tier to the ch
 
 **`/effort` mapping.** GLM collapses `low`/`medium`/`high` to a single high setting; only `xhigh`/`max` reach its maximum reasoning. Pin a routed build lane to `high` or above (`--effort high`); a lower effort buys nothing on GLM.
 
+## Inherited env and the daemon carrier
+
+A long-lived background daemon holds a copy of the env of its first shell. It re-stamps that copy into every session it spawns. A shell with foreign model exports and no base URL poisons every child. Each child asks Anthropic for a model it does not serve. The whole tier errors rather than degrading. No config edit reaches a running daemon. Only a restart or a settings pin does.
+
+`~/.claude/settings.json` `env` wins over an inherited value. That is the durable pin. It is the only fix that spares live sessions. The current Anthropic ids to pin, one per tier: `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001`, `ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5`, `ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5`, `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5`.
+
+**The naming trap.** There is no Haiku 4.7. The current lineup is Haiku 4.5, with Sonnet, Opus and Fable at 5. The zai provider's `haiku_model` IS `glm-4.7`. That number does not transfer to an Anthropic id. Guessing `claude-haiku-4-7` fails exactly the way the GLM names do.
+
+The code side of the same defense: `incoherent_model_env` (`cli/src/fno/agents/model_routing.py`) names every offending model var. An offending var carries a non-Anthropic id while the endpoint is Anthropic's. The substrate seams that copy the parent env strip those vars before any route overlay. Those seams are `bg_create`, `headless_create`, `_default_wake_fn`, and `_mesh_env_wrapper`. Each strip prints one stderr line. A bg spawn needs more than the strip. The serving session is forked by the claude daemon with the daemon's own env. So `bg_create` also floats a `--settings` file flooring the offending vars. The Python front door never scrubs `os.environ` at the routing seam. That scrub blinds `bg_create`'s floor decision. The compiled client is reachable without the front door (`fno-agents spawn`, the loop runtime). Its own spawn arms scrub the child env and float the same floor (`crates/fno-agents/src/model_env_scrub.rs`). A real route is never stripped. A foreign base URL serves those model ids, so the predicate returns empty. When the daemon itself pre-warms a spare session, a spawn-time scrub cannot reach it: the process already exists. The settings pin covers that case. The SessionStart detector (`hooks/attest-model.sh`) warns over the same five vars. It bails out on Bedrock/Vertex lanes. A parity test pins its var list to `MODEL_ENV_KEYS`. A new tier cannot land in one list and not the other.
+
 ## Scope and deferrals
 
 Wires native per-spawn routing for the claude lane (Anthropic-protocol providers) with the fail-safe fallback and the hard guard. `extra_env` is the escape hatch for differentiated tiers (e.g. a cheaper `ANTHROPIC_DEFAULT_HAIKU_MODEL`). Deferred: a codex/openai lane that consumes the same provider registry over the OpenAI-protocol endpoints; claude-code-router (CCR) for routing an *in-session* subagent to a non-Anthropic provider; a config UI for editing roles (hand-edit is acceptable first). `consolidate` is already served out-of-repo by modelkit/memdream, which calls z.ai directly.
 
 ## Sigma panel routes
 
-`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer.
-Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles.
-At the measured 50–60K tokens per preamble, routing all six agents costs roughly 300–360K tokens before review work; use whole-session routing when the full panel should share one model.
+`review.agent_routes` optionally assigns a complete `harness`, route `provider`, and `model` tuple to a named sigma reviewer. Each configured reviewer starts its own named session, so a six-agent panel pays six SessionStart preambles. At the measured 50–60K tokens per preamble, a six-agent panel costs roughly 300–360K tokens before review work. Whenever the full panel must share one model, use whole-session routing.
 
 ```yaml
 config:

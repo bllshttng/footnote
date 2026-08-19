@@ -1026,7 +1026,13 @@ def make_agents_group_cls() -> type:
                     # spawn falls through to dispatch_spawn / dispatch_spawn_pane,
                     # which emit it, so warning at the seam too would print it
                     # twice. The Rust-exec branches below emit it before they
-                    # exec, since the binary never reaches dispatch.
+                    # exec, since the binary never reaches dispatch. The
+                    # incoherent-model scrub is likewise NOT applied to
+                    # os.environ here: bg_create floats its --settings floor
+                    # off a fresh incoherent_model_env() read of os.environ,
+                    # and a seam-level scrub would empty it before that read;
+                    # the Rust client's own spawn arms scrub their child env
+                    # and float the same floor themselves.
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any

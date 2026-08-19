@@ -57,7 +57,15 @@ Two non-negotiable invariants:
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Callable, Mapping, NamedTuple, Optional
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Mapping,
+    MutableMapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+)
 
 from fno.env_file import read_var_from_env_file
 
@@ -369,6 +377,171 @@ def check_spawn_tier_remap(
     raise TierRemapConflict(remap_conflict_message(*found))
 
 
+# The inherited-env carrier (x-4709): a long-lived background daemon stamps the
+# environment of the shell that started it into every session it spawns. When
+# that shell held a foreign vendor's model exports with no base URL, every
+# child asks Anthropic's endpoint for a model it does not serve and the whole
+# tier ERRORS rather than degrading - far from the cause, because no config
+# edit reaches a running daemon. The four spawn seams strip the vars below; a
+# real route (base URL + token + model as one unit) is never stripped because
+# the coherence question never fires under a foreign base URL.
+
+#: The words that leave a boolean env flag OFF. One tuple so the Bedrock/Vertex
+#: lane gate and :func:`env_scrub_truthy` cannot disagree on what counts as
+#: opted in (the Rust mirror and the hook carry their own copies).
+ENV_FALSY_WORDS = ("", "0", "false", "no", "off")
+
+
+def base_url_is_anthropic(env: Optional[Mapping[str, str]] = None) -> bool:
+    """True when ANTHROPIC_BASE_URL is unset or names an anthropic.com host.
+
+    Under either, a foreign vendor's model id is sent to Anthropic's endpoint,
+    which has no model by that name, so the call errors rather than degrading.
+    Exact host or subdomain match; a bare ``*anthropic.com`` glob would also
+    match ``notanthropic.com`` (the same rule hooks/attest-model.sh applies).
+    """
+    if env is None:
+        env = os.environ
+    base = (env.get("ANTHROPIC_BASE_URL") or "").strip().lower()
+    if not base:
+        return True
+    host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    return host == "anthropic.com" or host.endswith(".anthropic.com")
+
+
+def incoherent_model_env(env: Optional[Mapping[str, str]] = None) -> tuple[tuple[str, str], ...]:
+    """Every ``(var, value)`` in :data:`MODEL_ENV_KEYS` naming a non-Anthropic
+    model while the endpoint is Anthropic's. Empty when coherent.
+
+    Returns Bedrock and Vertex runs empty: ``CLAUDE_CODE_USE_BEDROCK`` /
+    ``CLAUDE_CODE_USE_VERTEX`` serve Anthropic models under ids that do not
+    start with ``claude-`` (``us.anthropic.claude-...``) and leave
+    ``ANTHROPIC_BASE_URL`` unset, so the coherence question this asks does not
+    apply there. A foreign base URL also returns empty: the endpoint serves
+    those model ids, so a route is never stripped. Do not widen
+    :func:`tier_remap_conflict` instead - that answers "does this spawn's named
+    alias mean something else here" and its answer must stay a refusal; this
+    answers "does any inherited var name something this endpoint cannot serve"
+    and its answer is a repair. :func:`is_anthropic_model` is the shared half.
+    """
+    if env is None:
+        env = os.environ
+    for lane_flag in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        if (env.get(lane_flag) or "").strip().lower() not in ENV_FALSY_WORDS:
+            return ()
+    if not base_url_is_anthropic(env):
+        return ()
+    return tuple(
+        (key, value)
+        for key in MODEL_ENV_KEYS
+        if (value := (env.get(key) or "").strip())
+        and not is_anthropic_model(value)
+    )
+
+
+def scrub_incoherent_model_env(
+    environ: Optional[MutableMapping[str, str]] = None,
+) -> tuple[str, ...]:
+    """Remove every incoherent model var from ``environ`` (default
+    ``os.environ``); return the names actually removed.
+
+    The dict substrate (bg / headless / wake). Pairs with
+    :func:`incoherent_model_env_unset_args` for the pane's argv substrate; both
+    read :func:`incoherent_model_env`, so the two shapes cannot drift on what
+    counts. A strip, never a refusal: a refusal at 3am kills an autonomous loop
+    over a condition the child cannot fix from inside itself, while a strip
+    restores correct behavior because a spawn with no model var uses the
+    account's own default.
+    """
+    target = os.environ if environ is None else environ
+    found = incoherent_model_env(target)
+    for key, _value in found:
+        target.pop(key, None)
+    return tuple(key for key, _value in found)
+
+
+def scrub_incoherent_model_env_and_notify(
+    environ: Optional[MutableMapping[str, str]] = None,
+    *,
+    routed: bool = False,
+) -> tuple[str, ...]:
+    """:func:`scrub_incoherent_model_env`, printing the shared stderr notice
+    when anything was dropped - the one call each spawn seam makes instead of
+    hand-rolling "scrub, check dropped, print" at every site (headless_create,
+    bg_create, resume_cli's wake, the Rust exec seam each did this
+    independently before this helper existed).
+    """
+    import sys
+
+    target = os.environ if environ is None else environ
+    dropped = scrub_incoherent_model_env(target)
+    if dropped:
+        print(incoherent_model_env_notice(dropped, routed=routed), file=sys.stderr)
+    return dropped
+
+
+def incoherent_model_env_unset_args(env: Optional[Mapping[str, str]] = None) -> list[str]:
+    """``env -u`` flag pairs that strip every incoherent model var, for a child
+    launched through an ``env`` argv (the pane substrate).
+
+    Same source as :func:`scrub_incoherent_model_env`, so the dict and argv
+    substrates cannot drift on which names count. ``env -u`` on an unset var is
+    a harmless no-op, so the argv is stable when the env is clean.
+    """
+    flags: list[str] = []
+    for key, _value in incoherent_model_env(env):
+        flags += ["-u", key]
+    return flags
+
+
+def overlay_restores_model_env(*overlays: Optional[Mapping[str, str]]) -> bool:
+    """True when at least one overlay sets a :data:`MODEL_ENV_KEYS` var.
+
+    A caller composing account_env/route_env right after the incoherent
+    scrub must not assume ANY overlay re-supplies a dropped model var: the
+    config-dir and managed-active account lanes (``resolve_account_overlay``
+    in ``account_env.py``) return an overlay of just ``CLAUDE_CONFIG_DIR`` -
+    no model var - so the dropped var stays dropped and the child genuinely
+    falls back to its account's own default. Only a route, or an
+    ``own-dir``/api-key account overlay that carries its own model pins,
+    resupplies the tier. This is the precise predicate for
+    :func:`incoherent_model_env_notice`'s ``routed`` kwarg.
+    """
+    for overlay in overlays:
+        if overlay and any(key in overlay for key in MODEL_ENV_KEYS):
+            return True
+    return False
+
+
+def incoherent_model_env_notice(dropped: Sequence[str], *, routed: bool = False) -> str:
+    """The one stderr line, shared by every seam: names the dropped vars, the
+    cause, and both remedies (the settings.json pin and the daemon restart).
+
+    `routed` must be True when an account/route overlay is composed right
+    after this scrub: that overlay re-supplies these same vars from the
+    route, so "falls back to its account's own default" would be false for
+    that spawn. Pass routed=True whenever account_env or route_env is
+    active at the call site."""
+    fallback = (
+        "The child receives that route's own model instead."
+        if routed
+        else "The child falls back to its account's own default."
+    )
+    return (
+        "fno: dropped "
+        + ", ".join(dropped)
+        + " from this child's env: they name a non-Anthropic model while "
+        "ANTHROPIC_BASE_URL is unset or names an anthropic.com host, so the "
+        "child would ask Anthropic for a model it does not serve and every "
+        "call on that tier would error. " + fallback + " This env was "
+        "inherited, usually from a long-lived `claude` background daemon "
+        "started from a shell that held those exports; no config edit "
+        "clears a running daemon. Pin the tier defaults in "
+        "~/.claude/settings.json `env` (that wins over an inherited value) "
+        "or restart the daemon."
+    )
+
+
 # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. Set by an operator (or a hardened shell) to
 # strip inherited ANTHROPIC_* env from a subprocess. Read at BOTH the CLI spawn
 # seam and the in-process spawn APIs so every reachable path sees the warning.
@@ -382,13 +555,7 @@ def env_scrub_truthy(env: Optional[Mapping[str, str]] = None) -> bool:
     the common off-words are falsy."""
     if env is None:
         env = os.environ
-    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in (
-        "",
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in ENV_FALSY_WORDS
 
 
 def env_scrub_warning(
@@ -725,16 +892,46 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     A composed ``--route`` + ``--account`` spawn writes ONLY this file (the
     route wins the settings file by design), which is where that gap lived.
     """
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
+    env.update(route_env)
+    return _write_settings_env_file(env)
+
+
+def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
+    """Write a ``--settings`` JSON flooring only ``dropped`` to "" and return
+    its path.
+
+    ``bg_create``'s incoherent-model-env scrub mutates the spawn env, but a
+    ``claude --bg`` session is forked by the claude daemon with the DAEMON's
+    own env (x-6de8) - the same reason :func:`materialize_route_settings`
+    exists. Without a route or account overlay there is no other reason to
+    write a settings file, so the plain poisoned-inherited-env case (the
+    shape this module exists to fix) reached only the short-lived front-end
+    process, never the actual serving session. This is the same mechanism
+    scoped to just the offending model vars, not the whole auth floor -
+    a coherent ``ANTHROPIC_API_KEY``/``ANTHROPIC_AUTH_TOKEN`` must not be
+    wiped by a spawn that only had a poisoned model tier.
+    """
+    return _write_settings_env_file({name: "" for name in dropped})
+
+
+def _write_settings_env_file(env: Mapping[str, str]) -> str:
+    """Content-addressed ``0600`` write of ``{"env": env}`` under
+    ``paths.state_dir() / "route-settings"``; returns the path.
+
+    Shared by :func:`materialize_route_settings` and
+    :func:`materialize_model_scrub_settings` so the atomic-write mechanics
+    (content addressing, tmp-then-``os.replace``) exist in one place.
+    """
     import hashlib
     import json
     import os
 
     from fno import paths
-    from fno.agents.account_env import SCRUB_AUTH_VARS
 
-    env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
-    env.update(route_env)
-    payload = json.dumps({"env": env}, sort_keys=True)
+    payload = json.dumps({"env": dict(env)}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare
     # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and

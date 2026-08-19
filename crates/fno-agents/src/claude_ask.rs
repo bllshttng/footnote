@@ -1419,7 +1419,7 @@ pub fn bg_create(
     use std::process::{Command, Stdio};
 
     let use_stdin = use_stdin_for(message);
-    let argv = build_argv(
+    let mut argv = build_argv(
         name,
         message,
         use_stdin,
@@ -1428,10 +1428,42 @@ pub fn bg_create(
         effort,
         flags,
     );
+    // The serving `claude --bg` session is forked by the claude daemon with
+    // the DAEMON's own env, so the env scrub below never reaches it. An
+    // incoherent inherited model env floats a --settings floor instead - the
+    // same mechanism Python's bg_create uses, spliced right after --name to
+    // match its token order (parity). A failed write warns and the spawn
+    // proceeds: the front-end scrub still fixes the visible process.
+    let incoherent = crate::model_env_scrub::incoherent_model_env(&|k| std::env::var(k).ok());
+    // An overlay re-supplying a model var is a route: like Python's
+    // route_settings_path_for branch, the route owns the settings slot, so
+    // this unrouted floor stands down rather than fight it.
+    let overlay_routes = extra_env
+        .iter()
+        .any(|(k, _)| crate::model_env_scrub::MODEL_ENV_KEYS.contains(k));
+    if !incoherent.is_empty() && !overlay_routes {
+        match crate::model_env_scrub::write_scrub_settings(&incoherent) {
+            Ok(path) => {
+                let p = path.display().to_string();
+                argv.splice(4..4, ["--settings".to_string(), p]);
+            }
+            Err(e) => {
+                eprintln!(
+                    "fno: could not write the model-scrub settings floor for this \
+                     bg session (the daemon fork keeps the inherited env): {e}"
+                );
+            }
+        }
+    }
 
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
+    // Inherited-model scrub before any overlay env below, so a route or
+    // account that re-supplies a var still wins (env after env_remove is
+    // last-wins). Reached without the Python front door too (direct client,
+    // loop runtime).
+    crate::model_env_scrub::scrub_onto(&mut cmd, extra_env);
     cmd.env("FNO_AGENT_SELF", name);
     cmd.env("FNO_AGENT_HARNESS", "claude");
     for (k, v) in extra_env {
@@ -2383,6 +2415,9 @@ pub fn dispatch_claude_headless(
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
+    // Same scrub + ordering rationale as bg_create above; no overlay env and
+    // no daemon fork on this one-shot arm, so no settings floor is needed.
+    crate::model_env_scrub::scrub_onto(&mut cmd, &[]);
     cmd.env("FNO_AGENT_SELF", name);
     cmd.env("FNO_AGENT_HARNESS", "claude");
     cmd.env("FNO_AGENT_FROM", from_name);
