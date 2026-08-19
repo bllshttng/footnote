@@ -658,6 +658,9 @@ def test_snapshot_mode_joins_tracker_and_sidecar_sentinels(
     assert by_id["EXT-1"]["pr_number"] == 7
     assert by_id["EXT-1"]["title"] == "Free work"
     assert by_id["EXT-2"]["pr_number"] is None
+    # EXT-2 has no sidecar (no PR, no plan): the same three-way split
+    # selection filters on, not the "any open node with no PR is ready" bug.
+    assert by_id["EXT-2"]["status"] == "idea"
     # The closed dependency arrives as a tombstone row so the consumer's
     # read-time readiness derives "satisfied" without a stored flag.
     assert by_id["EXT-done"]["status"] == "done"
@@ -2487,6 +2490,9 @@ class _GetFakeTracker(_SnapshotFakeTracker):
         if id == "EXT-1":
             T, S = self._TrackerCandidate, self._TrackerState
             return T(id=id, title="Free work", state=S.open, blocked_by=["EXT-done"])
+        if id == "EXT-2":
+            T, S = self._TrackerCandidate, self._TrackerState
+            return T(id=id, title="Waiting", state=S.open)
         return super().read(id)
 
 
@@ -2534,6 +2540,11 @@ def test_get_external_reads_tracker_and_sidecar_sentinels(
     # does not read it as a flag).
     r = _invoke("backlog", "get", "1")
     assert r.exit_code == 1
+    # EXT-2: open, no PR, no plan (no sidecar file written for it) - the same
+    # three-way split selection filters on, not "any open node is ready".
+    r = _invoke("backlog", "get", "EXT-2")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["status"] == "idea"
 
 
 def test_provenance_external_reads_sidecar_edges(

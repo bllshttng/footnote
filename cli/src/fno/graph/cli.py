@@ -3840,6 +3840,20 @@ def _starvation_receipts(
     return out
 
 
+def _external_open_status(*, pr_number: Optional[int], plan_path: Optional[str]) -> str:
+    """Read-time status for an OPEN external item: in_review > ready > idea.
+
+    A plan-less, PR-less open node is dispatch work nobody has started
+    planning yet, not ready work - the same three-way split selection
+    filters on. Every external-backend status render (selection, the mux
+    snapshot, `backlog get`) must derive from this one function so a node
+    dispatch skips never reads as ready anywhere else.
+    """
+    if pr_number:
+        return "in_review"
+    return "ready" if plan_path else "idea"
+
+
 class _ExternalSelectionError(RuntimeError):
     """A tracker or required sidecar read failed during joined selection.
 
@@ -3890,10 +3904,7 @@ def _joined_open_candidates(tracker=None) -> list[dict]:
             "id": c.id,
             "title": c.title,
             "state": str(c.state.value),
-            "status": (
-                "in_review" if sc.pr_number
-                else ("ready" if sc.plan_path else "idea")
-            ),
+            "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
             "parent": c.parent,
             "blocked_by": list(c.blocked_by),
             "priority": c.priority,
@@ -4674,12 +4685,14 @@ def cmd_board(
 
 # -- get --
 
-def _read_time_status_external(state: str, pr_number: Optional[int]) -> str:
-    """Read-time rung for the external get render - the same derivation the
-    live snapshot applies (never stored; x-cc90 keeps readiness derived)."""
+def _read_time_status_external(
+    state: str, pr_number: Optional[int], plan_path: Optional[str]
+) -> str:
+    """Read-time rung for the external get render - never stored, derived on
+    every read from tracker state plus sidecar evidence."""
     if state == "closed":
         return "done"
-    return "in_review" if pr_number else "ready"
+    return _external_open_status(pr_number=pr_number, plan_path=plan_path)
 
 
 def _render_external_get(id: str, field: Optional[str]) -> None:
@@ -4706,7 +4719,7 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
         "id": node.id,
         "title": node.title,
         "state": state,
-        "status": _read_time_status_external(state, sc.pr_number),
+        "status": _read_time_status_external(state, sc.pr_number, sc.plan_path),
         "parent": node.parent,
         "blocked_by": list(node.blocked_by),
     }
@@ -5782,10 +5795,10 @@ def _build_live_snapshot(tracker=None) -> dict:
                 # snapshot must not do).
                 "slug": derive_base_slug(c.title) if c.title else "",
                 "title": c.title,
-                # Open + a PR the sidecar knows about == work that has left the
-                # queue for review; anything else open is ready work. Computed
-                # here from evidence at read time, never stored.
-                "status": "in_review" if sc.pr_number else "ready",
+                # Same three-way split _joined_open_candidates selects on:
+                # a PR means in_review, else a plan means ready, else idea.
+                # Computed here from evidence at read time, never stored.
+                "status": _external_open_status(pr_number=sc.pr_number, plan_path=sc.plan_path),
                 "priority": c.priority,
                 "rank": c.rank,
                 "created_at": c.created_at,
