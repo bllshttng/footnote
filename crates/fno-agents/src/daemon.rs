@@ -2288,6 +2288,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // registry row, so it gets the same one-in-flight discipline as the sweeps
     // beside it rather than running inline in the select arm.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
+    // I/O (a connect per socket candidate), so the arm spawns it and reads
+    // the completed verdict on a later tick. `None` = no verdict yet; a taken
+    // verdict is consumed exactly once.
+    let idle_probe_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let idle_probe_verdict = Arc::new(std::sync::Mutex::new(None::<bool>));
 
     // THE RULE FOR THIS LOOP (x-ef7f): nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -2427,15 +2433,35 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // when the board is drained (OQ1 Option A): idle-exit must never
                 // kill a live drain supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit && no_live_worker(&ctx.home) {
-                    emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
-                    let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
-                    emit_state(&ctx.emitter, DaemonState::ShuttingDown);
-                    let _ = ctx.emitter.emit(
-                        "daemon_shutting_down",
-                        &json!({"reason": "idle"}),
-                    );
-                    break "idle";
+                if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
+                    // The liveness read (a CONNECT probe per socket candidate)
+                    // is blocking I/O, so it runs OFF the select arm like the
+                    // sweeps above, never inline: an in-arm probe against a
+                    // wedged worker's filling backlog is the
+                    // unreachable-AND-unstoppable shape this loop's rule
+                    // exists to prevent. One probe in flight; the exit fires
+                    // on the tick that reads a completed no-live-worker
+                    // verdict, so the worst case is one extra 5s tick.
+                    if !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let flag = Arc::clone(&idle_probe_in_flight);
+                        let home = ctx.home.clone();
+                        let verdict = Arc::clone(&idle_probe_verdict);
+                        tokio::task::spawn_blocking(move || {
+                            let _gate = SweepGate(flag);
+                            *verdict.lock().unwrap() = Some(no_live_worker(&home));
+                        });
+                    }
+                    let no_worker = idle_probe_verdict.lock().unwrap().take();
+                    if no_worker == Some(true) {
+                        emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
+                        let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
+                        emit_state(&ctx.emitter, DaemonState::ShuttingDown);
+                        let _ = ctx.emitter.emit(
+                            "daemon_shutting_down",
+                            &json!({"reason": "idle"}),
+                        );
+                        break "idle";
+                    }
                 }
             }
         }

@@ -49,16 +49,16 @@ pub enum ClientError {
 /// whether or not anyone ever calls accept, so connect time cannot tell
 /// "saturated" from "serving"; only a bounded read can. The value must sit
 /// ABOVE the daemon's own legitimate worst-case handler budget - a `stop`
-/// escalation alone runs ~42s (bounded shutdown ack + 5s + 5s + 2s), and
-/// `rm --force` chains three of those - or a healthy-but-slow verb fails with
-/// an error whose remedy kills a healthy daemon. 90s is ~2x that worst chain
-/// and still turns the old forever-hang into a bounded failure.
+/// escalation alone runs ~42s (bounded shutdown ack + 5s + 5s + 2s), and an
+/// `rm --force` chains escalations to ~72s - or a healthy-but-slow verb fails
+/// with an error whose remedy kills a healthy daemon. 90s clears that worst
+/// chain and still turns the old forever-hang into a bounded failure.
 /// `FNO_AGENTS_RESPONSE_DEADLINE_MS` overrides it (tests drive a wedged-peer
 /// case through a child process so the override never touches a parallel
 /// test's ambient calls).
 pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(90);
 
-fn response_deadline() -> Duration {
+pub(crate) fn response_deadline() -> Duration {
     std::env::var("FNO_AGENTS_RESPONSE_DEADLINE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

@@ -1028,7 +1028,7 @@ async fn restart_force_recovers_a_wedged_holder() {
     );
     let stderr = String::from_utf8_lossy(&status_out.stderr);
     assert!(
-        stderr.contains("listening and not serving") || stderr.contains("no response"),
+        stderr.contains("listening, not serving") || stderr.contains("no response"),
         "the failure names the wedge shape: {stderr}"
     );
     assert!(
