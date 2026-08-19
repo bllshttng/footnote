@@ -13,7 +13,7 @@ A recording script is the exact terminal run, expected output, and edit list for
 | L03 | How done is decided | video | `L03-how-done-is-decided.md` | scripted |
 | L04 | Design before code | video | `L04-design-before-code.md` | scripted |
 | L06 | Execute a plan | cast | `L06-execute-a-plan.md` | planned |
-| L07 | Review before you ship | video | `L07-review-before-you-ship.md` | planned |
+| L07 | Review before you ship | video | `L07-review-before-you-ship.md` | scripted |
 | L08 | The PR lifecycle | cast | `L08-the-pr-lifecycle.md` | planned |
 | L10 | Capture and shape work | cast | `L10-capture-and-shape-work.md` | planned |
 | L12 | Worktrees | cast | `L12-worktrees.md` | planned |
