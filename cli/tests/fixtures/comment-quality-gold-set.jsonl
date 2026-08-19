@@ -1,0 +1,30 @@
+{"path": "cli/src/fno/agents/harnesses/base.py", "line": 73, "label": "KEEP", "reason": "why-not-the-obvious: default Exception pickling breaks the kw-only signature; the override exists for that"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 34, "label": "KEEP", "reason": "portability contract: bound is a sleep, not GNU timeout, so suffixed values like 30m are refused"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 44, "label": "KEEP", "reason": "portability trap: GNU stat -f prints non-numeric output instead of failing, so GNU-first ordering and digit scrub"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 66, "label": "KEEP", "reason": "invariant: a stage killed at the bound writes nothing of its own, so the rc line is the only kill evidence in the log"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 80, "label": "KEEP", "reason": "why-not-the-obvious: keep the recent half, not wipe - a wipe discards exactly the history an operator reaches for"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 131, "label": "KEEP", "reason": "exit-code contract: 0 acquired / 1 held-or-contended / other degraded, with the per-fire holder rationale"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 182, "label": "KEEP", "reason": "race: two sessions starting in the same instant both saw an old stamp; the claim closes what the stamp cannot"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 39, "label": "KEEP", "reason": "value contract: what the TTL is for - self-frees a crashed run within the window"}
+{"path": "crates/fno/src/squad_store.rs", "line": 1928, "label": "KEEP", "reason": "expected-result label above the assert: names the scenario the assertion encodes"}
+{"path": "crates/fno-agents/src/loopcheck.rs", "line": 405, "label": "KEEP", "reason": "why-not-the-obvious: a bare scalar deliberately routes through the singleton path to keep semantics and the unit test live"}
+{"path": "crates/fno-agents/src/loopcheck.rs", "line": 12545, "label": "KEEP", "reason": "why-not-the-obvious: measured CI fork/exec flake, and retry matches what production already tolerates"}
+{"path": "cli/src/fno/claims/staleness.py", "line": 116, "label": "KEEP", "reason": "state contract: an expired clock alone does not decide liveness; names the HYBRID rule"}
+{"path": "cli/src/fno/graph/store.py", "line": 1244, "label": "KEEP", "reason": "field contract: when ended_at may be absent and why defaulting would lie"}
+{"path": "cli/src/fno/graph/store.py", "line": 108, "label": "KEEP", "reason": "invariant: sparse key placement preserves byte-identity of a containment-free graph; readers must .get, never index"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 32, "label": "CUT", "reason": "restates the variable name and its default; the operator-named target shape"}
+{"path": "scripts/lib/eval-sweep-throttle.sh", "line": 41, "label": "CUT", "reason": "restates the variable name and default; parenthetical adds nothing the name lacks"}
+{"path": "cli/src/fno/cost/_session_cost.py", "line": 540, "label": "CUT", "reason": "single-word label restating the line below"}
+{"path": "cli/src/fno/cost/_session_cost.py", "line": 567, "label": "CUT", "reason": "single-word label restating the line below"}
+{"path": "cli/src/fno/plan/brief.py", "line": 660, "label": "CUT", "reason": "section label restating the variable and section name below"}
+{"path": "cli/src/fno/plan/brief.py", "line": 676, "label": "CUT", "reason": "section label restating the variable and function name below"}
+{"path": "scripts/save-session.py", "line": 198, "label": "CUT", "reason": "single-word label restating the line below"}
+{"path": "scripts/diagnostics/token-diagnose.py", "line": 338, "label": "CUT", "reason": "label restating the heading string built on the next line"}
+{"path": "scripts/diagnostics/token-diagnose.py", "line": 382, "label": "CUT", "reason": "label restating the attribute read on the next line"}
+{"path": "cli/src/fno/pr_watch/_install.py", "line": 594, "label": "CUT", "reason": "label restating the variable and function names below"}
+{"path": "cli/src/fno/target/blast.py", "line": 40, "label": "CUT", "reason": "label restating the glob string below"}
+{"path": "cli/src/fno/agents/rust_runtime.py", "line": 632, "label": "CUT", "reason": "duplicates the function docstring's cutover rule at the seam; adds nothing new"}
+{"path": "cli/src/fno/setup/emit_shell.py", "line": 160, "label": "CUT", "reason": "duplicates the docstring's default-resolution rule and summarizes the branches below"}
+{"path": "cli/src/fno/setup/emit_shell.py", "line": 173, "label": "CUT", "reason": "duplicates the docstring's default-resolution rule and summarizes the branches below"}
+{"path": "crates/fno-agents/tests/loop_runtime.rs", "line": 361, "label": "CUT", "reason": "restates the assert and its own message string"}
+{"path": "scripts/migrations/generate-sweep-inventory.sh", "line": 81, "label": "CUT", "reason": "glob label restating the rglob pattern below"}
