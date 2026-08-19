@@ -11,6 +11,14 @@ name: guards
 # heterogeneous scripts into one shared runner buys nothing but a collision
 # risk none of them were written to tolerate.
 #
+# This trades away the GitHub-level parallelism the old 17-workflow layout
+# had for free - PR feedback now waits on a job's full serial sum instead of
+# just its slowest single check. That trade is the point, not a missed
+# option: 17 independently-scheduled runs is what "27 of 35 rows finish
+# under 30s" and a superseded run reading as current came from in the first
+# place. Two rows nobody misreads, three minutes slower, beats seventeen
+# rows some of which get misread.
+#
 # Every step after Checkout carries `if: ${{ !cancelled() }}` AND its own
 # `timeout-minutes` (matching its original per-workflow timeout). Together
 # they restore the isolation a separate-job-per-check layout gave for free:
