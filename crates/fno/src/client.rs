@@ -3072,15 +3072,14 @@ impl View {
     /// (x-7683) The narrower guard for the ROW/TAB menu paths (right-press
     /// and long-press alike): only overlays a menu would actually USURP -
     /// text inputs (rename/create/recruit/search/peek_input/nav, whose typed
-    /// buffer the menu would orphan) and interactive modals whose keys the
-    /// menu steals. Read-only overlays (peek, digest, answers, yard) are
-    /// deliberately absent: a right-press on a sideline row opened the row
-    /// menu over an open peek BEFORE this diff (the open path clears peek
-    /// itself), and that behavior must survive the guard. `nav` looks
-    /// read-only (cursor + filtered list) but carries a typed query buffer
-    /// like the other text inputs above - row_menu is checked before nav in
-    /// the key router, so leaving it out here let a menu open over an
-    /// in-progress filter and silently swallow every keystroke meant for it.
+    /// buffer the menu would orphan) and overlays that own live keys routed
+    /// after row_menu (answers dispatches PaneAnswer digits and goto/close on
+    /// Enter; yard takes n/N/q; digest swallows its next key dismissing
+    /// itself). None of those is cleared on menu-open, so a menu over one
+    /// steals its keys. `peek` is the one deliberate absence: the menu-open
+    /// path clears peek itself, so the two can never stack - a right-press
+    /// on a sideline row opened the row menu over an open peek BEFORE this
+    /// diff, and that behavior must survive the guard.
     fn menu_usurping_open(&self) -> bool {
         self.keys_modal.is_some()
             || self.row_menu.is_some()
@@ -3095,6 +3094,9 @@ impl View {
             || self.search.is_some()
             || self.peek_input.is_some()
             || self.nav.is_some()
+            || self.answers.is_some()
+            || self.yard.is_some()
+            || self.digest.is_some()
     }
 
     /// (x-7683) Open the owning agent's row menu for the pane under
@@ -20385,6 +20387,45 @@ mod tests {
             .unwrap();
         assert!(v.row_menu.is_none(), "no row menu under an open nav filter");
         assert!(v.nav.is_some(), "nav survives untouched");
+    }
+
+    #[tokio::test]
+    async fn x7683_right_press_on_a_sideline_row_under_answers_yard_digest_opens_nothing() {
+        // answers/yard/digest LOOK read-only like peek, but each owns live
+        // keys routed AFTER row_menu: answers dispatches PaneAnswer digits and
+        // goto/close on Enter, yard takes n/N/q, digest swallows its next key
+        // dismissing itself. Unlike peek (which the menu-open path clears),
+        // none is cleared on open, so a menu over one steals its keys - Enter
+        // meant to accept an answer could run a menu action on a live agent.
+        let overlays: [(&str, Box<dyn FnOnce(&mut super::View)>); 3] = [
+            ("answers", Box::new(|v| v.answers = Some(0))),
+            (
+                "yard",
+                Box::new(|v| {
+                    v.yard = Some(super::YardSel {
+                        sel: 0,
+                        opened_at: std::time::Instant::now(),
+                    })
+                }),
+            ),
+            (
+                "digest",
+                Box::new(|v| v.digest = Some(vec!["catch-up".into()])),
+            ),
+        ];
+        for (name, open) in overlays {
+            let mut v =
+                view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+            open(&mut v);
+            let mut scanner = Scanner::default();
+            let mut carry = Vec::new();
+            let mut buf: Vec<u8> = Vec::new();
+            // Right-press on the agent row itself (screen row 1, sideline col).
+            handle_stdin(&mut v, &mut scanner, &mut carry, b"\x1b[<2;6;2M", &mut buf)
+                .await
+                .unwrap();
+            assert!(v.row_menu.is_none(), "no row menu over an open {name}");
+        }
     }
 
     #[tokio::test]
