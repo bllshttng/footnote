@@ -472,11 +472,13 @@ case "${1:-status}" in
         trap '[[ "$(cat "$_WT_SWEEP_LOCK/pid" 2>/dev/null)" == "$$" ]] && { unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true; rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true; }' EXIT
 
         if [[ -n "$CARGO_TARGETS" ]]; then
+            CARGO_APPLY="$APPLY"
             if [[ -n "$MERGED" || -n "$OLDER_SET" || -n "$PREFIX" || -n "$KILL_ORPHANS" ]]; then
                 echo "worktree cleanup: --cargo-targets cannot be combined with worktree-removal selectors" >&2
                 exit 1
             fi
-            _cargo_target_cleanup "$CARGO_CAP_BYTES" "$CARGO_MAX_AGE_DAYS" "$APPLY"
+            [[ -n "$DRY_RUN" ]] && CARGO_APPLY=""
+            _cargo_target_cleanup "$CARGO_CAP_BYTES" "$CARGO_MAX_AGE_DAYS" "$CARGO_APPLY"
             exit $?
         fi
 

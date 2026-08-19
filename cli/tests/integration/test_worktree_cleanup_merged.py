@@ -154,6 +154,23 @@ def test_cargo_target_apply_reaps_age_then_cap_and_is_idempotent(repo: Path):
     assert "reclaimed_bytes=0" in second.stdout
 
 
+def test_cargo_target_explicit_dry_run_wins_over_apply(repo: Path):
+    target = _add_target(repo, "cargo-dry-run", 2 * 1024 * 1024, old=True)
+
+    r = _cargo_sweep(
+        repo,
+        "--cap-bytes", "1",
+        "--target-max-age", "0d",
+        "--apply",
+        "--dry-run",
+    )
+
+    assert r.returncode == 0, r.stderr
+    assert "mode=dry-run" in r.stdout
+    assert "would-reap" in r.stdout
+    assert target.exists(), "explicit dry-run must override apply"
+
+
 def test_cargo_target_apply_refuses_to_delete_rooted_builder(repo: Path):
     target = _add_target(repo, "cargo-live", 2 * 1024 * 1024, old=True)
     holder = subprocess.Popen(["sleep", "10"], cwd=target.parent.parent.parent)
