@@ -834,3 +834,100 @@ def test_observed_model_escalates_past_an_inconclusive_tail(tmp_path):
         "model": "gpt-5.6-sol",
         "samples": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# --handles: one process answers N handles (x-0d93)
+#
+# The probe's real work is 0.83 ms and its delivery was 780 ms of interpreter
+# cold start, paid once per roster row per daemon sweep. These pin the batch
+# contract the Rust side now depends on: a keyed object, an always-zero exit,
+# and one registry read for the whole batch.
+# ---------------------------------------------------------------------------
+
+def test_truth_batch_keys_every_handle_and_exits_zero_with_a_miss(
+    tmp_path, monkeypatch
+):
+    """Two resolve, one does not. The miss rides its own entry, never the exit
+    code -- a batch has no single exit code to carry."""
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sids = {
+        "a": "0badc0de-3333-0000-0000-00000000000a",
+        "b": "0badc0de-3333-0000-0000-00000000000b",
+    }
+    for name, sid in sids.items():
+        _write_claude_transcript(tmp_path, cwd, sid, [f"still going on {name}"])
+
+    real = session_truth.resolve_session_truth
+
+    def routed(handle, **kw):
+        sid = sids.get(handle)
+        if sid is None:
+            return real(handle, resolve=lambda _h: (None, []), projects_root=tmp_path)
+        session = SimpleNamespace(
+            agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8]
+        )
+        return real(handle, resolve=_resolver(session), projects_root=tmp_path)
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", routed)
+
+    result = CliRunner().invoke(
+        app, ["agents", "truth", "--handles", "a,b,c", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"a", "b", "c"}
+    assert payload["a"]["last_message"] == "still going on a"
+    assert payload["b"]["last_message"] == "still going on b"
+    assert payload["c"]["state"] == "unknown"
+    assert payload["c"]["reason"]  # the miss explains itself in its own entry
+
+
+def test_truth_batch_refuses_both_a_positional_handle_and_handles():
+    """Two spellings of one question. Exit 2 (usage), nothing on stdout."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    result = CliRunner().invoke(app, ["agents", "truth", "w1", "--handles", "a,b"])
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout.strip() == ""
+
+
+def test_truth_batch_reads_the_registry_once_for_every_handle(monkeypatch):
+    """`load_registry` per handle was the cost inside the cost. One read now
+    serves the whole batch, and the three-key match is unchanged."""
+    from fno.agents import cli as agents_cli
+
+    rows = [
+        SimpleNamespace(name="alpha", harness_session_id="sid-alpha", short_id="aaaa"),
+        SimpleNamespace(name="beta", harness_session_id="sid-beta", short_id="bbbb"),
+    ]
+    reads = []
+
+    def counting_load_registry():
+        reads.append(1)
+        return rows
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", counting_load_registry)
+    monkeypatch.setattr(
+        "fno.agents.reachability.registry_falsifier", lambda row: f"gone:{row.name}"
+    )
+
+    # Matched on name, session id AND short id, exactly as the single form does.
+    out = agents_cli._registry_falsifiers(["alpha", "sid-beta", "bbbb", "nobody"])
+
+    assert len(reads) == 1
+    assert out == {
+        "alpha": "gone:alpha",
+        "sid-beta": "gone:beta",
+        "bbbb": "gone:beta",
+        "nobody": None,
+    }

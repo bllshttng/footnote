@@ -3311,8 +3311,8 @@ def cmd_orphans(
         raise typer.Exit(2)
 
 
-def _registry_falsifier(handle: str) -> str | None:
-    """The falsifier for ``handle``, read off its registry row. Never raises.
+def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
+    """One registry read for N handles. Same three-key match as the single form.
 
     A handle with no registry row (a discovered-but-unadopted session) carries
     no falsifier, which is absence of evidence and NOT a death sentence.
@@ -3323,27 +3323,41 @@ def _registry_falsifier(handle: str) -> str | None:
     name-only lookup silently returns "no falsifier" for every row on that path,
     which reads exactly like a healthy process and is how a guard ends up
     decorative on one of two reachable paths.
+
+    The batch is why ``--handles`` exists at all: ``load_registry`` was the
+    per-handle cost inside a per-handle subprocess. First matching row wins per
+    handle, exactly as the single-handle ``next()`` lookup did. Never raises.
     """
     from fno.agents.reachability import registry_falsifier
 
-    if not handle:
-        return None
+    out: dict[str, str | None] = dict.fromkeys(handles, None)
+    wanted = {h for h in handles if h}
+    if not wanted:
+        return out
     try:
         from fno.agents.registry import load_registry
 
-        row = next(
-            (
-                r
-                for r in load_registry()
-                if handle in {r.name, r.harness_session_id, r.short_id}
-            ),
-            None,
-        )
+        resolved: set[str] = set()
+        for row in load_registry():
+            keys = ({row.name, row.harness_session_id, row.short_id} & wanted) - resolved
+            if not keys:
+                continue
+            falsifier = registry_falsifier(row)
+            for key in keys:
+                out[key] = falsifier
+            resolved |= keys
+            if resolved == wanted:
+                break
     except Exception:  # noqa: BLE001 -- an unreadable registry falsifies nothing
-        return None
-    if row is None:
-        return None
-    return registry_falsifier(row)
+        return out
+    return out
+
+
+def _registry_falsifier(handle: str) -> str | None:
+    """The falsifier for one ``handle``. A wrapper over
+    [`_registry_falsifiers`] so the three-key match has ONE implementation and
+    the single-handle path cannot drift from the batch one."""
+    return _registry_falsifiers([handle])[handle]
 
 
 def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
@@ -3385,8 +3399,21 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
 
 @agents_app.command("truth", hidden=True)
 def cmd_truth(
-    handle: str = typer.Argument(
-        ..., help="Worker handle / short id / session id (as in `fno agents list`)."
+    handle: str | None = typer.Argument(
+        None, help="Worker handle / short id / session id (as in `fno agents list`)."
+    ),
+    handles: str | None = typer.Option(
+        None,
+        "--handles",
+        help=(
+            "BATCH MODE. Comma-separated handles, answered in ONE process. "
+            "Emits a JSON object keyed by handle (with --json), else one "
+            "handle-prefixed line each. Batch mode ALWAYS exits 0, even when a "
+            "handle is unresolvable: a batch has no single exit code to carry, "
+            "so every entry carries its own state and reason instead. A caller "
+            "reading exit 0 as 'all resolved' is reading an absence; read the "
+            "per-entry state."
+        ),
     ),
     json_out: bool = typer.Option(
         False, "--json", "-J", help="Emit a single JSON object instead of a line."
@@ -3406,10 +3433,57 @@ def cmd_truth(
     primary vendor shows a `claude-*` id here and disagrees visibly with what
     the spawn asked for. A worker that came up and never answered reads "no
     model yet"; one with no transcript yet omits the clause entirely.
+
+    `--handles a,b,c` answers many in ONE process. The Rust daemon probes every
+    roster row on every sweep, and one interpreter cold start (780 ms measured)
+    per row against 0.83 ms of real work is a 940-to-1 overhead ratio. Batching
+    pays that start once per sweep. It stays a batch rather than a Rust port
+    because `state` and `observed_model` must come from the SAME reader (see
+    `TruthProbe` in `crates/fno-agents/src/claude_ask.rs`); a Rust
+    reimplementation would grow the second transcript reader that constraint
+    exists to prevent.
     """
     import json as _json
 
     from fno.agents.session_truth import render_truth, resolve_session_truth
+
+    if (handle is None) == (handles is None):
+        print(
+            "pass exactly one of: a positional handle, or --handles a,b,c",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    if handles is not None:
+        # ponytail: handles ride argv. Ceiling is roughly 125 handles at 36
+        # chars, under 5 KB and far below ARG_MAX; read the list from stdin if
+        # a roster ever outgrows that.
+        names = [h.strip() for h in handles.split(",") if h.strip()]
+        falsifiers = _registry_falsifiers(names)
+        answers = [
+            (name, resolve_session_truth(name), falsifiers[name]) for name in names
+        ]
+        if json_out:
+            sys.stdout.write(
+                _json.dumps(
+                    {
+                        name: _truth_payload(result, falsifier=falsifier)
+                        for name, result, falsifier in answers
+                    }
+                )
+                + "\n"
+            )
+        else:
+            for name, result, falsifier in answers:
+                payload = _truth_payload(result, falsifier=falsifier)
+                sys.stdout.write(
+                    f"{name}: {render_truth(result)} "
+                    f"[{payload['reachability']}: {payload['basis']}]\n"
+                )
+        sys.stdout.flush()
+        # Always 0: an unresolvable handle is reported in its own entry, never
+        # in an exit code the whole batch would have to share.
+        return
 
     result = resolve_session_truth(handle)
     falsifier = _registry_falsifier(handle)
