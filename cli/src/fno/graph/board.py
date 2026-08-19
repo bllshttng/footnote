@@ -58,10 +58,10 @@ def _parse_iso(value: object) -> Optional[datetime]:
 
 
 def _format_age(seconds: float) -> str:
-    # Deliberately not fno.mail.cli._humanize_age: that one shows raw
-    # seconds under a minute (a live process's last-log-line staleness),
-    # this one floors at "1m ago" (a board line has no use for sub-minute
-    # precision on a merge or a cached verdict).
+    # Several near-identical seconds/timedelta-to-string age humanizers
+    # already exist (fno.mail.cli._humanize_age and others); this is its
+    # own copy, not a reuse, because a board line has no use for the
+    # sub-minute precision those give - it floors at "1m ago".
     seconds = max(0, int(seconds))
     if seconds < 3600:
         return f"{max(1, seconds // 60)}m ago"
@@ -133,7 +133,6 @@ def compute_board(
     *,
     project: Optional[str] = None,
     now: Optional[datetime] = None,
-    strict_claims: bool = True,
 ) -> dict:
     """Just finished / In progress / On deck, off the graph and the pr-status
     cache only. Never calls subprocess - not for GitHub, not for local git."""
@@ -149,7 +148,11 @@ def compute_board(
     )
 
     try:
-        live_claimed = frozenset(live_claimed_node_ids(strict=strict_claims))
+        # strict=True is the only correct mode here: the non-strict default
+        # swallows a claims-subsystem fault into an empty set, which would
+        # render "nobody is working on anything" instead of the required
+        # unknown - the exact lie this module exists to refuse.
+        live_claimed = frozenset(live_claimed_node_ids(strict=True))
         claims_reason: Optional[str] = None
     except Exception as exc:  # noqa: BLE001 - render unknown, never a fabricated empty set
         live_claimed = frozenset()
