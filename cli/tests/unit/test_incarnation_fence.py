@@ -124,6 +124,10 @@ def test_resolve_manifest_run_id_only_is_none(tmp_path, monkeypatch):
 
 def test_run_merge_blocked_by_fence(monkeypatch, tmp_path):
     # The merge outward action refuses when the fence blocks (before any merge work).
+    # run_merge's hold-check runs BEFORE the fence check; an empty graph_json
+    # keeps it a no-op so this test exercises the fence, not leftover graph
+    # state from another test in the same xdist worker (round-12 review fix).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr(
         "fno.claims.incarnation.resolve_fence_session_uuid", lambda cwd=None: "uuid1"
     )

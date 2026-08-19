@@ -18,6 +18,20 @@ from fno.pr import _merge
 from fno.pr._proc import Result, ToolMissing
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_graph_json(tmp_path, monkeypatch):
+    """Hermetic hold-check: point graph_json at a file that does not exist.
+
+    hold_for_pr's round-11 fail-closed fetch fires whenever the graph is
+    non-empty; the $HOME sandbox conftest.py sets up is per pytest WORKER,
+    not per test, so an unpinned graph_json here can pick up nodes another
+    test in this worker wrote earlier. None of these tests name a PR with a
+    real backlog relationship, so an empty graph is always the correct
+    default (same fix as test_pr_merge.py's `enabled` fixture).
+    """
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+
+
 def _state_file(tmp_path) -> str:
     fno = tmp_path / ".fno"
     fno.mkdir(exist_ok=True)
