@@ -475,35 +475,68 @@ def test_quota_skip_defers_the_catchup_leg(monkeypatch):
     assert "degraded: 2 sweep failure(s)" in res.output
 
 
+class _FakeCatchupTracker:
+    """A minimal NodeTracker fake: only ``list_open`` is exercised here."""
+
+    def __init__(self, ids, *, fail=False):
+        self._ids = ids
+        self._fail = fail
+
+    def list_open(self):
+        from fno.tracker.types import TrackerCandidate, TrackerState
+
+        if self._fail:
+            raise RuntimeError("corrupt")
+        return [
+            TrackerCandidate(id=i, title=None, state=TrackerState.open)
+            for i in self._ids
+        ]
+
+
 def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
     """launchd starts the daemon in `/`, so there is no ambient project.
 
     A bare load_settings() there reads global config, where post_merge is
-    unset - which silently disabled this whole leg.
+    unset - which silently disabled this whole leg. Roots come from the open
+    tracker set joined with each id's sidecar cwd (task 2.1's guarded seam),
+    not a direct graph.json read.
     """
+    import json
+
     from fno.pr_watch import cli as pw
+    from fno.tracker import sidecar as sidecar_store
 
     alpha = tmp_path / "alpha"
     alpha.mkdir()
+    sidecar_dir = tmp_path / "sidecars"
+    sidecar_dir.mkdir()
+    rows = {
+        "a": str(alpha),
+        "b": str(alpha),              # duplicate project
+        "c": str(tmp_path / "gone"),  # deleted checkout
+        "d": None,                     # node with no cwd
+    }
+    for node_id, cwd in rows.items():
+        payload = {"id": node_id}
+        if cwd is not None:
+            payload["cwd"] = cwd
+        (sidecar_dir / f"{node_id}.json").write_text(json.dumps(payload))
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
-        lambda _p: [
-            {"cwd": str(alpha)},
-            {"cwd": str(alpha)},              # duplicate project
-            {"cwd": str(tmp_path / "gone")},  # deleted checkout
-            {},                                # node with no cwd
-        ],
+        "fno.tracker.get_tracker", lambda *a, **k: _FakeCatchupTracker(list(rows))
     )
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(
+        sidecar_store, "sidecar_path", lambda i: sidecar_dir / f"{i}.json"
+    )
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     assert pw._catchup_roots() == [alpha]
 
 
-def test_catchup_roots_survive_an_unreadable_graph(monkeypatch):
+def test_catchup_roots_survive_an_unreadable_tracker(monkeypatch):
     from fno.pr_watch import cli as pw
 
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
-        lambda _p: (_ for _ in ()).throw(RuntimeError("corrupt")),
+        "fno.tracker.get_tracker",
+        lambda *a, **k: _FakeCatchupTracker([], fail=True),
     )
     assert pw._catchup_roots() == []
 

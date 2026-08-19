@@ -162,6 +162,16 @@ def _project(event: dict[str, Any]) -> str | None:
     except ExternalMetadataUnavailable:
         return None
     if resolve_node(subject, precheck_entries).kind != "exact":
+        # read_entries swallows a corrupt default graph to [], which resolves
+        # the same as a genuinely unmatched subject. On the default backend,
+        # diagnose the corrupt case with _graph_entries()'s own strict-read
+        # warning so "no such node" is never printed for "unreadable graph" -
+        # the distinction this precheck made before the guarded seam existed.
+        if not precheck_entries:
+            from fno.tracker import active_backend_name
+
+            if active_backend_name() == "graph":
+                _graph_entries()
         return None
 
     matched: list[str] = []
