@@ -827,6 +827,18 @@ fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
         .map(|session_id| session_id.chars().take(8).collect())
 }
 
+/// True only when a KNOWN roster snapshot was consulted and the row is not
+/// in it. A `None`/unknown snapshot proves nothing, so it is never absent on
+/// that basis alone. The single predicate both the pre-cascade live-gate and
+/// the cascade's own already-absent check apply, so "what counts as absent"
+/// cannot diverge between the two call sites.
+fn claude_row_provably_absent(
+    claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
+    row_id: Option<&str>,
+) -> bool {
+    claude_agents.is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
+}
+
 fn cascade_harness_session_result_with(
     e: &state::RegistryEntry,
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
@@ -841,9 +853,8 @@ fn cascade_harness_session_result_with(
                     "claude cascade has no short id and no session id".into(),
                 );
             };
-            let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
-            let list_known = snapshot.is_known();
-            if list_known && snapshot.find(&short_id).is_none() {
+            let _snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
+            if claude_row_provably_absent(claude_agents, Some(&short_id)) {
                 return CascadeOutcome::AlreadyAbsent(format!(
                     "claude row {short_id} already absent"
                 ));
@@ -5454,13 +5465,12 @@ async fn handle_rm_with(
             ),
         );
     }
-    // The stored enum is what fno last WROTE, not what is true (MODE B,
-    // x-76d1): a session torn down by hand with `claude stop`/`claude rm`
+    // The stored enum is what fno last WROTE, not what is true: a session
+    // torn down by hand with `claude stop`/`claude rm`
     // never updates it. A row absent from the roster is provably gone,
     // whoever removed it. Anything less than proof keeps refusing.
-    let provably_gone = claude_agents.as_ref().is_some_and(|snap| {
-        snap.is_known() && claude_row_id(&entry).is_some_and(|id| snap.find(&id).is_none())
-    });
+    let provably_gone =
+        claude_row_provably_absent(claude_agents.as_ref(), claude_row_id(&entry).as_deref());
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         return Response::err(
             req.id,
@@ -5541,8 +5551,8 @@ async fn handle_rm_with(
     let rm_name = name.clone();
     // retain() cannot fail and cannot report what it dropped, so count across
     // it via the closure's return value: a resolved name that no row in the
-    // file actually carries must not report removed:true (this is the MODE A
-    // silent no-op, x-76d1).
+    // file actually carries must not report removed:true (the silent no-op
+    // mode).
     let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| e.name != rm_name);
@@ -7382,7 +7392,7 @@ mod tests {
 
     #[tokio::test]
     async fn rm_refuses_to_report_removed_when_the_row_is_already_gone() {
-        // AC1-NEG (x-76d1 MODE A): the row entry_for_lifecycle resolved is no
+        // AC1-NEG (silent-no-op mode): the row entry_for_lifecycle resolved is no
         // longer in the file by the time the write runs (raced away by a
         // concurrent teardown, e.g. another rm or a direct `claude rm`). The
         // injected claude_rm closure deletes the row as its side effect,
@@ -7572,7 +7582,7 @@ mod tests {
 
     #[tokio::test]
     async fn rm_removes_a_stored_live_row_provably_gone_from_the_roster() {
-        // AC2-HP (x-76d1 MODE B): a row torn down by hand with `claude
+        // AC2-HP (false-refusal mode): a row torn down by hand with `claude
         // stop`/`claude rm` never gets AgentStatus::Live written back. The
         // live gate must reconcile with the roster, not the stored enum.
         let home = short_home("rmprovengone");
