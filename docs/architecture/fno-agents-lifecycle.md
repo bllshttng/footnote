@@ -73,19 +73,11 @@ harnesses/codex.py
 
 ## Writing a reaper against these verbs
 
-A reaper must confirm a removal with a positive marker: re-read the registry and check the row is gone.
-Never trust the exit code alone, and never treat a quiet run as proof.
-Both have lied on this surface in opposite directions: one code path once reported success while the row stayed in the registry, and another once hung well past its own subprocess budget with the row already removed.
-An exit code cannot tell those two failures apart from a clean removal; only the re-read can.
+A reaper must confirm a removal with a positive marker: re-read the registry and check the row is gone. Never trust the exit code alone, and never treat a quiet run as proof. Both have lied on this surface, in opposite directions. One code path once reported success while the row stayed in the registry. Another once hung well past its own subprocess budget with the row already removed. An exit code cannot tell those two failures apart from a clean removal. Only the re-read can.
 
-Any hand-run roster enumeration must pass `--all`.
-`claude agents --json` alone omits stopped and completed sessions.
-A sweep run without it can read a small slice of the real roster and still report a clean fleet.
-Every reader inside fno already passes `--all`; the risk is a human typing the bare command.
+Any hand-run roster enumeration must pass `--all`. `claude agents --json` alone omits stopped and completed sessions. A sweep run without it can read a small slice of the real roster and still report a clean fleet. Every reader inside fno already passes `--all`. The risk is a human typing the bare command.
 
-`claude rm` (and `claude stop`) take a SHORT ID, never an agent name.
-`fno agents rm` takes the agent NAME and resolves it internally.
-Passing the agent name straight to `claude rm` fails, so a hand-driven teardown that mixes the two up can leave the fno registry holding a row `fno agents rm` still calls live.
+`claude rm` (and `claude stop`) take a SHORT ID, never an agent name. `fno agents rm` takes the agent NAME and resolves it internally. Passing the agent name straight to `claude rm` fails. A hand-driven teardown that mixes the two up can leave the fno registry holding a row `fno agents rm` still calls live.
 
 ## Failure modes addressed
 
