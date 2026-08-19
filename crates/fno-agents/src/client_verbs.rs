@@ -3403,9 +3403,10 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
 /// push (E3.2). A per-turn hook calls this; it builds the `agent.report` RPC and
 /// sends it to an ALREADY-RUNNING daemon (never lazy-starts one -- a hook must
 /// not boot the daemon). Fire-and-forget: a down daemon is exit 0 (no grid to
-/// report to), a successful store/drop is exit 0; only a malformed invocation
-/// (exit 2) or a real transport error (exit 1) is loud, so a per-turn hook never
-/// reds a turn.
+/// report to), a wedged-but-live daemon that never answers is exit 0 too (the
+/// report is lost, not the turn), a successful store/drop is exit 0; only a
+/// malformed invocation (exit 2) or a real transport error (exit 1) is loud,
+/// so a per-turn hook never reds a turn.
 pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
     let params = match build_report_params(rest) {
         Ok(p) => p,
@@ -3418,6 +3419,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
     match crate::client::call_if_running(home, &req).await {
         Ok(_) => 0,
         Err(crate::client::ClientError::DaemonNotRunning) => 0,
+        Err(crate::client::ClientError::DaemonUnresponsive { .. }) => 0,
         Err(e) => {
             eprintln!("fno-agents: report failed: {e}");
             1

@@ -421,8 +421,8 @@ def test_rm_refuses_when_row_is_removed_entirely_during_shellout(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """AC1-NEG (x-76d1 MODE A): the row is gone entirely by write time, not
-    just replaced. rm must not report success on a no-op removal."""
+    """AC1-NEG (silent-no-op mode): the row is gone entirely by write time,
+    not just replaced. rm must not report success on a no-op removal."""
     use_tmpdir(monkeypatch, tmp_path)
     original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
     _seed_registry(

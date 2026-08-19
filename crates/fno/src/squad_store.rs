@@ -784,7 +784,7 @@ pub struct PruneOutcome {
     pub skipped_named: usize,
     pub kept_protected: usize,
     /// Tombstoned members reaped one-by-one out of squads that survived the
-    /// whole-squad decision above (x-76d1 change 4). `prune_decision_at`
+    /// whole-squad decision above. `prune_decision_at`
     /// returns `Keep`/`KeepUnknown` at the FIRST live (or unknown-liveness)
     /// member it finds, so a tombstoned member sitting beside a live one in
     /// the same squad was unreachable by any sweep before this.
@@ -832,21 +832,20 @@ pub fn prune(
         let mut kept = Vec::with_capacity(sf.squads.len());
         for mut sq in sf.squads.drain(..) {
             let decision = decide(&sq);
-            match decision {
-                PruneDecision::Prune => out.removed.push(PrunedSquad::from(&sq)),
-                PruneDecision::KeepUnknown | PruneDecision::SkipNamed | PruneDecision::Keep => {
-                    match decision {
-                        PruneDecision::KeepUnknown => out.kept_unknown += 1,
-                        PruneDecision::SkipNamed => out.skipped_named += 1,
-                        PruneDecision::Keep => out.kept_protected += 1,
-                        PruneDecision::Prune => unreachable!(),
-                    }
-                    let before = sq.members.len();
-                    sq.members.retain(|m| !tombstone_reapable(m, live));
-                    out.members_reaped += before - sq.members.len();
-                    kept.push(sq);
+            let counter = match decision {
+                PruneDecision::Prune => {
+                    out.removed.push(PrunedSquad::from(&sq));
+                    continue;
                 }
-            }
+                PruneDecision::KeepUnknown => &mut out.kept_unknown,
+                PruneDecision::SkipNamed => &mut out.skipped_named,
+                PruneDecision::Keep => &mut out.kept_protected,
+            };
+            *counter += 1;
+            let before = sq.members.len();
+            sq.members.retain(|m| !tombstone_reapable(m, live));
+            out.members_reaped += before - sq.members.len();
+            kept.push(sq);
         }
         sf.squads = kept;
     })?;
