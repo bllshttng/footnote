@@ -3113,6 +3113,10 @@ impl View {
                     self.tab_drag = None;
                     return true;
                 }
+                // The held tab closed before the reaper fired - say so, same
+                // as the release-path long-press arms, rather than let a
+                // qualifying hold end in silence.
+                self.set_notice("no menu on the held tab".into());
             }
             return false;
         }
@@ -3132,6 +3136,7 @@ impl View {
                     return true;
                 }
             }
+            self.set_notice("no menu on the held row".into());
         }
         false
     }
@@ -10239,28 +10244,33 @@ async fn handle_stdin(
                         None => {
                             let still_on_row = pressed.is_some()
                                 && view.row_drag_source_at(rep.row, rep.col) == pressed;
-                            if still_on_row {
-                                let long_press = !view.menu_usurping_open()
-                                    && held.is_some_and(|(start, moved)| {
-                                        !moved
-                                            && Instant::now().duration_since(start)
-                                                >= MENU_LONG_PRESS
+                            // long_press is a TIME question, not a position one -
+                            // it must not be gated on still_on_row, or a release
+                            // that slips off the pressed row during a genuine
+                            // motionless hold ends in total silence, breaking the
+                            // "never a silent swallow" promise above.
+                            let long_press = !view.menu_usurping_open()
+                                && held.is_some_and(|(start, moved)| {
+                                    !moved
+                                        && Instant::now().duration_since(start)
+                                            >= MENU_LONG_PRESS
+                                });
+                            if long_press {
+                                let opened = still_on_row
+                                    && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
+                                        view.open_row_menu(
+                                            i,
+                                            Anchor::At {
+                                                row: rep.row,
+                                                col: rep.col,
+                                            },
+                                        )
                                     });
-                                if long_press {
-                                    let opened =
-                                        view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
-                                            view.open_row_menu(
-                                                i,
-                                                Anchor::At {
-                                                    row: rep.row,
-                                                    col: rep.col,
-                                                },
-                                            )
-                                        });
-                                    if !opened {
-                                        view.set_notice("no menu on the held row".into());
-                                    }
-                                } else if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                                if !opened {
+                                    view.set_notice("no menu on the held row".into());
+                                }
+                            } else if still_on_row {
+                                if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                                     apply_hit(view, hit, sock_w).await?;
                                 }
                             }
