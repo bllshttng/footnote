@@ -20,8 +20,14 @@ name: guards
 # step still fails the job either way, this only bounds how much of the
 # shared clock any one step can spend before the rest get their turn.
 #
-# Every step's name and command is verbatim from the workflow it replaces
-# (scripts/ci/check-workflow-manifest.sh's manifest names the source). A step
+# Every guard step's name and command is verbatim from the workflow it
+# replaces (scripts/ci/check-workflow-manifest.sh's manifest names the
+# source). The one exception is Checkout/Python/uv: every folded source
+# needed some version of this same setup, so both jobs share it through
+# `.github/actions/guards-setup` (Checkout itself stays a separate step in
+# each job - a local composite action can only be resolved after the repo
+# is already checked out) rather than the two jobs hand-copying it and
+# drifting on a version, the way this file's own Checkout once did. A step
 # NOT here (stacked-base-guard.yml) was deliberately excluded from
 # consolidation despite being in the plan's candidate pool: it POSTs commit
 # statuses to OTHER open PRs (not just this one), gates on fork-vs-same-repo
@@ -64,24 +70,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # v4, matching every one of this job's five sources - unlike the
-      # `guards` job below, nothing folded in here ever pinned v5.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Python + uv
         if: ${{ !cancelled() }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        if: ${{ !cancelled() }}
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
+        uses: ./.github/actions/guards-setup
 
       # From control-plane-doc-colocation.yml (doc-colocation job).
       # Advisory: warns (never blocks) when control-plane code changes
@@ -182,27 +178,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # v5, not v4: codex-bootstrap-check.yml's own Checkout pinned v5, and
-      # this job absorbs its three steps. Every other folded source used v4,
-      # and a plain full-history checkout behaves the same on both, so v5
-      # here keeps the "verbatim" claim above true for all eleven sources
-      # instead of silently reverting one of them.
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Python + uv
         if: ${{ !cancelled() }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        if: ${{ !cancelled() }}
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
+        uses: ./.github/actions/guards-setup
 
       # The coverage guard for this consolidation itself - a deleted
       # workflow file with no matching manifest edit is a red check, not a
