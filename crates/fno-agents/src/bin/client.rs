@@ -1440,16 +1440,22 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "node_session_refused": node_refused,
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
+                "dormant_probes_escalated": summary.dormant_probes_escalated,
                 "dry_run": dry_run,
             })
         );
     }
     let verb = if dry_run { "would reap" } else { "reaped" };
     let mut out = format!(
-        "{verb} {} row(s) ({} by the age backstop, {} dormant done)\n",
+        "{verb} {} row(s) ({} by the age backstop, {} dormant done); \
+         {} live-idle row(s) escalated to a truth probe\n",
         summary.reaped.len(),
         summary.reaped_backstop.len(),
-        summary.reaped_dormant.len()
+        summary.reaped_dormant.len(),
+        // Reported at every pass, including zero. The cap this replaced
+        // truncated a large sweep silently; a spend nobody prints is the same
+        // silence one step over.
+        summary.dormant_probes_escalated,
     );
     for id in &summary.reaped {
         out.push_str(&format!("  {verb} {id}\n"));
