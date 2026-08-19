@@ -747,11 +747,13 @@ mod response_timeout_tests {
 
         let mut conn = UnixStream::connect(&sock_path).await.unwrap();
         let start = Instant::now();
-        let result =
-            read_response_bounded(&mut conn, "agent.rm", Duration::from_millis(100)).await;
+        let result = read_response_bounded(&mut conn, "agent.rm", Duration::from_millis(100)).await;
         let elapsed = start.elapsed();
 
-        assert!(elapsed < Duration::from_secs(5), "deadline must bound the wait");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline must bound the wait"
+        );
         match result {
             Err(ClientError::DaemonUnresponsive { method, .. }) => assert_eq!(method, "agent.rm"),
             other => panic!("expected DaemonUnresponsive, got {other:?}"),

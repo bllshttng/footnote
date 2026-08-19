@@ -428,7 +428,7 @@ def test_rm_refuses_when_row_is_removed_entirely_during_shellout(
     _seed_registry(
         dict(
             name="victim",
-            provider="claude",
+            harness="claude",
             harness_session_id=original_id,
             short_id="transportA",
         ),

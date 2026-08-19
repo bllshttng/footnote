@@ -5547,7 +5547,10 @@ async fn handle_rm_with(
     if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         let before = r.entries.len();
         r.entries.retain(|e| e.name != rm_name);
-        counter.store(before - r.entries.len(), std::sync::atomic::Ordering::SeqCst);
+        counter.store(
+            before - r.entries.len(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
     })
     .await
     {
