@@ -3313,6 +3313,22 @@ class KingBlock(BaseModel):
     autonomous_merge: bool = False
 
 
+class PreflightBlock(BaseModel):
+    """Local preflight policy (nested under 'config.preflight').
+
+    ``required`` decides whether a full local ``scripts/ci/preflight.sh``
+    receipt is REQUIRED before a PR is opened. Default false: CI is the merge
+    gate, and a 22-to-47-minute local rehearsal of it is an optimisation,
+    never the authority. Six concurrent runs at load average 415 with zero
+    completions (2026-08-19) is the measurement that set this default. Set
+    true to restore the mandatory rehearsal per project.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    required: bool = False
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -3332,6 +3348,7 @@ class ConfigBlock(BaseModel):
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
+    preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
     # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.

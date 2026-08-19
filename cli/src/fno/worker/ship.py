@@ -178,7 +178,8 @@ def ship(
                 "error": (
                     "verification evidence refused ship: no full/passed "
                     "verification receipt for HEAD, and no earlier receipt "
-                    "whose patches match it. Run scripts/ci/preflight.sh. "
+                    "whose patches match it. Run scripts/ci/preflight.sh "
+                    "(required by config.preflight.required = true). "
                     f"(mode={evidence['mode']} result={evidence['result']})"
                 ),
                 "branch": branch,
