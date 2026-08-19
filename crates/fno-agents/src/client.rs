@@ -37,11 +37,11 @@ pub enum ClientError {
     #[error("daemon is not running")]
     DaemonNotRunning,
     #[error(
-        "daemon accepted the connection but sent no response within {0:?} - it is either \
+        "no response from the daemon for `{method}` within {timeout:?} - it is either \
          wedged (listening, not serving) or still working a slow handler. `fno agents \
          restart --force` recovers a wedged holder; retry before assuming one"
     )]
-    DaemonUnresponsive(Duration),
+    DaemonUnresponsive { method: String, timeout: Duration },
 }
 
 /// How long a client waits for the daemon's response frame before declaring it
@@ -67,17 +67,22 @@ pub(crate) fn response_deadline() -> Duration {
 }
 
 /// Read one response, bounded by `deadline` ([`RESPONSE_DEADLINE`] at the call
-/// sites, injected so a unit test can prove the bound without waiting 10s). The
-/// deadline lives in the CLIENT, not in `protocol::read_response`, because the
-/// daemon's own read path uses that function too and a deadline there would be
-/// wrong.
+/// sites, injected so a unit test can prove the bound without waiting 10s), and
+/// naming the request it was waiting on when it gave up (x-76d1 AC3, measured
+/// as a 300s hang with the row already removed). The deadline lives in the
+/// CLIENT, not in `protocol::read_response`, because the daemon's own read
+/// path uses that function too and a deadline there would be wrong.
 async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
     conn: &mut R,
+    method: &str,
     deadline: Duration,
 ) -> Result<Response, ClientError> {
     match tokio::time::timeout(deadline, read_response(conn)).await {
         Ok(r) => Ok(r?),
-        Err(_elapsed) => Err(ClientError::DaemonUnresponsive(deadline)),
+        Err(_elapsed) => Err(ClientError::DaemonUnresponsive {
+            method: method.to_string(),
+            timeout: deadline,
+        }),
     }
 }
 
@@ -315,7 +320,7 @@ pub async fn call(
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
     write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -338,7 +343,7 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         Err(e) => return Err(ClientError::Io(e)),
     };
     write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +719,72 @@ pub async fn restart_daemon(
 }
 
 #[cfg(test)]
+mod response_timeout_tests {
+    use super::*;
+    use crate::protocol::write_response;
+    use tokio::net::UnixListener;
+
+    fn temp_sock(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "fno-agents-client-test-{tag}-{}.sock",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn read_response_bounded_names_the_method_it_waited_on() {
+        // AC3-HP: a daemon that never answers must not hang the caller
+        // forever. The client-side read gives up within the deadline and
+        // names what it was waiting on.
+        let sock_path = temp_sock("hp");
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let accepted = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold the connection open and never write a response.
+            std::mem::forget(stream);
+        });
+
+        let mut conn = UnixStream::connect(&sock_path).await.unwrap();
+        let start = Instant::now();
+        let result =
+            read_response_bounded(&mut conn, "agent.rm", Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed < Duration::from_secs(5), "deadline must bound the wait");
+        match result {
+            Err(ClientError::DaemonUnresponsive { method, .. }) => assert_eq!(method, "agent.rm"),
+            other => panic!("expected DaemonUnresponsive, got {other:?}"),
+        }
+        accepted.abort();
+        std::fs::remove_file(&sock_path).ok();
+    }
+
+    #[tokio::test]
+    async fn read_response_bounded_is_unchanged_on_a_normal_reply() {
+        // AC3-EDGE: a normal removal takes no deadline path; the response is
+        // exactly what the daemon sent.
+        let sock_path = temp_sock("edge");
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let resp = Response::ok(1, json!({"removed": true}));
+            write_response(&mut stream, &resp).await.unwrap();
+        });
+
+        let mut conn = UnixStream::connect(&sock_path).await.unwrap();
+        let response = read_response_bounded(&mut conn, "agent.rm", Duration::from_secs(5))
+            .await
+            .expect("normal reply must not time out");
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        server.await.unwrap();
+        std::fs::remove_file(&sock_path).ok();
+    }
+}
+
+#[cfg(test)]
 mod drift_restart_tests {
     use super::*;
 
@@ -775,11 +846,11 @@ mod drift_restart_tests {
         let (_silent, mut read_side) = tokio::io::duplex(64);
         let deadline = Duration::from_millis(150);
         let started = Instant::now();
-        let err = read_response_bounded(&mut read_side, deadline)
+        let err = read_response_bounded(&mut read_side, "agent.status", deadline)
             .await
             .expect_err("silent peer must fail");
         assert!(
-            matches!(err, ClientError::DaemonUnresponsive(d) if d == deadline),
+            matches!(err, ClientError::DaemonUnresponsive { timeout, .. } if timeout == deadline),
             "wrong error: {err:?}"
         );
         assert!(
