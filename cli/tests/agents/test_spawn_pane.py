@@ -29,6 +29,9 @@ import pytest
 
 from fno.paths_testing import use_tmpdir
 
+AGY_HARNESS = "agy"
+CODEX_HARNESS = "codex"
+
 
 class FakeRunner:
     """Record `fno mux ...` invocations; script the replies per verb."""
@@ -42,7 +45,7 @@ class FakeRunner:
         db_stdout: str = "",
         # x-6928 interactive-readiness gate probes.
         wait_returncode: int = 11,
-        read_stdout: str = "",
+        read_stdout: str = "ready\n",
         read_returncode: int = 0,
         read_stderr: str = "",
         placement: Optional[dict] = None,
@@ -274,7 +277,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         spawned = mux_spawn.dispatch_spawn_pane(
             name=requested_name,
             message="wait",
-            provider="codex",
+            provider=CODEX_HARNESS,
             cwd=repo,
             session=mux_session,
         )
@@ -671,7 +674,6 @@ def test_codex_spawn_without_capture_fails_and_reaps_unaddressable_pane(
     assert load_registry() == []
     assert runner.kill_calls
 
-
 def test_codex_spawn_with_capture_returns_bound_identity(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -696,6 +698,48 @@ def test_codex_spawn_with_capture_returns_bound_identity(
     assert result.status == "live"
     assert result.session_uuid == session_id
     assert result.short_id == session_id[:8]
+
+
+def test_codex_binding_expiry_runs_one_reconcile_backfill(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.registry import load_registry, update_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
+    )
+
+    def reconcile_once():
+        calls.append("reconcile")
+        update_registry(
+            lambda rows: [
+                replace(
+                    row,
+                    harness_session_id=session_id,
+                    status="live",
+                )
+                if row.name == "peer"
+                else row
+                for row in rows
+            ]
+        )
+
+    monkeypatch.setattr(dispatch, "reconcile_agents", reconcile_once)
+
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider=CODEX_HARNESS, codex_binding=False
+    )
+
+    assert calls == ["reconcile"]
+    assert load_registry()[0].harness_session_id == session_id
+    assert result.session_uuid == session_id
+    assert result.short_id == session_id[:8]
+    assert result.bound is True
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
@@ -867,10 +911,9 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # Bare interactive session: no -i without a message.
     assert "-i" not in build_pane_argv("gemini", "", tmp_path, False, None)
 
-    # x-8f7f US1: agy is never-prompt, stateless (no --session-id), message as
-    # trailing positional; never `-p` (that is agy's headless/print form).
+    # agy is never-prompt and stateless. The seed is delivered after readiness.
     agy = build_pane_argv("agy", "task", tmp_path, False, "ignored-uuid")
-    assert agy == ["agy", "--dangerously-skip-permissions", "task"]
+    assert agy == ["agy", "--dangerously-skip-permissions"]
     assert "-p" not in agy and "--session-id" not in agy
     assert build_pane_argv("agy", "", tmp_path, False, None) == [
         "agy",
@@ -916,6 +959,23 @@ def test_build_pane_argv_delegates_create_identity_to_capability_contract(
     argv = build_pane_argv("claude", "task", tmp_path, False, "uuid")
     assert argv[:3] == ["claude", "--contract-session", "uuid"]
     assert calls == [("claude", "interactive_create", "uuid")]
+def test_agy_trust_pregrant_failure_falls_back_to_live_readiness(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import mux_spawn
+
+    runner = FakeRunner()
+    monkeypatch.setattr(mux_spawn, "_ensure_agy_folder_trusted", lambda _cwd: False)
+
+    result = mux_spawn.dispatch_spawn_pane(
+        name="peer",
+        message="hello",
+        provider=AGY_HARNESS,
+        cwd=tmp_path,
+        runner=runner,
+    )
+    assert result.seed == "submitted"
+    assert any(call[1:4] == ["mux", "pane", "send"] for call in runner.calls)
 
 
 def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> None:
@@ -3273,9 +3333,9 @@ def test_ac1_passthrough_splices_into_every_pane_arm(tmp_path: Path) -> None:
     argv = build_pane_argv("codex", "task", tmp_path, False, None, passthrough=tok)
     fence = argv.index("--")
     assert argv[fence - 3 : fence] == tok
-    # agy: before the trailing positional seed.
+    # agy: the seed is delivered after readiness, so passthrough owns the tail.
     argv = build_pane_argv("agy", "task", tmp_path, False, None, passthrough=tok)
-    assert argv[-4:-1] == tok and argv[-1] == "task"
+    assert argv[-3:] == tok and "task" not in argv
     # gemini: before the -i <message> pair.
     argv = build_pane_argv("gemini", "task", tmp_path, False, None, passthrough=tok)
     i = argv.index("-i")
@@ -3740,7 +3800,9 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
     ls_stdout = json.dumps(
         [{"pane_id": 9, "squad_id": 1, "tab_id": 1, "cwd": str(tmp_path), "child_pid": 4242}]
     )
-    runner = FakeRunner(run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout)
+    runner = FakeRunner(
+        run_returncode=_MUX_CONTROL_UNANSWERED, ls_stdout=ls_stdout, read_stdout=""
+    )
 
     with pytest.raises(DispatchAskError) as exc:
         _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)

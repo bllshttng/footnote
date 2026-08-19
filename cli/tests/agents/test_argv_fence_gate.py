@@ -354,10 +354,11 @@ def test_scanner_still_sees_the_known_seams() -> None:
     assert counts.get("fenced", 0) >= 20, counts
     assert counts.get("value-form", 0) >= 4, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
-    # visible test edit, never a silent gate bypass. Eleven standing
-    # exemptions: the agy arms (no clean end-of-options, probed), the
-    # deprecated-gemini arms, the hermes -q value form, and the notify-send
-    # body (a toast, not a worker seed).
-    assert counts.get("exempt", 0) == 11, counts
+    # visible test edit, never a silent gate bypass. Ten standing
+    # exemptions: the deprecated-gemini arms, the hermes -q value form, and
+    # the notify-send body (a toast, not a worker seed). The agy arm dropped
+    # out when the seed moved off the argv seam onto the shared readiness
+    # gate's submit path (x-4c17).
+    assert counts.get("exempt", 0) == 10, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

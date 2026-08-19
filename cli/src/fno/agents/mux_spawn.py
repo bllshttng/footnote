@@ -143,6 +143,9 @@ class MuxSpawnResult:
     recovered: bool = False
     readiness: Optional[str] = None
     readiness_rule: Optional[str] = None
+    seed: Optional[str] = None
+    seed_source: Optional[str] = None
+    fno_id: Optional[str] = None
 
 
 def _fno_bin() -> str:
@@ -1015,11 +1018,9 @@ def build_pane_argv(
         # so an unattended pane can't wedge on its first approval. agy is
         # stateless (no session id, no JSON envelope), so no --session-id pin;
         # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
-        # NOT be used for a pane. A message rides as the trailing positional,
-        # matching claude's interactive form.
-        # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
-        # pin it via capture-readiness-grid.sh when the manifest is validated.
-        argv = [*identity, "--dangerously-skip-permissions"]
+        # NOT be used for a pane. The shared readiness gate submits the seed
+        # after trust and the composer are ready.
+        argv = ["agy", "--dangerously-skip-permissions"]
         if permission_mode:
             # skip -> [] (argv already carries the flag); anything else raises.
             argv += permission_pane_tokens("agy", permission_mode)
@@ -1027,13 +1028,6 @@ def build_pane_argv(
             argv += ["--model", model]
         argv += tier3
         argv += pane_passthrough_tokens(passthrough, argv)
-        if message:
-            # Deliberately unfenced: agy has no clean end-of-options. Probed
-            # 2026-08-15, `agy -p -- "<prompt>"` folds the flag text AND the
-            # fence itself into the prompt, so fencing corrupts the seed; an
-            # unfenced leading-flag seed rides into the prompt mangled, not
-            # dead. argv-fence: exempt (test_argv_fence_gate honors this marker)
-            argv.append(message)
         return argv
     if provider == "opencode":
         if effort:
@@ -1769,6 +1763,29 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 _SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
 
 
+def _ensure_agy_folder_trusted(cwd: Path) -> bool:
+    """Best-effort upsert of agy's exact cwd in its trust file."""
+    home = os.environ.get("HOME")
+    if not home:
+        return False
+    trust_file = Path(home) / ".gemini" / "trustedFolders.json"
+    key = str(cwd if cwd.is_absolute() else Path.cwd() / cwd)
+    try:
+        trust_file.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(trust_file.read_text()) if trust_file.exists() else {}
+        if not isinstance(data, dict):
+            return False
+        if key in data or any(data.get(str(parent)) == "TRUST_PARENT" for parent in Path(key).parents):
+            return True
+        data[key] = "TRUST_FOLDER"
+        tmp = trust_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, trust_file)
+        return True
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def _resolve_bound(session_uuid: Optional[str], harness: str) -> Optional[bool]:
     """Tri-state: bound / not bound / this harness binds no session at all."""
     if harness not in _SESSION_BINDING_HARNESSES:
@@ -1797,6 +1814,8 @@ def _resolve_unbound_reason(
     """
     if bound is not False:
         return None
+    if reason == "binding-window-expired":
+        return "binding-window-expired: pane is live; fno agents reconcile will backfill its session id"
     # Generic on purpose: a reason naming the harness reads as "this harness
     # binds no session", which is exactly what `bound is None` means and the
     # opposite of what a MISS means. An opencode backfill miss has a real cause
@@ -2101,6 +2120,62 @@ def _send_permission_response(
         )
 
 
+def _submit_spawn_seed(
+    provider: str,
+    session: str,
+    pane_id: int,
+    seed: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[str, str, str]:
+    """Submit a spawn seed after the shared readiness probe has painted."""
+    try:
+        screen = _run_mux(
+            ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+            runner,
+        )
+    except DispatchAskError:
+        return "unconfirmed", "", "delivered"
+    frame = screen.stdout or ""
+    if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
+        try:
+            cleared = _run_mux(
+                ["mux", "pane", "send", "--session", session, str(pane_id), "--text", "", "--submit"],
+                runner,
+            )
+        except DispatchAskError:
+            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+        if cleared.returncode != 0:
+            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+        try:
+            screen = _run_mux(
+                ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
+                runner,
+            )
+        except DispatchAskError:
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+        frame = screen.stdout or ""
+        if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+        trust_source = "trust-cleared"
+    else:
+        trust_source = ""
+    if not frame.strip():
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source
+    if provider != "agy" and seed not in frame:
+        return "submitted", "", "argv"
+    payload = "" if seed in frame else seed
+    try:
+        submitted = _run_mux(
+            ["mux", "pane", "send", "--session", session, str(pane_id), "--text", payload, "--submit"],
+            runner,
+        )
+    except DispatchAskError:
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+    if submitted.returncode != 0:
+        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+    return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
+
+
 def dispatch_spawn_pane(
     name: str,
     message: str,
@@ -2304,6 +2379,8 @@ def dispatch_spawn_pane(
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
+    if provider == "agy":
+        _ensure_agy_folder_trusted(cwd)
     argv = build_pane_argv(
         provider,
         message,
@@ -2522,6 +2599,14 @@ def dispatch_spawn_pane(
                 else None
             ),
         )
+        seed_state: Optional[str] = None
+        seed_source: Optional[str] = None
+        if message and readiness != "failed":
+            seed_state, seed_detail, seed_source = _submit_spawn_seed(
+                provider, session, pane_id, message, runner
+            )
+            if seed_state == "unconfirmed":
+                readiness_detail = seed_detail or readiness_detail
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
                 readiness_detail = (
@@ -2640,7 +2725,18 @@ def dispatch_spawn_pane(
                     cwd=str(cwd),
                     reason="no unique codex rollout for this cwd after spawn",
                 )
-                if binding_caps["required"] and not pane_died:
+                # binding-window-expired is a soft miss, not a dead end: the
+                # pane is confirmed live, only codex's own id has not shown up
+                # yet, and the spawn-time reconcile pass below gets one more
+                # chance to backfill it. Reaping here would kill a working
+                # worker over a race it can still win. Every other required-
+                # binding miss (no pid to correlate, a pane that never got
+                # this far) has nothing left to wait on and reaps as before.
+                if (
+                    binding_caps["required"]
+                    and not pane_died
+                    and unbound_reason != "binding-window-expired"
+                ):
                     reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
                     if reaped:
                         raise DispatchAskError(
@@ -2894,6 +2990,7 @@ def dispatch_spawn_pane(
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
                     route_settings_path=route_settings_path,
+                    fno_id=stored_session_uuid or name,
                 )
             )
             return rows
@@ -3060,6 +3157,58 @@ def dispatch_spawn_pane(
             stored_session_uuid = registered_id
             row_status = "live"
 
+        # A codex id-less row from a binding-window timeout is a different
+        # mechanism from the happy-hosted restamp above: the pane is
+        # confirmed alive and the row is already written `spawning`, so a
+        # single spawn-time reconcile pass gives the rollout one more chance
+        # to appear before the receipt returns. Scoped to this exact reason:
+        # any other unbound cause (no pid to correlate, pane died) has
+        # nothing for reconcile to find and would just cost a wasted pass.
+        if provider == "codex" and unbound_reason == "binding-window-expired":
+            from fno.agents import dispatch as _dispatch
+
+            _dispatch.reconcile_agents()
+            this_mux = {"session": session, "pane_id": pane_id}
+            backfilled_row = next(
+                (
+                    r
+                    for r in load_registry(path=registry_path)
+                    if r.name == name and r.mux == this_mux
+                ),
+                None,
+            )
+            if backfilled_row is not None and backfilled_row.harness_session_id:
+                stored_session_uuid = backfilled_row.harness_session_id
+                row_status = backfilled_row.status
+            elif binding_caps["required"]:
+                # Reconcile's one extra chance came up empty too: a required
+                # binding that is STILL id-less is the same unusable pane the
+                # earlier required-binding gate reaps for every other unbound
+                # reason, so it earns the same fate rather than lingering
+                # `spawning` forever.
+                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                if reaped:
+                    try:
+                        update_registry(
+                            lambda rows: [
+                                r for r in rows if not (r.name == name and r.mux == this_mux)
+                            ],
+                            path=registry_path,
+                        )
+                    except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
+                        pass
+                    raise DispatchAskError(
+                        f"agent {name!r} required {provider} session binding "
+                        f"({unbound_reason}); pane {pane_id} reaped, "
+                        "no registry row written",
+                        exit_code=1,
+                    )
+                raise DispatchAskError(
+                    f"agent {name!r} required {provider} session binding but cleanup "
+                    f"failed: {cleanup_detail}; pane {pane_id} may still exist",
+                    exit_code=1,
+                )
+
         # Claude and Codex both resolve the canonical full harness id through the
         # generated mailbox handle. The row keeps short_id empty because mux is
         # its one live transport ref; the receipt may still hand out the derived
@@ -3103,4 +3252,7 @@ def dispatch_spawn_pane(
             if readiness_detail.startswith(("ready-marker=", "blocked-rule="))
             else None
         ),
+        seed=seed_state,
+        seed_source=seed_source,
+        fno_id=session_uuid or name,
     )

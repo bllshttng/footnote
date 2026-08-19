@@ -1375,7 +1375,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // (x-d865) The row's durable identity, provider-agnostic (both are
         // read unscoped: `where` resolves against either spelling).
         let session_id = row
-            .get("session_id")
+            .get("fno_id")
+            .or_else(|| row.get("session_id"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
