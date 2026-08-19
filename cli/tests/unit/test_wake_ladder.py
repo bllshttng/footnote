@@ -12,9 +12,22 @@ import fno.agents.dispatch as dispatch
 from fno.agents.dispatch import DispatchAskError, wake_and_deliver
 
 
-def _entry(status, *, short="abc12345", name="wk-abc12345", sid="uuid-full"):
+def _entry(
+    status,
+    *,
+    short="abc12345",
+    name="wk-abc12345",
+    sid="uuid-full",
+    provider=None,
+    route_settings_path=None,
+):
     return SimpleNamespace(
-        status=status, short_id=short, name=name, harness_session_id=sid
+        status=status,
+        short_id=short,
+        name=name,
+        harness_session_id=sid,
+        provider=provider,
+        route_settings_path=route_settings_path,
     )
 
 
@@ -102,6 +115,63 @@ def test_live_roster_skips_rung2_and_forks(monkeypatch):
     ok, detail = wake_and_deliver("uuid-full", "wake")
     assert ok is True and detail == "FORK"
     assert respawned == []  # never respawned a live session
+
+
+def test_routed_fork_holds_provider_gate_across_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("live", provider="zai", route_settings_path="/route.json"),
+    )
+    events = []
+
+    class _Gate:
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda name, substrate, **kwargs: events.append(
+            ("gate", name, substrate, kwargs)
+        )
+        or _Gate(),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: events.append(("dispatch", kwargs))
+        or SimpleNamespace(short_id="FORK"),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is True and detail == "FORK"
+    assert events[0][0] == "gate"
+    assert events[0][2:] == ("bg", {"route_provider": "zai"})
+    assert events[1][0] == "dispatch"
+    assert events[1][1]["route_provider"] == "zai"
+    assert events[2] == "release"
+
+
+def test_routed_fork_provider_refusal_launches_nothing(monkeypatch):
+    from fno.agents.spawn_gate import GateRefused
+
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("live", provider="zai", route_settings_path="/route.json"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GateRefused(78)),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("spawned past cap")),
+    )
+
+    assert wake_and_deliver("uuid-full", "wake") == (False, "spawn-exit-78")
 
 
 def test_fork_refusal_tokens_unchanged(monkeypatch):

@@ -6193,14 +6193,28 @@ def wake_and_deliver(
             # respawn failed or the revived session did not accept the inject within
             # the probe budget -> fall through to the fork rung.
 
+    spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
+    route_provider = (
+        getattr(entry, "provider", None)
+        if entry is not None and getattr(entry, "route_settings_path", None)
+        else None
+    )
+    from fno.agents.spawn_gate import GateRefused, run_gate
+
+    gate = None
     try:
+        if route_provider is not None:
+            gate = run_gate(spawn_name, "bg", route_provider=route_provider)
         result = dispatch_spawn(
-            name=f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}",
+            name=spawn_name,
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
+            route_provider=route_provider,
         )
+    except GateRefused as exc:
+        return False, f"spawn-exit-{exc.code}"
     except DispatchAskError as exc:
         # Exit 11 is the writer claim refusing: another writer holds the
         # transcript, so the session is not actually asleep. Exit 2 is the name
@@ -6214,6 +6228,9 @@ def wake_and_deliver(
         return False, f"spawn-exit-{exc.exit_code}"
     except (OSError, RuntimeError) as exc:
         return False, f"spawn-error-{type(exc).__name__}"
+    finally:
+        if gate is not None:
+            gate.release()
 
     short = getattr(result, "short_id", None) or getattr(result, "name", "") or "unknown"
     # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
