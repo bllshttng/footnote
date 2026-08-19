@@ -8000,6 +8000,11 @@ enum BoundedRun {
     Stdout(Vec<u8>),
     TimedOut(std::time::Duration),
     SpawnFailed,
+    /// `try_wait()` itself errored (e.g. a concurrent reap of the group
+    /// leader) - the bound was never reached, so this must stay distinct
+    /// from `TimedOut` or a wait failure would misreport as "timed out
+    /// after 0s", naming a hang that never happened.
+    WaitFailed,
 }
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
@@ -8046,26 +8051,39 @@ fn run_bounded(
     });
     let mut stderr_pipe = child.stderr.take();
     let stderr_drain = std::thread::spawn(move || {
+        // Nothing reads this back (the caller only wants stdout) - drain to
+        // sink rather than a growing Vec so an unbounded stderr write
+        // doesn't buy an unbounded allocation for bytes no one inspects.
         if let Some(ref mut p) = stderr_pipe {
-            let mut buf = Vec::new();
-            let _ = p.read_to_end(&mut buf);
+            let _ = std::io::copy(p, &mut std::io::sink());
         }
     });
 
+    enum Outcome {
+        Done,
+        TimedOut,
+        WaitFailed,
+    }
+
     let start = std::time::Instant::now();
-    let timed_out = loop {
+    let outcome = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break false,
+            Ok(Some(_)) => break Outcome::Done,
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     kill_process_group(&mut child);
-                    break true;
+                    break Outcome::TimedOut;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(_) => {
+                // The bound was never reached - this is NOT a timeout, and
+                // must not be reported as one (that would name a hang that
+                // never happened). Still kill the group: an error mid-wait
+                // leaves the child's liveness unknown, and a stray survivor
+                // must not outlive this call.
                 kill_process_group(&mut child);
-                break true;
+                break Outcome::WaitFailed;
             }
         }
     };
@@ -8074,13 +8092,15 @@ fn run_bounded(
     // that forks) so the drain threads see EOF either way.
     killpg(pgid);
 
-    if timed_out {
-        return BoundedRun::TimedOut(start.elapsed());
+    match outcome {
+        Outcome::TimedOut => BoundedRun::TimedOut(start.elapsed()),
+        Outcome::WaitFailed => BoundedRun::WaitFailed,
+        Outcome::Done => {
+            let stdout = stdout_drain.join().unwrap_or_default();
+            let _ = stderr_drain.join();
+            BoundedRun::Stdout(stdout)
+        }
     }
-
-    let stdout = stdout_drain.join().unwrap_or_default();
-    let _ = stderr_drain.join();
-    BoundedRun::Stdout(stdout)
 }
 
 /// Run `fno plan fidelity --json` for the bound plan and classify the decision.
@@ -8104,7 +8124,7 @@ fn evaluate_plan_fidelity(
     };
     match run_bounded(fno_bin, &["plan", "fidelity", plan, "--json"], cwd, timeout) {
         BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
-        BoundedRun::SpawnFailed => FidelityGate::Absent,
+        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
                 "plan fidelity check timed out after {}s running `{} plan fidelity {} --json` \
