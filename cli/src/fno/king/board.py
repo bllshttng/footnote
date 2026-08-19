@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
+from fno.pr._status import _classify, _latest_per_name
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
 #: rank up; a king that dispatched p2 would spend the fleet on the wrong thing.
@@ -427,8 +428,6 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
         # conclusion into one flat set poisons that set with the stale result.
         # A body gate that re-ran green then still read red here, twice, the
         # night this was measured (x-b130).
-        from fno.pr._status import _classify, _latest_per_name
-
         deduped = _latest_per_name(pr.get("statusCheckRollup") or [])
         classes = {_classify(c) for c in deduped}
         if "fail" in classes:
