@@ -159,7 +159,8 @@ async fn ensure_daemon_with_budgets(
             if !status.success() {
                 return Err(ClientError::DaemonExitedEarly(status));
             }
-            return if wait_for_daemon_answer(home, remaining).await {
+            let remaining_after_exit = start_budget.saturating_sub(start.elapsed());
+            return if wait_for_daemon_answer(home, remaining_after_exit).await {
                 Ok(())
             } else {
                 Err(ClientError::DaemonStartTimeout(start_budget))
@@ -173,13 +174,20 @@ async fn ensure_daemon_with_budgets(
     if wait_for_daemon_answer(home, answer_budget).await {
         return Ok(());
     }
-    if let Some(status) = child.try_wait()? {
-        if !status.success() {
+    match child.try_wait()? {
+        Some(status) if !status.success() => {
             return Err(ClientError::DaemonExitedEarly(status));
         }
-    } else {
-        child.kill().await?;
-        let _ = child.wait().await?;
+        Some(_) => {}
+        None => match child.kill().await {
+            Ok(()) => {
+                let _ = child.wait().await?;
+            }
+            Err(error) => match child.try_wait()? {
+                Some(_) => {}
+                None => return Err(error.into()),
+            },
+        },
     }
     Err(ClientError::DaemonStartTimeout(start_budget))
 }
