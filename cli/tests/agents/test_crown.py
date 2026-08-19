@@ -712,6 +712,71 @@ def test_rescope_names_subordinates_stranded_by_the_move(
     assert (row.crown_level, row.crown_scope) == (1, "alpha")
 
 
+def test_no_op_rescope_reports_no_strands(tmp_path: Path, monkeypatch) -> None:
+    """A re-scope onto the same territory strands nobody: vacated and new are
+    the same territory, so the report is [] even with a live subordinate
+    inside it."""
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    sub = _entry(
+        "sub",
+        harness_session_id="sub-session",
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="king",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [king, sub])
+
+    result = _invoke_crown("king", "--scope", "a")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["stranded_subordinates"] == []
+
+
+def test_widening_rescope_keeps_contained_subordinates_out_of_the_report(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A widened scope still contains what the old one did, so a subordinate
+    inside the old territory is not stranded by the move."""
+    from fno import paths
+
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    sub = _entry(
+        "sub",
+        harness_session_id="sub-session",
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="king",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [king, sub])
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "e-1", "type": "epic", "project": "alpha"}]}),
+        encoding="utf-8",
+    )
+
+    result = _invoke_crown("king", "--scope", "alpha", "--scope", "beta")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["stranded_subordinates"] == []
+
+
 def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     tmp_path: Path, monkeypatch
 ) -> None:

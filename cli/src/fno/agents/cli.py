@@ -3098,10 +3098,11 @@ def cmd_rm(
         help=(
             "Drop the registry entry even when the row is LIVE or the harness "
             "teardown fails or refuses (e.g. uncommitted worktree changes). "
-            "The process survives for bg and headless rows; a mux-hosted pane "
-            "is killed with it. WARNING: leaves an orphan session record in "
-            "that harness's own store, named on stderr, for you to clean "
-            "manually."
+            "The Rust route (the default) kills a mux-hosted pane with it, "
+            "but still refuses a live pane worker it cannot stop; the Python "
+            "route drops the row only. The process survives for bg and "
+            "headless rows. WARNING: leaves an orphan session record in that "
+            "harness's own store, named on stderr, for you to clean manually."
         ),
     ),
 ) -> None:

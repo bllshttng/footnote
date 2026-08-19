@@ -458,19 +458,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 f"  end the holder        fno agents stop {holder.name}, then retry"
             )
 
-        # A re-scope can strand subordinates: a crown granted out of the OLD
-        # territory keeps reigning after its grantor moves, holding authority
-        # the new scope no longer contains. Containment is enforced at grant
-        # time only (grant_error), so name the stranded rows in the receipt
-        # rather than letting the move pass silently.
-        stranded_subordinates = [
-            row.name
-            for row in rows
-            if row.name != target.name
-            and row.status not in TERMINAL_STATUSES
-            and scope_contains(vacated_scope, row.crown_scope)
-        ]
-
         for index, row in enumerate(rows):
             if row.name == target.name:
                 rows[index] = replace(
@@ -487,12 +474,54 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             grantor="human",
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
-            stranded_subordinates=stranded_subordinates,
         )
         return rows
 
     update_registry(_stamp)
+    receipt["stranded_subordinates"] = _stranded_subordinates(
+        receipt["vacated_scope"], scope, target_name
+    )
     return receipt
+
+
+def _stranded_subordinates(
+    vacated: Optional[str], new_scope: str, target_name: str
+) -> Optional[list[str]]:
+    """Live rows whose crown the vacated scope contained and the new one does not.
+
+    Advisory receipt data about a re-scope: containment is enforced at grant
+    time only, so a crown granted out of the old territory keeps reigning
+    after its grantor moves away. Two deliberate answers beyond the list:
+
+    ``[]`` on a no-op or widening move, where no territory actually left the
+    new scope. ``None`` when the check could not run (graph unreadable, or an
+    external tracker backend) - which is not the same answer as ``[]``, or the
+    receipt would read as "verified no strands" on a machine it could not
+    check. Computed by the caller AFTER the registry write returns, so no
+    graph I/O runs under the registry lock.
+    """
+    if _same_territory(vacated, new_scope):
+        return []
+    from fno.tracker.metadata import read_entries
+
+    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+
+    try:
+        # Availability probe: raises ExternalMetadataUnavailable under an
+        # external tracker backend, where per-row containment checks would
+        # silently degrade to "not contained".
+        read_entries("agents.crown")
+        rows = load_registry()
+    except Exception:
+        return None
+    return [
+        row.name
+        for row in rows
+        if row.name != target_name
+        and row.status not in TERMINAL_STATUSES
+        and scope_contains(vacated, row.crown_scope)
+        and not scope_contains(new_scope, row.crown_scope)
+    ]
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
