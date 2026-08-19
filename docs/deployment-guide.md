@@ -170,39 +170,7 @@ python scripts/sync-codex-agents.py
 
 ### Codex Bootstrap Check
 
-The repository includes a GitHub Actions workflow at `.github/workflows/codex-bootstrap-check.yml`:
-
-```yaml
-name: Codex Bootstrap Check
-
-on:
-  pull_request:
-  push:
-    branches:
-      - main
-
-jobs:
-  codex-bootstrap:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
-      - name: Run Codex setup (no package setup)
-        run: |
-          bash scripts/setup.sh --provider codex --skip-package-setup
-
-      - name: Run doctor checks
-        run: |
-          bash scripts/doctor.sh
-```
-
-This workflow validates that the plugin bootstraps correctly on a clean Ubuntu environment with Codex as the provider.
+The Codex bootstrap check (setup + doctor on a clean Ubuntu environment with Codex as the provider) runs as the "Run Codex setup (no package setup)" / "Run doctor checks" steps inside `.github/workflows/guards.yml`'s `guards` job, consolidated there with 10 other structural guards (x-b130). It validates that the plugin bootstraps correctly with Codex as the provider.
 
 ### Adding your own CI checks
 
