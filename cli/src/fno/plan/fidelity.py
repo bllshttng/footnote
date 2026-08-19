@@ -87,6 +87,22 @@ def compute_plan_fidelity(
         rows = []
     graph_nodes = _load_graph_nodes()
 
+    # Scope the join to this ONE plan before the fold ever runs (x-8ad8): the
+    # ledger is global (thousands of rows across every plan ever shipped), and
+    # the fold's fidelity scoring shells a real `gh pr diff` per joined
+    # delivery to score it. Folding the unfiltered ledger fired that network
+    # call once per joined row IN THE WHOLE LEDGER, serially, then threw away
+    # every result but this plan's - a single-plan query paying for the
+    # entire ledger's network fan-out, which is how it went from slow to
+    # "never returns". Reuse the SAME remote-slug derivation the ledger stamps
+    # row.project with (paths._slug_from_git_remote), not a checkout
+    # basename, so a worktree resolves to the repo's real project and not its
+    # worktree folder name; and the join is scoped to this repo since
+    # _plan_key's tail alone can match a foreign project's same-tail plan.
+    project = _paths._slug_from_git_remote(Path(repo_root) if repo_root else None)
+    target = _plan_key(plan_path, project)
+    rows = [r for r in rows if _plan_key(r.get("plan_path"), r.get("project")) == target]
+
     pf = build_plan_fidelity(
         rows, graph_nodes, since_days=since_days, now=now, unmeasurable="refuse"
     )
@@ -94,13 +110,9 @@ def compute_plan_fidelity(
         # No planned rows in window: nothing to measure, nothing to refuse.
         return _passthrough(planned=0, delivered=0)
 
-    # Scope the join to this repo: the ledger is global, and _plan_key's tail
-    # alone can match a foreign project's same-tail plan. Reuse the SAME
-    # remote-slug derivation the ledger stamps row.project with
-    # (paths._slug_from_git_remote), not a checkout basename, so a worktree
-    # resolves to the repo's real project and not its worktree folder name.
-    project = _paths._slug_from_git_remote(Path(repo_root) if repo_root else None)
-    target = _plan_key(plan_path, project)
+    # Re-check the same key on the fold's own output: the pre-filter above is
+    # what makes this fast, this re-check is what keeps it correct regardless
+    # of what the fold does with its input.
     plan_rows = [
         r for r in pf["results"]
         if _plan_key(r.get("plan_path"), r.get("project")) == target
