@@ -475,31 +475,14 @@ def test_quota_skip_defers_the_catchup_leg(monkeypatch):
     assert "degraded: 2 sweep failure(s)" in res.output
 
 
-class _FakeCatchupTracker:
-    """A minimal NodeTracker fake: only ``list_open`` is exercised here."""
-
-    def __init__(self, ids, *, fail=False):
-        self._ids = ids
-        self._fail = fail
-
-    def list_open(self):
-        from fno.tracker.types import TrackerCandidate, TrackerState
-
-        if self._fail:
-            raise RuntimeError("corrupt")
-        return [
-            TrackerCandidate(id=i, title=None, state=TrackerState.open)
-            for i in self._ids
-        ]
-
-
 def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
     """launchd starts the daemon in `/`, so there is no ambient project.
 
     A bare load_settings() there reads global config, where post_merge is
-    unset - which silently disabled this whole leg. Roots come from the open
-    tracker set joined with each id's sidecar cwd (task 2.1's guarded seam),
-    not a direct graph.json read.
+    unset - which silently disabled this whole leg. Roots come from every
+    sidecar's cwd via one ``load_all()`` scan (task 2.1's guarded seam), not
+    a direct graph.json read, and not filtered to open tracker state - a
+    project whose nodes are all done/closed must still get swept.
     """
     import json
 
@@ -522,22 +505,20 @@ def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
             payload["cwd"] = cwd
         (sidecar_dir / f"{node_id}.json").write_text(json.dumps(payload))
     monkeypatch.setattr(
-        "fno.tracker.get_tracker", lambda *a, **k: _FakeCatchupTracker(list(rows))
-    )
-    monkeypatch.setattr(
         sidecar_store, "sidecar_path", lambda i: sidecar_dir / f"{i}.json"
     )
     monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     assert pw._catchup_roots() == [alpha]
 
 
-def test_catchup_roots_survive_an_unreadable_tracker(monkeypatch):
+def test_catchup_roots_survive_an_unreadable_sidecar_store(monkeypatch):
     from fno.pr_watch import cli as pw
+    from fno.tracker import sidecar as sidecar_store
 
-    monkeypatch.setattr(
-        "fno.tracker.get_tracker",
-        lambda *a, **k: _FakeCatchupTracker([], fail=True),
-    )
+    def _blow_up():
+        raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(sidecar_store, "load_all", _blow_up)
     assert pw._catchup_roots() == []
 
 
