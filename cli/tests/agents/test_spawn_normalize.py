@@ -386,3 +386,94 @@ def test_implied_bg_substrate_splices_before_the_fence():
     out = _norm(["spawn", "-r", UUID, "--", "--flag seed"])
     assert out.index("--substrate") < out.index("--")
     assert out[out.index("--substrate") + 1] == "bg"
+
+
+# --- x-b80d: a node-driven spawn mints t-<node>-<slug>-<model> ----------------
+
+def test_node_spawn_mints_provenance_name():
+    # The registry row's NAME is the only node carrier, so the mint must put
+    # the node and slug there: t-x919-sentinel-arms-glm52.
+    out = _norm(
+        ["spawn", "--node", "x919", "--slug", "sentinel-arms", "--model", "glm-5.2", "go"]
+    )
+    assert out[1:3] == ["--name", "t-x919-sentinel-arms-glm52"]
+    assert out[3:] == ["--node", "x919", "--slug", "sentinel-arms", "--model", "glm-5.2", "go"]
+
+
+def test_node_spawn_model_tag_comes_from_route_when_no_model():
+    # --route <vendor>,<model>: the model half feeds the tag.
+    out = _norm(
+        ["spawn", "--node", "x919", "--slug", "arms", "--route", "zai,glm-5.2", "go"]
+    )
+    assert out[2] == "t-x919-arms-glm52"
+
+
+def test_node_spawn_route_slash_spelling_also_feeds_the_tag():
+    # provider/model is the canonical route spelling; the legacy comma is the
+    # alias. Both must yield the model tag.
+    out = _norm(
+        ["spawn", "--node", "x919", "--slug", "arms", "--route", "zai/glm-5.2", "go"]
+    )
+    assert out[2] == "t-x919-arms-glm52"
+
+
+def test_node_spawn_re_spawn_suffixes_the_taken_name():
+    # The mint is deterministic; a name already held by a live worker gets a
+    # numeric suffix instead of a dispatcher refusal (a re-spawn on one node
+    # is the two-worker implement+review shape).
+    argv = ["spawn", "--node", "x919", "--slug", "arms", "--model", "glm-5.2", "go"]
+    first = _norm(argv, existing_names=set())
+    assert first[2] == "t-x919-arms-glm52"
+    second = _norm(argv, existing_names={"t-x919-arms-glm52"})
+    assert second[2] == "t-x919-arms-glm52-2"
+    third = _norm(argv, existing_names={"t-x919-arms-glm52", "t-x919-arms-glm52-2"})
+    assert third[2] == "t-x919-arms-glm52-3"
+
+
+def test_node_spawn_without_model_omits_the_tag():
+    out = _norm(["spawn", "--node", "x919", "--slug", "arms", "go"])
+    assert out[2] == "t-x919-arms"
+
+
+def test_explicit_name_still_wins_over_the_node_mint():
+    argv = ["spawn", "--node", "x919", "--name", "mine", "go"]
+    assert _norm(argv) == argv  # untouched; the mint never fires
+
+
+def test_nodeless_spawn_mints_adjective_noun_exactly_as_today():
+    out = _norm(["spawn", "go"])
+    assert out[1] == "--name" and out[3] == "go"
+    name = out[2]
+    from fno.agents import spawn_defaults as sd
+
+    assert name in {f"{a}-{n}" for a in sd._SLUG_ADJ for n in sd._SLUG_NOUN}
+
+
+def test_graph_read_failure_falls_back_to_adjective_noun(monkeypatch):
+    # A spawn must never die on a naming lookup: the graph read raising falls
+    # back to the plain adjective-noun mint, not a refusal, not a t-<node>
+    # name built on an unresolved identity.
+    import fno.graph.load as gl
+
+    def _raise():
+        raise RuntimeError("graph unreadable")
+
+    monkeypatch.setattr(gl, "load_graph", _raise)
+    out = _norm(["spawn", "--node", "x919", "--slug", "arms", "go"])
+    from fno.agents import spawn_defaults as sd
+
+    assert out[2] in {f"{a}-{n}" for a in sd._SLUG_ADJ for n in sd._SLUG_NOUN}
+
+
+def test_graph_read_supplies_the_slug_when_flag_absent(monkeypatch):
+    # --slug omitted: the best-effort graph read fills id + slug, and a slug
+    # input normalizes to the canonical id.
+    import fno.graph.load as gl
+
+    monkeypatch.setattr(
+        gl,
+        "load_graph",
+        lambda: [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}],
+    )
+    out = _norm(["spawn", "--node", "x-919abcd", "--model", "glm-5.2", "go"])
+    assert out[2] == "t-x-919abcd-sentinel-arms-glm52"

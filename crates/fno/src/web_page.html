@@ -156,7 +156,13 @@
     const byPane = new Map();
     for (const a of agents) if (a.pane_id != null) byPane.set(a.pane_id, a);
     const ids = [...new Set([...frames.keys(), ...byPane.keys()])].sort((x, y) => x - y);
-    if (current == null && ids.length) current = ids[0];
+    if (current == null && ids.length) {
+      // A pending pane-link want outranks the first-known id: the Layout that
+      // reaches here BEFORE any frame would otherwise steal the paint from
+      // the wanted pane (renderPicker runs on Layout too, not just frames).
+      if (wanted != null && frames.has(wanted)) { current = wanted; wanted = null; }
+      else if (wanted == null) current = ids[0];
+    }
     picker.innerHTML = "";
     if (!ids.length) {
       const span = document.createElement("span");
@@ -204,7 +210,14 @@
         dirtyPicker = true;
       }
       if (upstreamUp) setBar("live", "live");
-      if (current == null) { current = pane_id; dirtyPicker = true; }
+      if (wanted != null && wantedSince > 0 && Date.now() - wantedSince > 3000) wanted = null;
+      if (current == null) {
+        // A pasted pane link pins the first paint. Keep waiting for THAT
+        // pane's frame - a different pane landing first must not steal the
+        // paint (codex P1). Only with no want does the first frame win.
+        if (wanted != null && frames.has(wanted)) { current = wanted; wanted = null; dirtyPicker = true; }
+        else if (wanted == null) { current = pane_id; dirtyPicker = true; }
+      }
       if (dirtyPicker) renderPicker();
       if (pane_id === current) draw();
       return;
@@ -217,9 +230,12 @@
       // the picker (a plain non-agent pane's death is invisible without a proto
       // signal, so it ages out via the LRU cap instead).
       for (const a of agents) {
-        if (a.exited && a.pane_id != null && frames.has(a.pane_id)) {
+        if (a.exited && a.pane_id != null) {
           frames.delete(a.pane_id);
           if (a.pane_id === current) current = null;
+          // A wanted pane that died before painting: stop waiting for it so
+          // the page falls back to the first frame to land.
+          if (a.pane_id === wanted) wanted = null;
         }
       }
       renderPicker();
@@ -232,6 +248,13 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
+  // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
+  // instead of whichever frame lands first, then clear the want so the operator
+  // can still switch panes by hand afterwards. A want that never paints
+  // (renumbered or dead pane) is dropped after 3s so the page still opens.
+  let wanted = new URLSearchParams(location.search).get("pane");
+  let wantedSince = 0;
+  if (wanted != null) { wanted = parseInt(wanted, 10); if (Number.isNaN(wanted)) wanted = null; if (wanted != null) wantedSince = Date.now(); }
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`);

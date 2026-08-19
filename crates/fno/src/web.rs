@@ -98,6 +98,73 @@ struct AppState {
     tx: broadcast::Sender<String>,
     snap: Arc<Mutex<Snapshot>>,
     token: Arc<str>,
+    /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
+    /// complete: an open browser tab holds a connection that never closes on
+    /// its own, so without this arm the bridge hangs past the signal and the
+    /// state-file Drop the hook exists to guarantee never runs.
+    shutdown: tokio::sync::watch::Receiver<bool>,
+}
+
+/// The bridge's live-state marker (x-b80d): `web-<session>.json` beside the
+/// session socket, holding the bind/port/token the bind-time print showed
+/// once. Written 0600 (the token is the only URL guard); removed by `Drop`
+/// on every exit path. A SIGKILLed bridge leaves it behind - the reader
+/// (`mux_cli::print_pane_url`) probes the TCP port, so a corpse file reads
+/// as "no bridge", never as a dead URL.
+struct WebStateFile(PathBuf);
+
+impl WebStateFile {
+    fn write(socket: &Path, bind: &str, port: u16, token: &str) -> Option<Self> {
+        let session = socket
+            .file_stem()
+            .and_then(|s| s.to_str())
+            // socket_path() names the file <session>.sock; the stem is the name.
+            .unwrap_or(proto::DEFAULT_SESSION);
+        let path = socket.parent()?.join(format!("web-{session}.json"));
+        // `pid` makes the file's ownership checkable: two bridges may share a
+        // session on different ports, the later bind owns the file, and an
+        // exiting OLDER bridge must not delete the newer one's state (codex P2).
+        let body = serde_json::json!({
+            "bind": bind,
+            "port": port,
+            "token": token,
+            "pid": std::process::id(),
+        });
+        let wrote = {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut f: std::fs::File| f.write_all(body.to_string().as_bytes()))
+        };
+        match wrote {
+            Ok(()) => Some(WebStateFile(path)),
+            Err(e) => {
+                eprintln!("fno mux serve --web: cannot record bridge state: {e}");
+                None
+            }
+        }
+    }
+}
+
+impl Drop for WebStateFile {
+    fn drop(&mut self) {
+        // Remove only the file that still names THIS process. A newer bridge
+        // for the same session overwrote it at its own bind; deleting that
+        // one would make a live bridge read as absent.
+        let still_ours = std::fs::read_to_string(&self.0)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
+            == Some(std::process::id() as u64);
+        if still_ours {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 }
 
 /// Entry point for the `mux serve --web` role. Owns its own runtime like the
@@ -178,14 +245,37 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
             "  bound to all interfaces - reach it over tailscale/LAN; the URL token is the only guard."
         );
     }
+    // (x-b80d) Record the live bridge so `mux view <selector> --url` can
+    // recover the URL after this one print. A write failure only costs the
+    // --url door (it reports "no web bridge"), never the bridge itself; a
+    // file left behind by a killed bridge is inert because the reader probes
+    // the port before trusting it. Removed on every exit path via Drop.
+    let _state_guard = WebStateFile::write(&socket, &args.bind, args.port, &token);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let state = AppState { tx, snap, token };
+    let state = AppState {
+        tx,
+        snap,
+        token,
+        shutdown: shutdown_rx,
+    };
     let app = Router::new()
         .route("/", get(page))
         .route("/ws", get(ws_handler))
         .with_state(state);
 
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            // Ctrl-C is the NORMAL way a bridge ends. Without this hook the
+            // process dies straight to the signal, no Drop runs, and the
+            // state file outlives its bridge (x-b80d). Firing the watch makes
+            // every ws loop close its tab first, so graceful shutdown can
+            // actually complete instead of waiting out an open connection.
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = shutdown_tx.send(true);
+        })
+        .await
+    {
         eprintln!("fno mux serve --web: server error: {e}");
         return 1;
     }
@@ -448,6 +538,7 @@ async fn ws_conn(mut socket: WebSocket, st: AppState) {
     }
 
     loop {
+        let mut shutdown = st.shutdown.clone();
         tokio::select! {
             r = rx.recv() => match r {
                 Ok(json) => {
@@ -465,6 +556,15 @@ async fn ws_conn(mut socket: WebSocket, st: AppState) {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
                 Some(Ok(_)) => {}
             },
+            _ = shutdown.changed() => {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::NORMAL,
+                        reason: "bridge shutting down".into(),
+                    })))
+                    .await;
+                return;
+            }
         }
     }
 }

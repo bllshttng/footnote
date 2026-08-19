@@ -236,6 +236,94 @@ def _mint_slug(existing: Set[str], rng: random.Random, err: IO[str]) -> str:
     raise SystemExit(2)
 
 
+def _head_flag_value(head: Sequence[str], flags: Tuple[str, ...]) -> Optional[str]:
+    """Read one flag's value from a pre-fence head (``--flag v``, ``--flag=v``,
+    ``-f v``, ``-f v`` attached). Skips every other value flag's value so it
+    cannot misread one, mirroring ``_scan``. First occurrence wins."""
+    it = iter(head)
+    for a in it:
+        if a in ("--argv", "--"):
+            break
+        key, eq, val = a.partition("=")
+        if key in flags:
+            return val if eq else next(it, None) or None
+        # Short attached form: -m<value> (no long-flag starts with a single dash).
+        if (
+            not eq
+            and len(a) > 2
+            and not a.startswith("--")
+            and a[:2] in flags
+        ):
+            return a[2:]
+        if key in _SPAWN_VALUE_FLAGS and not eq:
+            next(it, None)
+    return None
+
+
+def _model_tag(model: Optional[str]) -> Optional[str]:
+    """The short per-model name tag: lowercase, every non-alphanumeric stripped
+    (``glm-5.2`` -> ``glm52``). Kept short by hand rather than via
+    ``slug_component`` so the tag never spends the name budget on hyphens."""
+    if not model:
+        return None
+    return re.sub(r"[^a-z0-9]", "", model.lower()) or None
+
+
+def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort graph read of a node's canonical id and slug.
+
+    Returns ``(node_id, slug)``; a slug input normalizes to the id, like
+    ``resolve_provenance``. Raises whatever the graph read raises - the CALLER
+    decides the fallback, because a spawn must never die on a naming lookup.
+    """
+    from fno.graph.load import load_graph
+
+    for rec in load_graph():
+        if rec.get("id") == node or rec.get("slug") == node:
+            return rec.get("id") or node, rec.get("slug") or None
+    return node, None
+
+
+def _mint_node_name(
+    node: str,
+    slug_flag: Optional[str],
+    model: Optional[str],
+    existing: Optional[Set[str]] = None,
+) -> Optional[str]:
+    """The ``t-<node>-<slug>-<model>`` mint for a node-driven spawn (x-b80d).
+
+    Routes through :func:`fno.agents.naming.agent_name` - the single owner of
+    the 64-char budget - with the model tag as discriminator. The mint is
+    deterministic, so a name already taken by a live worker gets a ``-2``,
+    ``-3``... suffix (the same collision-avoidance the adjective-noun mint
+    retries for): a re-spawn on one node must not turn into a refusal. Any
+    failure (graph read, budget, contract) returns ``None`` so pass 3 falls
+    back to the adjective-noun mint: a spawn must never die on a naming lookup.
+    """
+    from fno.agents.naming import AgentNameError, agent_name
+
+    try:
+        node_id, slug = _node_slug_from_graph(node)
+    except Exception:
+        return None
+    if slug_flag:
+        slug = slug_flag
+    try:
+        name = agent_name(
+            "t", node_id or node, slug=slug, discriminator=_model_tag(model)
+        )
+    except AgentNameError:
+        return None
+    if existing and name in existing:
+        for n in range(2, 6):
+            if len(name) + len(str(n)) + 1 > 64:
+                return None
+            if f"{name}-{n}" not in existing:
+                return f"{name}-{n}"
+        return None
+    return name
+
+
 def _read_registry_names() -> Set[str]:
     """Live worker names for the autogen pre-check. Best-effort: {} on any error."""
     try:
@@ -396,8 +484,28 @@ def normalize_spawn_args(
     head = toks if fence is None else toks[:fence]
     if not any(t == "--name" or t.startswith("--name=") for t in head):
         names = existing_names if existing_names is not None else _read_registry_names()
-        slug = _mint_slug(names, rng if rng is not None else random.Random(), err)
-        toks = ["--name", slug, *toks]
+        # x-b80d: a node-driven spawn carries what an operator remembers. The
+        # name is the registry row's ONLY node carrier, so a nodeless mint makes
+        # the row unfindable by node or slug. Mint ``t-<node>-<slug>-<model>``
+        # through the canonical owner when --node is present; any lookup
+        # failure falls back to the adjective-noun mint, never a refusal.
+        node = _head_flag_value(head, ("--node",))
+        minted: Optional[str] = None
+        if node:
+            slug_flag = _head_flag_value(head, ("--slug",))
+            model = _head_flag_value(head, _MODEL_FLAGS)
+            if not model:
+                route = _head_flag_value(head, ("--route",))
+                # Canonical route spelling is provider/model (comma is
+                # legacy); take the model half of either.
+                model = (
+                    route.replace(",", "/").rsplit("/", 1)[1].strip()
+                    if route and ("/" in route or "," in route)
+                    else None
+                )
+            minted = _mint_node_name(node, slug_flag, model, names)
+        name = minted or _mint_slug(names, rng if rng is not None else random.Random(), err)
+        toks = ["--name", name, *toks]
     extra = _positional_indices(toks)
     if len(extra) > 1:
         print(
