@@ -95,6 +95,24 @@ def _events(root: Path) -> list[dict]:
     ]
 
 
+def _write_decision_index(index: Path, *rows: dict) -> None:
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "type": "operator_decision",
+                    "ts": row.pop("ts"),
+                    "data": row,
+                }
+            )
+            + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path, index: Path):
     """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
@@ -357,6 +375,128 @@ def test_limit_caps_the_newest_and_zero_means_no_cap(
         ).stdout
     )
     assert len(uncapped["decisions"]) == 4
+
+
+@pytest.mark.parametrize(
+    "authority,ts,question_id,expected",
+    [
+        ("operator", "2026-08-21T00:00:01Z", None, "law"),
+        ("operator", "2026-08-20T23:59:59Z", "q-human", "unattributed"),
+        ("agent", "2026-08-20T23:59:59Z", None, "coord"),
+        ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
+        ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
+    ],
+    ids=["post-cutover-law", "legacy-question", "coord", "grant", "legacy"],
+)
+def test_list_derives_and_filters_authority_lanes_in_the_engine(
+    index: Path,
+    authority: str,
+    ts: str,
+    question_id: str | None,
+    expected: str,
+):
+    from fno.decide import list_decisions
+
+    row = {
+        "ts": ts,
+        "decision_id": f"d-{expected}",
+        "subject": "pr-923",
+        "decision": f"{expected} ruling",
+        "decided_by": "someone",
+        "authority_source": authority,
+    }
+    if question_id:
+        row["question_id"] = question_id
+    _write_decision_index(index, row)
+
+    _, decisions, _ = list_decisions("pr-923", lane=expected)
+    assert [d["lane"] for d in decisions] == [expected]
+    _, excluded, _ = list_decisions("pr-923", lane="unattributed" if expected != "unattributed" else "law")
+    assert excluded == []
+
+
+@pytest.mark.parametrize(
+    "authority,ts,question_id,marker",
+    [
+        ("operator", "2026-08-21T00:00:01Z", None, "LAW"),
+        ("agent", "2026-08-20T23:59:59Z", None, "coord"),
+        ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
+        ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
+    ],
+)
+def test_human_render_leads_with_the_authority_lane(
+    index: Path,
+    authority: str,
+    ts: str,
+    question_id: str | None,
+    marker: str,
+):
+    row = {
+        "ts": ts,
+        "decision_id": "d-render",
+        "subject": "pr-923",
+        "decision": "render me",
+        "decided_by": "someone",
+        "authority_source": authority,
+    }
+    if question_id:
+        row["question_id"] = question_id
+    _write_decision_index(index, row)
+
+    rendered = runner.invoke(decide_app, ["list", "--subject", "pr-923"])
+    assert rendered.exit_code == 0, rendered.output
+    assert rendered.stdout.startswith(f"{marker}  d-render")
+
+
+def test_json_rows_carry_the_derived_lane(index: Path):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-20T23:59:59Z",
+            "decision_id": "d-json",
+            "subject": "pr-923",
+            "decision": "coordinate",
+            "decided_by": "worker",
+            "authority_source": "agent",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "coord", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["decisions"][0]["lane"] == "coord"
+
+
+def test_legacy_operator_rows_stay_byte_identical_and_empty_law_is_positive(
+    index: Path,
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-20T23:59:59Z",
+            "decision_id": "d-legacy",
+            "subject": "pr-923",
+            "decision": "old writer stamped this operator",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    before = index.read_bytes()
+
+    legacy = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "unattributed"]
+    )
+    assert legacy.exit_code == 0, legacy.output
+    assert legacy.stdout.startswith("unattributed  d-legacy")
+
+    law = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "law"]
+    )
+    assert law.exit_code == 0, law.output
+    assert "0 law decisions" in law.output
+    assert "1 pre-cutover decision remains unattributed" in law.output
+    assert index.read_bytes() == before
 
 
 # --- reindex: the records already on disk become readable -------------------

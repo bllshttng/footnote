@@ -10,6 +10,7 @@ fno decide --subject pr-1234 --decision "recall moves to a machine-wide index" \
   --option "global journal" --option "machine-wide index"
 
 fno decide list --subject pr-1234  # newest first, superseded rows marked
+fno decide list --lane law         # only operator-entitled rulings
 fno decide list                    # the recent decisions across every subject
 fno decide reindex                 # backfill records written before the index
 ```
@@ -19,6 +20,12 @@ fno decide reindex                 # backfill records written before the index
 `fno decide` records a ruling that has no question on file. `fno outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
+
+## Authority lanes
+
+Every read derives an authority lane in the engine, so the human and JSON surfaces cannot disagree: `operator` authority is `law`, `agent` authority is `coord`, and `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+
+The fixed cutover is `2026-08-21T00:00:00Z`, chosen to safely postdate every row produced by the old deployed writer. Before that point the writer stamped agent coordination as `operator`, so every pre-cutover operator-shaped row renders as `unattributed`, including rows that answered a question. This deliberately creates a narrow transition window in which a genuine operator ruling is not called law. That under-claim is safer than fabricating authority, and the append-only index is never rewritten. After the cutover, the engine guard makes `operator` an earned value, so new operator rows are law even without a question.
 
 There is no new recording gate, and none is needed. `crates/fno-agents/src/loopcheck.rs` already holds a session that closed its own question with an answer and emitted no matching decision. Its refusal already names the verb. That gate is starved, not missing: only two `operator_question` events exist across 194,109 events.
 

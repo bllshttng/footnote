@@ -161,6 +161,12 @@ def list_cmd(
     limit: int = typer.Option(
         20, "--limit", help="Most recent N. 0 or less means no cap."
     ),
+    lane: Optional[str] = typer.Option(
+        None,
+        "--lane",
+        metavar="law|coord|grant|unattributed",
+        help="Show only one authority lane.",
+    ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
@@ -169,11 +175,18 @@ def list_cmd(
     from fno.decide import list_decisions
     from fno.tracker.metadata import ExternalMetadataUnavailable
 
+    if lane not in {None, "law", "coord", "grant", "unattributed"}:
+        typer.echo(
+            "decide list: --lane must be law, coord, grant, or unattributed",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     try:
         # No cap on the read. The cap is applied HERE so the total is known,
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
-        label, found, damaged = list_decisions(subject, limit=None)
+        label, found, damaged = list_decisions(subject, limit=None, lane=lane)
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
@@ -214,6 +227,18 @@ def list_cmd(
         # empty answer names the backfill whenever the index is missing.
         from fno.decide import _index_path
 
+        if lane == "law" and _index_path().exists():
+            _, legacy, _ = list_decisions(subject, limit=None, lane="unattributed")
+            if legacy:
+                noun = "decision remains" if len(legacy) == 1 else "decisions remain"
+                typer.echo(
+                    f"decide list: 0 law decisions for '{label}'; "
+                    f"{len(legacy)} pre-cutover {noun} unattributed. "
+                    "Use --lane unattributed to inspect them.",
+                    err=True,
+                )
+                return
+
         hint = (
             "" if _index_path().exists()
             else " (no index yet on this machine - run `fno decide reindex` to "
@@ -228,8 +253,9 @@ def list_cmd(
         # Across subjects the subject IS the column that tells the rows apart;
         # scoped to one it is the same word on every line.
         scope = "" if subject else f"{d.get('subject') or '(none)'}  "
+        lane_marker = "LAW" if d.get("lane") == "law" else d.get("lane", "")
         typer.echo(
-            f"{d.get('decision_id')}  {d.get('ts', '')}  {scope}"
+            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts', '')}  {scope}"
             f"{d.get('decided_by', '')}  {d.get('decision', '')}{marker}"
         )
         if d.get("rationale"):

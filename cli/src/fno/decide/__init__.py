@@ -22,6 +22,11 @@ from typing import Any
 
 DECISION_EVENT = "operator_decision"
 
+# The deployed writer still labelled agent-authored rulings as ``operator``.
+# This safely postdates every row that writer produced during the cutover; the
+# reader refuses to fabricate law from those ambiguous append-only records.
+AUTHORITY_LANE_CUTOVER = "2026-08-21T00:00:00Z"
+
 PROJECTION_FIELDS = (
     "decision_id",
     "decision",
@@ -432,8 +437,24 @@ def _subject_matcher(subject: str):
     return matches
 
 
+def _decision_lane(row: dict) -> str:
+    """Map stored provenance to the authority lane a reader can trust."""
+    authority = str(row.get("authority_source") or "")
+    if authority == "agent":
+        return "coord"
+    if authority == "beastmode":
+        return "grant"
+    if authority == "operator":
+        if str(row.get("ts") or "") >= AUTHORITY_LANE_CUTOVER:
+            return "law"
+        return "unattributed"
+    return "unattributed"
+
+
 def list_decisions(
-    subject: str | None = None, limit: int | None = None
+    subject: str | None = None,
+    limit: int | None = None,
+    lane: str | None = None,
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -479,6 +500,9 @@ def list_decisions(
         row = dict(row)
         winner = superseded_by.get(str(row.get("decision_id")))
         row["superseded_by"] = winner[1] if winner else None
+        row["lane"] = _decision_lane(row)
+        if lane is not None and row["lane"] != lane:
+            continue
         out.append(row)
 
     # decision_id breaks the tie. A stable sort keeps file order for equal
