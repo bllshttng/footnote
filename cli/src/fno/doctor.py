@@ -41,6 +41,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -1572,6 +1573,7 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno setup` to install it."
         )
+    _emit_codex_context_window(result, out=out)
     dupes = surf.get("codex_marketplace_duplicates") or []
     if dupes:
         out(
@@ -1770,6 +1772,251 @@ def _emit_human(
 # ---------------------------------------------------------------------------
 # Command
 # ---------------------------------------------------------------------------
+
+
+def _codex_context_window_report(app_server_present: bool | None = None) -> dict[str, Any]:
+    """What context window a codex thread on the configured model actually gets.
+
+    Codex resolves the window as ``min(config.model_context_window,
+    max_context_window) * effective_context_window_percent / 100``, where both
+    right-hand values come from ``$CODEX_HOME/models_cache.json``.  The TUI
+    footer echoes the CONFIGURED number, so a config asking for 1M reads as 1M
+    while every turn runs smaller - the gap this reports.
+
+    Scope is the model config.toml selects.  ``-m`` and a profile both override
+    it per thread, so this describes the default, never "every thread".
+
+    The cached ``max_context_window`` is served per fetching client - both its
+    surface and its originator, since ``codex exec`` and ``codex app-server``
+    are served differently under one originator - while the cache records
+    neither and every launcher shares one copy.  So the last fetch sets the cap
+    for every thread started since.  That cap is per MODEL, not per file: one
+    fetch here holds gpt-5.6-sol at 272000 beside gpt-5.4 at 1000000, so no
+    single file-wide tier label is truthful.  Read-only.
+
+    A silent path returns a ``reason`` rather than ``{}`` so ``--json`` says
+    which of "nothing to report" and "could not tell" happened."""
+    import tomllib
+
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    try:
+        with (codex_home / "config.toml").open("rb") as handle:
+            config = tomllib.load(handle)
+        cache = json.loads((codex_home / "models_cache.json").read_text())
+    except Exception as exc:  # noqa: BLE001 - doctor stays advisory on an unreadable home
+        return {"reason": f"unreadable-codex-home: {str(exc)[-200:]}"}
+
+    # A `profile` key redirects model selection wholesale, so reading the
+    # top-level `model` past one describes a model no thread runs.  A profile
+    # sets an arbitrary subset though: name the profile key only once that
+    # table actually carried `model`, else the provenance itself is a lie.
+    # The window has the same exposure as the slug: a profile that supplies it
+    # leaves the reader grepping config.toml for a number that is not there.
+    source = "model"
+    window_source = "model_context_window"
+    profile = config.get("profile")
+    if isinstance(profile, str):
+        # A malformed `profiles` (a scalar, or a scalar entry) must return a
+        # reason, not raise: the caller swallows exceptions, which drops the
+        # key from --json and loses the "could not tell" the reason exists for.
+        profiles = config.get("profiles")
+        table = profiles.get(profile) if isinstance(profiles, dict) else None
+        if not isinstance(table, dict):
+            table = {}
+        if "model" in table:
+            source = f"profiles.{profile}.model"
+        if "model_context_window" in table:
+            window_source = f"profiles.{profile}.model_context_window"
+        config = {**config, **table}
+
+    configured = config.get("model_context_window")
+    slug = config.get("model")
+    # TOML allows a bool here, and `isinstance(True, int)` is True, so an
+    # unguarded check reports `model_context_window=True` as a real window.
+    if not isinstance(configured, int) or isinstance(configured, bool):
+        # Deliberately silent.  `overstated` measures a promise the USER wrote
+        # against what runs; with nothing configured there is no such promise,
+        # and what an unconfigured footer displays is unverified here.  Do not
+        # "fix" this into a percent-shrink nag for every codex install.
+        return {"reason": "no-configured-window"}
+    if not isinstance(slug, str):
+        return {"reason": "no-configured-model"}
+    # Same hardening as the profiles branch above: a malformed shape must
+    # return a reason, since the caller swallows a raise and drops the key.
+    models = cache.get("models") if isinstance(cache, dict) else None
+    if not isinstance(models, list):
+        return {"reason": "cache-schema-drift: models"}
+    entry = next(
+        (m for m in models if isinstance(m, dict) and m.get("slug") == slug), None
+    )
+    if entry is None:
+        return {"reason": f"model-not-in-cache: {slug}"}
+    # Accept a float everywhere, not just for the percent.  Rejecting a float
+    # cap silently substitutes the base and reports a clamp that is not real,
+    # which is a false positive in the exact direction this check exists for.
+    cap = entry.get("max_context_window")
+    base = entry.get("context_window")
+    percent = entry.get("effective_context_window_percent")
+    def _number(
+        value: object, *, lo: float, hi: float, keep_float: bool = False
+    ) -> Optional[float]:
+        """The ONE gate every cached number goes through, RANGE INCLUDED.
+
+        Per-field guards were the recurring defect here: bool, then non-finite,
+        then out-of-range each got closed on one field and left open on its
+        neighbour, and every miss either raised into a caller that swallows it
+        or printed an impossible window as fact.  The bounds are arguments, so
+        adding a field cannot forget them.  The int branch returns before any
+        float coercion, because `math.isfinite` coerces and an oversized JSON
+        integer raises `OverflowError` there."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            number: float = value
+        elif isinstance(value, float) and math.isfinite(value):
+            number = value if keep_float else int(value)
+        else:
+            return None
+        return number if lo <= number <= hi else None
+
+    # No real window is zero, negative, or astronomical: the largest codex
+    # documents is about 1.05M, so a gigatoken ceiling rejects a corrupt cache
+    # without ever rejecting a served one.
+    WINDOW_CEILING = 1_000_000_000
+    cap = _number(cap, lo=1, hi=WINDOW_CEILING)
+    base = _number(base, lo=1, hi=WINDOW_CEILING)
+    # No cap means no computable window.  Substituting the base produced a
+    # number the cache never carried, and the line then had to disclaim the
+    # very cap it quoted.  Say the cache cannot answer instead.
+    if cap is None:
+        return {"reason": f"cache-schema-drift: no max_context_window for {slug}"}
+    base_synthesized = base is None
+    # Narrowed on `base` itself, not through the flag: mypy cannot follow the
+    # indirection, and the resulting `int > None` error is a real one.
+    if base is None:
+        base = cap
+    # A missing percent must not silence a clamp that needs no percent to
+    # compute.  Carry it as None and let the line omit the claim, rather than
+    # defaulting to a number upstream did not send.  A float is legitimate
+    # here, since 95.0 is served.  `lo=1` for the same reason the window
+    # fields use it: a zero percent is an impossible window, and rejecting it
+    # falls through to the honest 100% assumption.
+    percent = _number(percent, lo=1, hi=100, keep_float=True)
+
+    effective = int(min(configured, cap) * (100 if percent is None else percent) // 100)
+    return {
+        "model": slug,
+        "model_source": source,
+        "window_source": window_source,
+        "configured": configured,
+        "max_context_window": cap,
+        "base_synthesized": base_synthesized,
+        # Omitted, not filled in, for the same reason the cap is: a consumer
+        # reading it alone to price a base-tier fetch would see a loss of zero.
+        **({} if base_synthesized else {"context_window": base}),
+        "effective": effective,
+        "percent": percent,
+        # The footer lies whenever the effective window is short of the
+        # configured one, and the percent shrink alone is enough to do it.
+        "overstated": effective < configured,
+        # The cached cap is load-bearing both when it clamps and when a RAISED
+        # cap is the only reason it does not.  gpt-5.4 sits at base 272000 and
+        # cap 1000000: a configured 400000 escapes the clamp solely because the
+        # last fetch won the raised cap, and reverts to 258400 without it.
+        # With no base in the entry, the cap alone carries the clamp, so
+        # measure against whichever of the two the cache actually gave.  Both
+        # halves are needed: a cap BELOW the base clamps while `configured >
+        # base` stays False, and the operator then loses tokens to a stale cap
+        # with nothing in the line to say so.
+        "leans_on_cached_cap": configured > base or cap < configured,
+        # Every app-server fetch lands the base cap, whatever clientInfo name
+        # it presents, so a live daemon keeps pulling a raised cap back down.
+        "app_server_running": (
+            bool(_codex_app_server_report().get("present"))
+            if app_server_present is None
+            else bool(app_server_present)
+        ),
+        "cache_fetched_at": cache.get("fetched_at"),
+        "cache_client_version": cache.get("client_version"),
+    }
+
+
+def _emit_codex_context_window(result: dict[str, Any], *, out) -> None:
+    """Name the real window when the configured one overstates it."""
+    report = (result.get("harness_surface") or {}).get("codex_context_window") or {}
+    if not (report.get("overstated") or report.get("leans_on_cached_cap")):
+        return
+    # `:g` because a float percent is legitimate: 95.0 must read as 95.
+    kept = "" if report.get("percent") is None else f" (codex keeps {report['percent']:g}%)"
+    line = (
+        f"fno doctor: codex {report['model_source']}={report['model']} with "
+        f"{report['window_source']}={report['configured']} runs at an effective "
+        f"{report['effective']}{kept}."
+    )
+    # Only claim the footer lies once it actually does.  A raised cap can be
+    # load-bearing while the effective window still equals the configured one.
+    if report.get("overstated"):
+        line += " The TUI footer shows the configured value, not this one."
+    # The cached cap is load-bearing whenever the configured value clears the
+    # model's base, whether the cap clamped it or a raised cap spared it.
+    if report.get("leans_on_cached_cap"):
+        cap = report["max_context_window"]
+        # Absent when the cache carried no base; the cap stands in for the
+        # arithmetic, and `base_synthesized` keeps it out of the prose.
+        base = report.get("context_window", cap)
+        # Only claim a fetch time and a client when the cache recorded them:
+        # an older or hand-written cache carries neither, and the clause was
+        # printing "(fetched None by codex None)" as if it did.
+        stamp = report.get("cache_fetched_at")
+        client = report.get("cache_client_version")
+        if stamp and client:
+            fetched = f"(fetched {stamp} by codex {client})"
+        elif stamp:
+            fetched = f"(fetched {stamp})"
+        elif client:
+            fetched = f"(written by codex {client})"
+        else:
+            fetched = "(the cache records no fetch time)"
+        provenance = (
+            f"{fetched}. That cap is served per fetching client, "
+            "surface and originator both, and the cache records neither"
+        )
+        if cap > base:
+            # `percent` is None on cache schema drift, so apply the same 100%
+            # assumption `effective` already uses instead of multiplying by it.
+            pct = report.get("percent")
+            base_tier = base if pct is None else int(base * pct // 100)
+            line += (
+                f" models_cache.json holds {report['model']} at {cap}, above its {base} "
+                f"base {provenance}. A base-tier fetch drops this to {base_tier}."
+            )
+        elif cap == base and not report.get("base_synthesized"):
+            line += (
+                f" models_cache.json caps {report['model']} at {cap}, its base "
+                f"{provenance}, so whichever launcher fetched last set it for every "
+                "thread started since."
+            )
+        else:
+            # A cap BELOW base is upstream nonsense, and a missing base leaves
+            # nothing to call it.  State the number, claim nothing about it.
+            line += (
+                f" models_cache.json puts {report['model']} at {cap} {provenance}, "
+                "so whichever launcher fetched last set it for every thread "
+                "started since."
+            )
+        # Belongs on every branch, and most of all on the RAISED-cap one: the
+        # daemon is the thing that pulls a raised cap back down, so the run
+        # about to lose the difference is the one that needs telling.
+        if report.get("app_server_running"):
+            # Deliberately no remedy.  The only lever that raises the cap is
+            # stopping this daemon, and `_codex_app_server_report` right above
+            # requires the same socket for live mail to a codex peer.  Naming a
+            # fix here means telling the operator to break that.
+            line += (
+                " A codex app-server daemon is live here and every app-server "
+                "fetch lands the base cap, so it will keep pulling this back down."
+            )
+    out(line)
 
 
 def _codex_hooks_report() -> dict[str, Any]:
@@ -2227,6 +2474,18 @@ def _harness_surface_report() -> dict[str, Any]:
         report["codex_app_server"] = _codex_app_server_report()
     except Exception:
         pass
+
+    # Gated like the codex plugin check above: a leftover ~/.codex from an
+    # uninstalled codex must not nag a user who no longer runs it.
+    if shutil.which("codex") is not None:
+        try:
+            # Reuse the socket probe already stored above: a second stat can
+            # disagree with it when the daemon starts between the two calls.
+            report["codex_context_window"] = _codex_context_window_report(
+                app_server_present=(report.get("codex_app_server") or {}).get("present")
+            )
+        except Exception:
+            pass
 
     return report
 
