@@ -1707,7 +1707,10 @@ fn durable_session_pid() -> Option<i32> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse::<i32>().ok()
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
 }
 
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
@@ -1946,7 +1949,12 @@ mod tests {
 
         let stub = stub_session_pid(td.path(), &std::process::id().to_string());
         std::env::set_var("FNO_BIN", &stub);
-        let result = renew("node:x-corpse", "target-session:me", 120_000, Some(td.path()));
+        let result = renew(
+            "node:x-corpse",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
         std::env::remove_var("FNO_BIN");
         assert_eq!(result, Ok(true));
 
@@ -1975,7 +1983,12 @@ mod tests {
 
         let stub = stub_session_pid(td.path(), &std::process::id().to_string());
         std::env::set_var("FNO_BIN", &stub);
-        let _ = renew("node:x-anchor", "target-session:me", 120_000, Some(td.path()));
+        let _ = renew(
+            "node:x-anchor",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
         std::env::remove_var("FNO_BIN");
 
         assert!(
@@ -1999,7 +2012,12 @@ mod tests {
 
         let stub = stub_session_pid(td.path(), "");
         std::env::set_var("FNO_BIN", &stub);
-        let result = renew("node:x-noanchor", "target-session:me", 120_000, Some(td.path()));
+        let result = renew(
+            "node:x-noanchor",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
         std::env::remove_var("FNO_BIN");
         assert_eq!(result, Ok(true));
 
