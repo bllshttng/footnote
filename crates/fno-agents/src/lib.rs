@@ -694,6 +694,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_exited",
     "daemon_idle_pending_exit",
     "daemon_shutting_down",
+    // The socket path stopped resolving to the inode this daemon bound, so
+    // something else now owns it and this process is unreachable (x-ef7f).
+    // It retires rather than keep running as an invisible CPU burner.
+    "daemon_socket_lost",
     "daemon_state",
     "daemon_recovery_error",
     // Binary-version drift (daemon-emitted, plan ab-1891cdff): advisory note that

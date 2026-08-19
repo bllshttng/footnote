@@ -42,9 +42,66 @@ pub fn resolve_daemon_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("fno-agents-daemon"))
 }
 
+/// True when no process currently holds the supervisor singleton lock, so
+/// there is no daemon entitled to this socket and starting one is legitimate.
+///
+/// This is the positive marker a connect probe cannot be (x-ef7f): a busy
+/// holder still holds the lock, while a busy holder answers no connect. We take
+/// the lock only to ask the question and release it immediately -- the daemon
+/// we spawn takes it for real, for its whole lifetime.
+///
+/// A lock error that is NOT `WouldBlock` (no flock support, an unwritable
+/// state root) answers `true`. The daemon refuses to start at all without a
+/// working flock (`flock_self_test`), so failing open here preserves today's
+/// behavior and its error message rather than wedging every verb behind a
+/// question the filesystem cannot answer.
+fn daemon_lock_is_free(home: &AgentsHome) -> bool {
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.supervisor_lock())
+    {
+        Ok(f) => f,
+        Err(_) => return true,
+    };
+    match file.try_lock() {
+        Ok(()) => true, // dropping `file` releases it on return
+        Err(e) => {
+            let io_err: std::io::Error = e.into();
+            io_err.kind() != std::io::ErrorKind::WouldBlock
+        }
+    }
+}
+
+/// Poll `sock` until it answers or `budget` from `start` is spent.
+async fn wait_for_socket(sock: &Path, start: Instant, budget: Duration) -> Result<(), ClientError> {
+    while start.elapsed() < budget {
+        if UnixStream::connect(sock).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(ClientError::DaemonStartTimeout(budget))
+}
+
 /// Ensure a daemon is serving on `home`'s socket, lazy-starting one if not.
-/// Returns once a connect succeeds. The lazy-start race is resolved daemon-side
-/// (socket-bind exclusivity); a redundant fork simply loses and exits.
+/// Returns once a connect succeeds.
+///
+/// A failed connect is not licence to fork. The comment that used to sit here
+/// claimed the lazy-start race was resolved daemon-side by socket-bind
+/// exclusivity, so a redundant fork simply lost and exited. It did not: the
+/// daemon guarded the bind with its own connect probe, and a daemon too busy to
+/// accept in time read as absent, so the challenger unlinked a LIVE listener and
+/// bound a fresh inode. Every takeover added a supervisor instead of replacing
+/// one, and the added load made the next probe likelier to misread -- 59 of them
+/// at once, measured. `call()` reaches this from every client verb, so every
+/// timed-out verb minted another.
+///
+/// Both halves are now gated on the same sidecar lockfile, which the daemon
+/// holds for its entire process lifetime. Here that means: ask whether any
+/// process owns the singleton before spawning a competitor for it, and when one
+/// does, wait for the incumbent instead.
 pub async fn ensure_daemon(
     home: &AgentsHome,
     daemon_bin: &std::path::Path,
@@ -57,6 +114,22 @@ pub async fn ensure_daemon(
         return Err(ClientError::DaemonBinMissing(daemon_bin.to_path_buf()));
     }
 
+    let start = Instant::now();
+    let budget = Duration::from_secs(10);
+
+    // A daemon owns the singleton and is merely slow to answer (booting, or
+    // saturated). Wait it out; spawning here is what compounded the wedge.
+    if !daemon_lock_is_free(home) {
+        return wait_for_socket(&sock, start, budget).await;
+    }
+
+    // The lock was free a moment ago, so no daemon is entitled to this socket.
+    // We released it to let the child take it, which leaves a window where a
+    // second client also finds it free and also spawns. That race is bounded
+    // and self-correcting in a way the old one was not: the loser fails its
+    // `try_lock` at bind time, returns `AlreadyRunning`, and exits WITHOUT
+    // touching the socket -- one short-lived extra process, not a supervisor
+    // that keeps running on an inode nobody can reach.
     eprintln!("(lazy-starting daemon)");
     // Detached, own process group: the daemon must outlive this client.
     let mut cmd = tokio::process::Command::new(daemon_bin);
@@ -68,8 +141,6 @@ pub async fn ensure_daemon(
     }
     let mut child = cmd.spawn()?;
 
-    let start = Instant::now();
-    let budget = Duration::from_secs(10);
     while start.elapsed() < budget {
         if UnixStream::connect(&sock).await.is_ok() {
             return Ok(());
@@ -87,7 +158,10 @@ pub async fn ensure_daemon(
     // Budget spent and the child still lives: it is genuinely slow to boot.
     // Drop the handle WITHOUT killing (tokio does not kill on drop; the child
     // is in its own process group) so it can finish booting and serve a later
-    // verb, matching the old detach behavior.
+    // verb, matching the old detach behavior. This leak used to be unbounded --
+    // the next verb re-probed, timed out again, and forked again. It is bounded
+    // now: the surviving child holds the singleton lock, so the next verb takes
+    // the wait branch above instead of spawning a competitor for it.
     drop(child);
     Err(ClientError::DaemonStartTimeout(budget))
 }

@@ -60,10 +60,14 @@ pub struct DaemonOptions {
     /// executable directory by default; overridable via `FNO_AGENTS_WORKER_BIN`
     /// (tests point this at the cargo-built binary).
     pub worker_bin: PathBuf,
-    /// Run one bounded reconcile sweep on daemon startup before serving any
-    /// client (Architecture B, plan ab-70faa65b). Default `true`; the opt-out
-    /// (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's discretion #5) trades a
-    /// truthful first `list` for the fastest possible cold start.
+    /// Run one bounded reconcile sweep on daemon startup, CONCURRENTLY with the
+    /// accept loop (Architecture B, plan ab-70faa65b; concurrency per x-ef7f).
+    /// It used to complete before the daemon served anything, which on a large
+    /// roster left a cold daemon silent for tens of seconds and had every client
+    /// that timed out against that silence lazy-start another one. Default
+    /// `true`; the opt-out (env `FNO_AGENTS_NO_STARTUP_RECONCILE=1`, Claude's
+    /// discretion #5) skips the sweep entirely, so the first `list` reads
+    /// last-recorded status until an idle tick settles it.
     pub reconcile_on_start: bool,
     /// cwd the idle tick resolves `agents.dead_row_grace.<harness>` against
     /// (x-9de7 task 6). A `Duration` cannot be pre-resolved here the way
@@ -1866,6 +1870,10 @@ pub async fn bind_supervisor_socket(
     let lock_path = home.supervisor_lock();
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        // Nothing ever reads or writes this file's CONTENT -- the flock on it is
+        // the whole signal -- so truncation is meaningless here. Say so
+        // explicitly; `create` without a truncate decision is a clippy lint.
+        .truncate(false)
         .write(true)
         .open(&lock_path)?;
     if let Err(e) = lock_file.try_lock() {
@@ -1997,41 +2005,71 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Concurrency invariant that no client observes a half-applied sweep. Opt out
     // via FNO_AGENTS_NO_STARTUP_RECONCILE for the fastest cold start (discretion #5).
     if opts.reconcile_on_start {
-        // Collapse a panic into an Err so the degradation has a single shape. The
-        // FNO_AGENTS_FAIL_STARTUP_RECONCILE env is a test seam that forces the
-        // failure path (proving the daemon keeps serving last-recorded status
-        // instead of aborting -- AC1-FR); it is never set in production.
-        let swept: Result<ReconcileSweepResult, String> =
-            if std::env::var("FNO_AGENTS_FAIL_STARTUP_RECONCILE").is_ok() {
-                Err(
-                    "forced startup-reconcile failure (FNO_AGENTS_FAIL_STARTUP_RECONCILE)"
-                        .to_string(),
-                )
-            } else {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_reconcile_sweep(&home, &emitter)
-                }))
-                .unwrap_or_else(|_| {
+        // Off the startup path and onto the blocking pool (x-ef7f). The sweep
+        // probes reachability PER REGISTRY ROW, each probe bounded but not
+        // free, so on a large roster it costs tens of seconds. Awaiting it here
+        // -- on the async runtime, before the accept loop starts -- meant a
+        // cold daemon answered nothing until every row was probed, and a client
+        // whose connect timed out lazy-started yet another daemon that paid the
+        // same cost. One cold daemon starved itself; the spawns compounded it.
+        //
+        // What that ordering bought was "no client observes a half-applied
+        // sweep", and that guarantee is not what is given up here: the sweep
+        // writes the registry under the same advisory lock every reader takes,
+        // so a client still reads a whole registry, never a torn one. What is
+        // given up is narrower -- the FIRST `list` after a cold start may read
+        // pre-sweep status, one idle tick before the sweep lands. A stale first
+        // row is worth strictly less than a daemon nobody can reach.
+        let home_sweep = home.clone();
+        let emitter_sweep = EventEmitter::new(home.events_jsonl(), "daemon");
+        tokio::task::spawn_blocking(move || {
+            // Test seam (x-ef7f): hold the sweep open so a test can prove the
+            // daemon answers DURING it, not merely after it. Without a seam that
+            // assertion is a race against however fast the machine probes, and a
+            // flaky proof of the one property this fix exists to give. Never set
+            // in production, exactly like FNO_AGENTS_FAIL_STARTUP_RECONCILE below.
+            if let Some(ms) = std::env::var("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            // Collapse a panic into an Err so the degradation has a single shape. The
+            // FNO_AGENTS_FAIL_STARTUP_RECONCILE env is a test seam that forces the
+            // failure path (proving the daemon keeps serving last-recorded status
+            // instead of aborting -- AC1-FR); it is never set in production.
+            let swept: Result<ReconcileSweepResult, String> =
+                if std::env::var("FNO_AGENTS_FAIL_STARTUP_RECONCILE").is_ok() {
                     Err(
-                        "startup reconcile sweep panicked; serving last-recorded status"
+                        "forced startup-reconcile failure (FNO_AGENTS_FAIL_STARTUP_RECONCILE)"
                             .to_string(),
                     )
-                })
-            };
-        match swept {
-            Ok(result) => {
-                let _ = emitter.emit(
-                    "startup_reconcile_done",
-                    &json!({
-                        "updated": result.outcome.updated.len(),
-                        "deferred": result.outcome.deferred,
-                    }),
-                );
+                } else {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_reconcile_sweep(&home_sweep, &emitter_sweep)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(
+                            "startup reconcile sweep panicked; serving last-recorded status"
+                                .to_string(),
+                        )
+                    })
+                };
+            match swept {
+                Ok(result) => {
+                    let _ = emitter_sweep.emit(
+                        "startup_reconcile_done",
+                        &json!({
+                            "updated": result.outcome.updated.len(),
+                            "deferred": result.outcome.deferred,
+                        }),
+                    );
+                }
+                Err(msg) => {
+                    let _ = emitter_sweep.emit("startup_reconcile_failed", &json!({"error": msg}));
+                }
             }
-            Err(msg) => {
-                let _ = emitter.emit("startup_reconcile_failed", &json!({"error": msg}));
-            }
-        }
+        });
     }
 
     // State: serving. daemon_started is emitted AFTER recovery (step 7 ordering:
@@ -2101,7 +2139,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // inline in the select arm and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Dead-row GC gate (x-ef7f): its dormant check shells one truth probe per
+    // registry row, so it gets the same one-in-flight discipline as the sweeps
+    // beside it rather than running inline in the select arm.
+    let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    // THE RULE FOR THIS LOOP (x-ef7f): nothing that shells out, walks the
+    // registry row by row, or otherwise blocks may run INLINE in a select arm.
+    // Every arm shares one thread with `accept()` and with the SIGTERM arm, so
+    // an inline sweep makes the daemon both unreachable and unstoppable at the
+    // same time -- which is how 59 supervisors accumulated, each new client
+    // reading the silence as "no daemon" and starting another. Give a sweep
+    // `spawn_blocking` plus a one-in-flight `AtomicBool`, like the four below.
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -2162,13 +2211,31 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // ritual. Cheap in steady state (no candidates -> no git, no
                 // registry write); the grace window makes exact cadence
                 // non-critical, so running it on the idle tick is fine.
-                let grace_cwd = &ctx.opts.dead_row_grace_cwd;
-                let grace_for_harness = |harness: &str| {
-                    Duration::from_secs(crate::agents_config::dead_row_grace_secs(
-                        grace_cwd, harness,
-                    ))
-                };
-                let _ = gc_sweep(&ctx.home, &ctx.emitter, &grace_for_harness);
+                // Runs off-loop under spawn_blocking behind a one-in-flight
+                // gate, like the scrape and worktree sweeps above (x-ef7f). Its
+                // dormant gate shells `fno agents truth` ONCE PER REGISTRY ROW,
+                // each child bounded at 5s and retried once on a crash, so a
+                // 28-row roster could hold this select arm for minutes at a
+                // time. Inline, that starved accept() -- clients' connects timed
+                // out and lazy-started competing daemons, each adding rows and
+                // lengthening the next sweep -- and it starved the SIGTERM arm
+                // beside it, which is why a wedged daemon could only be
+                // SIGKILLed.
+                if !gc_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&gc_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    let grace_cwd = ctx.opts.dead_row_grace_cwd.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let grace_for_harness = |harness: &str| {
+                            Duration::from_secs(crate::agents_config::dead_row_grace_secs(
+                                &grace_cwd, harness,
+                            ))
+                        };
+                        let _ = gc_sweep(&home, &emitter, &grace_for_harness);
+                        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+                }
                 // Worktree report sweep: the backstop for what the merge ritual
                 // missed. Its own 24h stamp makes it a near-no-op on this tick,
                 // but the verb shells git across every worktree when it does

@@ -5,7 +5,7 @@
 //! still-live worker via socket discovery. No monkeypatching — real `daemon`,
 //! `worker`, and `sleep` processes.
 
-use fno_agents::client::call;
+use fno_agents::client::{call, ensure_daemon, ClientError};
 use fno_agents::paths::AgentsHome;
 use fno_agents::protocol::Request;
 use fno_agents::state;
@@ -60,6 +60,37 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> std::process::
     let child = cmd.spawn().expect("daemon spawns");
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
     child
+}
+
+/// Wait for `needle` to appear in the daemon's event log.
+///
+/// The startup reconcile sweep runs CONCURRENTLY with the accept loop (x-ef7f),
+/// so a served response no longer implies the sweep has landed. A test that
+/// reads post-sweep state waits for the event that says it did, rather than
+/// inferring it from response ordering.
+fn wait_for_event(home: &AgentsHome, needle: &str, budget: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < budget {
+        if std::fs::read_to_string(home.events_jsonl())
+            .unwrap_or_default()
+            .contains(needle)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("event never appeared within {budget:?}: {needle}");
+}
+
+/// A stand-in daemon binary that exits immediately. Lets a client test tell
+/// "spawned it" (`DaemonExitedEarly`) apart from "declined to spawn it"
+/// (`DaemonStartTimeout`) by which error comes back.
+fn fake_daemon_bin(home: &AgentsHome) -> PathBuf {
+    let path = home.root().join("fake-daemon.sh");
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake daemon");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake daemon");
+    path
 }
 
 fn wait_for(path: &Path, budget: Duration) {
@@ -126,8 +157,11 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
 
     let mut daemon = start_daemon(&home);
 
-    // The first served RPC necessarily follows the startup sweep (the accept loop
-    // runs only after the sweep completes), so the listed status is post-sweep.
+    // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
+    // RPC no longer implies it has landed. This test is about WHAT the sweep
+    // settles, not when, so wait for the sweep's own event before reading.
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+
     let resp = call(
         &home,
         &daemon_bin,
@@ -191,6 +225,9 @@ async fn startup_reconcile_failure_degrades_to_serving() {
         fno_agents::AgentStatus::Live,
     );
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
+    // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
+    // on what it did or did not write.
+    wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -227,6 +264,135 @@ async fn startup_reconcile_failure_degrades_to_serving() {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
     }
     let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-ef7f, the load-bearing assertion: a cold daemon with a large roster STAYS
+/// RESPONSIVE while its startup reconcile sweep is still running.
+///
+/// The sweep probes reachability per registry row, so on a large roster it held
+/// the daemon silent for tens of seconds -- awaited on the async runtime, before
+/// the accept loop ever started. Every client that timed out against that
+/// silence lazy-started another daemon, which paid the same cost and made the
+/// next timeout likelier. That is the feedback loop: the wedge caused the spawn
+/// and the spawn deepened the wedge, and it tightened with roster size.
+///
+/// Counting daemon processes cannot catch this. A single, correctly-deduplicated
+/// daemon starves accept() just as well, so a process-count test passes over a
+/// roster nobody can reach. The assertion here is a SERVED RESPONSE under a
+/// deadline, and the ordering rests on two positive measurements -- when the
+/// response arrived, and when the sweep event landed -- never on an absence.
+///
+/// The probe is `agent.status` rather than `agent.list` deliberately. `list`
+/// shells one `fno agents truth` child per row on the blocking pool, which is
+/// its own legitimate cost and would swamp the measurement; `status` reads the
+/// registry and the in-memory drive table and stays on the async runtime, so
+/// what it times is exactly the property at issue -- whether the event loop is
+/// still able to accept and answer.
+#[tokio::test]
+async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+
+    // A roster big enough that the sweep is genuinely long-running, with every
+    // row pointing at a session store that holds nothing -- the unreachable
+    // shape that makes each probe pay its full bounded cost.
+    const ROWS: usize = 40;
+    for i in 0..ROWS {
+        seed_codex_source(
+            &home,
+            &format!("row-{i:02}"),
+            &format!("uuid-unreachable-{i:02}"),
+            fno_agents::AgentStatus::Live,
+        );
+    }
+
+    // Hold the sweep open on top of that. The seam is what makes "served while
+    // it ran" deterministic rather than a race against how fast this machine
+    // probes 40 rows.
+    const DELAY_MS: u64 = 3000;
+    let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_STARTUP_RECONCILE_DELAY_MS", "3000")]);
+
+    let t0 = Instant::now();
+    let resp = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1, "agent.status", json!({})),
+    )
+    .await
+    .expect("status served while the startup sweep was running");
+    let served_at = t0.elapsed();
+    assert!(!resp.is_err(), "status failed: {:?}", resp.error());
+    assert!(
+        served_at < Duration::from_secs(1),
+        "daemon must answer within 1s over a {ROWS}-row roster while the sweep \
+         runs; took {served_at:?}"
+    );
+
+    wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    let done_at = t0.elapsed();
+    // The sweep cannot finish before its own delay elapses, so this reading
+    // proves it was still running when the response came back. Both readings
+    // are positive measurements, not absences.
+    assert!(
+        done_at >= Duration::from_millis(DELAY_MS - 500),
+        "sweep landed at {done_at:?}, too early to have still been running"
+    );
+    assert!(
+        served_at < done_at,
+        "response must precede the sweep landing (served {served_at:?}, swept {done_at:?})"
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// x-ef7f, the client half: a client whose connect fails while something already
+/// holds the singleton lock WAITS for the incumbent instead of forking a
+/// competitor for it.
+///
+/// `call()` reaches `ensure_daemon` from every client verb, so with a fleet
+/// firing loop-check at each turn boundary, a daemon too busy to accept in time
+/// minted a new supervisor per timed-out verb. A failed connect has two
+/// explanations, dead and merely busy; only the lock separates them.
+///
+/// The two outcomes are told apart by which error returns, both positive
+/// signals: a daemon bin that exits immediately yields `DaemonExitedEarly` when
+/// it was spawned and `DaemonStartTimeout` when it was not. The unlocked half is
+/// the positive control -- it proves the fake bin really is spawned when
+/// spawning is legitimate, so the locked half's timeout means "declined to
+/// spawn" rather than "the seam never worked".
+#[tokio::test]
+async fn client_declines_to_spawn_while_the_singleton_lock_is_held() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let fake = fake_daemon_bin(&home);
+
+    // Positive control: lock free -> the client does spawn, and the fake exits.
+    match ensure_daemon(&home, &fake).await {
+        Err(ClientError::DaemonExitedEarly(_)) => {}
+        other => panic!("control: a free lock must spawn the daemon bin, got {other:?}"),
+    }
+
+    // Now hold the lock, as a live daemon holds it for its whole lifetime.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.supervisor_lock())
+        .expect("open singleton lock");
+    lock.try_lock().expect("test takes the singleton lock");
+
+    match ensure_daemon(&home, &fake).await {
+        Err(ClientError::DaemonStartTimeout(_)) => {}
+        other => panic!("a held lock must make the client wait, not spawn; got {other:?}"),
+    }
+
+    drop(lock);
     std::fs::remove_dir_all(home.root()).ok();
 }
 
