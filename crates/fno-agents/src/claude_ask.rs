@@ -577,7 +577,7 @@ fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const BASE: Duration = Duration::from_secs(5);
     const PER_HANDLE: Duration = Duration::from_millis(300);
     const CEILING: Duration = Duration::from_secs(60);
-    std::cmp::min(BASE + PER_HANDLE * handles.min(200) as u32, CEILING)
+    std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
 }
 
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
@@ -5004,8 +5004,11 @@ mod tests {
             "the bound is capped, not unbounded"
         );
         // Saturates rather than wrapping or panicking. Checked by running the
-        // arithmetic, not by reasoning about it: an earlier draft of this
-        // comment asserted `Duration * u32` panicked here, and it does not.
+        // arithmetic, not by reasoning about it: an earlier draft asserted
+        // `Duration * u32` panicked here and added a clamp to prevent it.
+        // Neither was true. 300 ms times u32::MAX is about 1.29e9 seconds, four
+        // orders under Duration::MAX, and `min(..., CEILING)` already bounds
+        // the result. The clamp was a second copy of a cap one line above it.
         assert_eq!(
             family1_truth_batch_timeout(usize::MAX),
             Duration::from_secs(60),
