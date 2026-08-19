@@ -17,7 +17,7 @@ Everything else keeps bare `rm`. Two files qualify.
 
 ### `scripts/ci/preflight.sh` (criterion a)
 
-Every `rm` in this file sits in, or tears down, the mutex around the one shared preflight worktree. The lock protocol was rebuilt on `mv` because rename is one atomic operation. Its comments record a cross-run corruption race that `rm -rf` + `mkdir` caused. A trash wrapper puts non-atomic work back inside that section. When the trash sits on the same volume, a trash move is a rename. Across volumes it degrades to copy-then-delete. The mutex waits on that copy.
+Every `rm` in this file sits in, or tears down, the mutex around the one shared preflight worktree. The lock protocol was rebuilt on `mv` because rename is one atomic operation. Its comments record a cross-run corruption race that `rm -rf` + `mkdir` caused. A trash wrapper puts non-atomic work back inside that section. When the trash sits on the same volume, a trash move is a rename. Across volumes it degrades to copy-then-delete. The mutex waits on that copy. The file carries the two-rung form as one local `srm()` helper, so the sanctioned spelling is defined once.
 
 ### `hooks/worktree-remove.sh` (criterion b)
 

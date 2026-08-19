@@ -51,6 +51,15 @@
 
 set -uo pipefail
 
+# srm: disposable-delete helper, the sanctioned two-rung form. A PATH-wrapped
+# rm trash-moves inside this script's mutexes (non-atomic work under the lock);
+# command -p rm resolves via the default PATH, /bin/rm is the fallback where
+# that PATH is itself shadowed. check-disposable-rm.sh fails a bare `rm` here.
+# See docs/architecture/disposable-deletes.md.
+srm() {
+    command -p rm "$@" 2>/dev/null || /bin/rm "$@"
+}
+
 # Signal traps arm at the TOP, before any git/network child runs. Untrapped,
 # a SIGINT that arrives while bash waits on a slow foreground child (git ops
 # and the fetch stretch from ~1s to tens of seconds under host load) is
@@ -376,10 +385,8 @@ finish_lock_acquire() {
     if stamp_holder; then
         return 0
     fi
-    # Lock-protocol deletes use `command -p rm` + `/bin/rm` (never bare `rm`):
-    # a PATH-wrapped rm trash-moves inside this mutex. See
-    # docs/architecture/disposable-deletes.md.
-    command -p rm -rf "$LOCKDIR" 2>/dev/null || /bin/rm -rf "$LOCKDIR"
+    # Lock-protocol deletes go through srm (never bare `rm`).
+    srm -rf "$LOCKDIR"
     echo "preflight: cannot stamp lock ownership at $LOCKDIR" >&2
     exit 3
 }
@@ -413,7 +420,7 @@ enqueue_ticket() {
             printf 'pid=%s started=%s host=%s\n' "$$" \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
                 "$(hostname 2>/dev/null || echo unknown)" > "$candidate/holder" \
-                || { command -p rm -rf "$candidate" 2>/dev/null || /bin/rm -rf "$candidate"
+                || { srm -rf "$candidate"
                      echo "preflight: cannot stamp queue ticket at $candidate" >&2
                      exit 3; }
             TICKET="$candidate"
@@ -423,7 +430,7 @@ enqueue_ticket() {
     done
 }
 
-dequeue_ticket() { [[ -n "$TICKET" ]] && { command -p rm -rf "$TICKET" 2>/dev/null || /bin/rm -rf "$TICKET"; }; TICKET=""; }
+dequeue_ticket() { [[ -n "$TICKET" ]] && srm -rf "$TICKET"; TICKET=""; }
 
 ticket_is_dead() {
     # Dead = the pid is gone OR was recycled (a live but younger process now
@@ -441,7 +448,7 @@ am_i_front() {
     for f in "$LOCKDIR.queue.d"/*/; do
         [[ -d "$f" ]] || continue
         f="${f%/}"
-        if ticket_is_dead "$f"; then command -p rm -rf "$f" 2>/dev/null || /bin/rm -rf "$f"; continue; fi
+        if ticket_is_dead "$f"; then srm -rf "$f"; continue; fi
         [[ "$f" == "$TICKET" ]]
         return
     done
@@ -612,11 +619,11 @@ cancel_requested() {
     [[ -n "$m" ]] || return 1
     now="$(date +%s)"
     if (( now - m > 3600 )); then
-        command -p rm -f "$s" 2>/dev/null || /bin/rm -f "$s" 2>/dev/null || true
+        srm -f "$s" 2>/dev/null || true
         return 1
     fi
     mv "$s" "$s.reaped.$$" 2>/dev/null || return 1
-    command -p rm -f "$s.reaped.$$" 2>/dev/null || /bin/rm -f "$s.reaped.$$" 2>/dev/null || true
+    srm -f "$s.reaped.$$" 2>/dev/null || true
     return 0
 }
 
@@ -685,13 +692,13 @@ steal_dead_lock() {
         # not, restore it and lose the race.
         reaped="$(cat "$LOCKDIR.reap.$$/holder" 2>/dev/null || echo '')"
         if [[ "$reaped" == "$condemned" ]]; then
-            command -p rm -rf "$LOCKDIR.reap.$$" 2>/dev/null || /bin/rm -rf "$LOCKDIR.reap.$$"
+            srm -rf "$LOCKDIR.reap.$$"
             mkdir "$LOCKDIR" 2>/dev/null && { finish_lock_acquire; return 0; }
         elif [[ -e "$LOCKDIR" ]] || ! mv "$LOCKDIR.reap.$$" "$LOCKDIR" 2>/dev/null; then
             # Someone already re-took the path. Renaming onto an existing
             # directory NESTS inside it rather than replacing it, which would
             # bury a live holder under a stray reap dir, so drop the corpse.
-            command -p rm -rf "$LOCKDIR.reap.$$" 2>/dev/null || /bin/rm -rf "$LOCKDIR.reap.$$"
+            srm -rf "$LOCKDIR.reap.$$"
         fi
         return 1   # lost the race: caller re-reads the live winner's stamp
     fi
@@ -834,13 +841,13 @@ cleanup_lock() {
     local path="$1" expected="$2" observed
     [[ -n "$path" && -n "$expected" ]] || return 0
     observed="$(cat "$path/holder" 2>/dev/null || true)"
-    [[ "$observed" == "$expected" ]] && { command -p rm -rf "$path" 2>/dev/null || /bin/rm -rf "$path"; }
+    [[ "$observed" == "$expected" ]] && srm -rf "$path"
 }
 cleanup() {
-    [[ -n "${TICKET:-}" ]] && { command -p rm -rf "$TICKET" 2>/dev/null || /bin/rm -rf "$TICKET"; }
+    [[ -n "${TICKET:-}" ]] && srm -rf "$TICKET"
     [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
     [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
-    [[ -n "$TMPHOME" ]] && { command -p rm -rf "$TMPHOME" 2>/dev/null || /bin/rm -rf "$TMPHOME"; }
+    [[ -n "$TMPHOME" ]] && srm -rf "$TMPHOME"
 }
 trap cleanup EXIT
 # The signal traps themselves were armed at the top of the script (see the
@@ -880,7 +887,7 @@ if is_registered; then
     : # exists and registered; reset below
 elif [[ -e "$PREFLIGHT_WT" ]]; then
     echo "preflight: $PREFLIGHT_WT exists but is not a registered worktree - recreating" >&2
-    command -p rm -rf "$PREFLIGHT_WT" 2>/dev/null || /bin/rm -rf "$PREFLIGHT_WT"
+    srm -rf "$PREFLIGHT_WT"
     git -C "$INVOKING_ROOT" worktree prune >/dev/null 2>&1 || true
 fi
 if ! is_registered; then
@@ -1037,15 +1044,15 @@ record_attestation() {
         # also drops temp files left by crashed writers, and the rm clears the
         # pre-per-SHA single-file carrier, which nothing reads anymore.
         find "$ATTEST_DIR" -maxdepth 1 -type f -mtime +14 -delete 2>/dev/null || true
-        command -p rm -f "$COMMON_DIR/.preflight-attestation" 2>/dev/null || /bin/rm -f "$COMMON_DIR/.preflight-attestation" 2>/dev/null
+        srm -f "$COMMON_DIR/.preflight-attestation" 2>/dev/null
     else
-        command -p rm -f "$tmp" 2>/dev/null || /bin/rm -f "$tmp" 2>/dev/null
+        srm -f "$tmp" 2>/dev/null
         echo "preflight: WARN attestation write failed ($ATTEST); reuse unavailable until writable" >&2
     fi
 }
 invalidate_attestation() {
     [[ -f "$ATTEST" ]] || return 0
-    { command -p rm -f "$ATTEST" 2>/dev/null || /bin/rm -f "$ATTEST"; } && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
+    srm -f "$ATTEST" && echo "preflight: invalidated a stale green attestation for $CANDIDATE_SHORT"
 }
 # --- suites ------------------------------------------------------------------
 # LEG_SCOPES holds the required-scope name(s) each leg answers to ("" = not a
@@ -1311,7 +1318,7 @@ write_leg_record() {
     if mv -f "$tmp" "$LEG_RECORD" 2>/dev/null; then
         return 0
     fi
-    command -p rm -f "$tmp" 2>/dev/null || /bin/rm -f "$tmp" 2>/dev/null
+    srm -f "$tmp" 2>/dev/null
     echo "preflight: WARN leg-record write failed; --retry-failed will run every leg" >&2
 }
 write_leg_record

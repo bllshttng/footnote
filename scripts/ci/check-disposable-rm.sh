@@ -77,7 +77,8 @@ check_file() {
     report "${path}:${n}: bare \`rm\` in a disposable-delete file (${criterion})."
   done
   report "  Use the two-rung form: command -p rm <args> 2>/dev/null || /bin/rm <args>."
-  report "  \`command rm\` does not bypass a PATH wrapper. See docs/architecture/disposable-deletes.md."
+  report "  Or call the file's srm() helper where one exists. \`command rm\` does not bypass a"
+  report "  PATH wrapper. See docs/architecture/disposable-deletes.md."
   VIOLATIONS=$((VIOLATIONS + 1))
 }
 
