@@ -763,7 +763,7 @@ def _acquire_worker_slot(
     try:
         from fno.claims.core import acquire_claim
 
-        claim_metadata = {
+        claim_metadata: dict[str, object] = {
             "model_provider": route_provider or _KNOWN_UNROUTED_PROVIDER
         }
         if metadata:

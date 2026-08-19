@@ -218,6 +218,7 @@ def resolve_spawn_route(
     account the spawn never used.
     """
     provider_names: list[str] = []
+    route: Optional[dict[str, str]]
     if route_env:
         route_provider = getattr(route_env, "provider", None)
         route = (
