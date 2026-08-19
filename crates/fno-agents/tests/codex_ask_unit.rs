@@ -183,8 +183,9 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
 }
 
 #[test]
-fn build_argv_create_git_grant_composes_with_user_add_dir() {
-    // --add-dir is repeatable, so the git grant never clobbers a caller's own.
+fn build_argv_create_internal_grants_compose_with_user_add_dir() {
+    // --add-dir is repeatable, so the git and plan grants never clobber a
+    // caller's own root.
     let dir = tempfile::tempdir().unwrap();
     std::process::Command::new("git")
         .args(["init", "-q"])
@@ -193,7 +194,7 @@ fn build_argv_create_git_grant_composes_with_user_add_dir() {
         .unwrap();
 
     let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"));
-    assert_eq!(argv.iter().filter(|a| *a == "--add-dir").count(), 2);
+    assert_eq!(argv.iter().filter(|a| *a == "--add-dir").count(), 3);
     assert!(argv.iter().any(|a| a == "/extra"));
 }
 

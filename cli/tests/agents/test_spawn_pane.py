@@ -1018,7 +1018,10 @@ def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
         claude.index("--allowedTools") < claude.index("--disallowedTools")
 
     codex = build_pane_argv("codex", "t", tmp_path, False, None, add_dir="/extra")
-    assert codex[codex.index("--add-dir") + 1] == "/extra"
+    codex_dirs = [
+        codex[i + 1] for i, token in enumerate(codex) if token == "--add-dir"
+    ]
+    assert "/extra" in codex_dirs
     agy = build_pane_argv("agy", "t", tmp_path, False, None, add_dir="/extra")
     assert agy[agy.index("--add-dir") + 1] == "/extra"
     opencode = build_pane_argv("opencode", "t", tmp_path, False, None, agent="build")
@@ -1047,6 +1050,22 @@ def test_build_pane_argv_codex_grants_git_metadata_write(tmp_path: Path) -> None
 
     assert "--add-dir" in argv
     assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+
+
+def test_build_pane_argv_codex_grants_plan_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.mux_spawn import build_pane_argv
+
+    repo = _pane_repo(tmp_path)
+    plan_dir = tmp_path / "plans"
+    monkeypatch.setattr(codex_mod, "_resolve_plan_dir", lambda cwd: str(plan_dir))
+
+    argv = build_pane_argv("codex", "t", repo, False, None)
+
+    grants = [argv[i + 1] for i, token in enumerate(argv) if token == "--add-dir"]
+    assert str(plan_dir) in grants
 
 
 def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path) -> None:
@@ -1078,7 +1097,7 @@ def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Pa
     repo = _pane_repo(tmp_path)
     argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
 
-    assert argv.count("--add-dir") == 2
+    assert argv.count("--add-dir") == 3
     assert "/extra" in argv
 
 
@@ -1103,7 +1122,8 @@ def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
     # fail-closed guard even on a no-equivalent provider (gemini review finding).
     for provider, kw in closed:
         argv = build_pane_argv(provider, "t", tmp_path, False, None, **{k: "" for k in kw})
-        assert "--add-dir" not in argv and "--agent" not in argv
+        assert "" not in argv
+        assert "--agent" not in argv
 
 
 def test_pane_hostable_set_stays_in_sync_with_build_pane_argv(tmp_path: Path) -> None:

@@ -446,6 +446,21 @@ def test_state_dir_exceeding_path_max_rejected(
 # ---------------------------------------------------------------------------
 
 
+def test_missing_config_names_missing_not_parse_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from fno.config_io import _load_raw
+
+    missing = tmp_path / "settings.yaml"
+    with caplog.at_level(logging.WARNING, logger="fno.config_io"):
+        data, ok = _load_raw(missing)
+
+    assert (data, ok) == ({}, False)
+    messages = [record.message for record in caplog.records]
+    assert any("is missing" in message for message in messages)
+    assert all("failed to parse" not in message for message in messages)
+
+
 def test_corrupt_yaml_returns_defaults_and_logs_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -672,5 +687,4 @@ def test_blueprint_max_prs_per_epic_rejects_non_positive(
 
     with pytest.raises(Exception, match=r"max_prs_per_epic|>= ?1|positive"):
         config_mod.load_settings()
-
 

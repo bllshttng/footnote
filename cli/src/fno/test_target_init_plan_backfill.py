@@ -13,10 +13,9 @@ which is the "a guard on one of N reachable paths is decorative" trap in its
 quietest form. These tests pin the back-fill as its own contract:
 ``test_backfill_survives_blast_disabled`` is the one that fails on that revert.
 
-The dangling-pointer case is not cosmetic. The manifest is WRITE-ONCE and
-``fno state set --field plan_path`` accepts a first-fill only while the field is
-EMPTY (else exit 5), so back-filling a plan that is not on disk closes the only
-legal repair route. Empty is recoverable; wrong-and-non-empty is not.
+The dangling-pointer case is not cosmetic. Back-filling a plan that is not on
+disk wedges the write-once manifest, while leaving it empty starts a planned
+node without its plan. Initialization must refuse before writing either state.
 """
 from __future__ import annotations
 
@@ -154,21 +153,21 @@ def test_explicit_plan_path_wins_over_node(stub_exec, monkeypatch, tmp_path):
     assert stub_exec[0].get("TARGET_PLAN_PATH") == explicit
 
 
-def test_explicit_plan_path_is_not_existence_gated(stub_exec, monkeypatch, tmp_path):
-    """A missing --plan-path still reaches the writer: a typo must surface.
-
-    The existence gate exists to protect the write-once first-fill escape on an
-    UNASKED-FOR back-fill. Silently dropping a path the operator typed would
-    turn a typo into a confusing `plan: none` instead of a plan error.
-    """
+def test_missing_explicit_plan_path_refuses_before_manifest_write(
+    stub_exec, monkeypatch, tmp_path
+):
+    """A typo in --plan-path refuses instead of writing a broken pointer."""
     missing = str(tmp_path / "nope.md")
     _graph(monkeypatch, [])
     _blast(monkeypatch, False)
 
     res = _invoke(["--input", "some feature", "--plan-path", missing])
 
-    assert res.exit_code == 0
-    assert stub_exec[0].get("TARGET_PLAN_PATH") == missing
+    assert res.exit_code == 2
+    assert stub_exec == []
+    assert "REFUSING" in res.stderr
+    assert "explicit --plan-path" in res.stderr
+    assert "does not resolve to a readable plan" in res.stderr
 
 
 def test_free_text_input_leaves_plan_empty(stub_exec, monkeypatch, tmp_path):
@@ -190,25 +189,40 @@ def test_free_text_input_leaves_plan_empty(stub_exec, monkeypatch, tmp_path):
     assert "TARGET_PLAN_PATH" not in stub_exec[0]
 
 
-def test_dangling_node_plan_is_not_backfilled(stub_exec, monkeypatch, tmp_path):
-    """A bound-but-missing plan leaves the field empty AND says why.
-
-    Filling it would satisfy the orienter and permanently wedge the manifest:
-    `fno state set --field plan_path` refuses a non-empty field with exit 5, so
-    there would be no legal way to correct the pointer for the whole session.
-    """
+def test_dangling_node_plan_refuses_before_manifest_write(
+    stub_exec, monkeypatch, tmp_path
+):
+    """A bound-but-missing plan refuses instead of starting planless."""
     _graph(monkeypatch, [{"id": "x-39c0", "plan_path": str(tmp_path / "gone.md")}])
     _blast(monkeypatch, False)
 
     res = _invoke(["--input", "x-39c0"])
 
-    assert res.exit_code == 0
-    assert "TARGET_PLAN_PATH" not in stub_exec[0]
-    assert "does not resolve" in res.stderr
-    # names BOTH repairs: this session's first-fill and the node itself, since
-    # fixing only the manifest leaves every future start on the node repeating.
-    assert "fno state set --field plan_path" in res.stderr
+    assert res.exit_code == 2
+    assert stub_exec == []
+    assert "REFUSING" in res.stderr
+    assert "does not resolve to a readable plan" in res.stderr
     assert "fno backlog update" in res.stderr
+
+
+def test_unreadable_node_plan_refuses_before_manifest_write(
+    stub_exec, monkeypatch, tmp_path
+):
+    plan = _real_plan(tmp_path)
+    _graph(monkeypatch, [{"id": "x-39c0", "plan_path": plan}])
+    _blast(monkeypatch, False)
+
+    def _unreadable(path):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("fno.target.blast.resolve_plan_index", _unreadable)
+
+    res = _invoke(["--input", "x-39c0"])
+
+    assert res.exit_code == 2
+    assert stub_exec == []
+    assert "REFUSING" in res.stderr
+    assert "does not resolve to a readable plan" in res.stderr
 
 
 def test_ambiguous_node_tokens_leave_plan_empty(stub_exec, monkeypatch, tmp_path):
@@ -322,10 +336,10 @@ def test_tilde_node_plan_reaches_writer_expanded(stub_exec, monkeypatch, tmp_pat
 
 
 def test_resolve_plan_pointer_fails_closed(monkeypatch):
-    """Under an unreadable path, prefer the recoverable empty field.
+    """Under an unreadable path, return the refusal signal.
 
-    Fail-CLOSED on purpose: an unverified pointer lands in a write-once field
-    that can never be corrected, while an empty one keeps the first-fill escape.
+    Fail-CLOSED on purpose: an unverified pointer must never land in a
+    write-once field or let a planned node continue with an empty field.
     """
     def _boom(self):
         raise OSError("filesystem unavailable")

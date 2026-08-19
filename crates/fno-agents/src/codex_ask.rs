@@ -157,6 +157,7 @@ pub fn build_argv_create(
     // Additive - `--add-dir` is repeatable, so a caller's own grant survives.
     if !yolo {
         argv.extend(crate::provider::codex_git_writable_args(cwd));
+        argv.extend(crate::provider::codex_plan_writable_args(cwd));
     }
     // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
