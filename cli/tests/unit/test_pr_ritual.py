@@ -538,13 +538,34 @@ def test_run_skips_when_post_merge_disabled(tmp_path, capsys, monkeypatch):
                    for c in runner.calls)  # mutex never acquired
 
 
+
+def _patch_sidecar_scan(monkeypatch, rows):
+    """Route the PR-recovery scan's sidecar projection at synthetic rows.
+
+    The reader migrated from read_graph to the sidecar seam; the same synthetic
+    node data now arrives as per-id sidecars (pr_number/pr_url are the fields
+    the recovery scan consumes).
+    """
+    from fno.tracker import sidecar as sidecar_store
+    from fno.tracker.sidecar import Sidecar
+
+    monkeypatch.setattr(
+        sidecar_store,
+        "load_all",
+        lambda: {
+            e["id"]: Sidecar(id=e["id"], pr_number=e.get("pr_number"),
+                            pr_url=e.get("pr_url"))
+            for e in rows
+        },
+    )
+
 def test_recover_node_for_pr_scopes_by_repo(tmp_path, monkeypatch):
     # codex P2: when reconcile closed nothing (dominant ship-gate path),
     # recover the PR's node from the graph, scoped by origin slug + pr_url so a
     # foreign repo sharing a pr_number is never reaped.
     r = _bare(tmp_path, FakeRunner(), pr=7)
     monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
-    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+    _patch_sidecar_scan(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"},
         {"id": "fno-forei", "pr_number": 7, "pr_url": "https://github.com/other/repo/pull/7"},
         {"id": "fno-other", "pr_number": 99, "pr_url": "https://github.com/owner/repo/pull/99"},
@@ -605,7 +626,7 @@ def test_recover_skips_when_no_origin_slug(tmp_path, monkeypatch):
     # are unaffected).
     r = _bare(tmp_path, FakeRunner(), pr=7)
     monkeypatch.setattr(r, "_resolve_origin_slug", lambda: None)
-    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+    _patch_sidecar_scan(monkeypatch, [
         {"id": "x-1234", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}])
     assert r._recover_node_for_pr() == []
 
@@ -624,7 +645,7 @@ def test_recover_falls_through_to_gh(tmp_path, monkeypatch):
 
     runner = _GhFallback()
     r = _bare(tmp_path, runner, pr=7)
-    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+    _patch_sidecar_scan(monkeypatch, [
         {"id": "x-1234", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7"}])
     assert r._recover_node_for_pr() == ["x-1234"]
 
@@ -683,7 +704,7 @@ def test_reap_rows_recovers_node_when_reconcile_closed_nothing(tmp_path, monkeyp
     # fills node_ids -> reap proceeds instead of skipping.
     r = _bare(tmp_path, FakeRunner(agent_rows=[]), pr=7)
     monkeypatch.setattr(r, "_resolve_origin_slug", lambda: "owner/repo")
-    monkeypatch.setattr(_ritual, "read_graph", lambda: [
+    _patch_sidecar_scan(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7"}])
     r.leg_reap_rows()
     out = capsys.readouterr().out

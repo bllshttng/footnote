@@ -108,13 +108,15 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
     Both same- and cross-project (unlike advance_dependents, the reconcile path
     does not care about the project boundary: the dependent already exists with
     its own worktree + draft PR). Returns ``{id, project, slug, cwd}`` dicts.
-    Raises on a graph read error so the caller skips rather than guessing.
+    Reads footnote-minted metadata (dep pins, slug, model pins) through the
+    guarded default-backend reader: raises on a store error (including an
+    external selection, under which no contract dependent can exist) so the
+    caller skips rather than guessing.
     """
-    from fno.graph.store import read_graph
-    from fno.paths import graph_json
+    from fno.tracker.metadata import read_entries
 
     out: list[dict] = []
-    for e in read_graph(graph_json()):
+    for e in read_entries("reconcile_dispatch.contract"):
         if not isinstance(e, dict):
             continue
         if closed_node_id not in (e.get("blocked_by") or []):
@@ -357,12 +359,13 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
         return None
 
     # Look the dependent up so the dispatch carries its slug/project/cwd.
+    # Guarded metadata read (slug/model pins are footnote-minted): an external
+    # selection falls to the bare {id, cwd=root} shape, same as any store fault.
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.tracker.metadata import read_entries
 
         dep = None
-        for e in read_graph(graph_json()):
+        for e in read_entries("reconcile_dispatch.pending"):
             if isinstance(e, dict) and e.get("id") == node_id:
                 dep = {"id": node_id, "project": e.get("project"),
                        "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),

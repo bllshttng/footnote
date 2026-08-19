@@ -47,7 +47,6 @@ import typer
 
 from fno._subprocess_util import fno_py_cmd
 from fno.config import load_settings_for_repo
-from fno.graph.store import read_graph
 from fno.pr._proc import Result, ToolMissing, run as _run
 
 # Cross-runner mutex (Step 0.5): a global TTL claim so an attended `/fno:pr
@@ -789,21 +788,28 @@ class Ritual:
         return None
 
     def _recover_node_for_pr(self) -> list[str]:
-        """Graph-derived node id(s) for this PR when reconcile closed nothing.
+        """Sidecar-derived node id(s) for this PR when reconcile closed nothing.
 
         The dominant path closes + stamps the node at the ship gate, so
         ``backlog reconcile`` no-ops and ``.closed[]`` is empty. Recover the
-        PR's node from the graph (repo-scoped) so the row reap still finds it -
-        the replaced bash Step 2 did this scan inline (codex P2).
+        PR's node from the sidecar store (repo-scoped; PR links are
+        footnote-owned ship evidence, so the scan works on any tracker
+        backend) so the row reap still finds it - the replaced bash Step 2 did
+        this scan inline (codex P2).
         """
         slug = self._resolve_origin_slug()
         if not slug:
             return []
         try:
-            entries = read_graph()
-        except Exception:  # noqa: BLE001 - unreadable graph degrades to no recovery
+            from fno.tracker import sidecar as sidecar_store
+
+            rows = [
+                {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url}
+                for nid, sc in sidecar_store.load_all().items()
+            ]
+        except Exception:  # noqa: BLE001 - unreadable store degrades to no recovery
             return []
-        return _scan_nodes(entries, self.ctx.pr, slug)
+        return _scan_nodes(rows, self.ctx.pr, slug)
 
     def leg_reap_rows(self) -> None:
         """Step 8a: reap the merged node's lingering build-worker rows."""

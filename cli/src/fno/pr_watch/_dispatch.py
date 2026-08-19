@@ -577,7 +577,15 @@ def _run_tick(
 
     gpath = graph_path or default_graph_json()
     set_tick_phase("discover")
-    entries = read_graph(gpath) if gpath.exists() else []
+    from fno.tracker import active_backend_name
+
+    # PR discovery needs the done-at-PR-green grace window (recently closed
+    # nodes still watched through merge), which list_open() cannot serve -
+    # closed items are outside its contract by design. An external tracker
+    # backend has no equivalent yet, so this tick degrades to "nothing to
+    # sweep" rather than reading the wrong store (mirrors _catchup_roots'
+    # existing no-graph degrade for the same daemon).
+    entries = read_graph(gpath) if active_backend_name() == "graph" and gpath.exists() else []
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)

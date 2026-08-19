@@ -208,6 +208,14 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
+      # From disposable-rm.yml.
+      - name: Bare rm in disposable-delete files + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash scripts/ci/check-disposable-rm.sh
+          bash tests/ci/test-check-disposable-rm.sh
+
       # From axis-vocabulary.yml.
       - name: Axis vocabulary ratchet + self-test
         if: ${{ !cancelled() }}
@@ -288,6 +296,11 @@ jobs:
         run: |
           bash scripts/ci/check-tracker-partition.sh --self-test
           bash scripts/ci/check-tracker-partition.sh
+
+      - name: Tracker consumer census + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-tracker-consumers.sh
 
       # From uv-install-bytecode.yml.
       - name: Bytecode gate + self-test

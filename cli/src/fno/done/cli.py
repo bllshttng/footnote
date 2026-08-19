@@ -409,6 +409,21 @@ def done_command(
 
     # -- backfill mode (no status change, may be batch) --
     if backfill:
+        # The sweep enumerates done nodes from the graph store and writes
+        # rollup fields back into it. Under an external backend the done
+        # roster lives in the tracker and the rollup lives in the footnote
+        # sidecar, so both halves target the wrong store; the per-node door
+        # above already fills sidecar rollups at completion time.
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            typer.echo(
+                "fno done --backfill: refused - the sweep reads and writes "
+                "the graph store, which is not selected (rollups live in the "
+                "footnote sidecar under an external backend)",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         entries = read_graph(graph_path)
         if query:
             branch = _current_branch()
@@ -477,6 +492,37 @@ def done_command(
         return
 
     # -- normal flow: resolve + flip status + rollup --
+    # External backend (task 4.1): this front door routes through the SAME
+    # shared terminal as `backlog done` - identical gates, sidecar rollups
+    # before the close, exactly one tracker.close - instead of the local
+    # graph resolution below. Requires an explicit node id: the branch-based
+    # auto-detect resolves through footnote-minted slug metadata.
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        from fno.graph.cli import _done_via_seam
+
+        # Graph-backend completions the seam cannot record: the sidecar has no
+        # artifact_url/completion_note fields and the gates run on the
+        # sidecar's stored refs. Refuse rather than silently drop them.
+        if pr or pr_url or link or note:
+            typer.echo(
+                "fno done: --pr/--pr-url/--link/--note record graph-backend "
+                "completion metadata and cannot be recorded under an external "
+                "tracker backend",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if not query:
+            typer.echo(
+                "fno done: an external tracker backend needs an explicit node "
+                "id (branch auto-detect is footnote-metadata-based)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _done_via_seam(query, skip_stamp=False, force=False, reason=None)
+        return
+
     entries = read_graph(graph_path)
     branch = _current_branch()
     match = resolve_id(query, entries, git_branch=branch)

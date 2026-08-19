@@ -979,6 +979,53 @@ def _checks_enabled(monkeypatch):
     )
 
 
+def test_checks_verdict_can_ignore_only_the_coverage_status(monkeypatch):
+    rollup = {
+        "headRefOid": "abc123",
+        "statusCheckRollup": [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {
+                "context": "fno/review-coverage",
+                "state": "FAILURE",
+                "createdAt": "2026-08-18T01:00:00Z",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_rest",
+        lambda pr, cwd=None, runner=None: (rollup, ""),
+    )
+
+    assert _merge._checks_verdict(42, "/repo")[0] == "red"
+    verdict, counts, head = _merge._checks_verdict(
+        42, "/repo", ignore_contexts=("fno/review-coverage",)
+    )
+    assert verdict == "green"
+    assert counts["total"] == 1
+    assert head == "abc123"
+
+
+def test_checks_verdict_keeps_other_failing_contexts(monkeypatch):
+    rollup = {
+        "headRefOid": "abc123",
+        "statusCheckRollup": [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "fno/review-coverage", "state": "FAILURE"},
+            {"context": "security/policy", "state": "FAILURE"},
+        ],
+    }
+    monkeypatch.setattr(
+        "fno.pr._rest.fetch_pr_rest",
+        lambda pr, cwd=None, runner=None: (rollup, ""),
+    )
+
+    verdict, counts, _head = _merge._checks_verdict(
+        42, "/repo", ignore_contexts=("fno/review-coverage",)
+    )
+    assert verdict == "red"
+    assert counts["fail"] == 1
+
+
 def test_green_checks_merge_in_one_call_without_auto(
     enabled, monkeypatch, capsys, tmp_path
 ):
@@ -1461,6 +1508,31 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 
 
 # ---- coverage guard (x-0eaf) ----
+
+
+def test_coverage_override_is_not_vetoed_by_its_stale_failure_status(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    monkeypatch.setattr(
+        "fno.pr._reviews._override_label_actor",
+        lambda pr, repo, runner: (True, "maintainer"),
+    )
+    rollup = {
+        "state": "OPEN",
+        "headRefOid": "deadbeefcafe",
+        "statusCheckRollup": [
+            {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            {"context": "fno/review-coverage", "state": "FAILURE"},
+        ],
+    }
+    fake = _AutoMergeRejectingRun(rollup=rollup, toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+    assert len(fake.merge_cmds) == 1
 
 
 def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):

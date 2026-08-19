@@ -44,6 +44,21 @@ cli = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
+def _triage_entries() -> list[dict]:
+    """Guarded store read for triage's diagnostic surfaces: the local store's
+    full records (statuses, domains, plan evidence) under the default backend,
+    an honest named refusal under an external selection (see
+    fno.tracker.metadata - the refusal names the backend instead of rendering
+    stale local rows)."""
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
+
+    try:
+        return read_entries("triage")
+    except ExternalMetadataUnavailable as exc:
+        typer.echo(f"fno triage: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+
 def _graph_path() -> Path:
     """Return the active graph.json path (monkeypatch-friendly)."""
     from fno.graph._constants import GRAPH_JSON
@@ -636,10 +651,8 @@ def _collect_pending(
     """Gather pending nodes, scoped to the current project by default."""
     from fno.graph._constants import PRIORITY_ORDER
     from fno.graph._intake import filter_by_project
-    from fno.graph.store import read_graph
-
     if entries is None:
-        entries = read_graph(_graph_path())
+        entries = _triage_entries()
     if roadmap_id:
         entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
     entries = filter_by_project(entries, project, all_projects)
@@ -663,10 +676,8 @@ def _collect_ideas(
     """Gather idea-stage nodes scoped the same way as pending candidates."""
     from fno.graph._constants import PRIORITY_ORDER
     from fno.graph._intake import filter_by_project
-    from fno.graph.store import read_graph
-
     if entries is None:
-        entries = read_graph(_graph_path())
+        entries = _triage_entries()
     if roadmap_id:
         entries = [e for e in entries if e.get("roadmap_id") == roadmap_id]
     entries = filter_by_project(entries, project, all_projects)
@@ -747,13 +758,11 @@ def _resolve_scope(
     entries: Optional[list[dict]] = None,
 ) -> str:
     from fno.graph._intake import detect_project
-    from fno.graph.store import read_graph
-
     if project:
         return f"project '{project}'"
     if all_projects:
         return "all projects"
-    snapshot = entries if entries is not None else read_graph(_graph_path())
+    snapshot = entries if entries is not None else _triage_entries()
     detected = detect_project(snapshot)
     if detected:
         return f"project '{detected}' (auto-detected)"
@@ -957,9 +966,7 @@ def _build_context(
 ) -> dict:
     """Build the LLM-reasoning context payload. Shared by `triage context` and
     `triage consistency` so both reason over an identical snapshot."""
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
+    entries = _triage_entries()
     candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
     ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
     inbox_items = _collect_inbox_items()
@@ -1010,9 +1017,7 @@ def cmd_propose(
     ),
 ) -> None:
     """Emit a proposal skeleton or a dry-run candidate summary."""
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
+    entries = _triage_entries()
     scope = _resolve_scope(project, all_projects, entries)
     candidates = _collect_pending(roadmap_id, deep, project, all_projects, entries)
     ideas = _collect_ideas(roadmap_id, deep, project, all_projects, entries)
@@ -1149,8 +1154,6 @@ def cmd_rank(
     import sys
 
     from fno.graph._constants import PRIORITY_ORDER
-    from fno.graph.store import read_graph
-
     try:
         raw = verdicts.read_text() if verdicts else sys.stdin.read()
     except OSError as e:
@@ -1167,7 +1170,7 @@ def cmd_rank(
         typer.echo("Error: verdicts must be a JSON list of {winner, loser}", err=True)
         raise typer.Exit(code=2)
 
-    entries = read_graph(_graph_path())
+    entries = _triage_entries()
     by_id = {e.get("id"): e for e in entries if isinstance(e.get("id"), str)}
 
     # Participants are verdict ids that actually exist in the graph. Dropping
@@ -1200,10 +1203,8 @@ def cmd_validate(
     proposal: Path = typer.Argument(..., help="Path to proposal.json"),
 ) -> None:
     """Validate a proposal, drop cycles and unknown-id entries, print cleaned JSON."""
-    from fno.graph.store import read_graph
-
     data = _load_proposal(proposal)
-    entries = read_graph(_graph_path())
+    entries = _triage_entries()
     cleaned, errors = _validate_proposal(data, entries)
     for err in errors:
         typer.echo(err, err=True)
@@ -1361,9 +1362,7 @@ def cmd_projects(
     integration test locks this shape in; both would break if this were
     flattened to a bare list of names.
     """
-    from fno.graph.store import read_graph
-
-    entries = read_graph(_graph_path())
+    entries = _triage_entries()
     counts: dict[str, int] = {}
     for e in entries:
         if roadmap_id and e.get("roadmap_id") != roadmap_id:
@@ -1430,9 +1429,7 @@ def cmd_health(
         _find_repo_root,
         _resolve_plan_path,
     )
-    from fno.graph.store import read_graph
-
-    all_entries = read_graph(_graph_path())
+    all_entries = _triage_entries()
     entries = filter_by_project(all_entries, project, all_projects)
 
     pending = [e for e in entries if _is_pending(e) or _is_idea(e)]

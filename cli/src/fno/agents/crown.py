@@ -144,16 +144,21 @@ def split_scope(scope: Optional[str]) -> list[str]:
 
 
 def _graph_entry(node_id: str) -> Optional[dict]:
-    """The backlog entry for ``node_id``, or None. Path resolved dynamically:
-    ``read_graph``'s default arg is frozen at import time and would ignore a
-    redirected state dir (tests, overrides)."""
-    from fno import paths
-    from fno.graph.store import read_graph
+    """The node record for ``node_id``, or None. Reads footnote-minted
+    metadata (type/project) through the guarded default-backend reader: the
+    crown ladder's epic rung classifies nodes footnote's own verbs typed, so
+    an external selection degrades to None - the same path as an unknown id
+    (configured projects, the top rungs, still resolve from settings)."""
+    from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
+    try:
+        entries = read_entries("agents.crown")
+    except ExternalMetadataUnavailable:
+        return None
     return next(
         (
             e
-            for e in read_graph(paths.graph_json())
+            for e in entries
             if isinstance(e, dict) and e.get("id") == node_id
         ),
         None,

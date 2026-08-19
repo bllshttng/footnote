@@ -198,7 +198,9 @@ def _subprocess_journey(tmp_path: Path, monkeypatch):
             }
         )
     )
-    monkeypatch.setattr("fno.graph.cli._graph_path", lambda: graph_path)
+    # The think-dispatch resolver reads through the guarded metadata seam,
+    # which resolves paths.graph_json at call time (not graph.cli._graph_path).
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_path)
     monkeypatch.setattr(
         "fno.provenance.spawn_think.resolve_transcript",
         lambda harness, sid, cwd, **kw: ResolvedTranscript(

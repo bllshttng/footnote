@@ -942,7 +942,16 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         (
             "right-click".into(),
-            "row menu · on a header: clear dead".into(),
+            // (x-7683) All three triggers of the same menu, so a terminal that
+            // never forwards the button does not read as a dead feature. The
+            // header-only clear-dead action stays named here too - it was the
+            // only in-app documentation of that behavior (x-7683 review). The
+            // hold duration formats from the client's one constant, so a
+            // retune can never leave this label stale.
+            format!(
+                "context menu · or m · or hold L {}ms · on a header: clear dead",
+                crate::client::MENU_LONG_PRESS.as_millis()
+            ),
             KeySection::SidelineRows,
         ),
         // Workspace-row rename/reorder, only reachable inside the prefix+w

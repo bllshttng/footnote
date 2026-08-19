@@ -97,6 +97,24 @@ out=$(cd "$S" && echo "{\"worktree_path\":\"$S/wt\"}" | bash "$HOOK" 2>&1); rc=$
 if [[ $rc -eq 0 && ! -d "$S/wt" ]]; then pass "dead owner_pid not preserved (removed, exit 0)"; else fail "dead owner_pid remove" "rc=$rc wt-exists=$([[ -d "$S/wt" ]] && echo y || echo n) out=$out"; fi
 rm -rf "$S"
 
+# 1g. Unregistered leftover dir whose delete FAILS -> exit 1, remove_failed
+# logged, path kept. Exit code is the whole signal: the hook must never claim
+# removal while the path survives. The unwritable parent makes every rm rung
+# fail. The log file exists beforehand so the append is not blocked by the
+# parent's mode.
+S=$(new_sandbox)
+mkdir -p "$S/leftover" "$S/.fno"
+: > "$S/.fno/worktree-log.jsonl"
+chmod 555 "$S"
+out=$(cd "$S" && echo "{\"worktree_path\":\"$S/leftover\"}" | bash "$HOOK" 2>&1); rc=$?
+chmod 755 "$S"
+if [[ $rc -eq 1 && -d "$S/leftover" ]] && grep -q '"action":"remove_failed"' "$S/.fno/worktree-log.jsonl" 2>/dev/null; then
+    pass "failed delete exits 1 and logs remove_failed"
+else
+    fail "failed delete" "rc=$rc exists=$([[ -d "$S/leftover" ]] && echo y || echo n) log=$(tail -1 "$S/.fno/worktree-log.jsonl" 2>/dev/null)"
+fi
+rm -rf "$S"
+
 echo "== 2. _wt_pids keys on cwd, not open files =="
 
 # Source just the helper (the script body runs a case statement on source).

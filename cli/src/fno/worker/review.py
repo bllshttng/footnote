@@ -529,22 +529,28 @@ def _resolve_cross_model_runner(
 
 
 def _resolve_node_size(state_path: Path) -> Optional[str]:
-    """Best-effort read of the bound node's size (S/M/L) from the graph. -> None."""
+    """Best-effort read of the bound node's size pin (S/M/L). -> None.
+
+    size is footnote-minted metadata the five-field read contract does not
+    carry and the sidecar must not mirror, so the pin is read from the
+    default store through the guarded metadata reader: advisory None under an
+    external backend (footnote's sizing verbs never ran for such a node).
+    """
     try:
         from fno.worker.ship import _read_graph_node_id
 
         node_id = _read_graph_node_id(state_path)
         if not node_id:
             return None
-        from fno.graph.store import read_graph
+        from fno.tracker import metadata
 
-        for node in read_graph():
+        for node in metadata.read_entries("worker.review"):
             if node.get("id") == node_id:
                 size = node.get("size")
                 return str(size) if size else None
+        return None
     except Exception:  # noqa: BLE001 - size is advisory; never break the panel
         return None
-    return None
 
 
 def review(

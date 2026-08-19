@@ -1545,6 +1545,19 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
+    let out = Command::new(git_bin)
+        .args(["branch", "--show-current"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
 /// `gh pr view` exits 1 both when no PR exists and when gh itself fails.
 /// "No PR" is real world-state - the fingerprint should record it and the
 /// NoProgress backstop should keep ticking - while an outage must freeze the
@@ -1572,6 +1585,79 @@ fn stderr_tail(bytes: &[u8]) -> String {
         }
         s[start..].to_string()
     }
+}
+
+const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName";
+
+fn pr_head_oid(pr_json: &Value) -> Option<String> {
+    pr_json
+        .get("headRefOid")
+        .and_then(|v| v.as_str())
+        .filter(|oid| !oid.is_empty())
+        .map(str::to_string)
+}
+
+fn read_pr_view(
+    gh_bin: &str,
+    cwd: &Path,
+    selector: Option<&str>,
+) -> Result<Option<Value>, (String, String)> {
+    let rest_adapter = internal_gh_adapter(gh_bin);
+    let metadata_read = if rest_adapter {
+        "pr_info_rest"
+    } else {
+        "pr_view"
+    };
+    let metadata_parse = if rest_adapter {
+        "pr_info_rest_parse"
+    } else {
+        "pr_view_parse"
+    };
+    let mut args = vec!["pr", "view"];
+    if let Some(selector) = selector {
+        args.push(selector);
+    }
+    args.extend(["--json", PR_VIEW_FIELDS]);
+    let out = Command::new(gh_bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
+    if !out.status.success() {
+        return if is_no_pr_stderr(&out.stderr) {
+            Ok(None)
+        } else {
+            Err((metadata_read.to_string(), stderr_tail(&out.stderr)))
+        };
+    }
+    serde_json::from_slice(&out.stdout)
+        .map(Some)
+        .map_err(|_| (metadata_parse.to_string(), String::new()))
+}
+
+/// Resolve a numeric PR selector without consulting the checkout branch.
+/// `Ok(None)` is the real-world no-PR state; `Err` is an unreadable GitHub
+/// response and must not fall back to local HEAD. Returns the raw `pr_json`
+/// alongside the head, so a caller that goes on to build a full `PrInfo` can
+/// reuse this read instead of issuing a second `gh pr view` for the same
+/// selector.
+fn read_pr_head_oid(
+    gh_bin: &str,
+    cwd: &Path,
+    selector: &str,
+) -> Result<Option<(String, Value)>, (String, String)> {
+    let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
+        return Ok(None);
+    };
+    let head = pr_head_oid(&pr_json).ok_or_else(|| {
+        let read = if internal_gh_adapter(gh_bin) {
+            "pr_info_rest_parse"
+        } else {
+            "pr_view_parse"
+        };
+        (read.to_string(), "missing headRefOid".to_string())
+    })?;
+    Ok(Some((head, pr_json)))
 }
 
 /// The GraphQL bucket's state, from `gh api rate_limit`.
@@ -2097,18 +2183,9 @@ fn read_pr_info(
     repo_slug: &str,
     author_session: Option<&str>,
     pr_selector: Option<&str>,
+    prefetched_pr_json: Option<Value>,
 ) -> Result<PrInfo, (String, String)> {
     let rest_adapter = internal_gh_adapter(gh_bin);
-    let metadata_read = if rest_adapter {
-        "pr_info_rest"
-    } else {
-        "pr_view"
-    };
-    let metadata_parse = if rest_adapter {
-        "pr_info_rest_parse"
-    } else {
-        "pr_view_parse"
-    };
     let checks_read = if rest_adapter {
         "pr_status_rest"
     } else {
@@ -2126,57 +2203,39 @@ fn read_pr_info(
     // argv byte-identical to the stop hook's branch-resolved form. The one
     // number-based call (`gh api .../pulls/<n>/comments`) already carries the
     // number the first read returned.
-    let sel: Vec<&str> = match pr_selector {
-        Some(n) => vec![n],
-        None => vec![],
+    let sel: Vec<&str> = pr_selector.into_iter().collect();
+    // Read 1: PR state + number + head OID + mergeability. Reuse the caller's
+    // read when it already resolved this exact selector (e.g. review-coverage
+    // pinning --pr N via read_pr_head_oid) instead of asking gh again.
+    let Some(pr_json) = (match prefetched_pr_json {
+        Some(json) => Some(json),
+        None => read_pr_view(gh_bin, cwd, pr_selector)?,
+    }) else {
+        // No PR yet: world-state, not an error. done() is simply false, and
+        // the backstop can resolve a stuck no-PR session as NoProgress.
+        return Ok(PrInfo {
+            state: PrState::None,
+            number: 0,
+            head_oid: String::new(),
+            ci_conclusion: CiConclusion::None,
+            failing_checks: Vec::new(),
+            ci_has_pending: false,
+            mergeable: "UNKNOWN".to_string(),
+            latest_review_ts: "none".to_string(),
+            reviewed: false,
+            missing_bots: Vec::new(),
+            bot_nudges: Vec::new(),
+            usage_limited: Vec::new(),
+            unaddressed_findings: Vec::new(),
+            review_skipped: false,
+            unattested_reviewers: Vec::new(),
+            malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: Vec::new(),
+            },
+        });
     };
-    // Read 1: PR state + number + head OID + mergeability
-    let pr_view_out = Command::new(gh_bin)
-        .args(["pr", "view"])
-        .args(&sel)
-        .args([
-            "--json",
-            // baseRefName rides along for the freshness predicate's merge-base
-            // (x-5b99). Same call, same round trip, no new API cost.
-            "state,number,headRefName,headRefOid,mergeable,baseRefName",
-        ])
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
-
-    if !pr_view_out.status.success() {
-        if is_no_pr_stderr(&pr_view_out.stderr) {
-            // No PR yet: world-state, not an error. done() is simply false
-            // ("no PR for HEAD"), and the backstop can resolve a stuck
-            // no-PR session as NoProgress rather than freezing forever.
-            return Ok(PrInfo {
-                state: PrState::None,
-                number: 0,
-                head_oid: String::new(),
-                ci_conclusion: CiConclusion::None,
-                failing_checks: Vec::new(),
-                ci_has_pending: false,
-                mergeable: "UNKNOWN".to_string(),
-                latest_review_ts: "none".to_string(),
-                reviewed: false,
-                missing_bots: Vec::new(),
-                bot_nudges: Vec::new(),
-                usage_limited: Vec::new(),
-                unaddressed_findings: Vec::new(),
-                review_skipped: false,
-                unattested_reviewers: Vec::new(),
-                malformed_attestations: 0,
-                coverage: CoverageReport {
-                    coverage: Coverage::Covered(0),
-                    verdicts: Vec::new(),
-                },
-            });
-        }
-        return Err((metadata_read.to_string(), stderr_tail(&pr_view_out.stderr)));
-    }
-
-    let pr_json: Value = serde_json::from_slice(&pr_view_out.stdout)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))?;
 
     let state = PrState::from_gh_str(
         pr_json
@@ -2185,11 +2244,7 @@ fn read_pr_info(
             .unwrap_or("none"),
     );
     let number = pr_json.get("number").and_then(|v| v.as_i64()).unwrap_or(0);
-    let head_oid = pr_json
-        .get("headRefOid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let head_oid = pr_head_oid(&pr_json).unwrap_or_default();
     // The PR's head branch, same `gh pr view` round trip as headRefOid. The
     // scope predicate needs it: attestations are keyed to the branch they
     // reviewed, and an empty read must pass "" so the predicate fails closed
@@ -7063,8 +7118,26 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     let fno_bin =
                         std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-                    match evaluate_plan_fidelity(manifest.plan_path.as_deref(), &fno_bin, &cwd) {
+                    match evaluate_plan_fidelity(
+                        manifest.plan_path.as_deref(),
+                        &fno_bin,
+                        &cwd,
+                        FIDELITY_TIMEOUT,
+                    ) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
+                        // Degraded fails OPEN on the stop decision (same as Absent - a
+                        // hung probe must not wedge the gate that lets a finished
+                        // session stop), but is emitted here so it is never a SILENT
+                        // pass: a probe that keeps timing out stays visible in the
+                        // event log even though it never blocks.
+                        FidelityGate::Degraded { reason } => emit(
+                            "loop_check_fidelity_degraded",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "plan_path": manifest.plan_path,
+                                "reason": reason
+                            }),
+                        ),
                         _ => {}
                     }
                 }
@@ -7743,6 +7816,7 @@ fn run_done(
         repo_slug,
         author_session,
         None,
+        None,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -7957,30 +8031,171 @@ enum FidelityGate {
     Refused {
         reason: String,
     },
+    /// The child ran past `FIDELITY_TIMEOUT` and was killed (x-d21f). Fail
+    /// open on the STOP decision like `Absent` - a hung probe must not wedge
+    /// the gate that exists to let a finished session finally stop - but,
+    /// unlike `Absent`, this is NAMED and carried into the emitted event so a
+    /// timing-out probe is visible, never a silent pass indistinguishable
+    /// from "no plan bound".
+    Degraded {
+        reason: String,
+    },
+}
+
+/// Wall-clock ceiling for the `fno plan fidelity` child (x-d21f). Same bound
+/// as `PROBE_TIMEOUT`, under its own name because this and done_probes gate
+/// different things and must be free to drift independently.
+const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Outcome of a bounded, killable child run: the whole point is that a hang
+/// inside the child (x-8ad8 was one; nothing rules out another) can never
+/// again read as "the read failed" or wedge forever - it reads as exactly
+/// what happened, with the verb and the elapsed time attached at the call
+/// site.
+enum BoundedRun {
+    Stdout(Vec<u8>),
+    TimedOut(std::time::Duration),
+    SpawnFailed,
+    /// `try_wait()` itself errored (e.g. a concurrent reap of the group
+    /// leader) - the bound was never reached, so this must stay distinct
+    /// from `TimedOut` or a wait failure would misreport as "timed out
+    /// after 0s", naming a hang that never happened.
+    WaitFailed,
+}
+
+/// Run `fno_bin args...` under a native wall-clock bound, killing the
+/// child's whole process group on expiry - the same discipline as
+/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
+/// stdout too since the caller needs to parse it as JSON. `Command::output()`
+/// alone has no timeout: it blocks until the child exits, however long that
+/// takes, which is exactly how a hang three calls deep in `fno plan fidelity`
+/// (x-8ad8) turned into loop-check itself hanging forever and stranding the
+/// session behind it. stdout/stderr are drained on background threads for
+/// the same reason `run_probe` drains stderr that way: reading a pipe only
+/// after the child exits deadlocks against a child that fills the pipe
+/// buffer before exiting.
+fn run_bounded(
+    fno_bin: &OsStr,
+    args: &[&str],
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> BoundedRun {
+    use std::os::unix::process::CommandExt;
+
+    let spawned = Command::new(fno_bin)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn();
+
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(_) => return BoundedRun::SpawnFailed,
+    };
+    let pgid = child.id() as i32;
+
+    let mut stdout_pipe = child.stdout.take();
+    let stdout_drain = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = stdout_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let mut stderr_pipe = child.stderr.take();
+    let stderr_drain = std::thread::spawn(move || {
+        // Nothing reads this back (the caller only wants stdout) - drain to
+        // sink rather than a growing Vec so an unbounded stderr write
+        // doesn't buy an unbounded allocation for bytes no one inspects.
+        if let Some(ref mut p) = stderr_pipe {
+            let _ = std::io::copy(p, &mut std::io::sink());
+        }
+    });
+
+    enum Outcome {
+        Done,
+        TimedOut(std::time::Duration),
+        WaitFailed,
+    }
+
+    let start = std::time::Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break Outcome::Done,
+            Ok(None) => {
+                let elapsed = start.elapsed();
+                if elapsed >= timeout {
+                    kill_process_group(&mut child);
+                    break Outcome::TimedOut(elapsed);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                // The bound was never reached - this is NOT a timeout, and
+                // must not be reported as one (that would name a hang that
+                // never happened). Still kill the group: an error mid-wait
+                // leaves the child's liveness unknown, and a stray survivor
+                // must not outlive this call.
+                kill_process_group(&mut child);
+                break Outcome::WaitFailed;
+            }
+        }
+    };
+
+    // Reap any descendant still holding a pipe write end (a wrapper script
+    // that forks) so the drain threads see EOF either way.
+    killpg(pgid);
+
+    match outcome {
+        // Captured at the moment the bound was actually crossed, not after
+        // kill_process_group + killpg have run - else the reported duration
+        // is inflated by cleanup cost instead of reflecting the timeout itself.
+        Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
+        Outcome::WaitFailed => BoundedRun::WaitFailed,
+        Outcome::Done => {
+            let stdout = stdout_drain.join().unwrap_or_default();
+            let _ = stderr_drain.join();
+            BoundedRun::Stdout(stdout)
+        }
+    }
 }
 
 /// Run `fno plan fidelity --json` for the bound plan and classify the decision.
 ///
-/// Fail-open on every error path (no fno, non-zero exit, unparseable JSON): the
-/// stop gate must not block on a broken probe. The inversion lives in the Python
-/// core (`fno.plan.fidelity`); Rust only reads the `refused` bool, so there is
-/// one implementation of the join and the gate and the loop cannot drift.
-/// `fno_bin` is resolved by the caller (from `FNO_LOOPCHECK_FNO_BIN`, default
-/// `fno`) so this function is hermetically testable with a stub script.
-fn evaluate_plan_fidelity(plan_path: Option<&str>, fno_bin: &OsStr, cwd: &Path) -> FidelityGate {
+/// Fail-open on every error path (no fno, non-zero exit, unparseable JSON,
+/// timeout): the stop gate must not block on a broken probe. The inversion
+/// lives in the Python core (`fno.plan.fidelity`); Rust only reads the
+/// `refused` bool, so there is one implementation of the join and the gate
+/// and the loop cannot drift. `fno_bin` is resolved by the caller (from
+/// `FNO_LOOPCHECK_FNO_BIN`, default `fno`) so this function is hermetically
+/// testable with a stub script.
+fn evaluate_plan_fidelity(
+    plan_path: Option<&str>,
+    fno_bin: &OsStr,
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> FidelityGate {
     let plan = match plan_path {
         Some(p) if !p.is_empty() => p,
         _ => return FidelityGate::Absent,
     };
-    let out = match Command::new(fno_bin)
-        .args(["plan", "fidelity", plan, "--json"])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return FidelityGate::Absent,
-    };
-    classify_plan_fidelity(&out.stdout)
+    match run_bounded(fno_bin, &["plan", "fidelity", plan, "--json"], cwd, timeout) {
+        BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
+        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
+        BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
+            reason: format!(
+                "plan fidelity check timed out after {:.1}s running `{} plan fidelity {} --json` \
+                 and was killed; degraded, not a pass - the fno CLI itself is hanging, \
+                 investigate that command directly",
+                elapsed.as_secs_f64(),
+                fno_bin.to_string_lossy(),
+                plan,
+            ),
+        },
+    }
 }
 
 fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
@@ -9458,16 +9673,78 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_harness_override.as_deref(),
     );
 
-    // head_sha pins the emitted event to what would actually merge. Default
-    // local HEAD; --head overrides with a caller that knows the PR head. A
-    // --head sha the local repository does not contain leaves freshness
-    // unresolvable, which resolves stale and refuses - the safe direction.
-    // Whether the caller supplied it decides the exit-4 publish below: a
-    // caller that knows the PR head gets the visible failure status; a
-    // derived-from-local-HEAD sha does not (it may be the canonical
-    // checkout's default-branch tip, a commit this row never described).
-    let head_explicit = head.is_some();
-    let head_sha = head.unwrap_or_else(|| git_head_sha(&git_bin, &cwd));
+    // Authorship: --session-id, else the manifest's harness_session_id when one
+    // exists, else None. Resolve it before the PR-head read so even an unknown
+    // row from that read failure keeps the established event shape.
+    let author_session = session_id.or_else(|| {
+        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
+            .ok()
+            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
+            .filter(|s| s != "null")
+    });
+
+    // Head precedence is explicit --head, then the named PR's head, then the
+    // local checkout for the branch-inference path. A failed named-PR read
+    // must never fall through to local HEAD: that is how a canonical checkout
+    // used to publish a row describing main against a different PR.
+    // `branch` is read lazily, inside the closure, since it is only ever
+    // needed on the no-PR error path - an explicit --head never calls it.
+    let no_pr_payload = || {
+        serde_json::json!({
+            "coverage": "none",
+            "emitted": false,
+            "reason": "no PR for the selector",
+            "selector": pr,
+            "branch": git_head_branch(&git_bin, &cwd),
+        })
+        .to_string()
+    };
+    // Set when the (None, Some(selector)) branch below resolves the head via
+    // a `gh pr view` read, so the read_pr_info call further down can reuse
+    // that same response instead of issuing an identical second request.
+    let mut prefetched_pr_json: Option<Value> = None;
+    let (head_sha, head_explicit) = match (head, pr.as_deref()) {
+        (Some(explicit), _) => (explicit, true),
+        (None, Some(selector)) => match read_pr_head_oid(&gh_bin, &cwd, selector) {
+            Ok(Some((resolved, pr_json))) => {
+                prefetched_pr_json = Some(pr_json);
+                (resolved, true)
+            }
+            Ok(None) => return (3, no_pr_payload()),
+            Err((read, tail)) => {
+                let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
+                let data = coverage_event_data(
+                    pr_num,
+                    &CoverageReport {
+                        coverage: Coverage::Unknown,
+                        verdicts: Vec::new(),
+                    },
+                    "",
+                    &inputs.repo_slug,
+                    author_session.as_deref(),
+                );
+                emit_to_both(
+                    &inputs.project_events,
+                    &inputs.global_events,
+                    "review_coverage",
+                    data.clone(),
+                );
+                let secondary = is_secondary_limit_stderr(&tail);
+                let quota = if secondary || !is_graphql_read(&read) {
+                    None
+                } else {
+                    probe_graphql_quota(&gh_bin, &cwd)
+                };
+                let mut out = data;
+                insert_quota_diagnostic(&mut out, &quota);
+                if secondary {
+                    out["reason"] = serde_json::json!(secondary_limit_reason());
+                }
+                return (4, out.to_string());
+            }
+        },
+        (None, None) => (git_head_sha(&git_bin, &cwd), false),
+    };
 
     // The self-review floor, exactly as decide() applies it for the stop
     // hook: a code payload on a lane-less stock install owes a local
@@ -9489,20 +9766,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         }
     }
 
-    // Authorship: --session-id, else the manifest's harness_session_id when one
-    // exists, else None. None leaves every local verdict's attestation_origin
-    // Unknown (the documented fail-open-on-authorship behavior) and the payload
-    // OMITS self_attested_count rather than reporting an unmeasured 0. The
-    // "null" filter is parse_manifest's own (init writes ${_HARNESS_SESSION:-null}):
-    // Some("null") would mislabel every origin other_session and emit the
-    // unmeasured-0 self_attested_count the omission exists to prevent.
-    let author_session = session_id.or_else(|| {
-        std::fs::read_to_string(cwd.join(".fno/target-state.md"))
-            .ok()
-            .and_then(|content| scan_manifest_field(&content, "harness_session_id"))
-            .filter(|s| s != "null")
-    });
-
     match read_pr_info(
         &gh_bin,
         &git_bin,
@@ -9522,20 +9785,13 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         &inputs.repo_slug,
         author_session.as_deref(),
         pr.as_deref(),
+        prefetched_pr_json,
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
                 // PrState::None: no PR for the selector (or the branch). There
                 // is nothing to cover and nothing was emitted.
-                return (
-                    3,
-                    serde_json::json!({
-                        "coverage": "none",
-                        "emitted": false,
-                        "reason": "no PR for the selector",
-                    })
-                    .to_string(),
-                );
+                return (3, no_pr_payload());
             }
             // read_pr_info already emitted this exact payload to both logs;
             // print the same object so stdout and the logs agree. And publish
@@ -9856,11 +10112,11 @@ mod tests {
         let cwd = std::env::temp_dir();
         let missing = Path::new("/definitely/missing/fno");
         assert!(matches!(
-            evaluate_plan_fidelity(None, missing.as_os_str(), &cwd),
+            evaluate_plan_fidelity(None, missing.as_os_str(), &cwd, FIDELITY_TIMEOUT),
             FidelityGate::Absent
         ));
         assert!(matches!(
-            evaluate_plan_fidelity(Some(""), missing.as_os_str(), &cwd),
+            evaluate_plan_fidelity(Some(""), missing.as_os_str(), &cwd, FIDELITY_TIMEOUT),
             FidelityGate::Absent
         ));
     }
@@ -9875,7 +10131,8 @@ mod tests {
             evaluate_plan_fidelity(
                 Some("/x/plan.md"),
                 Path::new("/definitely/missing/fno").as_os_str(),
-                &cwd
+                &cwd,
+                FIDELITY_TIMEOUT
             ),
             FidelityGate::Absent
         ));
@@ -9883,6 +10140,39 @@ mod tests {
             classify_plan_fidelity(b"No such command: fidelity"),
             FidelityGate::Absent
         ));
+    }
+
+    #[test]
+    fn plan_fidelity_gate_degrades_and_names_the_verb_on_timeout() {
+        // x-d21f: a hung `fno plan fidelity` child (x-8ad8 was one concrete
+        // cause; the bound must hold regardless of WHY the child hangs) must
+        // be killed, not waited on forever, and must report as exactly that -
+        // never a silent Absent pass, and never a misattributed message about
+        // some unrelated read.
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\nsleep 30\n");
+        let cwd = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        let gate = evaluate_plan_fidelity(
+            Some("/x/plan.md"),
+            fno.as_os_str(),
+            &cwd,
+            std::time::Duration::from_millis(200),
+        );
+        // The child is killed at the bound, not left to run out its sleep.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        match gate {
+            FidelityGate::Degraded { reason } => {
+                assert!(reason.contains("plan fidelity"), "{reason}");
+                assert!(reason.contains("/x/plan.md"), "{reason}");
+                assert!(reason.contains("timed out"), "{reason}");
+                assert!(!reason.contains("gh read"), "{reason}");
+                // A 200ms bound must read as sub-second, never truncate to a
+                // flat "0s" that misreads as no time having passed at all.
+                assert!(reason.contains("0.2s"), "{reason}");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
     }
 
     // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────

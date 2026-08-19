@@ -131,20 +131,21 @@ def _catchup_roots() -> list[Path]:
     """Distinct project roots the canonical-sync catch-up should sweep.
 
     launchd starts this daemon in ``/`` with no WorkingDirectory, so there is no
-    ambient project to read config from. The roots come from the backlog graph,
-    the same source the dispatch pass scopes its own per-repo config reads to.
+    ambient project to read config from. The roots come from every sidecar's
+    cwd, regardless of the node's tracker state - a project whose backlog is
+    all done/closed must still get swept, so this is ``load_all()`` (one scan,
+    every id), never ``list_open()`` plus a per-id ``load()`` loop.
     """
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
+        from fno.tracker import sidecar as sidecar_store
 
-        entries = read_graph(graph_json())
-    except Exception as exc:  # noqa: BLE001 - no graph means nothing to sweep
-        log.warning("pr-watch: could not read graph for catch-up roots: %s", exc)
+        sidecars = sidecar_store.load_all()
+    except Exception as exc:  # noqa: BLE001 - no sidecar store means nothing to sweep
+        log.warning("pr-watch: could not read sidecars for catch-up roots: %s", exc)
         return []
     roots: dict[str, Path] = {}
-    for node in entries:
-        cwd = node.get("cwd")
+    for sc in sidecars.values():
+        cwd = sc.cwd
         if cwd and str(cwd) not in roots:
             roots[str(cwd)] = Path(cwd)
     return [p for p in roots.values() if p.is_dir()]

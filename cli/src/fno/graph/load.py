@@ -232,12 +232,21 @@ def _entries(data: object, *, keep_malformed: bool = False) -> list[dict]:
 
 
 def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dict]:
-    """Return entries whose source_inbox_msg matches msg_id.
+    """Return sidecar rows whose source_inbox_msg matches msg_id.
 
-    Uses read_graph (defaults applied) so provenance fields are guaranteed
-    to be present even on legacy entries written before Phase 01.
+    source_inbox_msg is footnote-owned provenance (the same family as
+    source_node_id / source_plan_path), so the scan runs over the sidecar
+    projection and works on any tracker backend. An explicit ``path`` (a
+    hermetic-test redirect) is still honored by reading that file directly.
     """
-    from fno.graph.store import read_graph
+    if path is not None:
+        from fno.graph.store import read_graph
 
-    entries = read_graph(path) if path is not None else read_graph()
-    return [e for e in entries if e.get("source_inbox_msg") == msg_id]
+        return [e for e in read_graph(path) if e.get("source_inbox_msg") == msg_id]
+    from fno.tracker import sidecar as sidecar_store
+
+    return [
+        {"id": nid, "source_inbox_msg": sc.source_inbox_msg}
+        for nid, sc in sidecar_store.load_all().items()
+        if sc.source_inbox_msg == msg_id
+    ]

@@ -196,6 +196,9 @@ def graph(tmp_path, monkeypatch):
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
+    # Seam readers (guarded metadata/display reads) resolve paths.graph_json
+    # at call time; pin the resolver to the same hermetic file.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return seed
 
 

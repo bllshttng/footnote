@@ -59,11 +59,11 @@ def parse_address(raw: str) -> Address:
 
 def _default_node_resolver(node_id: str) -> Optional[str]:
     """Resolve a backlog node id/slug to its recorded ``session_id`` via the
-    graph. Lazy import so the registry/router carry no hard graph dependency
-    (and tests can inject a fake resolver)."""
+    guarded metadata read. Lazy import so the registry/router carry no hard
+    graph dependency (and tests can inject a fake resolver)."""
     try:
-        from fno.graph.store import read_graph
-        graph = read_graph()
+        from fno.tracker.metadata import read_entries
+        graph = read_entries("relay.router")
     except Exception:
         return None
     for entry in graph:

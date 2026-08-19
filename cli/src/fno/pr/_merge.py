@@ -503,6 +503,16 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         from fno.paths import graph_json
         from fno.graph.store import locked_mutate_graph
 
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # merge_status is footnote-owned node metadata AND a derived flag
+            # (readiness derives from live PR state, never a stored field).
+            # Under external selection the graph is not the store and every
+            # reader of the field refuses, so the write would only land in a
+            # dead local file.
+            return
+
         path = graph_json()
         if not path.exists():
             return
@@ -625,9 +635,15 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     """
     try:
         from fno.paths import graph_json
+        from fno.tracker import active_backend_name
 
         path = graph_json()
-        if not path.exists():
+        external = active_backend_name() != "graph"
+        # The graph-mode close path below needs the file; the external path
+        # does not and correctly has no local graph.json to check - a bare
+        # `not path.exists(): return` here would silently no-op every
+        # external-backend close on a project that never used graph mode.
+        if not external and not path.exists():
             return
         pr_url = ""
         view = _gh(
@@ -636,6 +652,34 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         )
         if view.ok:
             pr_url = view.stdout.strip()
+
+        if external:
+            # External selection has no Backlog-Closure trailer concept of its
+            # own yet (that is graph-only, x-59a6) - resolve the ONE node this
+            # PR's ref matches via the tracker-agnostic sidecar projection,
+            # backfill its primary link, and close through the shared
+            # external terminal: same gates, sidecar rollups, one close.
+            from fno.tracker import sidecar as sidecar_store
+
+            rows = [
+                {"id": nid, "pr_number": sc.pr_number, "pr_url": sc.pr_url,
+                 "additional_prs": sc.additional_prs}
+                for nid, sc in sidecar_store.load_all().items()
+            ]
+            nid = _find_pr_node_id(rows, pr_number, pr_url)
+            if not nid:
+                return  # no node linked to this PR - nothing to close
+
+            from fno.graph.cli import _done_via_seam
+
+            sc = sidecar_store.load(nid)
+            if not isinstance(sc.pr_number, int):
+                sc.pr_number = pr_number
+                if pr_url and not (sc.pr_url or "").strip():
+                    sc.pr_url = pr_url
+                sidecar_store.save(sc)
+            _done_via_seam(nid, skip_stamp=False, force=False, reason=None)
+            return
 
         if pr_url:
             from fno.graph.store import locked_mutate_graph, read_graph
@@ -839,23 +883,22 @@ def _emit_human_touch_merge(pr_number: int, state_dir: str) -> None:
         return
     node_id = None
     try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json, resolve_canonical_repo_root
+        from fno.paths import resolve_canonical_repo_root
+        from fno.tracker import sidecar as sidecar_store
 
-        # The graph is global across projects, so bare PR numbers collide;
-        # only nodes homed in THIS repo (node.cwd == canonical root) may
+        # The store is global across projects, so bare PR numbers collide;
+        # only nodes homed in THIS repo (sidecar cwd == canonical root) may
         # claim the touch, and only an UNAMBIGUOUS match does (two same-repo
         # nodes on one number -> resolution=failed, never an arbitrary pick).
+        # cwd and PR links are both footnote-owned sidecar fields, so the scan
+        # runs over the sidecar projection and works on any tracker backend.
         root = str(resolve_canonical_repo_root())
         hits = set()
-        for e in read_graph(graph_json()):
-            if e.get("cwd") != root:
+        for nid, sc in sidecar_store.load_all().items():
+            if sc.cwd != root:
                 continue
-            if e.get("pr_number") == pr_number or any(
-                isinstance(p, dict) and p.get("number") == pr_number
-                for p in e.get("additional_prs") or []
-            ):
-                hits.add(e.get("id"))
+            if sc.carries_pr(pr_number):
+                hits.add(nid)
         node_id = hits.pop() if len(hits) == 1 else None
     except Exception:
         node_id = None
@@ -1379,7 +1422,11 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
 
 
-def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
+def _checks_verdict(
+    pr_number: int,
+    repo: str,
+    ignore_contexts: Sequence[str] = (),
+) -> tuple[str, dict, str]:
     """CI verdict for the PR plus the head it describes.
 
     Borrows `verdict_for` rather than hand-rolling a statusCheckRollup read: a
@@ -1409,6 +1456,11 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     if data is None:
         return _miss(reason or "REST checks read failed")
     rollup = data.get("statusCheckRollup") or []
+    ignored = set(ignore_contexts)
+    if ignored:
+        # StatusContexts use `context`; CheckRuns use `name`. Keep those
+        # namespaces distinct so a same-named real check is never discarded.
+        rollup = [entry for entry in rollup if entry.get("context") not in ignored]
     # Whole-rollup semantics: with require_checks_pass, every check must pass.
     # A required-vs-optional split would need branch-protection context that
     # `gh pr view` does not expose - its statusCheckRollup entries carry no
@@ -1482,7 +1534,15 @@ def _do_merge(
     verified_head = ""
     if auto_merge.require_checks_pass:
         try:
-            verdict, counts, head_read = _checks_verdict(pr_number, repo)
+            ignore_contexts: Sequence[str] = ()
+            if gate_verdict is not None:
+                from fno.pr import _coverage_gate, _reviews
+
+                if gate_verdict[0] == _coverage_gate.COVERED:
+                    ignore_contexts = (_reviews.COVERAGE_STATUS_CONTEXT,)
+            verdict, counts, head_read = _checks_verdict(
+                pr_number, repo, ignore_contexts=ignore_contexts
+            )
         except ToolMissing:
             _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
             return 127
@@ -1683,7 +1743,12 @@ def _do_merge(
 
     # Unrecovered failure: classify and report.
     reason = first_line
-    if re.search(r"protected", output, re.IGNORECASE):
+    if "fno/review-coverage" in output:
+        reason = (
+            "fno/review-coverage is still required after its success status was "
+            "published; GitHub may not have observed the update yet - retry the merge"
+        )
+    elif re.search(r"protected", output, re.IGNORECASE):
         reason = "branch protected"
     elif re.search(r"not mergeable", output, re.IGNORECASE):
         reason = "not mergeable (conflicts or base changed)"

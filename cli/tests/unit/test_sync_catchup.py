@@ -479,32 +479,46 @@ def test_catchup_roots_come_from_the_graph_deduped(tmp_path, monkeypatch):
     """launchd starts the daemon in `/`, so there is no ambient project.
 
     A bare load_settings() there reads global config, where post_merge is
-    unset - which silently disabled this whole leg.
+    unset - which silently disabled this whole leg. Roots come from every
+    sidecar's cwd via one ``load_all()`` scan (task 2.1's guarded seam), not
+    a direct graph.json read, and not filtered to open tracker state - a
+    project whose nodes are all done/closed must still get swept.
     """
+    import json
+
     from fno.pr_watch import cli as pw
+    from fno.tracker import sidecar as sidecar_store
 
     alpha = tmp_path / "alpha"
     alpha.mkdir()
+    sidecar_dir = tmp_path / "sidecars"
+    sidecar_dir.mkdir()
+    rows = {
+        "a": str(alpha),
+        "b": str(alpha),              # duplicate project
+        "c": str(tmp_path / "gone"),  # deleted checkout
+        "d": None,                     # node with no cwd
+    }
+    for node_id, cwd in rows.items():
+        payload = {"id": node_id}
+        if cwd is not None:
+            payload["cwd"] = cwd
+        (sidecar_dir / f"{node_id}.json").write_text(json.dumps(payload))
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
-        lambda _p: [
-            {"cwd": str(alpha)},
-            {"cwd": str(alpha)},              # duplicate project
-            {"cwd": str(tmp_path / "gone")},  # deleted checkout
-            {},                                # node with no cwd
-        ],
+        sidecar_store, "sidecar_path", lambda i: sidecar_dir / f"{i}.json"
     )
-    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
     assert pw._catchup_roots() == [alpha]
 
 
-def test_catchup_roots_survive_an_unreadable_graph(monkeypatch):
+def test_catchup_roots_survive_an_unreadable_sidecar_store(monkeypatch):
     from fno.pr_watch import cli as pw
+    from fno.tracker import sidecar as sidecar_store
 
-    monkeypatch.setattr(
-        "fno.graph.store.read_graph",
-        lambda _p: (_ for _ in ()).throw(RuntimeError("corrupt")),
-    )
+    def _blow_up():
+        raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(sidecar_store, "load_all", _blow_up)
     assert pw._catchup_roots() == []
 
 

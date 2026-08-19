@@ -485,7 +485,12 @@ def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_pa
     """The ledger is global and two projects can share a plan-path tail.
     compute_plan_fidelity selects only this repo's rows via the same remote-slug
     derivation the ledger stamps, so a foreign project's same-tail plan cannot
-    cover or pollute the gate decision."""
+    cover or pollute the gate decision. The scoping happens on the INPUT rows,
+    before the fold ever runs (x-8ad8) - the fake fold below mirrors the real
+    one's output shape (plan_path/session_id, never project - fold.py's
+    results.append never copies that field through) so this test actually
+    exercises the pre-filter instead of a re-check that real output can't
+    satisfy."""
     import fno.paths as paths
     import fno.plan.fidelity as fid
     import fno.scoreboard.fold as fold
@@ -494,18 +499,25 @@ def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_pa
     plan.parent.mkdir(parents=True)
     plan.write_text("# plan\n")
 
-    fake_pf = {
-        "state": "ok",
-        "results": [
-            {"plan_path": "/a/feat/00-INDEX.md", "project": "footnote",
-             "status": "unjoined", "session_id": "s-local"},
-            {"plan_path": "/b/feat/00-INDEX.md", "project": "abilities",
-             "status": "unjoined", "session_id": "s-foreign"},
-        ],
-    }
+    def fake_build_plan_fidelity(rows, graph_nodes, **kwargs):
+        # Mirrors the real fold: one unjoined result per row it was actually
+        # given, output rows carry no "project" key.
+        return {
+            "state": "ok",
+            "results": [
+                {"plan_path": r["plan_path"], "status": "unjoined", "session_id": r["session_id"]}
+                for r in rows
+            ],
+        }
+
+    ledger_rows = [
+        {"plan_path": "/a/feat/00-INDEX.md", "project": "footnote", "session_id": "s-local"},
+        {"plan_path": "/b/feat/00-INDEX.md", "project": "abilities", "session_id": "s-foreign"},
+    ]
     # build_plan_fidelity is imported lazily inside compute_plan_fidelity, so
     # patch it at its source module rather than on fid.
-    monkeypatch.setattr(fold, "build_plan_fidelity", lambda *a, **k: fake_pf)
+    monkeypatch.setattr(fold, "build_plan_fidelity", fake_build_plan_fidelity)
+    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: ledger_rows)
     monkeypatch.setattr(fid, "_load_graph_nodes", lambda: [])
     monkeypatch.setattr(fid, "_read_covering_carveouts", lambda *a, **k: [])
     monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
@@ -516,3 +528,46 @@ def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_pa
     assert decision["planned"] == 1
     assert decision["refused"] is True
     assert decision["unjoined"][0]["session_id"] == "s-local"
+
+
+def test_compute_plan_fidelity_scopes_ledger_rows_before_the_fold(monkeypatch, tmp_path):
+    """x-8ad8: the fold shells a real `gh pr diff` per joined delivery row it is
+    given, so folding the WHOLE global ledger for a single-plan query pays for a
+    live network call per joined row across every plan ever shipped - the
+    reproduced hang (exit 124, zero bytes, no matter the timeout). The fix scopes
+    `rows` to this plan BEFORE calling build_plan_fidelity, not just its output
+    after; assert the fold never sees an unrelated plan's row at all."""
+    import fno.paths as paths
+    import fno.plan.fidelity as fid
+    import fno.scoreboard.fold as fold
+
+    plan = tmp_path / "feat" / "00-INDEX.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# plan\n")
+
+    seen_rows = []
+
+    def spy_build_plan_fidelity(rows, graph_nodes, **kwargs):
+        seen_rows.extend(rows)
+        return {"state": "ok", "results": []}
+
+    ledger_rows = [
+        {"plan_path": str(plan), "project": "footnote", "session_id": "s-mine",
+         "completed": "2026-08-01T00:00:00", "termination_reason": "none"},
+    ] + [
+        {"plan_path": f"/other/plan-{i}.md", "project": "footnote",
+         "session_id": f"s-other-{i}", "completed": "2026-08-01T00:00:00",
+         "termination_reason": "none"}
+        for i in range(50)
+    ]
+    monkeypatch.setattr(fold, "build_plan_fidelity", spy_build_plan_fidelity)
+    monkeypatch.setattr(fid, "_load_graph_nodes", lambda: [])
+    monkeypatch.setattr(fid, "_read_covering_carveouts", lambda *a, **k: [])
+    monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
+    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: ledger_rows)
+
+    fid.compute_plan_fidelity(plan_path=str(plan))
+
+    # Only this plan's own row reached the fold; the 50 unrelated rows never did.
+    assert len(seen_rows) == 1
+    assert seen_rows[0]["session_id"] == "s-mine"

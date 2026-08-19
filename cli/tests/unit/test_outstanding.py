@@ -76,6 +76,9 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(gc, "GRAPH_JSON", tmp_path / "graph.json")
     monkeypatch.setattr(gs, "GRAPH_JSON", tmp_path / "graph.json")
+    # Sidecar/metadata seam readers resolve through paths.graph_json at call
+    # time; pin the resolver too or the seam reads the real machine graph.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -395,6 +398,7 @@ def capture_roots(
 
     monkeypatch.setattr(gc, "GRAPH_JSON", graph)
     monkeypatch.setattr(gs, "GRAPH_JSON", graph)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     return this, other
 
 

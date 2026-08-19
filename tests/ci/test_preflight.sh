@@ -147,6 +147,21 @@ git -C "$FIX" config user.email t@t.t; git -C "$FIX" config user.name t
 cp "$PREFLIGHT_SRC" "$FIX/scripts/ci/preflight.sh"
 cp "$REPO_ROOT/scripts/lib/events-validate.sh" "$FIX/scripts/lib/events-validate.sh"
 cp "$REPO_ROOT/cli/src/fno/events/schema.yaml" "$FIX/cli/src/fno/events/schema.yaml"
+# Tracker gate stubs: the real gates need the full cli project and a live
+# registry; this fixture exercises preflight's orchestration (verdicts,
+# receipts, locks), so the gates stub green and honor POISON like the uv stub.
+cat > "$FIX/scripts/ci/check-tracker-partition.sh" <<'EOF'
+#!/usr/bin/env bash
+[[ -f POISON ]] && { echo "check-tracker-partition: POISON step failed"; exit 1; }
+case " $* " in *" --self-test "*) echo "check-tracker-partition: self-test OK (stub)";; esac
+echo "check-tracker-partition: OK (stub)"
+EOF
+cat > "$FIX/scripts/ci/check-tracker-consumers.sh" <<'EOF'
+#!/usr/bin/env bash
+[[ -f POISON ]] && { echo "check-tracker-consumers: POISON step failed"; exit 1; }
+echo "check-tracker-consumers: OK - verbs classified, reads attributed, self-test green (stub)"
+EOF
+chmod +x "$FIX/scripts/ci/check-tracker-partition.sh" "$FIX/scripts/ci/check-tracker-consumers.sh"
 echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"
