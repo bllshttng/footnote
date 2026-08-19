@@ -2767,7 +2767,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "restart [--force]  # --force: break-glass SIGKILL of the lockfile holder; plain restart is graceful",
     "reap [--json] [--dry-run]",
     "stop <name> [--force]",
-    "rm <name> [--force]",
+    "rm <name> [--force]   --force drops the registry row even when the row is LIVE or harness teardown fails; the process survives for bg and headless rows, a mux-hosted pane is killed with it",
     "loop-check --state <target-state.md> --transcript <transcript.jsonl> --cwd <project-root> [--events <events.jsonl>] [--global-events <global.jsonl>] [--settings <config.toml>] [--ledger <ledger.json>] [--now <rfc3339>] [--gh-bin <path>] [--git-bin <path>]",
     "finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> [--transcript <transcript.jsonl>]",
     "reconcile",
