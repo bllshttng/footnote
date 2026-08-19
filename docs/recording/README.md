@@ -8,13 +8,13 @@ A recording script is the exact terminal run, expected output, and edit list for
 
 | lesson | title | medium | file | status |
 |--------|-------|--------|------|--------|
-| L01 | Install and prove it | cast | `L01-install-and-prove-it.md` | planned |
+| L01 | Install and prove it | cast | `L01-install-and-prove-it.md` | scripted |
 | L02 | Your first shipped PR | video | `L02-your-first-shipped-pr.md` | scripted |
 | L03 | How done is decided | video | `L03-how-done-is-decided.md` | scripted |
 | L04 | Design before code | video | `L04-design-before-code.md` | scripted |
-| L06 | Execute a plan | cast | `L06-execute-a-plan.md` | planned |
+| L06 | Execute a plan | cast | `L06-execute-a-plan.md` | scripted |
 | L07 | Review before you ship | video | `L07-review-before-you-ship.md` | scripted |
-| L08 | The PR lifecycle | cast | `L08-the-pr-lifecycle.md` | planned |
+| L08 | The PR lifecycle | cast | `L08-the-pr-lifecycle.md` | scripted |
 | L10 | Capture and shape work | cast | `L10-capture-and-shape-work.md` | planned |
 | L12 | Worktrees | cast | `L12-worktrees.md` | planned |
 | L13 | Spawn a peer agent | video | `L13-spawn-a-peer-agent.md` | scripted |
