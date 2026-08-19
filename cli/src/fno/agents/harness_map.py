@@ -29,13 +29,12 @@ Verified facts (2026-07-13):
 """
 from __future__ import annotations
 
+import tomllib
+from copy import deepcopy
+from importlib.resources import files
 from typing import Mapping, Optional
 
 from fno.harness_names import KNOWN_HARNESSES
-
-# Bump when a capability KEY is added/removed or a value's meaning changes, so a
-# consumer can assert the shape it was written against.
-MAP_VERSION = 6  # autonomous_pane + route_on_pane capabilities
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
@@ -138,86 +137,137 @@ def _refused_reason(harness: str) -> str:
 #                    end stays false.
 # Neither key changes `substrate_default`: permission to use pane is a separate
 # decision from preferring it, and the defaults are unchanged.
-_HARNESS_CAPS: dict[str, dict] = {
-    "claude": {
-        "permission_bypass": ["--dangerously-skip-permissions"],
-        "resume": "native-session",  # session store + --resume <uuid>
-        "bg": True,  # claude --bg
-        "autonomous_pane": False,
-        "route_on_pane": True,
-        "stop_hook": "native",
-        # Native slash-command invocation of the target skill (verified).
-        "command_surface": _SLASH,
-        "slash_prefix": "",
-    },
-    "codex": {
-        "permission_bypass": ["--dangerously-bypass-approvals-and-sandbox"],
-        "resume": "native-thread",  # CODEX_THREAD_ID + exec resume
-        "bg": False,  # -> headless
-        "autonomous_pane": True,
-        "route_on_pane": False,
-        "stop_hook": "native",
-        # `$fno:target` invokes the footnote plugin skill. VERIFIED: `codex exec`
-        # injects the fno skill definitions and expands `$fno:verb` (not a
-        # literal prompt). Supersedes the old "prose brief only" guidance.
-        "command_surface": _CODEX_SKILL,
-    },
-    "gemini": {
-        "permission_bypass": ["--yolo"],
-        "resume": "native-continue",
-        "bg": False,
-        "autonomous_pane": False,
-        "route_on_pane": False,
-        "stop_hook": "native",
-        # gemini CLI is deprecated (agy is its successor); its build lane is a
-        # loud refusal, not a maintained brief (x-de43). No dispatch surface.
-        "command_surface": _REFUSED,
-    },
-    "agy": {
-        # Antigravity CLI (gemini's successor). Its migration guide converts
-        # legacy commands to skills and recognizes `.agents/skills/` entries as
-        # active slash commands, so the target skill invokes as `/target`
-        # (grounded in antigravity.google/docs/cli/gcli-migration; live-verify
-        # before relying on it for production dispatch).
-        "permission_bypass": ["--dangerously-skip-permissions"],
-        "resume": "native-continue",
-        "bg": False,
-        "autonomous_pane": False,
-        "route_on_pane": False,
-        "stop_hook": "native",
-        "command_surface": _SLASH,
-        "slash_prefix": "",
-    },
-    "opencode": {
-        # The fno opencode plugin exposes the footnote verbs as `/fno:verb` in the
-        # command palette (operator-verified live on GLM) AND headlessly: probed
-        # x-de43 against opencode v1.14.50, `opencode run --command fno:target`
-        # resolves the plugin command registry (the full `fno:*` namespace is
-        # registered), so a slash surface expands in both lanes - not a no-op.
-        # Plugin-namespaced, so `slash_prefix` is "fno:" (palette `/fno:verb`).
-        "permission_bypass": ["--dangerously-skip-permissions"],
-        # x-830c: session store + `--session <ses_id>`, the same strict id-keyed
-        # shape as claude. NOT `--continue`, which creates a NEW session when the
-        # project has none rather than refusing - never a resume.
-        "resume": "native-session",
-        "bg": False,
-        "autonomous_pane": False,
-        "route_on_pane": False,
-        "stop_hook": "native",
-        "command_surface": _SLASH,
-        "slash_prefix": "fno:",
-    },
+_RESPONSE_ACTIONS = {"allow_once", "allow_always", "deny"}
+_SESSION_LANES = {
+    "interactive_create",
+    "interactive_resume",
+    "headless_create",
+    "headless_resume",
 }
+_RESUME_KINDS = {"flag", "subcommand", "session_flag", "unsupported"}
+_KEY_TOKENS = {
+    *(str(i) for i in range(1, 10)),
+    "enter", "left", "right", "up", "down", "tab", "esc", "y", "a", "d",
+    "unsupported",
+}
+_STOP_STRATEGIES = {"claude-short-id", "registry-noop"}
+_REMOVE_STRATEGIES = {"claude-short-id", "codex-session-index", "registry-only"}
 
-# Anti-drift: the capability table's keys must agree with the canonical name
-# list (fno.harness_names), which platform-layer code reads without reaching into
-# this runtime module (x-cec8). Adding a harness is one coupled change: the name
-# lands in KNOWN_HARNESSES and a capability dict lands here, or this import fails
-# loudly. Keeps the single-source-of-truth property the old derivation had.
-assert set(_HARNESS_CAPS) == set(KNOWN_HARNESSES), (
-    "harness capability table keys diverge from fno.harness_names.KNOWN_HARNESSES; "
-    "add the harness in both places"
-)
+
+def _contract_error(harness: str, field: str, detail: str) -> "DispatchResolveError":
+    return DispatchResolveError(
+        f"harness capability contract: harness {harness!r} field {field!r}: {detail}"
+    )
+
+
+def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
+    """Parse the packaged per-harness contract and reject partial defaults."""
+    try:
+        root = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise DispatchResolveError(f"harness capability contract is invalid TOML: {exc}") from exc
+    version = root.get("map_version")
+    harnesses = root.get("harness")
+    if not isinstance(version, int) or version < 1:
+        raise DispatchResolveError("harness capability contract field 'map_version' is invalid")
+    if not isinstance(harnesses, dict) or set(harnesses) != set(KNOWN_HARNESSES):
+        raise DispatchResolveError(
+            "harness capability contract harness set diverges from KNOWN_HARNESSES"
+        )
+    required = {
+        "permission_bypass", "resume", "bg", "autonomous_pane", "route_on_pane",
+        "stop_hook", "command_surface", "permission_response", "resume_strategy",
+        "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
+        "stop_strategy", "remove_strategy", "manifest_rules", "session_binding",
+    }
+    for harness, caps in harnesses.items():
+        if not isinstance(caps, dict) or not required <= caps.keys():
+            missing = sorted(required - set(caps or {}))
+            raise _contract_error(harness, "contract", f"missing fields: {', '.join(missing)}")
+        responses = caps["permission_response"]
+        if not isinstance(responses, dict) or set(responses) != _RESPONSE_ACTIONS:
+            raise _contract_error(harness, "permission_response", "needs all three actions")
+        for action, response in responses.items():
+            if not isinstance(response, dict) or not isinstance(response.get("supported"), bool):
+                raise _contract_error(harness, f"permission_response.{action}", "bad support flag")
+            keys = response.get("keys")
+            rules = response.get("rule_ids")
+            if not isinstance(keys, list) or not all(key in _KEY_TOKENS for key in keys):
+                raise _contract_error(harness, "permission_response", f"bad keys for {action}")
+            if not isinstance(rules, list) or not all(isinstance(rule, str) and rule for rule in rules):
+                raise _contract_error(harness, "permission_response", f"bad rule ids for {action}")
+            if response["supported"] and (not keys or not rules):
+                raise _contract_error(harness, "permission_response", f"empty supported {action}")
+        marker = caps["ready_marker"]
+        ready_rules = caps["ready_rule_ids"]
+        manifest_rules = caps["manifest_rules"]
+        if not isinstance(marker, str) or not isinstance(ready_rules, list) or not isinstance(
+            manifest_rules, list
+        ):
+            raise _contract_error(harness, "ready_marker", "must name a rule or unsupported")
+        parsed_rules = {
+            rule.get("id"): rule.get("state")
+            for rule in manifest_rules
+            if isinstance(rule, dict)
+            and isinstance(rule.get("id"), str)
+            and rule.get("state") in {"idle", "blocked"}
+        }
+        if len(parsed_rules) != len(manifest_rules):
+            raise _contract_error(harness, "manifest_rules", "contains a malformed rule")
+        if marker != "unsupported" and marker not in ready_rules:
+            raise _contract_error(harness, "ready_marker", f"unknown rule {marker!r}")
+        if marker != "unsupported" and parsed_rules.get(marker) != "idle":
+            raise _contract_error(harness, "ready_marker", f"unknown positive rule {marker!r}")
+        for action, response in responses.items():
+            for rule_id in response["rule_ids"]:
+                if parsed_rules.get(rule_id) != "blocked":
+                    raise _contract_error(
+                        harness,
+                        "permission_response",
+                        f"{action} names unknown blocked rule {rule_id!r}",
+                    )
+        delay = caps["send_keys_enter_delay_ms"]
+        submit = caps["submit_keys"]
+        if not isinstance(delay, int) or isinstance(delay, bool) or delay < 0:
+            raise _contract_error(harness, "send_keys_enter_delay_ms", "must be non-negative")
+        if not isinstance(submit, list) or not submit or not all(key in _KEY_TOKENS for key in submit):
+            raise _contract_error(harness, "submit_keys", "has an invalid key token")
+        if delay == 0 and submit != ["unsupported"]:
+            raise _contract_error(
+                harness, "send_keys_enter_delay_ms", "zero requires an unsupported submit contract"
+            )
+        strategy = caps["resume_strategy"]
+        forms = strategy.get("forms") if isinstance(strategy, dict) else None
+        if not isinstance(forms, dict) or set(forms) != _SESSION_LANES:
+            raise _contract_error(harness, "resume_strategy", "needs every session lane")
+        for lane, form in forms.items():
+            kind = form.get("kind") if isinstance(form, dict) else None
+            tokens = form.get("tokens") if isinstance(form, dict) else None
+            if kind not in _RESUME_KINDS or not isinstance(tokens, list) or not all(
+                isinstance(token, str) and token for token in tokens
+            ):
+                raise _contract_error(harness, "resume_strategy", f"malformed {lane}")
+            if kind == "unsupported" and tokens:
+                raise _contract_error(harness, "resume_strategy", f"unsupported {lane} has tokens")
+            if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
+                raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
+        if caps["stop_strategy"] not in _STOP_STRATEGIES:
+            raise _contract_error(harness, "stop_strategy", "unknown strategy")
+        if caps["remove_strategy"] not in _REMOVE_STRATEGIES:
+            raise _contract_error(harness, "remove_strategy", "unknown strategy")
+        binding = caps["session_binding"]
+        if not isinstance(binding, dict) or set(binding) != {"strategy", "required", "timeout_ms"}:
+            raise _contract_error(harness, "session_binding", "malformed strategy")
+        if binding["strategy"] not in {
+            "preassigned-or-session-start", "rollout-fd", "preassigned",
+            "store-lookup", "unsupported",
+        }:
+            raise _contract_error(harness, "session_binding", "unknown strategy")
+        if not isinstance(binding["required"], bool) or not isinstance(binding["timeout_ms"], int):
+            raise _contract_error(harness, "session_binding", "bad required/timeout values")
+        if binding["timeout_ms"] < 0 or (binding["required"] and binding["timeout_ms"] == 0):
+            raise _contract_error(harness, "session_binding", "required binding needs a timeout")
+    return version, harnesses
 
 
 def normalize_command(command: str, harness: str) -> str:
@@ -282,6 +332,12 @@ class DispatchResolveError(ValueError):
     so the failure is loud and actionable (AC1-ERR)."""
 
 
+MAP_VERSION, _HARNESS_CAPS = parse_capability_contract(
+    files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
+)
+assert set(_HARNESS_CAPS) == set(KNOWN_HARNESSES)
+
+
 def known_harnesses() -> list[str]:
     """Sorted harness names the map knows (the loud-error candidate list)."""
     return sorted(KNOWN_HARNESSES)
@@ -297,6 +353,43 @@ def capabilities(harness: str) -> dict:
             f"(fno.agents.harness_map) knows: {', '.join(known_harnesses())}"
         )
     return caps
+
+
+def render_session_argv(harness: str, lane: str, session_id: Optional[str] = None) -> list[str]:
+    """Render the identity-bearing create/resume skeleton for one harness lane."""
+    form = capabilities(harness)["resume_strategy"]["forms"].get(lane)
+    if form is None:
+        raise DispatchResolveError(f"harness {harness!r} resume_strategy has no lane {lane!r}")
+    if form["kind"] == "unsupported":
+        raise DispatchResolveError(
+            f"harness {harness!r} lane {lane!r} is unsupported by resume_strategy"
+        )
+    tokens = list(form["tokens"])
+    if "{session_id}" not in tokens:
+        return tokens
+    if session_id:
+        return [session_id if token == "{session_id}" else token for token in tokens]
+    if lane.endswith("create"):
+        index = tokens.index("{session_id}")
+        start = index - 1 if index > 0 and tokens[index - 1].startswith("-") else index
+        return tokens[:start] + tokens[index + 1 :]
+    raise DispatchResolveError(f"harness {harness!r} lane {lane!r} needs a non-empty session id")
+
+
+def permission_response_keys(harness: str, action: str, rule_id: str) -> list[str]:
+    """Resolve semantic permission keys only for the manifest rule that matched."""
+    response = capabilities(harness)["permission_response"].get(action)
+    if response is None:
+        raise DispatchResolveError(f"harness {harness!r} has no permission action {action!r}")
+    if not response["supported"]:
+        raise DispatchResolveError(
+            f"harness {harness!r} permission action {action!r} is unsupported"
+        )
+    if rule_id not in response["rule_ids"]:
+        raise DispatchResolveError(
+            f"harness {harness!r} permission action {action!r} refuses rule {rule_id!r}"
+        )
+    return list(response["keys"])
 
 
 def substrate_default(harness: str) -> str:
@@ -558,6 +651,14 @@ def resolve_dispatch(
         "command_surface": caps["command_surface"],
         "permission_bypass": list(caps["permission_bypass"]),
         "resume": caps["resume"],
+        "permission_response": deepcopy(caps["permission_response"]),
+        "resume_strategy": deepcopy(caps["resume_strategy"]),
+        "ready_marker": caps["ready_marker"],
+        "send_keys_enter_delay_ms": caps["send_keys_enter_delay_ms"],
+        "submit_keys": list(caps["submit_keys"]),
+        "stop_strategy": caps["stop_strategy"],
+        "remove_strategy": caps["remove_strategy"],
+        "session_binding": deepcopy(caps["session_binding"]),
         "bg": caps["bg"],
         "effort_values": effort_values(chosen_harness),
         "env": env,

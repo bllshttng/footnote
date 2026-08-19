@@ -208,14 +208,17 @@ impl Provider for ClaudeProvider {
         // Agent-SDK-credit-billed and MUST NOT be used.
         // The seed rides behind `--` so a leading-flag seed is the prompt
         // positional, not a claude flag (verified against the real CLI).
-        vec![
-            "claude".into(),
+        let mut argv =
+            crate::harness_capabilities::render_session_argv("claude", "headless_create", None)
+                .expect("embedded claude headless-create capability");
+        argv.extend([
             "--bg".into(),
             "--name".into(),
             ctx.name.clone(),
             "--".into(),
             ctx.message.clone(),
-        ]
+        ]);
+        argv
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
@@ -224,14 +227,14 @@ impl Provider for ClaudeProvider {
         // `messaging_socket_path` is registered; this argv exists so the trait
         // is satisfiable without the socket (e.g. tests, socket-unavailable
         // degradation). `--print` is non-streaming (Domain Pitfall).
-        vec![
-            "claude".into(),
-            "--resume".into(),
-            ctx.session_id.clone(),
-            "--print".into(),
-            "--".into(),
-            ctx.message.clone(),
-        ]
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded claude headless-resume capability");
+        argv.extend(["--print".into(), "--".into(), ctx.message.clone()]);
+        argv
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
@@ -508,16 +511,17 @@ impl Provider for CodexProvider {
     }
 
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
-        let mut argv = vec![
-            "codex".into(),
-            "exec".into(),
+        let mut argv =
+            crate::harness_capabilities::render_session_argv("codex", "headless_create", None)
+                .expect("embedded codex headless-create capability");
+        argv.extend([
             "--json".into(),
             "-C".into(),
             ctx.cwd.to_string_lossy().into_owned(),
             // codex exec refuses to run in a non-git dir without this; the
             // validated codex.py create path always passes it.
             "--skip-git-repo-check".into(),
-        ];
+        ]);
         argv.extend(Self::sandbox_create(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_git_writable_args(&ctx.cwd));
@@ -534,14 +538,13 @@ impl Provider for CodexProvider {
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
-        let mut argv = vec![
-            "codex".into(),
-            "exec".into(),
-            "resume".into(),
-            ctx.session_id.clone(),
-            "--json".into(),
-            "--skip-git-repo-check".into(),
-        ];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "codex",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded codex headless-resume capability");
+        argv.extend(["--json".into(), "--skip-git-repo-check".into()]);
         argv.extend(Self::sandbox_resume(ctx.yolo));
         if !ctx.yolo {
             argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
@@ -718,8 +721,14 @@ impl Provider for GeminiProvider {
     }
 
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        let identity = crate::harness_capabilities::render_session_argv(
+            "gemini",
+            "headless_create",
+            ctx.session_id.as_deref(),
+        )
+        .expect("embedded gemini headless-create capability");
         let mut argv = vec![
-            "gemini".into(),
+            identity[0].clone(),
             "--skip-trust".into(),
             "-p".into(),
             // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
@@ -731,16 +740,19 @@ impl Provider for GeminiProvider {
         ];
         argv.extend(Self::sandbox(ctx.yolo));
         // gemini accepts a caller-assigned session UUID on create.
-        if let Some(sid) = ctx.session_id.as_deref() {
-            argv.push("--session-id".into());
-            argv.push(sid.to_string());
-        }
+        argv.extend(identity.into_iter().skip(1));
         argv
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        let identity = crate::harness_capabilities::render_session_argv(
+            "gemini",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded gemini headless-resume capability");
         let mut argv = vec![
-            "gemini".into(),
+            identity[0].clone(),
             "--skip-trust".into(),
             "-p".into(),
             // argv-fence: exempt (gemini CLI deprecated 2026-07-27; the -p
@@ -750,8 +762,7 @@ impl Provider for GeminiProvider {
             "json".into(),
         ];
         argv.extend(Self::sandbox(ctx.yolo));
-        argv.push("--resume".into());
-        argv.push(ctx.session_id.clone());
+        argv.extend(identity.into_iter().skip(1));
         argv
     }
 
@@ -898,7 +909,10 @@ impl Provider for AgyProvider {
     fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
         // Headless create is the autonomous lane: ALWAYS never-prompt so an
         // unattended agy cannot wedge on its first approval prompt.
-        let mut argv = vec!["agy".into(), "--dangerously-skip-permissions".into()];
+        let mut argv =
+            crate::harness_capabilities::render_session_argv("agy", "headless_create", None)
+                .expect("embedded agy headless-create capability");
+        argv.push("--dangerously-skip-permissions".into());
         argv.push("-p".into());
         // argv-fence: exempt (probed 2026-08-15: agy's parser folds flag-shaped
         // text into the prompt instead of dying; it has no clean end-of-options,
@@ -910,12 +924,13 @@ impl Provider for AgyProvider {
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
         // agy resume keys on the conversation id (`--conversation <id>`); plain
         // -p prompt as the value, last.
-        let mut argv = vec![
-            "agy".into(),
-            "--dangerously-skip-permissions".into(),
-            "--conversation".into(),
-            ctx.session_id.clone(),
-        ];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "agy",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded agy headless-resume capability");
+        argv.insert(1, "--dangerously-skip-permissions".into());
         argv.push("-p".into());
         // argv-fence: exempt (probed 2026-08-15: agy folds flag-shaped text
         // into the prompt; no clean end-of-options to fence with).
@@ -1044,24 +1059,23 @@ impl Provider for OpencodeProvider {
         // never-prompt lane so an unattended run cannot wedge on its first
         // approval. Confirmed vs opencode v1.14.50 `run --help` (x-567d); the
         // docs' `--auto` is stale.
-        let mut argv = vec![
-            "opencode".into(),
-            "run".into(),
-            "--dangerously-skip-permissions".into(),
-        ];
+        let mut argv =
+            crate::harness_capabilities::render_session_argv("opencode", "headless_create", None)
+                .expect("embedded opencode headless-create capability");
+        argv.push("--dangerously-skip-permissions".into());
         argv.extend(opencode_run_tail(&ctx.message));
         argv
     }
 
     fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
         // opencode continues a session via `--session <id>` (run cmd).
-        let mut argv = vec![
-            "opencode".into(),
-            "run".into(),
-            "--dangerously-skip-permissions".into(),
-            "--session".into(),
-            ctx.session_id.clone(),
-        ];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "opencode",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded opencode headless-resume capability");
+        argv.insert(2, "--dangerously-skip-permissions".into());
         argv.extend(opencode_run_tail(&ctx.message));
         argv
     }

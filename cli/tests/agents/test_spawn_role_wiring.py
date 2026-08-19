@@ -557,6 +557,10 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
                 return SimpleNamespace(returncode=0, stdout="7\n", stderr="")
             if argv[1:4] == ["mux", "pane", "ls"]:
                 return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            if argv[1:4] == ["mux", "pane", "wait"]:
+                return SimpleNamespace(returncode=11, stdout="", stderr="")
+            if argv[1:4] == ["mux", "pane", "read"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             raise AssertionError(argv)
 
         dispatch_spawn_pane(

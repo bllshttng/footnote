@@ -1,11 +1,18 @@
 """Tests for the harness-capability map + shared dispatch resolver (US1)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fno.agents.harness_map import (
+    MAP_VERSION,
     DispatchResolveError,
+    capabilities,
     known_harnesses,
+    parse_capability_contract,
+    permission_response_keys,
+    render_session_argv,
     resolve_dispatch,
     substrate_default,
 )
@@ -13,6 +20,145 @@ from fno.agents.harness_map import (
 # Config read is stubbed to empty in every resolve so the tests exercise the
 # built-in precedence, not the ambient project config.
 _NO_CFG: dict = {}
+
+
+_REQUIRED_INTERACTIVE_FIELDS = {
+    "permission_response", "resume_strategy", "ready_marker",
+    "send_keys_enter_delay_ms", "submit_keys", "stop_strategy", "remove_strategy",
+    "session_binding",
+}
+
+
+def test_packaged_contract_is_complete_for_every_known_harness():
+    root = Path(__file__).resolve().parents[4]
+    assert (
+        root / "crates/fno-agents/src/harness_capabilities.toml"
+    ).read_text(encoding="utf-8") == (
+        root / "cli/src/fno/agents/harness_capabilities.toml"
+    ).read_text(encoding="utf-8")
+    assert MAP_VERSION == 7
+    assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
+    for harness in known_harnesses():
+        caps = capabilities(harness)
+        assert _REQUIRED_INTERACTIVE_FIELDS <= caps.keys(), harness
+        assert set(caps["permission_response"]) == {"allow_once", "allow_always", "deny"}
+
+
+@pytest.mark.parametrize(
+    ("harness", "lane", "session_id", "expected"),
+    [
+        ("claude", "interactive_create", "c-1", ["claude", "--session-id", "c-1"]),
+        ("claude", "interactive_resume", "c-1", ["claude", "attach", "c-1"]),
+        ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
+        ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
+        ("opencode", "headless_resume", "ses_1", ["opencode", "run", "--session", "ses_1"]),
+    ],
+)
+def test_resume_strategy_renders_identity_skeletons(harness, lane, session_id, expected):
+    assert render_session_argv(harness, lane, session_id) == expected
+
+
+def test_unsupported_resume_lane_fails_before_spawn():
+    with pytest.raises(DispatchResolveError, match="agy.*interactive_resume.*unsupported"):
+        render_session_argv("agy", "interactive_resume", "x")
+
+
+def test_permission_and_submit_contracts_are_per_harness_not_claude_defaults():
+    claude = capabilities("claude")
+    codex = capabilities("codex")
+    opencode = capabilities("opencode")
+    assert claude["permission_response"]["allow_once"] == {
+        "supported": True, "rule_ids": ["permission_prompt"], "keys": ["1"],
+    }
+    assert codex["permission_response"]["allow_always"]["keys"] == ["2"]
+    assert opencode["permission_response"]["deny"]["keys"] == ["right", "right", "enter"]
+    assert claude["ready_marker"] == "live_prompt_box"
+    assert codex["ready_marker"] == "idle_prompt"
+    assert capabilities("agy")["ready_marker"] == "unsupported"
+    assert claude["send_keys_enter_delay_ms"] == 800
+    assert claude["submit_keys"] == ["enter"]
+    assert codex["submit_keys"] == ["unsupported"]
+
+
+def test_permission_response_requires_matching_fingerprinted_rule():
+    assert permission_response_keys("claude", "allow_once", "permission_prompt") == ["1"]
+    with pytest.raises(DispatchResolveError, match="rule.*trust_prompt"):
+        permission_response_keys("claude", "allow_once", "trust_prompt")
+    with pytest.raises(DispatchResolveError, match="opencode.*unsupported"):
+        permission_response_keys("opencode", "deny", "permission_required")
+
+
+def test_stop_and_remove_behavior_is_queryable_instead_of_implied():
+    assert capabilities("claude")["stop_strategy"] == "claude-short-id"
+    assert capabilities("claude")["remove_strategy"] == "claude-short-id"
+    for harness in ("codex", "gemini", "agy", "opencode"):
+        assert capabilities(harness)["stop_strategy"] == "registry-noop"
+    assert capabilities("codex")["remove_strategy"] == "codex-session-index"
+    assert capabilities("codex")["session_binding"] == {
+        "strategy": "rollout-fd", "required": True, "timeout_ms": 60000,
+    }
+
+
+def test_dispatch_resolve_exposes_the_machine_readable_harness_contract():
+    out = _resolve(harness="codex")
+    assert out["ready_marker"] == "idle_prompt"
+    assert out["submit_keys"] == ["unsupported"]
+    assert out["send_keys_enter_delay_ms"] == 0
+    assert out["stop_strategy"] == "registry-noop"
+    assert out["remove_strategy"] == "codex-session-index"
+    assert out["session_binding"] == {
+        "strategy": "rollout-fd", "required": True, "timeout_ms": 60000,
+    }
+    assert out["resume_strategy"]["forms"]["headless_resume"]["tokens"] == [
+        "codex", "exec", "resume", "{session_id}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement", "field"),
+    [
+        ('ready_marker = "idle_prompt"', 'ready_marker = "missing_rule"', "ready_marker"),
+        ('keys = ["1"]', 'keys = ["bogus-key"]', "permission_response"),
+        ("send_keys_enter_delay_ms = 800", "send_keys_enter_delay_ms = -1", "send_keys_enter_delay_ms"),
+        ('kind = "subcommand"', 'kind = "mystery"', "resume_strategy"),
+    ],
+)
+def test_contract_rejects_malformed_harness_fields(needle, replacement, field):
+    from importlib.resources import files
+
+    text = files("fno.agents").joinpath("harness_capabilities.toml").read_text()
+    assert needle in text
+    with pytest.raises(DispatchResolveError, match=field):
+        parse_capability_contract(text.replace(needle, replacement, 1))
+
+
+def test_contract_rejects_ready_marker_invented_in_both_marker_fields():
+    from importlib.resources import files
+
+    text = files("fno.agents").joinpath("harness_capabilities.toml").read_text()
+    bad = text.replace('ready_marker = "idle_prompt"', 'ready_marker = "invented"', 1)
+    bad = bad.replace(
+        'ready_rule_ids = ["idle_prompt"]', 'ready_rule_ids = ["invented"]', 1
+    )
+    with pytest.raises(DispatchResolveError, match="ready_marker.*invented"):
+        parse_capability_contract(bad)
+
+
+def test_every_session_builder_and_submit_path_names_the_shared_contract():
+    root = Path(__file__).resolve().parents[4]
+    consumers = [
+        "cli/src/fno/agents/resume_cli.py", "cli/src/fno/agents/mux_spawn.py",
+        "cli/src/fno/agents/harnesses/claude.py", "cli/src/fno/agents/harnesses/codex.py",
+        "crates/fno-agents/src/client_verbs.rs", "crates/fno-agents/src/provider.rs",
+    ]
+    for relative in consumers:
+        assert "render_session_argv" in (root / relative).read_text(encoding="utf-8"), relative
+    python_inject = (root / "cli/src/fno/agents/dispatch.py").read_text(encoding="utf-8")
+    rust_inject = (root / "crates/fno-agents/src/mail_inject.rs").read_text(encoding="utf-8")
+    assert "time.sleep(0.3)" not in python_inject
+    assert "CR_SETTLE_MS" not in rust_inject
+    assert 'capabilities("claude")["send_keys_enter_delay_ms"]' in python_inject
+    assert "default_enter_delay_ms()" in rust_inject
 
 
 def _resolve(**kw):

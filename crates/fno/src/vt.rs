@@ -74,6 +74,7 @@ pub struct Pane {
     /// BEFORE they reach the Term (which drops unknown OSC anyway) so 4b can turn
     /// a pane's scroll into typed command blocks. Stateful across feeds.
     scanner: Osc133Scanner,
+    osc_title: OscTitleCapture,
     /// Completed command blocks (oldest first), capped at `MAX_BLOCKS` and
     /// front-dropped; capture-at-completion stores each block's text so a
     /// finished block is width- and scroll-independent.
@@ -192,6 +193,7 @@ impl Pane {
             rows,
             cols,
             scanner: Osc133Scanner::default(),
+            osc_title: OscTitleCapture::default(),
             blocks: VecDeque::new(),
             open: None,
             next_seq: 0,
@@ -210,6 +212,7 @@ impl Pane {
     /// calls); recognized FinalTerm markers are stripped and queued for the block
     /// store. Partial markers split across reads carry over in the scanner state.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.osc_title.feed(bytes);
         for seg in self.scanner.scan(bytes) {
             match seg {
                 Seg::Pass(b) => {
@@ -273,6 +276,10 @@ impl Pane {
 
     pub fn size(&self) -> (u16, u16) {
         (self.rows, self.cols)
+    }
+
+    pub fn osc_title(&self) -> Option<&str> {
+        self.osc_title.title.as_deref()
     }
 
     /// (x-fbb1) True when this pane is a pristine, idle mux shell - safe to reap
@@ -1498,6 +1505,83 @@ enum ScanState {
 /// across PTY reads still parses (`keys.rs` accumulation discipline, output-side).
 pub struct Osc133Scanner {
     state: ScanState,
+}
+
+const MAX_OSC_TITLE_BODY: usize = 4096;
+
+#[derive(Debug, Clone, Copy, Default)]
+enum OscTitleState {
+    #[default]
+    Ground,
+    Esc,
+    Body,
+    BodyEsc,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OscTitleCapture {
+    state: OscTitleState,
+    body: Vec<u8>,
+    overflowed: bool,
+    title: Option<String>,
+}
+
+impl OscTitleCapture {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                OscTitleState::Ground => {
+                    if byte == 0x1b {
+                        self.state = OscTitleState::Esc;
+                    }
+                }
+                OscTitleState::Esc => {
+                    self.state = if byte == b']' {
+                        self.body.clear();
+                        self.overflowed = false;
+                        OscTitleState::Body
+                    } else if byte == 0x1b {
+                        OscTitleState::Esc
+                    } else {
+                        OscTitleState::Ground
+                    };
+                }
+                OscTitleState::Body => match byte {
+                    0x07 => {
+                        self.finish();
+                        self.state = OscTitleState::Ground;
+                    }
+                    0x1b => self.state = OscTitleState::BodyEsc,
+                    _ if self.body.len() < MAX_OSC_TITLE_BODY => self.body.push(byte),
+                    _ => self.overflowed = true,
+                },
+                OscTitleState::BodyEsc => {
+                    if byte == b'\\' {
+                        self.finish();
+                    }
+                    self.state = if byte == 0x1b {
+                        OscTitleState::Esc
+                    } else {
+                        OscTitleState::Ground
+                    };
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.overflowed {
+            if let Ok(body) = std::str::from_utf8(&self.body) {
+                if let Some((kind, title)) = body.split_once(';') {
+                    if matches!(kind, "0" | "2") {
+                        self.title = Some(title.to_string());
+                    }
+                }
+            }
+        }
+        self.body.clear();
+        self.overflowed = false;
+    }
 }
 
 impl Default for Osc133Scanner {

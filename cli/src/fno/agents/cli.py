@@ -1514,6 +1514,10 @@ def cmd_spawn(
                 # must say so rather than reading identically to a normal
                 # spawn.
                 receipt_obj["recovered"] = True
+            if pane_result.readiness is not None:
+                receipt_obj["readiness"] = pane_result.readiness
+            if pane_result.readiness_rule is not None:
+                receipt_obj["readiness_rule"] = pane_result.readiness_rule
             # Locked Decision 5: name the applied mode so an audit of "why did
             # this worker have edit rights" has a durable answer. Only when set,
             # so the unset receipt is unchanged.

@@ -68,6 +68,17 @@ class FakeRunner:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
+        if len(argv) > 1 and argv[1] == "manifest-eval":
+            harness = argv[argv.index("--harness") + 1]
+            title = argv[argv.index("--osc-title") + 1] if "--osc-title" in argv else ""
+            if harness == "claude" and title.startswith("⠋"):
+                payload = {
+                    "matched": True, "rule_id": "osc_title_working", "state": "working",
+                }
+            else:
+                rule = {"claude": "live_prompt_box", "codex": "idle_prompt"}.get(harness)
+                payload = {"matched": bool(rule), "rule_id": rule, "state": "idle"}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
         # The opencode spawn path reads opencode's session store through this
         # same seam (x-830c); default empty output = "no session captured", the
         # live-only row every non-opencode test already expects.
@@ -97,6 +108,12 @@ class FakeRunner:
             return subprocess.CompletedProcess(
                 argv, self.read_returncode, self.read_stdout, self.read_stderr
             )
+        if argv[1:4] in (
+            ["mux", "pane", "claim"],
+            ["mux", "pane", "send"],
+            ["mux", "pane", "release"],
+        ):
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[1:4] == ["mux", "pane", "kill"]:
             self.kill_calls.append(list(argv))
             if self.kill_exception is not None:
@@ -110,7 +127,25 @@ class FakeRunner:
 def _spawn(monkeypatch, tmp_path, **kwargs):
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.delenv("FNO_SESSION", raising=False)
+    from fno import rust_binary
     from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+    )
+
+    harness = kwargs.get("provider")
+    if harness is None:
+        harness = "claude"
+    codex_binding = kwargs.pop("codex_binding", True)
+    if harness == "codex" and codex_binding:
+        import fno.agents.mux_spawn as mux_spawn
+
+        monkeypatch.setattr(
+            mux_spawn,
+            "_backfill_codex_session_id",
+            lambda *_args, **_kwargs: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+        )
 
     runner = kwargs.pop("runner", FakeRunner())
     provider = kwargs.pop("provider", "claude")
@@ -234,10 +269,6 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             str(rollout),
         ],
     )
-    monkeypatch.setattr(
-        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
-    )
-
     spawned = None
     try:
         spawned = mux_spawn.dispatch_spawn_pane(
@@ -247,9 +278,9 @@ def test_late_codex_identity_composes_across_every_peer_surface(
             cwd=repo,
             session=mux_session,
         )
-        assert spawned.status == "spawning"
-        assert spawned.session_uuid is None
-        assert spawned.short_id == ""
+        assert spawned.status == "live"
+        assert spawned.session_uuid is not None
+        assert spawned.short_id == spawned.session_uuid[:8]
 
         monkeypatch.setattr(mux_spawn, "build_pane_argv", original_argv)
         monkeypatch.setattr(
@@ -277,8 +308,8 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         reconciled = dispatch.reconcile_agents(
             codex_session_index_path=tmp_path / "missing-index.jsonl"
         )
-        assert len(reconciled.backfilled) == 1
-        identity = reconciled.backfilled[0]["harness_session_id"]
+        assert reconciled.backfilled == []
+        identity = spawned.session_uuid
 
         registry_path = agents_home / "registry.json"
         row = load_registry(path=registry_path)[0]
@@ -462,7 +493,14 @@ sleep 5
     )
     assert keeper.returncode == 0, keeper.stderr
 
+    import fno.agents.mux_spawn as mux_spawn
     from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "_backfill_codex_session_id",
+        lambda *_args, **_kwargs: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+    )
 
     spawned = None
     try:
@@ -617,20 +655,21 @@ def test_opencode_spawn_without_capture_stays_live_only(
     assert [r.harness_session_id for r in rows] == [None]
 
 
-def test_codex_spawn_without_capture_stays_spawning(
+def test_codex_spawn_without_capture_fails_and_reaps_unaddressable_pane(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC2-CON: an id-less Codex pane is created but not yet addressable."""
+    """A required Codex binding never returns an unusable successful spawn."""
+    from fno.agents.dispatch import DispatchAskError
     from fno.agents.registry import load_registry
 
-    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
-
-    row = load_registry()[0]
-    assert row.harness_session_id is None
-    assert row.status == "spawning"
-    assert result.status == "spawning"
-    assert result.session_uuid is None
-    assert result.short_id == ""
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="session binding.*reaped"):
+        _spawn(
+            monkeypatch, tmp_path, provider="codex", runner=runner,
+            codex_binding=False,
+        )
+    assert load_registry() == []
+    assert runner.kill_calls
 
 
 def test_codex_spawn_with_capture_returns_bound_identity(
@@ -647,7 +686,9 @@ def test_codex_spawn_with_capture_returns_bound_identity(
         lambda *_args, **_kwargs: session_id,
     )
 
-    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider="codex", codex_binding=False
+    )
 
     row = load_registry()[0]
     assert row.harness_session_id == session_id
@@ -857,6 +898,24 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
         "--auto",
     ]
     assert "run" not in opencode and "--session-id" not in opencode
+
+
+def test_build_pane_argv_delegates_create_identity_to_capability_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import harness_map
+    from fno.agents.mux_spawn import build_pane_argv
+
+    calls = []
+
+    def render(harness, lane, session_id):
+        calls.append((harness, lane, session_id))
+        return [harness, "--contract-session", session_id]
+
+    monkeypatch.setattr(harness_map, "render_session_argv", render)
+    argv = build_pane_argv("claude", "task", tmp_path, False, "uuid")
+    assert argv[:3] == ["claude", "--contract-session", "uuid"]
+    assert calls == [("claude", "interactive_create", "uuid")]
 
 
 def test_build_pane_argv_normalizes_direct_slash_commands(tmp_path: Path) -> None:
@@ -1339,8 +1398,8 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     }
 
 
-def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
-    """The public CLI launches and reports the same translated pane payload."""
+def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatch) -> None:
+    """The public CLI never exits zero with an unaddressable Codex pane."""
     from typer.testing import CliRunner
 
     import fno.agents.cli as agents_cli
@@ -1367,35 +1426,9 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         agents_cli.agents_app,
         ["spawn", "--name", "peer", "--harness", "codex", "/fno:target x-81ad"],
     )
-    assert result.exit_code == 0, result.output
-    receipt = json.loads(result.output.strip().splitlines()[-1])
-    assert receipt == {
-        "name": "peer",
-        "short_id": "",
-        "harness": "codex",
-        "harness_source": "explicit",  # dispatch-harness provenance
-        "status": "spawning",
-        "mux_session": "main",
-        "pane_id": 9,
-        "effective_message": "$fno:target x-81ad",
-        # x-cdca: an unbound receipt says so, says whether the pane is still
-        # there, and says why. Without these, this exact receipt shape - status
-        # `spawning` with an empty short_id, exit 0 - was indistinguishable from
-        # one whose pane had already died, and callers re-prompted the corpse.
-        "bound": False,
-        "pane_alive": None,
-        "unbound_reason": "no-child-pid-to-correlate",
-    }
-    # The invariant that makes an empty short_id a signal rather than a
-    # formatting detail (claude/codex, where short_id IS the handle).
-    assert receipt["bound"] == bool(receipt["short_id"])
-    # AC5: no -P/--route on this spawn -> provider (vendor) and model keys are
-    # ABSENT, not defaulted to the harness. A provider key holding a harness
-    # literal is the axis defect this receipt shape corrects.
-    assert "provider" not in receipt
-    assert "model" not in receipt
-    pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert "$fno:target x-81ad" in pane_run
+    assert result.exit_code == 1
+    assert "required codex session binding" in result.output
+    assert fake_runner.kill_calls
 
 
 def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
@@ -1920,6 +1953,11 @@ def test_registry_write_failure_reaps_exact_spawned_pane(
         mux_spawn, "update_registry",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
     )
+    monkeypatch.setattr(
+        mux_spawn,
+        "_backfill_codex_session_id",
+        lambda *_args, **_kwargs: "019fb024-2327-75f3-8b80-06e9d5ade05f",
+    )
 
     with pytest.raises(DispatchAskError, match=r"registry write failed.*pane 7 reaped"):
         dispatch_spawn_pane(
@@ -1947,6 +1985,146 @@ def test_exact_at_current_proceeds_live_when_unpainted(
         runner=FakeRunner(placement={"anchor": 4}, wait_returncode=11, read_stdout=""),
     )
     assert [r.name for r in load_registry()] == ["peer"], "a live spawn still writes the row"
+
+
+def test_readiness_requires_the_configured_manifest_rule() -> None:
+    from fno.agents.mux_spawn import _await_interactive_readiness
+
+    runner = FakeRunner(wait_returncode=11, read_stdout="painted")
+    readiness, detail = _await_interactive_readiness(
+        "codex", "main", 7, runner,
+        manifest_evaluator=lambda _h, _screen: {
+            "matched": True, "rule_id": "busy", "state": "working",
+        },
+    )
+    assert readiness == "live"
+    assert "expected idle_prompt" in detail
+    assert "observed busy" in detail
+
+
+def test_readiness_reports_the_matched_rule_as_positive_evidence() -> None:
+    from fno.agents.mux_spawn import _await_interactive_readiness
+
+    runner = FakeRunner(wait_returncode=11, read_stdout="❯ ")
+    readiness, detail = _await_interactive_readiness(
+        "codex", "main", 7, runner,
+        manifest_evaluator=lambda _h, _screen: {
+            "matched": True, "rule_id": "idle_prompt", "state": "idle",
+        },
+    )
+    assert readiness == "ready"
+    assert detail == "ready-marker=idle_prompt"
+
+
+def test_working_osc_title_prevents_idle_composer_from_reporting_ready(monkeypatch) -> None:
+    from fno import rust_binary
+    from fno.agents.mux_spawn import _await_interactive_readiness
+
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+    )
+
+    runner = FakeRunner(
+        wait_returncode=11,
+        read_stdout="╭─╮\n│ prompt │\n╰─╯",
+        ls_stdout=json.dumps([{"pane_id": 7, "title": "⠋ Working"}]),
+    )
+    readiness, detail = _await_interactive_readiness("claude", "main", 7, runner)
+    assert readiness == "live"
+    assert "observed osc_title_working" in detail
+    manifest_call = next(call for call in runner.calls if "manifest-eval" in call)
+    assert manifest_call[manifest_call.index("--osc-title") + 1] == "⠋ Working"
+
+
+def test_permission_prompt_is_blocked_not_live_without_authorization() -> None:
+    from fno.agents.mux_spawn import _await_interactive_readiness
+
+    readiness, detail = _await_interactive_readiness(
+        "codex",
+        "main",
+        7,
+        FakeRunner(wait_returncode=11, read_stdout="approval"),
+        manifest_evaluator=lambda _h, _screen: {
+            "matched": True, "rule_id": "approval_prompt", "state": "blocked",
+        },
+    )
+    assert readiness == "blocked"
+    assert detail == "blocked-rule=approval_prompt"
+
+
+def test_authorized_permission_uses_contract_keys_then_waits_for_ready() -> None:
+    from fno.agents.mux_spawn import _await_interactive_readiness
+
+    verdicts = iter(
+        [
+            {"matched": True, "rule_id": "approval_prompt", "state": "blocked"},
+            {"matched": True, "rule_id": "idle_prompt", "state": "idle"},
+        ]
+    )
+    sent = []
+
+    def sender(harness, session, pane, rule, keys, verdict, runner, evaluator):
+        sent.append((harness, session, pane, rule, keys))
+        return True
+
+    readiness, detail = _await_interactive_readiness(
+        "codex",
+        "main",
+        7,
+        FakeRunner(wait_returncode=11, read_stdout="screen"),
+        manifest_evaluator=lambda _h, _screen: next(verdicts),
+        permission_action="allow_always",
+        permission_sender=sender,
+    )
+    assert sent == [("codex", "main", 7, "approval_prompt", ["2"])]
+    assert readiness == "ready"
+    assert detail == "ready-marker=idle_prompt"
+
+
+def test_permission_sender_rechecks_fingerprint_under_claim_before_keys() -> None:
+    from fno.agents.mux_spawn import _send_permission_response
+
+    answerable = {
+        "fingerprint": [7] * 32,
+        "region_lines": 20,
+        "options": [{"idx": "2", "label": "always", "keystroke": [50]}],
+    }
+    verdict = {
+        "matched": True,
+        "rule_id": "approval_prompt",
+        "state": "blocked",
+        "answerable": answerable,
+    }
+    runner = FakeRunner(read_stdout="same prompt")
+    assert _send_permission_response(
+        "codex", "main", 7, "approval_prompt", ["2"], verdict, runner,
+        lambda _h, _screen: verdict,
+    )
+    verbs = [call[3] for call in runner.calls]
+    assert verbs == ["claim", "read", "send", "release"]
+    send = runner.calls[2]
+    assert send[send.index("--text") + 1] == "2"
+
+
+def test_permission_sender_refuses_when_fingerprint_advanced() -> None:
+    from fno.agents.mux_spawn import _send_permission_response
+
+    answerable = {
+        "fingerprint": [7] * 32,
+        "region_lines": 20,
+        "options": [{"idx": "1", "label": "once", "keystroke": [49]}],
+    }
+    verdict = {
+        "matched": True, "rule_id": "approval_prompt", "state": "blocked",
+        "answerable": answerable,
+    }
+    advanced = {**verdict, "answerable": {**answerable, "fingerprint": [8] * 32}}
+    runner = FakeRunner(read_stdout="advanced prompt")
+    assert not _send_permission_response(
+        "codex", "main", 7, "approval_prompt", ["1"], verdict, runner,
+        lambda _h, _screen: advanced,
+    )
+    assert [call[3] for call in runner.calls] == ["claim", "read", "release"]
 
 
 # What a LIVE zai route actually carries, not just its endpoint half: the two

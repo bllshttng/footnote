@@ -183,6 +183,21 @@ def _resolve_cli(*args):
     return CliRunner().invoke(dispatch.dispatch_app, ["resolve", *args])
 
 
+def test_capabilities_query_ignores_dispatch_substrate_config():
+    import json
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(dispatch.dispatch_app, ["capabilities", "codex", "--json"])
+    assert result.exit_code == 0
+    out = json.loads(result.stdout)
+    assert out["harness"] == "codex"
+    assert out["ready_marker"] == "idle_prompt"
+    assert out["submit_keys"] == ["unsupported"]
+    assert out["resume_strategy"]["forms"]["headless_resume"]["tokens"] == [
+        "codex", "exec", "resume", "{session_id}"
+    ]
+
+
 def test_resolve_verb_brief_json():
     """--verb assembles `<verb> {id}`; --brief rides env.TARGET_BRIEF, JSON out."""
     import json

@@ -892,35 +892,53 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
         std::thread::sleep(Duration::from_millis(25));
     }
     write_divergent_registry(&home);
-
-    let resp = call(
-        &home,
-        &daemon_bin,
-        &Request::new(
-            11,
-            "agent.switchboard_v2",
-            json!({
-                "to": "worker-alpha",
-                "from": "worker-omega",
-                "body": "ping",
-                "recipient_identity": {},
-                "mirror": false,
-            }),
-        ),
-    )
-    .await
-    .expect("switchboard call");
-    let err = resp.error().expect("broken registry must error the lookup");
-    assert!(
-        err.message.contains("registry read failed"),
-        "must name the failed read, got: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("raw_rows=3") && err.message.contains("decoded_rows=0"),
-        "must carry both counts: {}",
-        err.message
-    );
+    let divergent = std::fs::read_to_string(home.registry_json()).unwrap();
+    let mut attempt = 0;
+    loop {
+        if attempt > 0 {
+            std::fs::write(home.registry_json(), &divergent).unwrap();
+        }
+        let resp = call(
+            &home,
+            &daemon_bin,
+            &Request::new(
+                11,
+                "agent.switchboard_v2",
+                json!({
+                    "to": "worker-alpha",
+                    "from": "worker-omega",
+                    "body": "ping",
+                    "recipient_identity": {},
+                    "mirror": false,
+                }),
+            ),
+        )
+        .await
+        .expect("switchboard call");
+        if let Some(err) = resp.error() {
+            assert!(
+                err.message.contains("registry read failed"),
+                "must name the failed read, got: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("raw_rows=3") && err.message.contains("decoded_rows=0"),
+                "must carry both counts: {}",
+                err.message
+            );
+            break;
+        }
+        attempt += 1;
+        let on_disk = std::fs::read_to_string(home.registry_json()).unwrap_or_default();
+        assert_ne!(
+            on_disk, divergent,
+            "daemon served the divergent registry instead of refusing it"
+        );
+        assert!(
+            attempt < 5,
+            "an idle sweep keeps healing the divergent fixture before lookup"
+        );
+    }
 
     unsafe {
         libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);

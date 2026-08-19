@@ -212,7 +212,11 @@ def _build_argv(
     so this flag is deliberately outside the parity set; unset means today's argv
     byte-for-byte.
     """
-    argv = ["claude", "--bg", "--name", name]
+    from fno.agents.harness_map import render_session_argv
+
+    lane = "headless_resume" if resume_session_id else "headless_create"
+    identity = render_session_argv("claude", lane, resume_session_id)
+    argv = [identity[0], "--bg", "--name", name]
     # x-6de8: a routed bg session's serving process is forked by the daemon
     # without the per-spawn ANTHROPIC_* env; --settings is read by the session
     # process itself and survives that fork, so the route actually applies.
@@ -229,8 +233,7 @@ def _build_argv(
     argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
     if model:
         argv += ["--model", model]
-    if resume_session_id:
-        argv += ["--resume", resume_session_id]
+    argv += identity[1:]
     if not use_stdin:
         # The seed rides behind `--` so a leading-flag seed ("--model x ...")
         # is the prompt positional, not a claude flag; same commander parse as

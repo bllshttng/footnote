@@ -5679,6 +5679,26 @@ def _mux_pane_send(
     # and codex lanes.
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         return False
+    from fno.agents.harness_map import capabilities
+
+    harness = getattr(entry, "harness", "") or ""
+    input_caps = capabilities(harness)
+    submit_keys = input_caps["submit_keys"]
+    if submit_keys == ["unsupported"]:
+        print(
+            f"mux pane delivery refused: harness {harness!r} has no pinned submit contract",
+            file=sys.stderr,
+        )
+        return False
+    submit_bytes = {
+        "enter": "\r", "tab": "\t", "left": "\x1b[D", "right": "\x1b[C",
+        "up": "\x1b[A", "down": "\x1b[B", "esc": "\x1b",
+    }
+    try:
+        submit_text = [submit_bytes.get(key, key) for key in submit_keys]
+        enter_delay_s = input_caps["send_keys_enter_delay_ms"] / 1000
+    except (KeyError, TypeError):
+        return False
     # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
     # the <cross-session-message> peer-follow-up container) leaves no agent-authored
     # marker in the recipient transcript, so record it in the ledger. Both wrapped
@@ -5764,8 +5784,8 @@ def _mux_pane_send(
             return False
         # The CR is unguarded: the guarded paste already proved the pane idle, and
         # guarding the submit could strand a pasted-but-unsent prompt.
-        time.sleep(0.3)
-        return _run(["send", pane, "--text", "\r"]) == 0
+        time.sleep(enter_delay_s)
+        return all(_run(["send", pane, "--text", key]) == 0 for key in submit_text)
 
     if guarded:
         sent = _paste_then_submit()
@@ -6033,7 +6053,13 @@ def _mail_inject_claude(
     if binary is None:
         _record("no-binary")
         return False
-    argv = [str(binary), "mail-inject", "--session", recipient]
+    from fno.agents.harness_map import capabilities
+
+    enter_delay_ms = capabilities("claude")["send_keys_enter_delay_ms"]
+    argv = [
+        str(binary), "mail-inject", "--session", recipient,
+        "--enter-delay-ms", str(enter_delay_ms),
+    ]
     if sender:
         argv += ["--sender", sender]
     timeout = _MAIL_INJECT_TIMEOUT_S

@@ -229,6 +229,22 @@ def cmd_resolve(
     raise typer.Exit(code=0)
 
 
+@dispatch_app.command("capabilities")
+def cmd_capabilities(
+    harness: str = typer.Argument(..., help="Harness to inspect."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit compact JSON."),
+) -> None:
+    """Print one harness's config-independent capability contract."""
+    from fno.agents.harness_map import MAP_VERSION, DispatchResolveError, capabilities
+
+    try:
+        out = {"map_version": MAP_VERSION, "harness": harness, **capabilities(harness)}
+    except DispatchResolveError as exc:
+        typer.echo(f"dispatch capabilities: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(out, separators=(",", ":") if json_output else None, indent=None if json_output else 2))
+
+
 def _autonomous_route_for(
     rec: Optional[dict], harness: Optional[str], node: Optional[str]
 ):

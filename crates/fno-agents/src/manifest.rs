@@ -822,6 +822,77 @@ pub fn load_manifest(
     bundled_manifest(agent).map(Manifest::parse)
 }
 
+pub fn evaluate_screen_json(agent: &str, text: &str) -> Result<serde_json::Value, String> {
+    evaluate_screen_json_with_osc(agent, text, None, None)
+}
+
+pub fn evaluate_screen_json_with_osc(
+    agent: &str,
+    text: &str,
+    osc_title: Option<&str>,
+    osc_progress: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let manifest = load_manifest(agent, None)
+        .ok_or_else(|| format!("unknown harness {agent:?}: no bundled readiness manifest"))?
+        .map_err(|error| error.to_string())?;
+    let screen = ScreenView {
+        visible_text: text,
+        cursor_row: 0,
+        cursor_col: 0,
+        osc_title,
+        osc_progress,
+    };
+    Ok(match manifest.evaluate_answerable(&screen) {
+        Some((verdict, answerable)) => serde_json::json!({
+            "matched": true,
+            "rule_id": verdict.rule_id,
+            "state": verdict.state,
+            "skip_state_update": verdict.skip_state_update,
+            "answerable": answerable,
+        }),
+        None => serde_json::json!({"matched": false}),
+    })
+}
+
+pub fn run_manifest_eval(rest: &[String]) -> i32 {
+    use std::io::Read;
+
+    let mut harness = None;
+    let mut osc_title = None;
+    let mut osc_progress = None;
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--harness" | "-H" => harness = it.next().map(String::as_str),
+            "--osc-title" => osc_title = it.next().map(String::as_str),
+            "--osc-progress" => osc_progress = it.next().map(String::as_str),
+            other => {
+                eprintln!("manifest-eval: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(harness) = harness else {
+        eprintln!("manifest-eval: --harness is required");
+        return 2;
+    };
+    let mut screen = String::new();
+    if let Err(error) = std::io::stdin().read_to_string(&mut screen) {
+        eprintln!("manifest-eval: read stdin: {error}");
+        return 1;
+    }
+    match evaluate_screen_json_with_osc(harness, &screen, osc_title, osc_progress) {
+        Ok(value) => {
+            println!("{value}");
+            0
+        }
+        Err(error) => {
+            eprintln!("manifest-eval: {error}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2021,5 +2092,32 @@ mod tests {
             m.evaluate_answerable(&view(screen)).is_none(),
             "agy arrow-only menu must not be answerable (focus-only fallback)"
         );
+    }
+
+    #[test]
+    fn manifest_eval_returns_the_positive_rule_identity() {
+        let result = evaluate_screen_json("codex", "old output\n❯ ").unwrap();
+        assert_eq!(result["matched"], true);
+        assert_eq!(result["rule_id"], "idle_prompt");
+        assert_eq!(result["state"], "idle");
+    }
+
+    #[test]
+    fn manifest_eval_keeps_working_osc_title_above_idle_composer() {
+        let result = evaluate_screen_json_with_osc(
+            "claude",
+            "╭─╮\n│ prompt │\n╰─╯",
+            Some("⠋ Working"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result["rule_id"], "osc_title_working");
+        assert_eq!(result["state"], "working");
+    }
+
+    #[test]
+    fn manifest_eval_unknown_harness_fails_loud() {
+        let err = evaluate_screen_json("unknown", "❯ ").unwrap_err();
+        assert!(err.contains("unknown"));
     }
 }

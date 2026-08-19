@@ -1,0 +1,251 @@
+map_version = 7
+
+[harness.claude]
+permission_bypass = ["--dangerously-skip-permissions"]
+resume = "native-session"
+bg = true
+autonomous_pane = false
+route_on_pane = true
+stop_hook = "native"
+command_surface = "slash"
+slash_prefix = ""
+ready_marker = "live_prompt_box"
+ready_rule_ids = ["live_prompt_box", "osc_title_idle"]
+manifest_rules = [
+  { id = "live_prompt_box", state = "idle" },
+  { id = "osc_title_idle", state = "idle" },
+  { id = "permission_prompt", state = "blocked" },
+]
+send_keys_enter_delay_ms = 800
+submit_keys = ["enter"]
+stop_strategy = "claude-short-id"
+remove_strategy = "claude-short-id"
+session_binding = { strategy = "preassigned-or-session-start", required = true, timeout_ms = 60000 }
+
+[harness.claude.permission_response.allow_once]
+supported = true
+rule_ids = ["permission_prompt"]
+keys = ["1"]
+
+[harness.claude.permission_response.allow_always]
+supported = true
+rule_ids = ["permission_prompt"]
+keys = ["2"]
+
+[harness.claude.permission_response.deny]
+supported = true
+rule_ids = ["permission_prompt"]
+keys = ["3"]
+
+[harness.claude.resume_strategy.forms.interactive_create]
+kind = "session_flag"
+tokens = ["claude", "--session-id", "{session_id}"]
+
+[harness.claude.resume_strategy.forms.interactive_resume]
+kind = "subcommand"
+tokens = ["claude", "attach", "{session_id}"]
+
+[harness.claude.resume_strategy.forms.headless_create]
+kind = "flag"
+tokens = ["claude"]
+
+[harness.claude.resume_strategy.forms.headless_resume]
+kind = "flag"
+tokens = ["claude", "--resume", "{session_id}"]
+
+[harness.codex]
+permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
+resume = "native-thread"
+bg = false
+autonomous_pane = true
+route_on_pane = false
+stop_hook = "native"
+command_surface = "codex-skill"
+ready_marker = "idle_prompt"
+ready_rule_ids = ["idle_prompt"]
+manifest_rules = [
+  { id = "idle_prompt", state = "idle" },
+  { id = "approval_prompt", state = "blocked" },
+]
+send_keys_enter_delay_ms = 0
+submit_keys = ["unsupported"]
+stop_strategy = "registry-noop"
+remove_strategy = "codex-session-index"
+session_binding = { strategy = "rollout-fd", required = true, timeout_ms = 60000 }
+
+[harness.codex.permission_response.allow_once]
+supported = true
+rule_ids = ["approval_prompt"]
+keys = ["1"]
+
+[harness.codex.permission_response.allow_always]
+supported = true
+rule_ids = ["approval_prompt"]
+keys = ["2"]
+
+[harness.codex.permission_response.deny]
+supported = true
+rule_ids = ["approval_prompt"]
+keys = ["3"]
+
+[harness.codex.resume_strategy.forms.interactive_create]
+kind = "subcommand"
+tokens = ["codex"]
+
+[harness.codex.resume_strategy.forms.interactive_resume]
+kind = "subcommand"
+tokens = ["codex", "resume", "{session_id}"]
+
+[harness.codex.resume_strategy.forms.headless_create]
+kind = "subcommand"
+tokens = ["codex", "exec"]
+
+[harness.codex.resume_strategy.forms.headless_resume]
+kind = "subcommand"
+tokens = ["codex", "exec", "resume", "{session_id}"]
+
+[harness.gemini]
+permission_bypass = ["--yolo"]
+resume = "native-continue"
+bg = false
+autonomous_pane = false
+route_on_pane = false
+stop_hook = "native"
+command_surface = "refused"
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = []
+send_keys_enter_delay_ms = 0
+submit_keys = ["unsupported"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "preassigned", required = true, timeout_ms = 60000 }
+
+[harness.gemini.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.gemini.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.gemini.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.gemini.resume_strategy.forms.interactive_create]
+kind = "session_flag"
+tokens = ["gemini", "--session-id", "{session_id}"]
+
+[harness.gemini.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["gemini", "--resume", "{session_id}"]
+
+[harness.gemini.resume_strategy.forms.headless_create]
+kind = "session_flag"
+tokens = ["gemini", "--session-id", "{session_id}"]
+
+[harness.gemini.resume_strategy.forms.headless_resume]
+kind = "flag"
+tokens = ["gemini", "--resume", "{session_id}"]
+
+[harness.agy]
+permission_bypass = ["--dangerously-skip-permissions"]
+resume = "native-continue"
+bg = false
+autonomous_pane = false
+route_on_pane = false
+stop_hook = "native"
+command_surface = "slash"
+slash_prefix = ""
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = []
+send_keys_enter_delay_ms = 0
+submit_keys = ["unsupported"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "unsupported", required = false, timeout_ms = 0 }
+
+[harness.agy.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.agy.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.agy.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.agy.resume_strategy.forms.interactive_create]
+kind = "flag"
+tokens = ["agy"]
+
+[harness.agy.resume_strategy.forms.interactive_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.agy.resume_strategy.forms.headless_create]
+kind = "flag"
+tokens = ["agy"]
+
+[harness.agy.resume_strategy.forms.headless_resume]
+kind = "session_flag"
+tokens = ["agy", "--conversation", "{session_id}"]
+
+[harness.opencode]
+permission_bypass = ["--dangerously-skip-permissions"]
+resume = "native-session"
+bg = false
+autonomous_pane = false
+route_on_pane = false
+stop_hook = "native"
+command_surface = "slash"
+slash_prefix = "fno:"
+ready_marker = "unsupported"
+ready_rule_ids = []
+manifest_rules = [{ id = "permission_required", state = "blocked" }]
+send_keys_enter_delay_ms = 0
+submit_keys = ["unsupported"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "store-lookup", required = false, timeout_ms = 2000 }
+
+[harness.opencode.permission_response.allow_once]
+supported = false
+rule_ids = ["permission_required"]
+keys = ["enter"]
+
+[harness.opencode.permission_response.allow_always]
+supported = false
+rule_ids = ["permission_required"]
+keys = ["right", "enter"]
+
+[harness.opencode.permission_response.deny]
+supported = false
+rule_ids = ["permission_required"]
+keys = ["right", "right", "enter"]
+
+[harness.opencode.resume_strategy.forms.interactive_create]
+kind = "flag"
+tokens = ["opencode"]
+
+[harness.opencode.resume_strategy.forms.interactive_resume]
+kind = "session_flag"
+tokens = ["opencode", "--session", "{session_id}"]
+
+[harness.opencode.resume_strategy.forms.headless_create]
+kind = "subcommand"
+tokens = ["opencode", "run"]
+
+[harness.opencode.resume_strategy.forms.headless_resume]
+kind = "session_flag"
+tokens = ["opencode", "run", "--session", "{session_id}"]

@@ -141,6 +141,8 @@ class MuxSpawnResult:
     # the prompt was consumed (x-7ebd is the sibling failure for that). Callers
     # must render this receipt as "recovered", never "spawned".
     recovered: bool = False
+    readiness: Optional[str] = None
+    readiness_rule: Optional[str] = None
 
 
 def _fno_bin() -> str:
@@ -908,6 +910,10 @@ def build_pane_argv(
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
+    from fno.agents.harness_map import render_session_argv
+
+    identity = render_session_argv(provider, "interactive_create", session_uuid)
+
     # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
@@ -918,9 +924,7 @@ def build_pane_argv(
         # `claude --session-id <uuid> [message]`: the pinned session id makes
         # the transcript discoverable and keys the inside-leg reports
         # (handle_report matches claude_session_uuid).
-        argv = ["claude"]
-        if session_uuid:
-            argv += ["--session-id", session_uuid]
+        argv = identity
         if name:
             argv += ["--name", name]
         if model:
@@ -942,7 +946,7 @@ def build_pane_argv(
         return argv
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
-        argv = ["codex", "-C", str(cwd)]
+        argv = [*identity, "-C", str(cwd)]
         if permission_mode:
             argv += permission_pane_tokens("codex", permission_mode)
         else:
@@ -976,7 +980,7 @@ def build_pane_argv(
             effort_tokens("gemini", effort)
         # `-i` executes the prompt then stays interactive; --skip-trust avoids
         # the workspace-trust modal blocking the TUI.
-        argv = ["gemini", "--skip-trust"]
+        argv = [*identity, "--skip-trust"]
         if model:
             argv += ["--model", model]
         # Permission tokens are computed before the passthrough splice so the
@@ -1014,7 +1018,7 @@ def build_pane_argv(
         # matching claude's interactive form.
         # ponytail: argv unvalidated against a live agy TUI (agy is closed-source);
         # pin it via capture-readiness-grid.sh when the manifest is validated.
-        argv = ["agy", "--dangerously-skip-permissions"]
+        argv = [*identity, "--dangerously-skip-permissions"]
         if permission_mode:
             # skip -> [] (argv already carries the flag); anything else raises.
             argv += permission_pane_tokens("agy", permission_mode)
@@ -1040,7 +1044,7 @@ def build_pane_argv(
         # the never-prompt lane (visible spelling of the hidden
         # --yolo/--dangerously-skip-permissions aliases); non-yolo keeps
         # opencode's default permission prompting for the answer queue.
-        argv = ["opencode"]
+        argv = identity
         if message:
             # Equal-form binds the value even when it is flag-shaped; yargs
             # misparses the split form there (probed: usage error on a
@@ -1878,19 +1882,82 @@ def _await_pane_registration(
     return None, f"no session id within {_PANE_REGISTRATION_DEADLINE_S}s"
 
 
-def _await_interactive_readiness(
+def _evaluate_manifest_screen(
+    harness: str,
+    screen: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    *,
+    osc_title: Optional[str] = None,
+    osc_progress: Optional[str] = None,
+) -> dict:
+    """Ask the Rust manifest engine for the winning rule on this exact screen."""
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return {"matched": False, "error": "manifest-eval binary unavailable"}
+    try:
+        argv = [str(binary), "manifest-eval", "--harness", harness]
+        if osc_title is not None:
+            argv += ["--osc-title", osc_title]
+        if osc_progress is not None:
+            argv += ["--osc-progress", osc_progress]
+        proc = runner(
+            argv,
+            input=screen,
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"matched": False, "error": str(exc)}
+    if proc.returncode != 0:
+        return {
+            "matched": False,
+            "error": (proc.stderr or proc.stdout or "manifest-eval failed").strip(),
+        }
+    try:
+        value = json.loads(proc.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return {"matched": False, "error": "manifest-eval returned unreadable JSON"}
+    return value if isinstance(value, dict) else {"matched": False, "error": "bad result"}
+
+
+def _pane_osc_title(
     session: str,
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> Optional[str]:
+    """Read the pane title carried by mux metadata; unreadable means unknown."""
+    try:
+        proc = _run_mux(
+            ["mux", "pane", "ls", "--session", session, "--json"], runner
+        )
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "[]")
+    except (DispatchAskError, TypeError, json.JSONDecodeError):
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if row.get("pane_id") == pane_id and isinstance(row.get("title"), str):
+            return row["title"]
+    return None
+
+
+def _await_interactive_readiness(
+    provider: str,
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    *,
+    manifest_evaluator: Optional[Callable[[str, str], dict]] = None,
+    permission_action: Optional[str] = None,
+    permission_sender: Optional[Callable[..., bool]] = None,
 ) -> tuple[str, str]:
     """Interactive readiness gate (x-6928).
 
-    A painted first frame plus a still-live child after a 1s dwell is READY; an
-    alive but unpainted child at the deadline is LIVE; an early child exit is
-    FAILED. Probed through the mux CLI so the gate works across the subprocess
-    boundary: ``pane wait`` (exit 12 == the child exited) for liveness, and
-    ``pane read`` (non-empty == painted) for the ready/live label. Only FAILED
-    stops the spawn (AC5-ERR); READY and LIVE both proceed to the registry row.
+    Liveness is necessary but never sufficient. A pane is READY only when the
+    Rust manifest engine returns this harness's configured positive rule id.
     """
     try:
         probe = _run_mux(
@@ -1915,7 +1982,7 @@ def _await_interactive_readiness(
         painted = _run_mux(
             [
                 "mux", "pane", "read", "--session", session,
-                str(pane_id), "--lines", "1",
+                str(pane_id), "--lines", "20",
             ],
             runner,
         )
@@ -1928,8 +1995,109 @@ def _await_interactive_readiness(
             "failed",
             f"readiness probe failed: pane read exited {painted.returncode}{suffix}",
         )
-    readiness = "ready" if (painted.stdout or "").strip() else "live"
-    return readiness, ""
+    screen = painted.stdout or ""
+    if not screen.strip():
+        return "live", "ready marker not observed: screen is unpainted"
+    from fno.agents.harness_map import capabilities
+
+    expected = capabilities(provider)["ready_marker"]
+    if expected == "unsupported":
+        return "live", f"harness {provider!r} has no pinned ready marker"
+    osc_title = _pane_osc_title(session, pane_id, runner)
+    evaluate = manifest_evaluator or (
+        lambda harness, text: _evaluate_manifest_screen(
+            harness, text, runner, osc_title=osc_title
+        )
+    )
+    verdict = evaluate(provider, screen)
+    observed = verdict.get("rule_id") if verdict.get("matched") else None
+    if observed == expected:
+        return "ready", f"ready-marker={expected}"
+    if verdict.get("state") == "blocked" and observed:
+        if permission_action is None:
+            return "blocked", f"blocked-rule={observed}"
+        from fno.agents.harness_map import DispatchResolveError, permission_response_keys
+
+        try:
+            keys = permission_response_keys(provider, permission_action, observed)
+        except DispatchResolveError as exc:
+            return "blocked", f"blocked-rule={observed}; response refused: {exc}"
+        sender = permission_sender or _send_permission_response
+        if not sender(
+            provider, session, pane_id, observed, keys, verdict, runner, evaluate
+        ):
+            return "blocked", f"blocked-rule={observed}; fingerprinted response not sent"
+        return _await_interactive_readiness(
+            provider,
+            session,
+            pane_id,
+            runner,
+            manifest_evaluator=manifest_evaluator,
+        )
+    detail = f"expected {expected}; observed {observed or 'no matching manifest rule'}"
+    if verdict.get("error"):
+        detail += f" ({verdict['error']})"
+    return "live", detail
+
+
+def _send_permission_response(
+    provider: str,
+    session: str,
+    pane_id: int,
+    rule_id: str,
+    keys: list[str],
+    verdict: dict,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    evaluator: Callable[[str, str], dict],
+) -> bool:
+    """Re-read the fingerprinted prompt under the pane writer claim, then answer."""
+    answerable = verdict.get("answerable")
+    if not isinstance(answerable, dict):
+        return False
+    fingerprint = answerable.get("fingerprint")
+    token_bytes = {
+        "enter": b"\r", "tab": b"\t", "left": b"\x1b[D", "right": b"\x1b[C",
+        "up": b"\x1b[A", "down": b"\x1b[B", "esc": b"\x1b",
+    }
+    desired = b"".join(token_bytes.get(key, key.encode("ascii")) for key in keys)
+    options = answerable.get("options") or []
+    if not any(bytes(option.get("keystroke") or []) == desired for option in options):
+        return False
+    pane = str(pane_id)
+    claim = _run_mux(
+        ["mux", "pane", "claim", pane, "--pid", str(os.getpid()), "--session", session],
+        runner,
+    )
+    if claim.returncode != 0:
+        return False
+    try:
+        fresh = _run_mux(
+            ["mux", "pane", "read", pane, "--lines", "20", "--session", session],
+            runner,
+        )
+        if fresh.returncode != 0:
+            return False
+        fresh_verdict = evaluator(provider, fresh.stdout or "")
+        fresh_answerable = fresh_verdict.get("answerable") or {}
+        if (
+            fresh_verdict.get("rule_id") != rule_id
+            or fresh_answerable.get("fingerprint") != fingerprint
+        ):
+            return False
+        for key in keys:
+            raw = token_bytes.get(key, key.encode("ascii")).decode("latin1")
+            sent = _run_mux(
+                ["mux", "pane", "send", pane, "--text", raw, "--session", session],
+                runner,
+            )
+            if sent.returncode != 0:
+                return False
+        return True
+    finally:
+        _run_mux(
+            ["mux", "pane", "release", pane, "--pid", str(os.getpid()), "--session", session],
+            runner,
+        )
 
 
 def dispatch_spawn_pane(
@@ -2340,40 +2508,38 @@ def dispatch_spawn_pane(
 
         pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
 
-        if exact or recovered:
-            # Interactive readiness gate (x-6928): hold the registry row and the
-            # success receipt until the provider proves it launched. An early
-            # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
-            # collapses the split, the viewer's focus and any later sibling split
-            # survive (AC5-FR/AC6-FR), and no registry row is written.
-            readiness, readiness_detail = _await_interactive_readiness(
-                session, pane_id, runner
-            )
-            # LD4: a recovered pane has no launch receipt behind it, so "alive
-            # and unpainted" (readiness == "live") is not enough proof - only
-            # "ready" (a painted frame) earns the row. A normal exact-placement
-            # spawn keeps its existing, weaker bar (live or ready both pass).
-            if readiness == "failed" or (recovered and readiness != "ready"):
-                if recovered and readiness != "failed":
-                    readiness_detail = (
-                        f"recovered pane never proved it started (readiness "
-                        f"{readiness!r}, not ready)"
-                    )
-                reaped, cleanup_detail = _reap_spawned_pane(
-                    session, pane_id, runner
+        # Interactive readiness is per harness and runs on every pane spawn;
+        # process liveness alone never earns a ready receipt.
+        readiness, readiness_detail = _await_interactive_readiness(
+            provider,
+            session,
+            pane_id,
+            runner,
+            permission_action=(
+                "allow_always"
+                if yolo or permission_mode in {"yolo", "bypassPermissions"}
+                else None
+            ),
+        )
+        if readiness == "failed" or (recovered and readiness != "ready"):
+            if recovered and readiness != "failed":
+                readiness_detail = (
+                    f"recovered pane never proved it started (readiness "
+                    f"{readiness!r}, not ready)"
                 )
-                if reaped:
-                    raise DispatchAskError(
-                        f"agent {name!r} {readiness_detail} in session "
-                        f"{session!r}; pane {pane_id} reaped, no registry row written",
-                        exit_code=1,
-                    )
+            reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+            if reaped:
                 raise DispatchAskError(
-                    f"agent {name!r} {readiness_detail}; pane "
-                    f"{pane_id} may still exist in session {session!r} because "
-                    f"exact cleanup failed: {cleanup_detail}",
+                    f"agent {name!r} {readiness_detail} in session "
+                    f"{session!r}; pane {pane_id} reaped, no registry row written",
                     exit_code=1,
                 )
+            raise DispatchAskError(
+                f"agent {name!r} {readiness_detail}; pane "
+                f"{pane_id} may still exist in session {session!r} because "
+                f"exact cleanup failed: {cleanup_detail}",
+                exit_code=1,
+            )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
         # spawn_trigger was already popped before the pane-run env snapshot above.
 
@@ -2410,6 +2576,9 @@ def dispatch_spawn_pane(
                     reason="no unique opencode session for this cwd after spawn",
                 )
         elif provider == "codex":
+            from fno.agents.harness_map import capabilities
+
+            binding_caps = capabilities(provider)["session_binding"]
             # child_pid reads the id race-free from the pane's open rollout. A
             # pid-less row (_lookup_child_pid best-effort miss) is left id-less:
             # the id is what routes the row into reconcile's mux branch, and a
@@ -2417,6 +2586,9 @@ def dispatch_spawn_pane(
             # true), so never stamp one without a pid to correlate (Codex P1/P2, #603).
             if child_pid is not None:
                 _pid = child_pid
+                binding_window_s = binding_caps["timeout_ms"] / 1000
+                if _BINDING_WINDOW_ENV in os.environ:
+                    binding_window_s = _binding_window_s()
                 binding = _await_pane_binding(
                     {"session": session, "pane_id": pane_id},
                     # attempts=1: the binding loop owns the retry, because it
@@ -2430,6 +2602,7 @@ def dispatch_spawn_pane(
                         attempts=1,
                     ),
                     runner=runner,
+                    window_s=binding_window_s,
                     label="codex",
                 )
                 session_uuid = binding.session_id
@@ -2466,6 +2639,20 @@ def dispatch_spawn_pane(
                     cwd=str(cwd),
                     reason="no unique codex rollout for this cwd after spawn",
                 )
+                if binding_caps["required"] and not pane_died:
+                    reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                    if reaped:
+                        raise DispatchAskError(
+                            f"agent {name!r} required {provider} session binding "
+                            f"({unbound_reason or 'not-captured'}); pane {pane_id} reaped, "
+                            "no registry row written",
+                            exit_code=1,
+                        )
+                    raise DispatchAskError(
+                        f"agent {name!r} required {provider} session binding but cleanup "
+                        f"failed: {cleanup_detail}; pane {pane_id} may still exist",
+                        exit_code=1,
+                    )
         elif provider == "claude" and not pin_session:
             # happy owns the id on this route, so the spawn CANNOT know it and
             # deliberately does not try. Guessing from the transcript store was
@@ -2909,4 +3096,10 @@ def dispatch_spawn_pane(
         effective_message=effective_message,
         placement=placement_receipt,
         recovered=recovered,
+        readiness=readiness,
+        readiness_rule=(
+            readiness_detail.split("=", 1)[1].split(";", 1)[0]
+            if readiness_detail.startswith(("ready-marker=", "blocked-rule="))
+            else None
+        ),
     )

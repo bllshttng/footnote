@@ -1721,6 +1721,7 @@ fn ask_via_control_sock(
         &wrapped,
         crate::mail_inject::DEFAULT_ATTEMPTS,
         crate::mail_inject::DEFAULT_INTERVAL_MS,
+        crate::mail_inject::default_enter_delay_ms(),
     )
     .is_err()
     {
