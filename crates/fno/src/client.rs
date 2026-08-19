@@ -10124,6 +10124,49 @@ async fn handle_stdin(
                 MouseKind::Release(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
                     let held = view.tab_drag.map(|d| (d.src_tab, d.start_at, d.moved));
+                    // (x-7683) A motionless hold past MENU_LONG_PRESS consumes
+                    // the release BEFORE any commit: `moved` gates it (the
+                    // clock alone cannot tell a hold from a slow drag), and a
+                    // terminal that drops drag reports can place the release
+                    // coords on a drop zone - a hold must never execute a join
+                    // (codex peer review on #975). Under a usurping overlay
+                    // (rename typing) the hold degrades to the plain flow
+                    // below - a menu there would steal the overlay's keys.
+                    // Open the CAPTURED tab's menu, not whatever cell the
+                    // release reports: with no drag report ever arriving, the
+                    // release coords are the one unchecked signal left.
+                    let long_press = !view.menu_usurping_open()
+                        && held.is_some_and(|(_, start, moved)| {
+                            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                        });
+                    if long_press {
+                        if let Some((tid, _, _)) = held {
+                            if let Some((_, idx, tab)) = view.find_tab(tid) {
+                                let menu = build_tab_menu(
+                                    idx,
+                                    tab,
+                                    Anchor::At {
+                                        row: rep.row,
+                                        col: rep.col,
+                                    },
+                                );
+                                view.clear_peek();
+                                view.row_menu = Some(menu);
+                                view.row_menu_esc.clear();
+                            } else {
+                                // The held tab closed mid-hold (e.g. a
+                                // co-attached client or server-driven
+                                // layout change) - say so rather than
+                                // let the hold end in silence, mirroring
+                                // the row arm's "no menu on the held
+                                // row" notice.
+                                view.set_notice("no menu on the held tab".into());
+                            }
+                        }
+                        view.tab_drag = None;
+                        view.refresh_hover_affordances(rep.row, rep.col);
+                        continue;
+                    }
                     match view.commit_tab_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -10133,55 +10176,8 @@ async fn handle_stdin(
                         // A zone-less release still ON the strip is a plain click:
                         // select the tab (the click-to-select affordance the strip
                         // has always had). Released off the strip it is a cancelled
-                        // drag - nothing travels. (x-7683) A motionless hold past
-                        // MENU_LONG_PRESS opens the tab menu instead - the
-                        // no-config path for terminals that never forward a
-                        // right-click. `moved` gates it: the clock alone cannot
-                        // tell a hold from a slow drag that ends zone-less. A hold
-                        // is never a click either way, so whether or not a menu
-                        // opened, no SelectTab rides it. Under a usurping overlay
-                        // (rename typing) the hold degrades to the plain click -
-                        // a menu there would steal the overlay's keys.
+                        // drag - nothing travels.
                         None => {
-                            let long_press = !view.menu_usurping_open()
-                                && held.is_some_and(|(_, start, moved)| {
-                                    !moved
-                                        && Instant::now().duration_since(start) >= MENU_LONG_PRESS
-                                });
-                            if long_press {
-                                // Open the CAPTURED tab's menu, not whatever
-                                // cell the release reports: a motionless hold
-                                // means no drag report ever arrived, so the
-                                // release coords are the only unchecked signal
-                                // left - a terminal that drops drag reports
-                                // must not turn a hold on tab A into a menu
-                                // for tab B (codex peer review on #975).
-                                if let Some((tid, _, _)) = held {
-                                    if let Some((_, idx, tab)) = view.find_tab(tid) {
-                                        let menu = build_tab_menu(
-                                            idx,
-                                            tab,
-                                            Anchor::At {
-                                                row: rep.row,
-                                                col: rep.col,
-                                            },
-                                        );
-                                        view.clear_peek();
-                                        view.row_menu = Some(menu);
-                                        view.row_menu_esc.clear();
-                                    } else {
-                                        // The held tab closed mid-hold (e.g. a
-                                        // co-attached client or server-driven
-                                        // layout change) - say so rather than
-                                        // let the hold end in silence, mirroring
-                                        // the row arm's "no menu on the held
-                                        // row" notice.
-                                        view.set_notice("no menu on the held tab".into());
-                                    }
-                                }
-                                view.refresh_hover_affordances(rep.row, rep.col);
-                                continue;
-                            }
                             if let Some((tid, _, _)) = held {
                                 if view.strip_at(rep.row, rep.col) {
                                     write_msg(sock_w, &ClientMsg::Command(Command::SelectTab(tid)))
@@ -10221,6 +10217,41 @@ async fn handle_stdin(
                     // SAME row.
                     let pressed = view.row_drag.as_ref().map(|d| d.src.clone());
                     let held = view.row_drag.as_ref().map(|d| (d.start_at, d.moved));
+                    let still_on_row =
+                        pressed.is_some() && view.row_drag_source_at(rep.row, rep.col) == pressed;
+                    // (x-7683) A motionless hold past MENU_LONG_PRESS consumes the
+                    // release BEFORE any commit, exactly like the tab arm: a
+                    // terminal that drops drag reports can place the release
+                    // coords on a drop zone, and a hold must never execute a
+                    // placement (codex peer review on #975). long_press is a
+                    // TIME question, not a position one - it must not be gated
+                    // on still_on_row, or a release that slips off the pressed
+                    // row during a genuine motionless hold ends in total
+                    // silence. A hold that opens nothing still SAYS so. Under a
+                    // usurping overlay the hold degrades to the plain flow
+                    // below.
+                    let long_press = !view.menu_usurping_open()
+                        && held.is_some_and(|(start, moved)| {
+                            !moved && Instant::now().duration_since(start) >= MENU_LONG_PRESS
+                        });
+                    if long_press {
+                        let opened = still_on_row
+                            && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
+                                view.open_row_menu(
+                                    i,
+                                    Anchor::At {
+                                        row: rep.row,
+                                        col: rep.col,
+                                    },
+                                )
+                            });
+                        if !opened {
+                            view.set_notice("no menu on the held row".into());
+                        }
+                        view.row_drag = None;
+                        view.refresh_hover_affordances(rep.row, rep.col);
+                        continue;
+                    }
                     match view.commit_row_drag() {
                         Some(cmd) => {
                             write_msg(sock_w, &ClientMsg::Command(cmd))
@@ -10235,44 +10266,8 @@ async fn handle_stdin(
                         // chrome (row_drag_source_at skips the density button) -
                         // resolves to a different source (or None), so the gesture
                         // cancels rather than acting on the wrong agent.
-                        // (x-7683) A motionless hold past MENU_LONG_PRESS on that
-                        // same row opens its context menu instead - the no-config
-                        // path for terminals that never forward a right-click -
-                        // through the same sideline_row_at + open_row_menu a
-                        // right-press uses. `moved` gates it like the tab arm,
-                        // and a genuine hold never falls back to the click
-                        // action either way (mirroring the tab arm's promise) -
-                        // but a hold that opens nothing still SAYS so, never a
-                        // silent swallow. Under a usurping overlay the hold
-                        // degrades to the plain click, like the tab arm.
                         None => {
-                            let still_on_row = pressed.is_some()
-                                && view.row_drag_source_at(rep.row, rep.col) == pressed;
-                            // long_press is a TIME question, not a position one -
-                            // it must not be gated on still_on_row, or a release
-                            // that slips off the pressed row during a genuine
-                            // motionless hold ends in total silence, breaking the
-                            // "never a silent swallow" promise above.
-                            let long_press = !view.menu_usurping_open()
-                                && held.is_some_and(|(start, moved)| {
-                                    !moved
-                                        && Instant::now().duration_since(start) >= MENU_LONG_PRESS
-                                });
-                            if long_press {
-                                let opened = still_on_row
-                                    && view.sideline_row_at(rep.row, rep.col).is_some_and(|i| {
-                                        view.open_row_menu(
-                                            i,
-                                            Anchor::At {
-                                                row: rep.row,
-                                                col: rep.col,
-                                            },
-                                        )
-                                    });
-                                if !opened {
-                                    view.set_notice("no menu on the held row".into());
-                                }
-                            } else if still_on_row {
+                            if still_on_row {
                                 if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                                     apply_hit(view, hit, sock_w).await?;
                                 }
@@ -20385,6 +20380,35 @@ mod tests {
             .unwrap();
         assert!(v.row_menu.is_none(), "no row menu under an open nav filter");
         assert!(v.nav.is_some(), "nav survives untouched");
+    }
+
+    #[tokio::test]
+    async fn x7683_long_press_release_on_a_drop_zone_never_joins() {
+        // A motionless hold sends no drag report, so the release coordinates
+        // are the one unchecked signal left - a terminal that drops drag
+        // reports can land them on a drop zone. The hold consumes the release
+        // BEFORE the commit: a menu opens, no JoinTab travels.
+        let mut v = view_with_agents(vec![]);
+        let ((tr, tc), _) = tab_and_new_tab_cells(&v);
+        v.tab_drag = Some(super::TabDrag {
+            src_tab: v.tab_cell_at(tr, tc).unwrap(),
+            zone: None,
+            last_at: Instant::now(),
+            start_at: Instant::now() - Duration::from_millis(600),
+            moved: false,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        // Release at screen (5, 28): content col 0, the left edge of pane 10 -
+        // a valid drop zone for a real drag.
+        release_left(&mut v, 5, 28, &mut buf).await.unwrap();
+        assert!(
+            matches!(
+                v.row_menu.as_ref().map(|m| &m.target),
+                Some(super::MenuTarget::Tab(_))
+            ),
+            "the held tab's menu opened"
+        );
+        assert!(buf.is_empty(), "no JoinTab rode the hold");
     }
 
     #[tokio::test]
