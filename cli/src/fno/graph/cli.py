@@ -4631,6 +4631,23 @@ def cmd_board(
     """
     from fno.graph.board import compute_board
     from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.tracker import active_backend_name
+
+    # The board spans done + in-progress + ready sections, which needs
+    # lookback past list_open()'s open-only contract (the same done-at-
+    # PR-green grace window pr_watch's discovery needs and cannot get from
+    # the tracker seam without storage-engine work, out of scope here). An
+    # external backend degrades the same way an unreadable graph already
+    # does, rather than reading the wrong store.
+    if active_backend_name() != "graph":
+        payload = _board_unreadable_graph_payload(
+            f"board is unavailable under the {active_backend_name()} tracker backend"
+        )
+        if json_output:
+            typer.echo(json.dumps(payload))
+        else:
+            _print_board(payload)
+        raise typer.Exit(code=1)
 
     try:
         entries = read_graph_strict(_graph_path())
@@ -11816,7 +11833,7 @@ _TRACKER_OWNED_VERBS = frozenset({
 _FOOTNOTE_OWNED_VERBS = frozenset({
     # seam reads / renders
     "get", "status", "view", "find", "next", "ready", "queued", "provenance",
-    "roadmap", "bases", "album", "project-root",
+    "roadmap", "bases", "album", "project-root", "board",
     # completion works on any backend by design (task 4.1)
     "done",
     # footnote-owned sidecar files, no graph write
