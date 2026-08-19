@@ -942,7 +942,9 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         (
             "right-click".into(),
-            "row menu · on a header: clear dead".into(),
+            // (x-7683) All three triggers of the same menu, so a terminal that
+            // never forwards the button does not read as a dead feature.
+            "context menu · or m · or hold L 500ms".into(),
             KeySection::SidelineRows,
         ),
         // Workspace-row rename/reorder, only reachable inside the prefix+w

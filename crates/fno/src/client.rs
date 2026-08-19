@@ -1305,6 +1305,23 @@ fn build_keys_modal() -> KeysModal {
         PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
         None,
     );
+    // (x-7683) The right-click config note. The mux side works whenever the
+    // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
+    // that never send them are named so the operator configures the terminal,
+    // or reaches for the no-config paths, instead of reading a dead feature.
+    add(PopupRow::Rule, None);
+    add(
+        PopupRow::Header("right-click works only where the terminal forwards it".into()),
+        None,
+    );
+    add(
+        PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
+        None,
+    );
+    add(
+        PopupRow::Header("in tmux set mouse off · else m, or hold Left 500ms".into()),
+        None,
+    );
     KeysModal {
         popup: Popup::new(rows, Anchor::Center),
         row_events: events,
@@ -19365,7 +19382,9 @@ mod tests {
         assert!(joined.contains("sideline rows"), "the section renders");
         assert!(joined.contains("x stop a live row · remove a dead one"));
         assert!(joined.contains("X reap all exited agents"));
-        assert!(joined.contains("on a header: clear dead"));
+        // (x-7683) The context-menu row names every trigger, not just the
+        // right-click; "on a header: clear dead" moved into that richer label.
+        assert!(joined.contains("context menu · or m · or hold L 500ms"));
         // Display-only: Enter on them must BEL, never dispatch a bogus chord.
         for (i, r) in modal.popup.rows.iter().enumerate() {
             if matches!(r, PopupRow::Entry { glyph, .. } if glyph == "X") {
@@ -19817,6 +19836,35 @@ mod tests {
             v.row_menu.as_ref().unwrap().popup.anchor,
             crate::popup::Anchor::At { row: w as u16, col: 1 },
             "the menu anchors on the row itself, not one below"
+        );
+    }
+
+    // ---- (x-7683) wave 4: the help note ---------------------------------------
+
+    #[test]
+    fn x7683_keys_modal_names_every_menu_trigger_and_the_terminal_caveat() {
+        // The operator-facing diagnosis: right-click works when the terminal
+        // forwards it, and Terminal.app / unconfigured iTerm2 / tmux-with-mouse
+        // do not. The in-app help must name all three triggers and the caveat,
+        // so a swallowed right-click never reads as a dead feature.
+        let mut view = two_pane_view();
+        // Tall enough that the centered modal shows its tail (the note lines
+        // ride below the binding sections; a short window scrolls them).
+        view.term = (64, 100);
+        view.open_keys_modal();
+        let text = frame_text(&view.compose());
+        let modal_tail: String = text
+            .lines()
+            .filter(|l| l.contains("menu") || l.contains("hold") || l.contains("click"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("right-click") && text.contains("hold"),
+            "the context-menu row names the mouse path and the long-press; matched lines:\n{modal_tail}"
+        );
+        assert!(
+            text.contains("terminal forwards it") || text.contains("terminal that"),
+            "the caveat names the forwarding condition"
         );
     }
 
