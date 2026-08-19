@@ -86,8 +86,17 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
       echo "[init-target-state] note: containment gate unavailable (rc=$_CT_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
     fi
   else
-    echo "[init-target-state] REFUSED: fno absent - dispatch hold state cannot be checked" >&2
-    exit 2
+    _HOLD_CHECK_REQUIRED=0
+    [[ -n "${TARGET_PLAN_PATH:-}" ]] && _HOLD_CHECK_REQUIRED=1
+    [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9_-]*-[0-9a-fA-F]{4,8}$ ]] \
+      && _HOLD_CHECK_REQUIRED=1
+    [[ -n "${TARGET_INPUT:-}" && -f "${TARGET_INPUT:-}" ]] \
+      && _HOLD_CHECK_REQUIRED=1
+    if [[ "$_HOLD_CHECK_REQUIRED" == "1" ]]; then
+      echo "[init-target-state] REFUSED: fno absent - dispatch hold state cannot be checked" >&2
+      exit 2
+    fi
+    echo "[init-target-state] note: fno absent - no existing node or plan to hold; proceeding with free-text init" >&2
   fi
 fi
 # Consume the marker like TARGET_START above: it means "the gate already ran for
