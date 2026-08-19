@@ -276,6 +276,29 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
     return refs
 
 
+def node_cwd_in_repo(entry: dict, our_root: str) -> bool:
+    """Does ``entry``'s own ``cwd`` sit inside ``our_root`` (or is it missing)?
+
+    A missing/empty/non-string cwd can't be proven NOT this repo's, and
+    there is no cost to treating it as in-scope here: ``reverse_map_unstamped``
+    (the only caller of this scope) independently skips a missing cwd
+    unconditionally before it would ever fire a gh call, so this branch
+    changes candidate-set membership only - never the observable close/skip
+    outcome for a no-cwd node.
+
+    Module-level (not nested inside a caller) precisely so this predicate is
+    unit-testable on its own, independent of the reverse-map machinery that
+    happens to make its no-cwd branch behaviorally inert today.
+    """
+    raw_cwd = entry.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        return True
+    our_root = os.path.normpath(our_root)
+    our_root_prefix = our_root.rstrip(os.sep) + os.sep
+    norm = os.path.normpath(os.path.expanduser(raw_cwd))
+    return norm == our_root or norm.startswith(our_root_prefix)
+
+
 # The exit-code contract, owned here so no verb can fork it. The loop runtime
 # keys on 5 for AwaitingMerge, so these numbers are load-bearing: do not renumber.
 REFUSAL_EXIT_CODES = {"awaiting_merge": 5, "outage": 4, "refused": 3}

@@ -1427,6 +1427,23 @@ def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_pat
     assert node["pr_number"] == 268  # reverse-map backfilled its own recovered ref
 
 
+def test_node_cwd_in_repo_treats_a_missing_cwd_as_in_scope():
+    """Round-3 review fix: a no-cwd node can't be proven NOT this repo's, so
+    ``node_cwd_in_repo`` includes it rather than excluding it - the same
+    "no cost to including it" reasoning the round-2 fix already applied to
+    ``_pr_touch_ids``, now directly exercised on the extracted predicate
+    (moved module-level in ``_reconcile.py`` specifically so this branch is
+    unit-testable on its own, since ``reverse_map_unstamped`` independently
+    skips a missing cwd before ever making a gh call - no end-to-end
+    ``reconcile`` run can observe this branch's return value either way)."""
+    assert rec.node_cwd_in_repo({"id": "ab-nocwd"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-nullcwd", "cwd": None}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-emptycwd", "cwd": ""}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-here", "cwd": "/some/repo"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-nested", "cwd": "/some/repo/sub"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-elsewhere", "cwd": "/other/repo"}, "/some/repo") is False
+
+
 def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_unresolvable(
     cli_env, monkeypatch,
 ):

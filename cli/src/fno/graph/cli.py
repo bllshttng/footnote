@@ -8720,33 +8720,17 @@ def cmd_reconcile(
         when its own slug is unresolvable, rather than treating that as a
         pass for every candidate).
         """
-        import os
-
         from fno.graph._intake import repo_root
-        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+        from fno.graph._reconcile import node_cwd_in_repo, node_pr_refs, repo_slug_from_url
 
-        _our_root = os.path.normpath(repo_root())
-        _our_root_prefix = _our_root.rstrip(os.sep) + os.sep
-
-        def _cwd_in_our_repo(_e: dict) -> bool:
-            _raw_cwd = _e.get("cwd")
-            if not isinstance(_raw_cwd, str) or not _raw_cwd:
-                # A no-cwd node can't be proven NOT this repo's, and there is
-                # no cost to including it: reverse_map_unstamped's own scan
-                # already skips a missing/empty cwd unconditionally before it
-                # would ever fire a gh call, so excluding it here would only
-                # add a new failure mode (a genuinely-this-repo node with no
-                # cwd going dark) with no matching benefit (review fix).
-                return True
-            _norm = os.path.normpath(os.path.expanduser(_raw_cwd))
-            return _norm == _our_root or _norm.startswith(_our_root_prefix)
+        _our_root = repo_root()
 
         ids = set(_claims)
         for _e in _entries:
             _rid = _e.get("id")
             if not (isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e)):
                 continue
-            if not _cwd_in_our_repo(_e):
+            if not node_cwd_in_repo(_e, _our_root):
                 continue
             ids.add(_rid)
         if _our_repo is None:
