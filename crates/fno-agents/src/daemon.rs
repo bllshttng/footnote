@@ -1221,7 +1221,7 @@ pub fn gc_sweep(
             let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 overrun.set(true);
-                return None;
+                return Err(());
             }
             let result = crate::claude_ask::family1_truth_probe_with_timeout(
                 handle,
@@ -1230,12 +1230,12 @@ pub fn gc_sweep(
             .map(|probe| probe.state);
             if started.elapsed() >= PROBE_PASS_BUDGET {
                 overrun.set(true);
+                return Err(());
             }
-            result
+            Ok(result)
         },
         &|e| store.borrow_mut().matches(e),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
-        &|| overrun.get(),
     );
     if overrun.get() {
         let _ = emitter.emit(
@@ -1273,7 +1273,7 @@ pub fn gc_sweep_dry_run(
             let remaining = PROBE_PASS_BUDGET.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 overrun.set(true);
-                return None;
+                return Err(());
             }
             let result = crate::claude_ask::family1_truth_probe_with_timeout(
                 handle,
@@ -1282,12 +1282,12 @@ pub fn gc_sweep_dry_run(
             .map(|probe| probe.state);
             if started.elapsed() >= PROBE_PASS_BUDGET {
                 overrun.set(true);
+                return Err(());
             }
-            result
+            Ok(result)
         },
         &|e| store.borrow_mut().matches(e),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
-        &|| overrun.get(),
     )
 }
 
@@ -1296,7 +1296,7 @@ fn gc_sweep_impl(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
     dry_run: bool,
-    truth_tail_state: &dyn Fn(&str) -> Option<String>,
+    truth_tail_state: &dyn Fn(&str) -> Result<Option<String>, ()>,
     // The harness-store lookup (every transcript candidate this row's own
     // store holds for its session id), injected so a sweep-level test never
     // depends on what lives in the developer's real ~/.claude / ~/.codex.
@@ -1304,7 +1304,6 @@ fn gc_sweep_impl(
     // The post-reap harness-store cascade, injected for the same reason: a
     // test must be able to stage a refusal without mutating PATH/HOME.
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
-    pass_overrun: &dyn Fn() -> bool,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
@@ -1338,9 +1337,6 @@ fn gc_sweep_impl(
         std::collections::BTreeMap::new();
 
     for e in &registry.entries {
-        if pass_overrun() {
-            return GcSummary::default();
-        }
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
         let is_live = live_workers.contains(&e.short_id)
             || e.pid
@@ -1425,8 +1421,10 @@ fn gc_sweep_impl(
                     // sessions would otherwise pay that cost on every idle row
                     // with the cap never engaging (codex review, PR #889).
                     dormant_probes += 1;
-                    if let Some(state) = truth_tail_state(handle) {
-                        dormant_done = state == "done";
+                    match truth_tail_state(handle) {
+                        Ok(Some(state)) => dormant_done = state == "done",
+                        Ok(None) => {}
+                        Err(()) => return GcSummary::default(),
                     }
                 }
             }
@@ -1512,12 +1510,6 @@ fn gc_sweep_impl(
                 }
             }
         }
-    }
-
-    // An overrun discards the pass before any registry write. Partial truth is
-    // not a coherent sweep result; the next tick retries from stored status.
-    if pass_overrun() {
-        return GcSummary::default();
     }
 
     // Cap the whole reap batch at CASCADE_CAP, not just the cascade calls
@@ -7315,10 +7307,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
+            &|_| Ok(None),
             &|_| None,
             &|_| None,
-            &|_| None,
-            &|| false,
         );
 
         assert!(
@@ -7434,11 +7425,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None, // truth tail: no live rows to probe
+            &|_| Ok(None), // truth tail: no live rows to probe
             // Session gone from its own store: the empty hit vector.
             &|e| (e.name == "gone-session").then(Vec::new),
             &|_| None, // cascade: store holds nothing to remove
-            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["gonesess".to_string()]);
@@ -7485,10 +7475,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
+            &|_| Ok(None),
             &|_| None,
             &|_| None,
-            &|_| None,
-            &|| false,
         );
         assert!(first.reaped.is_empty(), "first sight stamps, never reaps");
         let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -7518,10 +7507,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &|_| Ok(None),
             &|e| (e.name == "orph").then(Vec::new),
             &|_| None,
-            &|| false,
         );
         assert_eq!(second.reaped, vec!["orph".to_string()]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -7564,13 +7552,14 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|handle| match handle {
-                "bgdone" => Some("done".to_string()),
-                _ => Some("watching".to_string()), // the credential-dead shape
+            &|handle| {
+                Ok(match handle {
+                    "bgdone" => Some("done".to_string()),
+                    _ => Some("watching".to_string()), // the credential-dead shape
+                })
             },
             &|_| None,
             &|_| None,
-            &|| false,
         );
 
         assert_eq!(summary.reaped_dormant, vec!["bgdone".to_string()]);
@@ -7619,7 +7608,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &|_| Ok(None),
             &|_| None,
             // The cascade refuses for this row: the harness store would not
             // give the session up.
@@ -7631,7 +7620,6 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                     )
                 })
             },
-            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["piddead".to_string()]);
@@ -7724,10 +7712,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             true,
+            &|_| Ok(None),
             &|_| None,
             &|_| None,
-            &|_| None,
-            &|| false,
         );
 
         assert_eq!(summary.reaped, vec!["ask-old".to_string()]);
@@ -7803,10 +7790,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter_old,
             &|_| Duration::from_secs(3600),
             false,
+            &|_| Ok(None),
             &|_| None,
             &|_| None,
-            &|_| None,
-            &|| false,
         );
         assert_eq!(
             summary_old.reaped,
@@ -7822,10 +7808,9 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter_new,
             &|harness| Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 }),
             false,
+            &|_| Ok(None),
             &|_| None,
             &|_| None,
-            &|_| None,
-            &|| false,
         );
         assert!(
             summary_new.reaped.is_empty(),
