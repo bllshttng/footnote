@@ -37,6 +37,12 @@ One file per install. These belong at the root.
 | `convo-signals.jsonl` | `inbox/drain.py` | append-only |
 | `recovery-nudges.json` | `recovery.py` | permanent |
 | `watchdog-sweep.json` | `agents/watchdog.py` | permanent (rewritten per sweep) |
+| `recovery/provider-outages.json`, `.lock`, `.provider-outages-*.tmp` | `agents/provider_outage.py` | permanent breaker/evidence journal; lock and atomic temp sidecars live only for one write and stale temps are safe to remove when no writer holds the lock; stores fingerprints, bounded raw refusal text, and explicit route IDs, never credentials or full transcripts |
+| `recovery/provider-canaries/*.json` | `agents/watchdog.py` | bounded health proofs for audit; exact marker, provider/account IDs, pane ID, and timestamp only, never pane dumps or credentials |
+| `recovery/canary-work/` | `agents/watchdog.py` | permanent empty neutral cwd reused by canaries; owns no node claim or project data |
+| `recovery/transactions/outage-handoff-*.json` | `agents/outage_handoff.py` | permanent idempotency/phase journals per node and outage epoch; no credentials, transcript bodies, or pane dumps |
+| `claims/dispatch%3A*.lock`, `.recovery.d/` | `claims/core.py` for provider handoff | transaction lease for one attempt; released at terminal return, recovery mutex removed by the claim primitive; contains holder/process metadata only |
+| `<plan>.artifacts/target-state-*.md` | `state/outage_handoff.py` | permanent immutable handoff archive beside the plan; contains the pre-handoff session manifest but no credential or transcript payload |
 | `git-protection.json` | `hooks/git-protection.py` | permanent |
 | `squads.json`, `.lock` | `crates/fno/src/squad_store.rs` | permanent |
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |

@@ -2919,6 +2919,9 @@ fn create(
         // (possibly None-on-race) resolved uuid, healed later like the legacy field.
         harness: Some("claude".to_string()),
         harness_session_id: session_uuid.clone(),
+        route_provider_id: None,
+        model_name: None,
+        account_record_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

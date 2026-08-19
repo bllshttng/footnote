@@ -34,6 +34,7 @@ def _request() -> HandoffRequest:
         source_row_id="source-row",
         destination_harness="codex",
         destination_provider="openai",
+        destination_model="gpt-5.6-sol",
         destination_account="work",
         destination_account_env={"CODEX_HOME": "/private/account"},
         quorum_evidence_count=2,
@@ -368,7 +369,7 @@ def test_ac9_hp_successor_spawn_uses_canonical_axes_and_no_merge(tmp_path: Path)
 
     class Result:
         returncode = 0
-        stdout = '{"name":"successor","short_id":"child-row"}\n'
+        stdout = '{"name":"successor","short_id":"","session_id":"child-row"}\n'
         stderr = ""
 
     receipt = spawn_successor_exact(
@@ -383,7 +384,9 @@ def test_ac9_hp_successor_spawn_uses_canonical_axes_and_no_merge(tmp_path: Path)
     assert cmd[cmd.index("--substrate") + 1] == "pane"
     assert cmd[cmd.index("--cwd") + 1] == str(tmp_path)
     assert cmd[cmd.index("--node") + 1] == "x-abcd"
-    assert cmd[cmd.index("--provider") + 1] == "openai"
+    assert "--provider" not in cmd
+    assert cmd[cmd.index("--recorded-provider") + 1] == "openai"
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6-sol"
     assert cmd[cmd.index("--dispatch-account") + 1] == "work"
     assert kwargs["env"]["TARGET_NO_MERGE"] == "1"
     assert receipt == SpawnReceipt(row_id="child-row", name="successor")

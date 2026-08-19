@@ -7,6 +7,7 @@ import os
 import tempfile
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -47,11 +48,131 @@ class RouteCandidate:
     account: str | None
     account_env: dict[str, str] | None
     canary: CanaryProof | None
+    model: str | None = None
+    route_env: dict[str, str] | None = None
     breaker_open: bool = False
     runtime_exhausted: bool = False
     harness_installed: bool = True
     pane_supported: bool = True
     pane_count: int = 0
+
+
+@dataclass(frozen=True)
+class EvidenceIdentity:
+    """Machine-recorded axes required to join one transcript to a route."""
+
+    row_id: str
+    harness: str
+    provider: str | None
+    account: str | None
+    session_id: str
+    cwd: str
+
+
+def _message_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return ""
+    return " ".join(
+        str(part.get("text") or "").strip()
+        for part in value
+        if isinstance(part, dict) and part.get("type") == "text"
+    ).strip()
+
+
+def _record_epoch(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def collect_transcript_evidence(
+    identities: Iterable[EvidenceIdentity], *, now_s: float,
+    transcript_path_for: Callable[[EvidenceIdentity], Path | None] | None = None,
+    evidence_freshness_s: float = 600,
+) -> tuple[list["OutageEvidence"], list[dict[str, Any]]]:
+    """Read raw assistant records without consulting liveness projections."""
+    if transcript_path_for is None:
+        from fno.provenance.observed import resolve_transcript_path
+
+        def transcript_path_for(identity: EvidenceIdentity) -> Path | None:
+            return resolve_transcript_path(
+                identity.harness, identity.session_id, identity.cwd
+            )
+
+    records: list[OutageEvidence] = []
+    refusals: list[dict[str, Any]] = []
+    for identity in identities:
+        if not all((identity.row_id, identity.harness, identity.provider, identity.account)):
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "unknown_route_identity",
+                "count": 1,
+            })
+            continue
+        try:
+            path = transcript_path_for(identity)
+            if path is None:
+                lines = []
+            else:
+                with Path(path).open("rb") as handle:
+                    size = handle.seek(0, os.SEEK_END)
+                    handle.seek(max(0, size - 256 * 1024))
+                    raw_tail = handle.read()
+                lines = raw_tail.decode("utf-8").splitlines()
+                if size > 256 * 1024 and lines:
+                    lines = lines[1:]
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        if not lines:
+            refusals.append({
+                "row_id": identity.row_id,
+                "reason": "transcript_unreadable",
+                "count": 1,
+            })
+            continue
+        for line in lines:
+            try:
+                raw = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw, dict) or raw.get("type") != "assistant":
+                continue
+            message = raw.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            observed_at = _record_epoch(raw.get("timestamp"))
+            if observed_at is None:
+                continue
+            age = now_s - observed_at
+            if age < 0 or age > evidence_freshness_s:
+                continue
+            content = _message_text(message.get("content"))
+            if not content:
+                continue
+            is_error = raw.get("isApiErrorMessage") is True
+            raw_status = raw.get("apiErrorStatus") if is_error else None
+            if is_error and not isinstance(raw_status, int):
+                continue
+            records.append(OutageEvidence(
+                source="transcript",
+                observed_at=observed_at,
+                row_id=identity.row_id,
+                harness=identity.harness,
+                provider=identity.provider,
+                account=identity.account,
+                role="assistant",
+                raw_status=raw_status,
+                raw_kind="api_error" if is_error else "content",
+                content=content,
+            ))
+    return records, refusals
 
 
 def _fresh_canary(proof: CanaryProof | None, now_s: float) -> bool:
@@ -139,6 +260,11 @@ def run_health_canary(
         provider=destination.harness,
         cwd=resolved_canary,
         account_env=destination.account_env,
+        route_env=destination.route_env,
+        route_provider_id=destination.provider,
+        model_name=destination.model,
+        account_record_id=destination.record_id,
+        model=destination.model,
     )
     proof: CanaryProof | None = None
     stopped = False

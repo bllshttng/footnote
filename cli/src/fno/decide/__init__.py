@@ -72,6 +72,7 @@ def record_decision(
     asked_by: str | None = None,
     asked_at: str | None = None,
     events_root: Any = None,
+    source: str = "target",
 ) -> dict[str, Any]:
     """Append the event, then project it onto the subject node.
 
@@ -107,6 +108,7 @@ def record_decision(
         authority_source=authority_source,
         rationale=rationale,
         supersedes=supersedes,
+        source=source,
     )
     append_event(event, events_path=events_path(events_root))
     # Order is the contract: the project journal is durability, the index is

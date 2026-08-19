@@ -8,8 +8,10 @@ import pytest
 
 from fno.agents.provider_outage import (
     CanaryProof,
+    EvidenceIdentity,
     OutageEvidence,
     RouteCandidate,
+    collect_transcript_evidence,
     fold_provider_outages,
     measure_and_persist,
     run_health_canary,
@@ -87,6 +89,64 @@ def test_ac1_det_groups_only_the_same_explicit_provider_and_account():
     ])
     assert report["breakers"] == []
     assert report["counts"]["terminal"] == 3
+
+
+def test_ac1_det_real_claude_fup_record_is_collected_from_raw_transcript(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": "2026-08-18T17:59:30Z",
+        "isApiErrorMessage": True,
+        "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": FUP}]},
+    }) + "\n", encoding="utf-8")
+    identity = EvidenceIdentity(
+        row_id="row-1", harness="claude", provider="anthropic",
+        account="acct-a", session_id="session-1", cwd=str(tmp_path),
+    )
+
+    records, refusals = collect_transcript_evidence(
+        [identity], now_s=NOW,
+        transcript_path_for=lambda _identity: transcript,
+    )
+
+    assert refusals == []
+    assert len(records) == 1
+    assert records[0].raw_status == 429
+    assert records[0].raw_kind == "api_error"
+    assert records[0].role == "assistant"
+    assert "Fair Usage Policy" in records[0].content
+
+
+def test_ac1_det_quoted_user_record_and_missing_route_identity_do_not_vote(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text("\n".join([
+        json.dumps({
+            "type": "user", "timestamp": "2026-08-18T17:59:20Z",
+            "isApiErrorMessage": True, "apiErrorStatus": 429,
+            "message": {"role": "user", "content": FUP},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": "2026-08-18T17:59:30Z",
+            "isApiErrorMessage": True, "apiErrorStatus": 429,
+            "message": {"role": "assistant", "content": FUP},
+        }),
+    ]) + "\n", encoding="utf-8")
+    identities = [
+        EvidenceIdentity("quoted", "claude", "anthropic", "acct-a", "s1", str(tmp_path)),
+        EvidenceIdentity("unknown", "claude", None, "acct-b", "s2", str(tmp_path)),
+    ]
+
+    records, refusals = collect_transcript_evidence(
+        identities, now_s=NOW,
+        transcript_path_for=lambda _identity: transcript,
+    )
+
+    assert [record.row_id for record in records] == ["quoted"]
+    assert all(record.role == "assistant" for record in records)
+    assert refusals == [{
+        "row_id": "unknown", "reason": "unknown_route_identity", "count": 1,
+    }]
 
 
 def test_ac1_det_rejects_user_quotes_and_unknown_route_identity():

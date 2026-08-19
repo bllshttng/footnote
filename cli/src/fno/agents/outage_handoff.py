@@ -37,6 +37,7 @@ class HandoffRequest:
     source_row_id: str
     destination_harness: str
     destination_provider: str
+    destination_model: str
     destination_account: str
     destination_account_env: dict[str, str] = field(default_factory=dict, repr=False)
     quorum_evidence_count: int = 0
@@ -245,8 +246,10 @@ def spawn_successor_exact(
         snapshot.owner_cwd,
         "--node",
         request.node,
-        "--provider",
+        "--recorded-provider",
         request.destination_provider,
+        "--model",
+        request.destination_model,
         "--dispatch-account",
         request.destination_account,
         f"/fno:target --no-merge {request.node}",
@@ -274,10 +277,207 @@ def spawn_successor_exact(
             break
     if receipt is None or not receipt.get("name"):
         raise RuntimeError("spawn returned no exact registry identity")
-    row_id = str(receipt.get("short_id") or receipt.get("harness_session_id") or "")
+    row_id = str(
+        receipt.get("short_id")
+        or receipt.get("harness_session_id")
+        or receipt.get("session_id")
+        or ""
+    )
     if not row_id:
         raise RuntimeError("spawn returned no successor row id")
     return SpawnReceipt(row_id=row_id, name=str(receipt["name"]))
+
+
+def production_handoff_dependencies() -> HandoffDependencies:
+    """Build the real claim, registry, manifest, stop, and spawn transaction."""
+    from fno import paths
+    from fno.agents.registry import load_registry
+    from fno.claims.core import (
+        ClaimHeldByOther,
+        acquire_claim,
+        claim_status,
+        refresh_claim,
+        release_claim,
+    )
+    from fno.claims.io import claims_root_for
+    from fno.graph.store import read_graph
+    from fno.state.outage_handoff import (
+        ManifestAuthority,
+        archive_target_manifest,
+        inspect_target_manifest,
+    )
+
+    def acquire(key: str, holder: str) -> bool:
+        try:
+            acquire_claim(
+                key, holder=holder, ttl_ms=60_000,
+                root=claims_root_for(key), reason="provider outage handoff",
+            )
+            return True
+        except ClaimHeldByOther:
+            return False
+
+    def refresh(key: str, holder: str) -> bool:
+        try:
+            refresh_claim(key, holder=holder, root=claims_root_for(key))
+            return True
+        except Exception:
+            return False
+
+    def release(key: str, holder: str) -> None:
+        release_claim(key, holder=holder, root=claims_root_for(key), strict=True)
+
+    def read_snapshot(request: HandoffRequest) -> HandoffSnapshot:
+        matches = [
+            entry for entry in load_registry()
+            if str(entry.harness_session_id or entry.short_id) == request.source_row_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"source registry identity resolved {len(matches)} rows"
+            )
+        entry = matches[0]
+        inspection = inspect_target_manifest(Path(entry.cwd))
+        authority = inspection.authority
+        claim = claim_status(
+            f"node:{request.node}", root=claims_root_for(f"node:{request.node}")
+        )
+        if claim.get("state") not in {"live", "suspect"}:
+            raise ValueError("source node claim is not live")
+        if claim.get("holder") != authority.claim_holder:
+            raise ValueError("source node claim holder differs from manifest")
+        graph = read_graph(paths.graph_json())
+        node = next((item for item in graph if item.get("id") == request.node), None)
+        if node is None:
+            raise ValueError("source node is absent from the graph")
+        return HandoffSnapshot(
+            node=authority.node,
+            outage_epoch=request.outage_epoch,
+            source=SourceRow(
+                row_id=request.source_row_id,
+                name=entry.name,
+                harness=entry.harness,
+                cwd=entry.cwd,
+                harness_session_id=entry.harness_session_id,
+                pid=entry.pid,
+                pid_start_time=entry.pid_start_time,
+                mux=entry.mux,
+            ),
+            claim_holder=authority.claim_holder,
+            node_status=str(node.get("status") or ""),
+            plan_path=authority.plan_path,
+            owner_cwd=authority.owner_cwd,
+            branch=authority.branch,
+            head=authority.head,
+            worktree_id=authority.worktree_id,
+            manifest_hash=inspection.content_hash,
+        )
+
+    def archive(snapshot: HandoffSnapshot, attempt: str) -> ArchiveReceipt:
+        authority = ManifestAuthority(
+            node=snapshot.node,
+            claim_holder=snapshot.claim_holder,
+            owner_cwd=snapshot.owner_cwd,
+            plan_path=snapshot.plan_path,
+            branch=snapshot.branch,
+            head=snapshot.head,
+            worktree_id=snapshot.worktree_id,
+            harness_session_id=snapshot.source.harness_session_id or "",
+        )
+        receipt = archive_target_manifest(Path(snapshot.owner_cwd), attempt, authority)
+        return ArchiveReceipt(receipt.path, receipt.content_hash)
+
+    def release_node(key: str, holder: str) -> bool:
+        try:
+            release_claim(key, holder=holder, root=claims_root_for(key), strict=True)
+            return True
+        except Exception:
+            return False
+
+    def verify(snapshot: HandoffSnapshot, spawned: SpawnReceipt) -> SuccessorProof:
+        from fno.agents.mux_spawn import _mux_pane_alive
+        from fno.agents.spawn_gate import _pid_alive
+
+        def executable(entry) -> bool:
+            if entry.mux is not None:
+                return _mux_pane_alive(entry.mux) is True
+            if entry.pid and entry.pid_start_time is not None:
+                return _pid_alive(entry.pid, entry.pid_start_time) is True
+            return False
+
+        entries = load_registry()
+        successors = [
+            entry for entry in entries
+            if str(entry.harness_session_id or entry.short_id) == spawned.row_id
+        ]
+        successor_executable = len(successors) == 1 and executable(successors[0])
+        same_cwd = successor_executable and Path(successors[0].cwd).resolve() == Path(snapshot.owner_cwd)
+        try:
+            inspection = inspect_target_manifest(Path(snapshot.owner_cwd))
+            exact_claim = claim_status(
+                f"node:{snapshot.node}", root=claims_root_for(f"node:{snapshot.node}")
+            ).get("holder") == inspection.authority.claim_holder
+            fresh_manifest = (
+                inspection.authority.node == snapshot.node
+                and inspection.authority.plan_path == snapshot.plan_path
+                and inspection.content_hash != snapshot.manifest_hash
+            )
+            same_branch = inspection.authority.branch == snapshot.branch
+        except Exception:
+            exact_claim = fresh_manifest = same_branch = False
+        executable_same_worktree = [
+            entry for entry in entries
+            if Path(entry.cwd).resolve() == Path(snapshot.owner_cwd)
+            and executable(entry)
+        ]
+        unique = (
+            len(successors) == 1
+            and len(executable_same_worktree) == 1
+            and successors[0] in executable_same_worktree
+        )
+        facts = [successor_executable, same_cwd, same_branch, exact_claim, fresh_manifest, unique]
+        return SuccessorProof(
+            executable=successor_executable,
+            same_cwd=bool(same_cwd),
+            same_branch=bool(same_branch),
+            exact_claim=bool(exact_claim),
+            fresh_manifest=bool(fresh_manifest),
+            unique=unique,
+            evidence_count=sum(bool(value) for value in facts),
+        )
+
+    def stop_partial(spawned: SpawnReceipt) -> bool:
+        entries = [
+            entry for entry in load_registry()
+            if str(entry.harness_session_id or entry.short_id) == spawned.row_id
+        ]
+        if len(entries) != 1:
+            return False
+        entry = entries[0]
+        proof = stop_source_exact(SourceRow(
+            row_id=spawned.row_id,
+            name=entry.name,
+            harness=entry.harness,
+            cwd=entry.cwd,
+            harness_session_id=entry.harness_session_id,
+            pid=entry.pid,
+            pid_start_time=entry.pid_start_time,
+            mux=entry.mux,
+        ))
+        return proof.confirmed_dead
+
+    return HandoffDependencies(
+        acquire_dispatch=acquire,
+        refresh_dispatch=refresh,
+        release_dispatch=release,
+        read_snapshot=read_snapshot,
+        stop_source=stop_source_exact,
+        archive_manifest=archive,
+        release_node_claim=release_node,
+        spawn_successor=spawn_successor_exact,
+        verify_successor=verify,
+        stop_partial_successor=stop_partial,
+    )
 
 
 _PHASES = (
@@ -327,6 +527,7 @@ def _journal(path: Path, *, phase: str, request: HandoffRequest, attempt: str,
         "destination": {
             "harness": request.destination_harness,
             "provider": request.destination_provider,
+            "model": request.destination_model,
             "account": request.destination_account,
         },
         **details,

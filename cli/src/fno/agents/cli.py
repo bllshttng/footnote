@@ -460,6 +460,15 @@ def cmd_spawn(
             "the CLI binary -- that is --harness/-H. Capital -P: -p is headless."
         ),
     ),
+    recorded_provider: str | None = typer.Option(
+        None,
+        "--recorded-provider",
+        hidden=True,
+        help=(
+            "Machine-recorded model-vendor identity for a recovery spawn. "
+            "Unlike --provider, this does not configure a Claude route."
+        ),
+    ),
     once: bool = typer.Option(
         False,
         "--once",
@@ -861,6 +870,20 @@ def cmd_spawn(
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
+    if recorded_provider is not None:
+        recorded_provider = recorded_provider.strip()
+        if not recorded_provider or model is None:
+            print(
+                "--recorded-provider requires a non-empty --model",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if vendor is not None and recorded_provider != vendor:
+            print(
+                "--recorded-provider must match --provider when both are supplied",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     # Provenance rides the pane receipt's harness_source field below (the
     # default substrate) - it is the HARNESS axis's provenance, so it must not
     # be named provider_*, which now holds the vendor. The bg/once stdout
@@ -1468,6 +1491,9 @@ def cmd_spawn(
                     monitor=monitor,
                     route_provider=route_provider,
                     provider_gate=gate,
+                    route_provider_id=route_provider or recorded_provider,
+                    model_name=model or route_model,
+                    account_record_id=dispatch_account or account,
                     passthrough=passthrough,
                 )
             except DispatchAskError as exc:
@@ -1517,8 +1543,8 @@ def cmd_spawn(
             # Reporting only route_model here would re-introduce the
             # receipt-can-lie defect: a `--route zai,glm-5.3 --model opus` spawn
             # would name glm-5.3 in the receipt while the worker runs opus.
-            if route_provider is not None:
-                receipt_obj["provider"] = route_provider
+            if route_provider is not None or recorded_provider is not None:
+                receipt_obj["provider"] = route_provider or recorded_provider
             receipt_model = model or route_model
             if receipt_model is not None:
                 receipt_obj["model"] = receipt_model
@@ -1611,6 +1637,9 @@ def cmd_spawn(
                 output_format=output_format,
                 resume_session_id=resume,
                 account_env=account_env,
+                route_provider_id=route_provider or recorded_provider,
+                model_name=model or route_model,
+                account_record_id=dispatch_account or account,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
                 route_provider=route_provider,
@@ -1686,8 +1715,9 @@ def cmd_spawn(
         # `model` is the EFFECTIVE model: an explicit --model reaches claude as
         # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
         # wins the receipt too (see the pane branch above).
+        receipt_provider = route_provider or recorded_provider
         provider_field = (
-            f", \"provider\": {json.dumps(route_provider)}" if route_provider else ""
+            f", \"provider\": {json.dumps(receipt_provider)}" if receipt_provider else ""
         )
         receipt_model = model or route_model
         model_field = f", \"model\": {json.dumps(receipt_model)}" if receipt_model else ""
@@ -2963,6 +2993,9 @@ def cmd_watchdog(
         "manual", payload["counts"], now, signature,
         events_signature=signature_to_stamp,
         terminal_harness_rows=payload.get("terminal_harness_rows", 0),
+        provider_outages=payload.get("provider_outages") or wd._unknown_provider_report(
+            "provider_outage_payload_missing"
+        ),
     )
 
     # Classification events ride every mode: a verdict emitted only under a

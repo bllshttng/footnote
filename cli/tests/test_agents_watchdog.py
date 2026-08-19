@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import pytest
 import typer
 
 from fno.agents import watchdog
@@ -959,10 +961,244 @@ def test_sweep_payload_shape():
     assert payload["verdicts"][0]["verdict"] == LEAVE
     assert payload["terminal_harness_rows"] == 3
     assert payload["provider_outages"] == {
-        "instrument": "measured", "breakers": [], "counts": {}, "refusals": []
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {"provider_outage_collector_missing": 1},
+        "refusals": [{"reason": "provider_outage_collector_missing", "count": 1}],
     }
     # Rows ride along index-aligned so apply lanes can reach each cwd.
     assert out_rows == rows
+
+
+def test_ac12_obs_sweep_file_never_invents_measured_provider_evidence(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(watchdog, "sweep_path", lambda: path)
+
+    watchdog.write_sweep_file("tick", {LEAVE: 1}, NOW_1840)
+
+    stored = json.loads(path.read_text())
+    assert stored["provider_outages"] == {
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {"provider_outage_report_missing": 1},
+        "refusals": [{"reason": "provider_outage_report_missing", "count": 1}],
+    }
+
+
+@pytest.mark.parametrize("mode", ["off", "report", "wake"])
+def test_ac12_obs_only_handoff_mode_arms_provider_migration(mode):
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+    )
+    assert watchdog.handoff_armed(settings) is False
+
+
+def test_ac12_obs_handoff_mode_obeys_master_vetoes():
+    armed = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    assert watchdog.lane_armed(armed) is True
+    assert watchdog.handoff_armed(armed) is True
+    assert watchdog.handoff_armed(SimpleNamespace()) is False
+    assert watchdog.handoff_armed(SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=False),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )) is False
+
+
+def test_ac1_det_production_collector_joins_explicit_registry_route_identity(
+    monkeypatch, tmp_path
+):
+    fup = "API Error 429: Fair Usage Policy; submit a request to restore access"
+    paths = {}
+    entries = []
+    rows = []
+    for index in (1, 2):
+        sid = f"session-{index}"
+        path = tmp_path / f"{sid}.jsonl"
+        path.write_text(json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-08-16T18:39:30Z",
+            "isApiErrorMessage": True,
+            "apiErrorStatus": 429,
+            "message": {"role": "assistant", "content": fup},
+        }) + "\n", encoding="utf-8")
+        paths[sid] = path
+        entries.append(SimpleNamespace(
+            harness_session_id=sid,
+            harness="claude",
+            route_provider_id="anthropic",
+            account_record_id="acct-a",
+            cwd=str(tmp_path),
+        ))
+        rows.append(Row(sid, f"worker-{index}", "working", "x-abcd", str(tmp_path)))
+
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda identity: paths[identity.session_id],
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["breakers"][0]["provider"] == "anthropic"
+    assert report["breakers"][0]["account"] == "acct-a"
+
+
+def test_ac4_err_production_collector_missing_axes_is_count_bearing_unknown(tmp_path):
+    rows = [Row("session-1", "worker", "working", "x-abcd", str(tmp_path))]
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        entries_provider=lambda: [SimpleNamespace(
+            harness_session_id="session-1", harness="claude", cwd=str(tmp_path),
+        )],
+        journal=tmp_path / "provider-outages.json",
+    )
+    assert report["instrument"] == "unknown"
+    assert report["breakers"] == []
+    assert report["counts"] == {"unknown_route_identity": 1}
+
+
+@pytest.mark.parametrize("mode", ["report", "wake"])
+def test_ac12_obs_report_and_wake_never_call_provider_handoff(mode, tmp_path):
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog=mode),
+    )
+    called = []
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: called.append("candidate"),
+        handoff_fn=lambda *_args, **_kwargs: called.append("handoff"),
+    )
+    assert results == []
+    assert called == []
+
+
+def test_ac12_obs_handoff_mode_requires_fresh_canary_then_runs_one_transaction(
+    tmp_path
+):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 1, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    calls = []
+    decisions = []
+
+    def handoff(request, **_kwargs):
+        calls.append(request)
+        return HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase="committed", replayed=False,
+        )
+
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=handoff,
+        deps_factory=lambda: object(),
+        decision_fn=lambda **kwargs: decisions.append(kwargs),
+        journal_root=tmp_path / "transactions",
+    )
+
+    assert results[0]["phase"] == "committed"
+    assert len(calls) == 1
+    assert calls[0].destination_provider == "openai"
+    assert calls[0].destination_model == "gpt-5.6-sol"
+    assert decisions[0]["authority_source"] == "daemon-automation"
+    assert decisions[0]["source"] == "daemon"
+
+
+@pytest.mark.parametrize("phase,replayed,expected", [
+    ("committed", True, 0),
+    ("parked", False, 1),
+])
+def test_ac12_obs_terminal_decision_is_once_only(phase, replayed, expected, tmp_path):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=True, watchdog="handoff"),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 1, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    decisions = []
+    watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings, now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=lambda request, **_kwargs: HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase=phase, replayed=replayed,
+        ),
+        deps_factory=lambda: object(),
+        decision_fn=lambda **kwargs: decisions.append(kwargs),
+        journal_root=tmp_path / "transactions",
+    )
+    assert len(decisions) == expected
+
+
+def test_ac12_obs_enriched_handoff_transition_passes_event_schema():
+    from fno.events import _build, validate
+
+    event = _build("provider_handoff_transition", "daemon", {
+        "node": "x-abcd",
+        "outage_epoch": "1",
+        "provider": "openai",
+        "account": "codex-work",
+        "source_provider": "zai",
+        "source_account": "acct-a",
+        "phase": "committed",
+        "count": 8,
+        "attempt": "attempt-1",
+    })
+    assert validate(event) is None
+    assert watchdog.handoff_armed(SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(enabled=False, watchdog="handoff"),
+    )) is False
 
 
 def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):

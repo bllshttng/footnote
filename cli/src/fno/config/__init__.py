@@ -2355,9 +2355,18 @@ class RecoveryBlock(BaseModel):
     enabled: bool = True
     idle_threshold_seconds: int = Field(default=900, gt=0)
     max_nudges: int = Field(default=3, ge=1)
-    watchdog: Literal["off", "report", "wake"] = "off"
+    watchdog: Literal["off", "report", "wake", "handoff"] = "off"
     watchdog_mail_to: str = ""
     watchdog_reap: bool = False
+    provider_outage_quorum: int = Field(default=2, ge=2)
+    provider_outage_fup_window_seconds: int = Field(default=300, ge=300)
+    provider_outage_529_count: int = Field(default=3, ge=3)
+    provider_outage_529_span_seconds: int = Field(default=120, ge=120)
+    provider_outage_529_cross_session_window_seconds: int = Field(default=600, ge=600)
+    provider_outage_pane_freshness_seconds: int = Field(default=120, ge=120)
+    provider_outage_evidence_freshness_seconds: int = Field(default=600, ge=600)
+    provider_outage_reset_grace_seconds: int = Field(default=120, ge=120)
+    provider_health_marker_ttl_seconds: int = Field(default=120, ge=120)
 
 
 class HealthThresholdsBlock(BaseModel):

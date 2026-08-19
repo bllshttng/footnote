@@ -387,12 +387,30 @@ enabled = true
 idle_threshold_seconds = 900
 # Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately).
 max_nudges = 3
-# External fleet watchdog lane on the same tick: off (default) | report (classify + emit one event per non-leave verdict) | wake (also apply the wake lane: resume plus a content-verified message). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply-all`.
+# External fleet watchdog lane on the same tick: off (default) | report (classify and emit) | wake (also resume stalled sessions) | handoff (also permit a proved cross-provider outage transaction). Reap and reroute never fire from a tick; they need a manual `fno agents watchdog --apply-all`.
 watchdog = "off"
 # Mail handle the watchdog digest is pushed to when the non-leave verdict set changes (agent name, short id, or project:<slug>). Empty (default) mails nobody.
 watchdog_mail_to = ""
 # Whether `fno agents watchdog --apply-all` may EXECUTE the reap lane (default false). Reap runs stop then rm, which deletes the session's worktree; work that exists only there is gone with it. Wake and reroute are recoverable, so they ship on. Reap verdicts are still computed, reported and mailed when this is off - only the destructive action is withheld.
 watchdog_reap = false
+# Minimum distinct-session votes required to open a provider/account breaker; minimum and default 2.
+provider_outage_quorum = 2
+# Fair Usage Policy cross-session quorum window in seconds; minimum and default 300.
+provider_outage_fup_window_seconds = 300
+# Consecutive assistant 529 records required per session; minimum and default 3.
+provider_outage_529_count = 3
+# Minimum span in seconds for one persistent 529 session; minimum and default 120.
+provider_outage_529_span_seconds = 120
+# Cross-session window in seconds for persistent 529 quorum; minimum and default 600.
+provider_outage_529_cross_session_window_seconds = 600
+# Maximum age in seconds for a persisted pane snapshot to vote; minimum and default 120.
+provider_outage_pane_freshness_seconds = 120
+# Maximum age in seconds for durable transcript outage evidence; minimum and default 600 so the full cross-session overload window remains observable.
+provider_outage_evidence_freshness_seconds = 600
+# Grace after a reset-bearing limit before the breaker may close; minimum and default 120.
+provider_outage_reset_grace_seconds = 120
+# Maximum age in seconds for a persisted destination canary marker; minimum and default 120.
+provider_health_marker_ttl_seconds = 120
 
 [health_monitor]
 # Enable backlog health monitoring.

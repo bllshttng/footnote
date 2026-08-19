@@ -185,6 +185,9 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # harness="claude" and provider="zai", while "opencode" is valid on either
 # axis. Rows from v1..v14 retain the legacy meaning where `provider` was a
 # harness alias and are migrated only while reading those schema versions.
+# v15 adds explicit model-provider, model-name, and account-record identity.
+# They contain stable identifiers only and let a collector join raw provider
+# responses without inferring one axis from another.
 SCHEMA_VERSION = 15
 
 
@@ -253,6 +256,11 @@ class AgentEntry:
     # per-provider session-id fields (x-880e). load_registry back-fills it from a
     # legacy row's per-provider key on read; the Rust RegistryEntry mirrors it.
     harness_session_id: Optional[str] = None
+    # Explicit route axes captured at spawn. These are identifiers only: no
+    # endpoint, token, environment overlay, or settings contents belong here.
+    route_provider_id: Optional[str] = None
+    model_name: Optional[str] = None
+    account_record_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them

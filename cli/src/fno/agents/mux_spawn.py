@@ -2295,6 +2295,9 @@ def dispatch_spawn_pane(
     monitor: Optional[str] = None,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
@@ -3121,6 +3124,9 @@ def dispatch_spawn_pane(
                     crown_grantor=crown_grantor_val,
                     route_settings_path=route_settings_path,
                     fno_id=stored_session_uuid or name,
+                    route_provider_id=route_provider_id,
+                    model_name=model_name,
+                    account_record_id=account_record_id,
                 )
             )
             return rows

@@ -455,6 +455,62 @@ def test_failed_tick_exits_nonzero_without_killing_composed_legs(monkeypatch) ->
     assert isinstance(res.exception, SystemExit), repr(res.exception)
 
 
+def test_provider_supervisor_runs_before_github_leg_and_exception_is_nonfatal(
+    monkeypatch
+) -> None:
+    import typer
+    from types import SimpleNamespace
+    from typer.testing import CliRunner
+
+    from fno.agents import watchdog
+    from fno.agents.watchdog import LEAVE, Row, Verdict
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    order = []
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(
+            enabled=True, watchdog="handoff", watchdog_mail_to="",
+        ),
+        pr_watch=SimpleNamespace(
+            enabled=True, interval_seconds=600, tick_timeout_seconds=500,
+            max_age_days=30, retries=3, graphql_min_remaining=0,
+        ),
+    )
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *_a, **_k: 0)
+    monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_k: ([], 0))
+    verdict = Verdict("row-1", "worker", "working", LEAVE, "ok", "none")
+    payload = {
+        "generated_at": "x", "verdicts": [verdict._asdict()],
+        "counts": {LEAVE: 1}, "warnings": [],
+        "provider_outages": {
+            "instrument": "measured", "breakers": [], "counts": {}, "refusals": [],
+        },
+    }
+    monkeypatch.setattr(watchdog, "run_sweep", lambda **_k: (payload, [
+        Row("row-1", "worker", "working", None, "/tmp")
+    ]))
+    monkeypatch.setattr(watchdog, "mail_gate", lambda *_a, **_k: (True, "", ""))
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *_a, **_k: None)
+    monkeypatch.setattr(watchdog, "supervise_provider_handoffs", lambda *_a, **_k: (
+        order.append("supervisor") or (_ for _ in ()).throw(RuntimeError("boom"))
+    ))
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_k: order.append("github") or TickResult(open_prs=0, acted=0),
+    )
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [])
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    assert order == ["supervisor", "github"]
+
+
 def test_derived_deadline_stays_below_the_interval(monkeypatch):
     """The 60s floor must not push the derived deadline to or above
     StartInterval on small intervals: launchd does not run a StartInterval

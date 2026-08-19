@@ -417,6 +417,15 @@ pub struct RegistryEntry {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+    /// Explicit model-route identity captured by the spawn path. These fields
+    /// contain stable identifiers only; credentials and route settings remain
+    /// in their protected stores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_record_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1534,6 +1543,9 @@ mod tests {
             provider: None,
             harness: Some("codex".into()),
             harness_session_id: None,
+            route_provider_id: None,
+            model_name: None,
+            account_record_id: None,
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
             session_id: Some("uuid-1".into()),

@@ -28,6 +28,7 @@ Two traps a stranger inherits (both measured by hand on 2026-08-15):
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import subprocess
@@ -320,12 +321,33 @@ def lane_armed(settings: Any) -> bool:
     """
     try:
         return bool(
-            getattr(settings.recovery, "watchdog", "off") in ("report", "wake")
+            getattr(settings.recovery, "watchdog", "off") in ("report", "wake", "handoff")
             and settings.recovery.enabled
             and settings.autonomy.enabled
         )
     except Exception:  # noqa: BLE001 - a partial settings stub is not armed
         return False
+
+
+def handoff_armed(settings: Any) -> bool:
+    """Return true only for the explicit cross-provider action level."""
+    try:
+        return bool(
+            getattr(settings.recovery, "watchdog", "off") == "handoff"
+            and settings.recovery.enabled
+            and settings.autonomy.enabled
+        )
+    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
+        return False
+
+
+def _unknown_provider_report(reason: str) -> dict[str, Any]:
+    return {
+        "instrument": "unknown",
+        "breakers": [],
+        "counts": {reason: 1},
+        "refusals": [{"reason": reason, "count": 1}],
+    }
 
 
 def finished_with_the_tree(
@@ -981,6 +1003,307 @@ ROSTER_REFUSAL = (
 )
 
 
+def measure_provider_outages(
+    rows: list[Row], *, now_s: float,
+    entries_provider: Optional[Callable[[], list[Any]]] = None,
+    transcript_path_for: Optional[Callable[[Any], Path | None]] = None,
+    journal: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Collect raw transcript records joined to explicit registry route axes."""
+    from fno.agents.provider_outage import (
+        EvidenceIdentity,
+        collect_transcript_evidence,
+        measure_and_persist,
+    )
+
+    if entries_provider is None:
+        from fno.agents.registry import load_registry
+
+        entries_provider = load_registry
+    try:
+        entries = entries_provider()
+    except Exception as exc:  # noqa: BLE001 - an unreadable join refuses action
+        report = _unknown_provider_report("provider_identity_registry_unreadable")
+        report["refusals"][0]["detail"] = repr(exc)
+        return report
+    by_session = {
+        str(getattr(entry, "harness_session_id", "") or ""): entry
+        for entry in entries
+        if getattr(entry, "harness_session_id", None)
+    }
+    identities = []
+    for row in rows:
+        entry = by_session.get(row.row_id)
+        identities.append(EvidenceIdentity(
+            row_id=row.row_id,
+            harness=str(getattr(entry, "harness", "") or ""),
+            provider=getattr(entry, "route_provider_id", None),
+            account=getattr(entry, "account_record_id", None),
+            session_id=str(getattr(entry, "harness_session_id", "") or row.row_id),
+            cwd=str(getattr(entry, "cwd", "") or row.cwd),
+        ))
+    try:
+        from fno.config import load_settings
+
+        freshness = float(
+            load_settings().recovery.provider_outage_evidence_freshness_seconds
+        )
+    except Exception:  # noqa: BLE001 - use the schema floor on a config miss
+        freshness = 600
+    records, refusals = collect_transcript_evidence(
+        identities,
+        now_s=now_s,
+        transcript_path_for=transcript_path_for,
+        evidence_freshness_s=freshness,
+    )
+    if not records and refusals:
+        counts = Counter(str(item["reason"]) for item in refusals)
+        return {
+            "instrument": "unknown",
+            "breakers": [],
+            "counts": dict(counts),
+            "refusals": refusals,
+        }
+    report = measure_and_persist(records, now_s=now_s, path=journal)
+    if refusals:
+        report["refusals"] = [*report.get("refusals", []), *refusals]
+        counts = Counter(str(item["reason"]) for item in refusals)
+        for reason, count in counts.items():
+            report.setdefault("counts", {})[reason] = count
+    return report
+
+
+def supervise_provider_handoffs(
+    provider_outages: dict[str, Any], rows: list[Row], *, settings: Any,
+    now_s: float,
+    candidate_for: Optional[Callable[[dict[str, Any], Row, float], Any]] = None,
+    handoff_fn: Optional[Callable[..., Any]] = None,
+    deps_factory: Optional[Callable[[], Any]] = None,
+    decision_fn: Optional[Callable[..., Any]] = None,
+    journal_root: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    """Run at most one proved cross-provider transaction per source row."""
+    if not handoff_armed(settings) or provider_outages.get("instrument") != "measured":
+        return []
+    from fno.agents.outage_handoff import (
+        HandoffRequest,
+        production_handoff_dependencies,
+    )
+    from fno.agents.provider_outage import select_healthy_destination
+    from fno.recovery import recover_provider_outage
+
+    if candidate_for is None:
+        candidate_for = production_handoff_candidate
+    handoff_fn = handoff_fn or recover_provider_outage
+    deps_factory = deps_factory or production_handoff_dependencies
+    if decision_fn is None:
+        from fno.decide import record_decision
+
+        decision_fn = record_decision
+    root = journal_root or (sweep_path().parent / "recovery" / "transactions")
+    by_id = {row.row_id: row for row in rows}
+    outcomes: list[dict[str, Any]] = []
+    for breaker in provider_outages.get("breakers") or []:
+        if not isinstance(breaker, dict):
+            continue
+        broken_provider = str(breaker.get("provider") or "")
+        for row_id in breaker.get("row_ids") or []:
+            row = by_id.get(str(row_id))
+            if row is None or not row.node:
+                outcomes.append({
+                    "phase": "refused", "reason": "unknown_source_node",
+                    "source_row_id": str(row_id), "count": 1,
+                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                    "provider": broken_provider,
+                    "account": str(breaker.get("account") or ""),
+                })
+                continue
+            candidate = candidate_for(breaker, row, now_s)
+            selected = select_healthy_destination(
+                [candidate] if candidate is not None else [],
+                broken_provider=broken_provider,
+                now_s=now_s,
+            )
+            if selected is None or not selected.model:
+                outcomes.append({
+                    "phase": "refused", "reason": "no_fresh_destination_canary",
+                    "source_row_id": row.row_id, "node": row.node, "count": 1,
+                    "outage_epoch": str(breaker.get("outage_epoch") or ""),
+                    "provider": broken_provider,
+                    "account": str(breaker.get("account") or ""),
+                })
+                continue
+            request = HandoffRequest(
+                node=row.node,
+                outage_epoch=str(breaker.get("outage_epoch") or ""),
+                source_row_id=row.row_id,
+                destination_harness=str(selected.harness),
+                destination_provider=str(selected.provider),
+                destination_model=selected.model,
+                destination_account=str(selected.record_id),
+                destination_account_env=selected.account_env or {},
+                quorum_evidence_count=len(breaker.get("fingerprints") or []),
+            )
+            result = handoff_fn(
+                request, deps=deps_factory(), journal_root=Path(root)
+            )
+            outcome = result.to_dict()
+            outcome.update({
+                "provider": selected.provider,
+                "account": selected.record_id,
+                "source_provider": broken_provider,
+                "source_account": str(breaker.get("account") or ""),
+                "count": max(1, sum(result.counts.values())),
+            })
+            outcomes.append(outcome)
+            contended = (
+                result.failed_phase == "observed"
+                and result.counts.get("lease_contention", 0) > 0
+            )
+            if (
+                result.phase in {"committed", "parked"}
+                and not result.replayed
+                and not contended
+            ):
+                decision_fn(
+                    subject=row.node,
+                    decision=(
+                        f"provider outage handoff {result.phase} for "
+                        f"{broken_provider} to {selected.provider}"
+                    ),
+                    decided_by="provider-outage-supervisor",
+                    authority_source="daemon-automation",
+                    rationale=result.reason or "terminal provider-outage transaction",
+                    source="daemon",
+                )
+    return outcomes
+
+
+def production_handoff_candidate(
+    breaker: dict[str, Any], row: Row, now_s: float
+):
+    """Prove one configured, explicitly stamped route outside the node tree."""
+    from fno.agents.provider_outage import (
+        CanaryProof,
+        HEALTH_MARKER,
+        RouteCandidate,
+        run_health_canary,
+    )
+
+    # Candidate route discovery is intentionally conservative: only a route
+    # already stamped on a registry row is eligible. Missing explicit model,
+    # provider, or account identity refuses instead of deriving one axis from
+    # the harness or model label.
+    try:
+        from fno.agents.registry import load_registry
+        from fno.adapters.providers.dispatch import dispatch_env
+        from fno.agents.model_routing import read_route_settings
+
+        for entry in load_registry():
+            if not all((
+                entry.harness,
+                entry.route_provider_id,
+                entry.model_name,
+                entry.account_record_id,
+            )):
+                continue
+            if entry.route_provider_id == breaker.get("provider"):
+                continue
+            route_env = (
+                read_route_settings(Path(entry.route_settings_path))
+                if entry.route_settings_path else None
+            )
+            account_env = dispatch_env(entry.account_record_id, repo_root=Path(row.cwd))
+            candidate = RouteCandidate(
+                record_id=entry.account_record_id,
+                harness=entry.harness,
+                provider=entry.route_provider_id,
+                model=entry.model_name,
+                account=entry.account_record_id,
+                account_env=account_env,
+                route_env=route_env,
+                canary=None,
+            )
+
+            from fno import _subprocess_util, paths
+            from fno.agents.mux_spawn import _mux_pane_alive
+
+            canary_cwd = paths.state_dir() / "recovery" / "canary-work"
+            canary_cwd.mkdir(parents=True, exist_ok=True)
+
+            def collect(spawned: Any) -> CanaryProof | None:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    proc = subprocess.run(
+                        [*_subprocess_util.fno_py_cmd(), "mux", "pane", "read",
+                         "--session", spawned.session, str(spawned.pane_id),
+                         "--lines", "20"],
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    lines = [line.strip() for line in proc.stdout.splitlines()]
+                    if HEALTH_MARKER in lines:
+                        observed = time.time()
+                        proof_path = paths.state_dir() / "recovery" / "provider-canaries"
+                        proof_path.mkdir(parents=True, exist_ok=True)
+                        digest = hashlib.sha256(
+                            f"{entry.account_record_id}\0{spawned.pane_id}".encode()
+                        ).hexdigest()[:20]
+                        from fno.state.io import atomic_write
+
+                        atomic_write(proof_path / f"{digest}.json", json.dumps({
+                            "provider": entry.route_provider_id,
+                            "account": entry.account_record_id,
+                            "pane_id": str(spawned.pane_id),
+                            "observed_at": observed,
+                            "content": HEALTH_MARKER,
+                        }, sort_keys=True))
+                        return CanaryProof(
+                            source="pane", content=HEALTH_MARKER,
+                            observed_at=observed, persisted=True,
+                            assistant_role=False, pane_id=str(spawned.pane_id),
+                        )
+                    time.sleep(0.25)
+                return None
+
+            def stop(spawned: Any) -> bool:
+                subprocess.run(
+                    [*_subprocess_util.fno_py_cmd(), "mux", "pane", "kill",
+                     "--session", spawned.session, str(spawned.pane_id)],
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                stopped = _mux_pane_alive({
+                    "session": spawned.session, "pane_id": spawned.pane_id,
+                }) is False
+                if stopped:
+                    from fno.agents.registry import update_registry
+
+                    update_registry(lambda entries: [
+                        item for item in entries
+                        if not (
+                            item.name == spawned.name
+                            and item.mux == {
+                                "session": spawned.session,
+                                "pane_id": spawned.pane_id,
+                            }
+                        )
+                    ])
+                return stopped
+
+            proof = run_health_canary(
+                candidate,
+                canary_cwd=canary_cwd,
+                node_cwd=Path(row.cwd),
+                now_s=now_s,
+                collect_proof=collect,
+                stop=stop,
+            )
+            if proof is not None:
+                return RouteCandidate(**{**candidate.__dict__, "canary": proof})
+    except Exception:
+        return None
+    return None
+
+
 def run_sweep(
     *,
     now_s: Optional[float] = None,
@@ -1006,10 +1329,10 @@ def run_sweep(
         rows_provider() if rows_provider is not None
         else fleet_rows(timeout=roster_timeout)
     )
-    if provider_outage_fn is None:
-        from fno.agents.provider_outage import empty_report
-
-        provider_outages = empty_report()
+    if provider_outage_fn is None and rows_provider is None:
+        provider_outages = measure_provider_outages(rows, now_s=now_s)
+    elif provider_outage_fn is None:
+        provider_outages = _unknown_provider_report("provider_outage_collector_missing")
     else:
         try:
             provider_outages = provider_outage_fn()
@@ -1141,12 +1464,11 @@ def write_sweep_file(
             "terminal_harness_rows": terminal_harness_rows,
             "signature": signature,
             "events_signature": events_signature,
-            "provider_outages": provider_outages if provider_outages is not None else {
-                "instrument": "measured",
-                "breakers": [],
-                "counts": {},
-                "refusals": [],
-            },
+            "provider_outages": (
+                provider_outages
+                if provider_outages is not None
+                else _unknown_provider_report("provider_outage_report_missing")
+            ),
         }
         if last_tick is not None:
             payload["last_tick_epoch"] = last_tick
@@ -1259,6 +1581,12 @@ def verdict_signature(payload: dict) -> str:
     terminal_rows = int(payload.get("terminal_harness_rows") or 0)
     if terminal_rows:
         parts.append(f"terminal-harness-rows:{terminal_rows}")
+    for breaker in payload.get("provider_outages", {}).get("breakers", []):
+        parts.append(
+            "provider-breaker:"
+            f"{breaker.get('provider')}:{breaker.get('account')}:"
+            f"{breaker.get('outage_epoch')}"
+        )
     return ";".join(parts)
 
 

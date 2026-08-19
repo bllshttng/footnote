@@ -1310,6 +1310,9 @@ def _claude_create_path(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    route_provider_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    account_record_id: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     route_provider: Optional[str] = None,
@@ -1573,6 +1576,9 @@ def _claude_create_path(
         # leaves the account behind. Resolved before the launch (above) so its
         # I/O cannot strand a live supervisor.
         route_settings_path=route_settings_path,
+        route_provider_id=route_provider_id,
+        model_name=model_name,
+        account_record_id=account_record_id,
         crown_level=crown_level,
         crown_scope=crown_scope,
         crown_grantor=crown_grantor_val,

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.config import AutoMergeBlock
+from fno.config import AutoMergeBlock, RecoveryBlock
 from fno.config import registry as _registry
 from fno.config import schema_gen
 
@@ -42,6 +42,35 @@ def test_registry_is_complete_and_exact() -> None:
     extra = reg - leaves
     assert not missing, f"model leaves missing a registry entry: {sorted(missing)}"
     assert not extra, f"registry entries with no model leaf: {sorted(extra)}"
+
+
+def test_provider_outage_config_defaults_and_minima_are_fail_closed() -> None:
+    defaults = RecoveryBlock()
+    assert defaults.watchdog == "off"
+    assert defaults.provider_outage_quorum == 2
+    assert defaults.provider_outage_fup_window_seconds == 300
+    assert defaults.provider_outage_529_count == 3
+    assert defaults.provider_outage_529_span_seconds == 120
+    assert defaults.provider_outage_529_cross_session_window_seconds == 600
+    assert defaults.provider_outage_pane_freshness_seconds == 120
+    assert defaults.provider_outage_evidence_freshness_seconds == 600
+    assert defaults.provider_outage_reset_grace_seconds == 120
+    assert defaults.provider_health_marker_ttl_seconds == 120
+    RecoveryBlock(watchdog="handoff")
+
+    for field, value in {
+        "provider_outage_quorum": 1,
+        "provider_outage_fup_window_seconds": 299,
+        "provider_outage_529_count": 2,
+        "provider_outage_529_span_seconds": 119,
+        "provider_outage_529_cross_session_window_seconds": 599,
+        "provider_outage_pane_freshness_seconds": 119,
+        "provider_outage_evidence_freshness_seconds": 599,
+        "provider_outage_reset_grace_seconds": 119,
+        "provider_health_marker_ttl_seconds": 119,
+    }.items():
+        with pytest.raises(ValueError, match=field):
+            RecoveryBlock.model_validate({field: value})
 
 
 def test_registry_wizard_tiers_are_valid() -> None:

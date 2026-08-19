@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -805,6 +806,42 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     resolved = resolve_agent_in(rows, result.short_id)
     assert resolved.entry.name == "peer"
     assert resolved.matched_by == "canonical_handle"
+
+
+def test_provider_outage_axes_on_spawned_row_feed_raw_collector(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import watchdog
+    from fno.agents.registry import load_registry
+    from fno.agents.watchdog import Row
+
+    _spawn(
+        monkeypatch,
+        tmp_path,
+        route_provider_id="zai",
+        model_name="glm-5.3",
+        account_record_id="acct-a",
+    )
+    entry = load_registry()[0]
+    transcript = tmp_path / "raw.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": "2026-08-16T18:39:30Z",
+        "isApiErrorMessage": True,
+        "apiErrorStatus": 429,
+        "message": {"role": "assistant", "content": "Fair Usage Policy"},
+    }) + "\n", encoding="utf-8")
+
+    report = watchdog.measure_provider_outages(
+        [Row(entry.harness_session_id, entry.name, "working", None, entry.cwd)],
+        now_s=datetime(2026, 8, 16, 18, 40, tzinfo=timezone.utc).timestamp(),
+        entries_provider=lambda: [entry],
+        transcript_path_for=lambda _identity: transcript,
+        journal=tmp_path / "provider-outages.json",
+    )
+
+    assert report["instrument"] == "measured"
+    assert report["sessions"][entry.harness_session_id]["state"] == "terminal"
 
 
 def test_ac1_hp_session_resolution_env_beats_default(
