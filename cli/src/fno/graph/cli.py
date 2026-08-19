@@ -3758,7 +3758,16 @@ def _starvation_receipts(
         nid = e.get("id")
         if not nid:
             continue
-        if not e.get("plan_path"):
+        # A plan hold outranks structural exclusions: the owner may also be a
+        # container and a descendant may carry no plan of its own, but the
+        # actionable reason every dispatcher must report is the attributable
+        # hold on their shared delivery ancestry.
+        hold_guard = selection_guards(
+            e, by_id, now, staleness_days=staleness_days
+        )
+        if hold_guard and hold_guard.startswith("dispatch-hold"):
+            reason = hold_guard
+        elif not e.get("plan_path"):
             reason = "plan-less"
         elif nid in container_ids:
             reason = "container"
@@ -3781,7 +3790,7 @@ def _starvation_receipts(
         ):
             continue  # in review / batched - handled, not starved
         else:
-            g = selection_guards(e, by_id, now, staleness_days=staleness_days)
+            g = hold_guard
             if not g:
                 continue  # no known exclusion (would have been selected)
             if g.startswith("dead-ancestor"):
@@ -11192,5 +11201,4 @@ def _exec_liveness(state: str) -> str:
     """Map a claim_status state to the ExecNode liveness enum."""
     return {"live": "live", "suspect": "unknown", "stale": "unknown",
             "corrupted": "unknown", "free": ""}.get(state, "")
-
 

@@ -166,6 +166,21 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     assert "pr_closed_without_merge" in events
 
 
+def test_plan_dispatch_hold_refuses_direct_remediation_merge(
+    tmp_path, gh_on, monkeypatch
+):
+    sf = _state_file(tmp_path)
+    fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN"}])
+    monkeypatch.setattr(_verify, "run", fake)
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        "fno.pr._hold.merge_hold_reason",
+        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking finding; set_by=king",
+    )
+    assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
+    assert not any(call[:3] == ["gh", "pr", "merge"] for call in fake.calls)
+
+
 def test_audit_writer_locks_the_canonical_symlink_target(tmp_path, monkeypatch):
     canonical = tmp_path / "canonical" / "events.jsonl"
     canonical.parent.mkdir()

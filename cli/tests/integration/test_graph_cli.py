@@ -1092,6 +1092,46 @@ def test_model_pin_rides_in_ready_and_next_json(tmp_graph):
     assert nxt["model"] == "fable"
 
 
+def test_dispatch_hold_is_absent_from_ready_and_next_destinations(tmp_graph, tmp_path):
+    plan = tmp_path / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking review finding is unresolved\n"
+        "  release_when: The finding is fixed and re-reviewed\n"
+        "  review_on: 2099-08-20\n"
+        "  set_by: king:119e3c52\n---\n",
+        encoding="utf-8",
+    )
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "ab-5a5c", "title": "Held", "status": "ready", "priority": "p0", "plan_path": str(plan), "created_at": _recent_iso(1)},
+        {"id": "ab-1a2b", "title": "Unheld", "status": "ready", "priority": "p1", "created_at": _recent_iso(1)},
+    ]}))
+    ready_ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--all").stdout)]
+    assert ready_ids == ["ab-1a2b"]
+    assert json.loads(_invoke("backlog", "next", "--all").stdout)["id"] == "ab-1a2b"
+
+
+def test_dispatch_hold_on_owner_hides_parent_and_contained_descendants(tmp_graph, tmp_path):
+    plan = tmp_path / "owner-held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Owner is held\n  release_when: Review passes\n"
+        "  review_on: 2099-08-20\n  set_by: king\n---\n",
+        encoding="utf-8",
+    )
+    entries = [
+        {"id": "ab-5a5c", "title": "Owner", "status": "ready", "plan_path": str(plan), "created_at": _recent_iso(1)},
+        {"id": "ab-1a2b", "title": "Parent child", "status": "ready", "parent": "ab-5a5c", "created_at": _recent_iso(1)},
+        {"id": "ab-3c4d", "title": "Contained", "status": "ready", "contained_in": "ab-5a5c", "created_at": _recent_iso(1)},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}))
+    ready_ids = [e["id"] for e in json.loads(_invoke("backlog", "ready", "--all").stdout)]
+    assert ready_ids == []
+    next_result = _invoke("backlog", "next", "--all")
+    assert json.loads(next_result.stdout) is None
+    assert "dispatch-hold:ab-5a5c" in next_result.output
+
+
 def test_priority_read_path_backfill(tmp_graph):
     """Read-only commands (`backlog ready`/`next`) sort correctly even before
     the first mutation triggers the on-disk backfill - `_apply_graph_defaults`

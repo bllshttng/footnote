@@ -60,6 +60,17 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     elif [[ "$_RG_RC" -ne 0 ]]; then
       echo "[init-target-state] note: review capability gate unavailable (rc=$_RG_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-review-gate\`." >&2
     fi
+    # Plan-level hold gate. Unlike compatibility guards, an unreadable hold
+    # state refuses: dispatch cannot prove the plan is unheld. The wrapper runs
+    # this in-process; this call covers the documented direct script path.
+    fno target check-dispatch-hold && _DH_RC=0 || _DH_RC=$?
+    if [[ "$_DH_RC" -eq 9 ]]; then
+      echo "[init-target-state] REFUSED: dispatch hold (see above). Refusing to write state file or claim." >&2
+      exit 2
+    elif [[ "$_DH_RC" -ne 0 ]]; then
+      echo "[init-target-state] REFUSED: dispatch hold gate unavailable (rc=$_DH_RC); refusing to assume unheld. Run \`fno doctor --fix\` and retry." >&2
+      exit 2
+    fi
     # Containment gate (x-e957), same seam and same rc idiom. A node carrying
     # `contained_in` ships inside another node's PR, and this script acquires
     # the claim and writes the manifest - so bootstrapping one here opens the
@@ -75,7 +86,8 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
       echo "[init-target-state] note: containment gate unavailable (rc=$_CT_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
     fi
   else
-    echo "[init-target-state] note: fno absent - config.review capability + containment gates not checked" >&2
+    echo "[init-target-state] REFUSED: fno absent - dispatch hold state cannot be checked" >&2
+    exit 2
   fi
 fi
 # Consume the marker like TARGET_START above: it means "the gate already ran for

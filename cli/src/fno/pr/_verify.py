@@ -331,6 +331,16 @@ def run_verify_merged(
         sys.stderr.write(f"verify-pr-merged: unknown PR state: {state}; degrading open\n")
         return 0
 
+    # This remediation path calls ``gh pr merge`` directly, so the sanctioned
+    # merge verb cannot protect it. Read the same plan hold before any merge
+    # precondition can flow into remediation.
+    from fno.pr._hold import merge_hold_reason
+
+    hold_reason = merge_hold_reason(int(pr_number), repo)
+    if hold_reason:
+        sys.stdout.write(f"merge_held: PR #{pr_number}: {hold_reason}\n")
+        return 1
+
     # OPEN: check merge preconditions before remediation.
     if is_draft is True:
         _emit_audit(repo_root, state_file, pr_number, "pr_is_draft", {"pr_state": "OPEN"})

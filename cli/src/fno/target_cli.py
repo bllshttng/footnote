@@ -502,6 +502,53 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     raise typer.Exit(code=2)
 
 
+def _refuse_dispatch_hold(node: Optional[dict]) -> None:
+    """Refuse a named dispatch when its plan ancestry carries a hold."""
+    if not isinstance(node, dict):
+        return
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold_verdict
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    try:
+        entries = read_graph(graph_json())
+    except Exception as exc:  # noqa: BLE001 - an unreadable hold world refuses
+        typer.echo(
+            f"fno target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
+            f"backlog graph is unreadable ({exc}); refusing to assume unheld.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    by_id = {
+        entry.get("id"): entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("id")
+    }
+    verdict = dispatch_hold_verdict(node, by_id)
+    if verdict is None:
+        return
+    hold = verdict.hold
+    if hold.state is DispatchHoldState.INVALID:
+        typer.echo(
+            f"fno target: {verdict.guard_reason}: {hold.detail}. "
+            "The plan cannot prove that dispatch is unheld; fix or remove the "
+            "declaration, then retry. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"fno target: dispatch held by plan {verdict.owner_id}\n"
+        f"  reason: {hold.reason}\n"
+        f"  set_by: {hold.set_by}\n"
+        f"  release_when: {hold.release_when}\n"
+        f"  review_on: {hold.review_on}\n"
+        "Remove dispatch_hold only after the release condition is confirmed. "
+        "Nothing was claimed.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
 def _source_pr_repo(node: dict, source_pr: int) -> Optional[str]:
     """Extract the source PR repo from the retro node's canonical permalink."""
     from fno.graph._reconcile import repo_slug_from_url
@@ -996,6 +1043,20 @@ def check_contained() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("check-dispatch-hold", hidden=True)
+def check_dispatch_hold() -> None:
+    """Fail-closed hold check for the direct shell bootstrap path."""
+    node = _resolve_dispatch_node(
+        os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
+    )
+    try:
+        _refuse_dispatch_hold(node)
+    except typer.Exit as exc:
+        if exc.exit_code != 2:
+            raise
+        raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
+
+
 @target_app.command("denominator-ratio", hidden=True)
 def denominator_ratio(
     since_days: int = typer.Option(
@@ -1259,6 +1320,8 @@ def init(
     # Resolved once and shared: both gates below want the same exact-match node,
     # and the resolver reads the whole graph.
     _dispatch_node = _resolve_dispatch_node(input_, plan_path)
+
+    _refuse_dispatch_hold(_dispatch_node)
 
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (x-e957 task 1.3b).
@@ -2689,13 +2752,15 @@ def start(
     # slug would write graph_node_id: null and skip the claim) - both the
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
+    _start_node = _find_node(node)
+    _refuse_dispatch_hold(_start_node)
     # Redirect a contained node BEFORE `worktree ensure` (sigma). `init` catches
     # it too, but by then this verb has already created the worktree and branch,
     # so the operator got a refusal saying "Nothing was claimed" next to an
     # orphan directory they have to remove by hand. Placed beside the
     # foreign-holder park above for the same reason: a cold start's refusals
     # belong before it allocates anything.
-    _redirect_if_contained(_find_node(node))
+    _redirect_if_contained(_start_node)
     name = _wt_name(node)
 
     # Codex Desktop owns the only supported native worktree transition.  Keep

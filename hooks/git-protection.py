@@ -711,6 +711,28 @@ def _coverage_refusal(command=""):
     )
 
 
+def _dispatch_hold_refusal(command=""):
+    """Fail-closed plan-hold veto for every bare ``gh pr merge`` path."""
+    pr_number = _parse_merge_pr(command)
+    if not pr_number:
+        return None
+    if _targets_other_repo(command):
+        return "cannot verify plan dispatch hold for a merge targeting another repository"
+    try:
+        proc = subprocess.run(
+            ["fno", "pr", "hold-check", pr_number],
+            capture_output=True,
+            text=True,
+            timeout=_VETO_PROBE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable means held
+        return f"dispatch hold check unavailable ({type(exc).__name__}); refusing to assume unheld"
+    if proc.returncode == 0:
+        return None
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return detail[0] if detail else f"PR {pr_number}: dispatch hold state unreadable"
+
+
 def _check_pr_merge_allowed(command=""):
     """Return a reason string if gh pr merge is authorized, else None.
 
@@ -1906,6 +1928,10 @@ def main():
             sys.exit(0)
 
     if merge_seg is not None:
+        holdref = _dispatch_hold_refusal(merge_seg)
+        if holdref:
+            _emit("deny", f"[fno dispatch-hold] {holdref}")
+            sys.exit(0)
         # Checked BEFORE the two-factor path, so it vetoes every route that
         # would otherwise allow - including the merge-gate override marker.
         # That marker buys out the review ceremony; a base that no longer leads

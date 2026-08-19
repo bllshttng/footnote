@@ -1060,6 +1060,16 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         return 1
     pr_number = int(pr_raw)
 
+    # (-2) Plan-level hold. This is before every other merge gate and shares
+    # the same plan reader autonomous and named dispatch use. Unreadable state
+    # refuses rather than defaulting to unheld.
+    from fno.pr._hold import merge_hold_reason
+
+    hold_reason = merge_hold_reason(pr_number, repo)
+    if hold_reason:
+        _emit(pr_number, "held", hold_reason, "none", err=False)
+        return 2
+
     # (-1) Incarnation fence (x-eea5 1.3): a losing incarnation - a forked or
     # supervisor-restarted session whose session:<uuid> single-writer claim
     # another incarnation now holds - must not merge by construction. Read-only,

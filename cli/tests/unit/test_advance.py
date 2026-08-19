@@ -1416,6 +1416,21 @@ def test_direct_dependents_skips_epic_dependent(monkeypatch):
     assert [d["id"] for d in deps] == ["L"]  # epic E skipped, leaf L kept
 
 
+def test_direct_dependents_skips_plan_held_successor(tmp_path, monkeypatch):
+    plan = tmp_path / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king\n---\n"
+    )
+    entries = [
+        {"id": "A", "status": "done", "project": "etl"},
+        {"id": "B", "status": "ready", "project": "etl", "blocked_by": ["A"], "plan_path": str(plan)},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
+    assert adv._direct_dependents("A", "etl") == []
+
+
 def test_dependents_honors_dependent_repo_walker(iso, monkeypatch):
     """codex P2: a live walker in the DEPENDENT's repo suppresses the spawn (the
     walker will claim the node itself; spawning would double-launch there)."""

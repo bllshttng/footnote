@@ -869,6 +869,28 @@ def test_already_isolated_is_noop(monkeypatch):
     assert spawned == []  # nothing created
 
 
+def test_start_refuses_dispatch_hold_before_worktree_ensure(monkeypatch):
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
+    monkeypatch.setattr(target_cli, "_find_node", lambda node: {"id": node})
+    seen = []
+
+    def refuse(node):
+        seen.append(node["id"])
+        raise typer.Exit(code=2)
+
+    monkeypatch.setattr(target_cli, "_refuse_dispatch_hold", refuse, raising=False)
+    spawned = []
+    monkeypatch.setattr(
+        target_cli.subprocess, "run", lambda *a, **k: spawned.append(a) or None
+    )
+    result = runner.invoke(target_app, ["start", "x-5a5c"])
+    assert result.exit_code == 2
+    assert seen == ["x-5a5c"]
+    assert spawned == []
+
+
 # --------------------------- happy path + idempotency --------------------- #
 def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
