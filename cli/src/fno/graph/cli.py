@@ -4427,6 +4427,84 @@ def cmd_lanes(
         )
 
 
+# -- board --
+
+_BOARD_SECTIONS = (
+    ("just_finished", "Just finished"),
+    ("in_progress", "In progress"),
+    ("on_deck", "On deck"),
+)
+
+
+def _board_unreadable_graph_payload(reason: str) -> dict:
+    return {key: {"rows": [], "more": 0, "note": None, "unknown": reason} for key, _ in _BOARD_SECTIONS}
+
+
+def _print_board(board: dict) -> None:
+    for key, title in _BOARD_SECTIONS:
+        section = board.get(key) or {}
+        typer.echo(title)
+        unknown = section.get("unknown")
+        if unknown:
+            typer.echo(f"  (unknown: {unknown})")
+            typer.echo("")
+            continue
+        note = section.get("note")
+        if note:
+            typer.echo(f"  ({note})")
+        rows = section.get("rows") or []
+        if not rows:
+            typer.echo("  (none)")
+        for row in rows:
+            typer.echo(f"  {row['id']}  {row['title']}   {row['fact']}")
+        more = section.get("more") or 0
+        if more:
+            typer.echo(f"  ... and {more} more")
+        typer.echo("")
+
+
+@cli.command("board", hidden=True)
+def cmd_board(
+    project: Optional[str] = typer.Option(
+        None, "--project", help="Filter to one project; default the current repo's."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Same three sections, JSON, unknown markers included."
+    ),
+) -> None:
+    """Just finished / In progress / On deck - the board in one glance.
+
+    Reads only the graph and the on-disk pr-status cache, never GitHub: a
+    verb whose job is showing the board must never be the thing that
+    exhausts the quota. An unreadable source renders as an explicit
+    unknown, never as an empty section.
+    """
+    from fno.graph.board import compute_board
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
+
+    try:
+        entries = read_graph_strict(_graph_path())
+    except GraphUnreadableError as exc:
+        payload = _board_unreadable_graph_payload(f"graph unreadable ({exc})")
+        if json_output:
+            typer.echo(json.dumps(payload))
+        else:
+            _print_board(payload)
+        raise typer.Exit(code=1)
+
+    proj = project
+    if proj is None:
+        from fno.graph._intake import detect_project
+
+        proj = detect_project(entries)
+
+    board = compute_board(entries, project=proj)
+    if json_output:
+        typer.echo(json.dumps(board))
+        return
+    _print_board(board)
+
+
 # -- get --
 
 @cli.command("get")

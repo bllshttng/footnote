@@ -215,6 +215,22 @@ fno backlog get <id|slug|hex>     # resolve and inspect one node
 fno backlog find "query"          # high-recall search over title/slug/details
 ```
 
+## Board at a glance
+
+```bash
+fno backlog board                  # three sections, one line each: just finished, in progress, on deck
+fno backlog board --project fno    # scope to one project (default: the current repo's)
+fno backlog board --json           # same three sections, machine-readable
+```
+
+Reads only the graph and the on-disk pr-status cache under the state root. It never makes a live GitHub call, so this verb can never exhaust the GraphQL quota.
+
+Each section caps at five rows and shows `... and N more` past that. Each row caps at twelve words after the node id, so the whole board fits on one screen.
+
+When a source cannot be read, the section renders an explicit `(unknown: ...)`. It never renders as an empty section: an empty "Just finished" means nothing landed, not that the read failed.
+
+The "In progress" blocking fact comes from the cache's newest row for that PR. That row can be stale by up to the cache TTL. When the PR stays quiet, the row can be older still. The line prints the age beside the verdict, so nobody reads it as the current state.
+
 ## Health and hygiene
 
 ```bash
