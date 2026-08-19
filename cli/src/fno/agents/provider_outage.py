@@ -28,6 +28,68 @@ _HEALTH_FRAGMENTS = ("FNO_", "PROVIDER_", "HEALTH_", "OK")
 
 
 @dataclass(frozen=True)
+class OutagePolicy:
+    """Validated recovery settings consumed by the pure outage fold."""
+
+    quorum: int = 2
+    fup_window_s: float = FUP_QUORUM_WINDOW_S
+    overload_count: int = 3
+    overload_span_s: float = OVERLOAD_PERSISTENCE_S
+    overload_cross_session_window_s: float = OVERLOAD_QUORUM_WINDOW_S
+    pane_freshness_s: float = PANE_FRESHNESS_S
+    evidence_freshness_s: float = 600
+    reset_grace_s: float = 120
+    health_marker_ttl_s: float = PANE_FRESHNESS_S
+
+    def __post_init__(self) -> None:
+        if self.quorum < 2:
+            raise ValueError("provider outage quorum must be at least 2")
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "OutagePolicy":
+        recovery = getattr(settings, "recovery", settings)
+        defaults = cls()
+        return cls(
+            quorum=int(getattr(recovery, "provider_outage_quorum", defaults.quorum)),
+            fup_window_s=float(getattr(
+                recovery, "provider_outage_fup_window_seconds", defaults.fup_window_s
+            )),
+            overload_count=int(getattr(
+                recovery, "provider_outage_529_count", defaults.overload_count
+            )),
+            overload_span_s=float(getattr(
+                recovery, "provider_outage_529_span_seconds", defaults.overload_span_s
+            )),
+            overload_cross_session_window_s=float(
+                getattr(
+                    recovery,
+                    "provider_outage_529_cross_session_window_seconds",
+                    defaults.overload_cross_session_window_s,
+                )
+            ),
+            pane_freshness_s=float(getattr(
+                recovery,
+                "provider_outage_pane_freshness_seconds",
+                defaults.pane_freshness_s,
+            )),
+            evidence_freshness_s=float(
+                getattr(
+                    recovery,
+                    "provider_outage_evidence_freshness_seconds",
+                    defaults.evidence_freshness_s,
+                )
+            ),
+            reset_grace_s=float(getattr(
+                recovery, "provider_outage_reset_grace_seconds", defaults.reset_grace_s
+            )),
+            health_marker_ttl_s=float(getattr(
+                recovery, "provider_health_marker_ttl_seconds",
+                defaults.health_marker_ttl_s,
+            )),
+        )
+
+
+@dataclass(frozen=True)
 class CanaryProof:
     """One persisted provider response, separate from route policy."""
 
@@ -288,13 +350,15 @@ def collect_pane_evidence(
     return records, refusals
 
 
-def _fresh_canary(proof: CanaryProof | None, now_s: float) -> bool:
+def _fresh_canary(
+    proof: CanaryProof | None, now_s: float, policy: OutagePolicy
+) -> bool:
     if proof is None or not proof.persisted or not proof.stopped:
         return False
     if proof.holds_node_claim or proof.content.strip() != HEALTH_MARKER:
         return False
     age = now_s - proof.observed_at
-    if age < 0 or age > PANE_FRESHNESS_S:
+    if age < 0 or age > policy.health_marker_ttl_s:
         return False
     if proof.source == "transcript":
         return proof.assistant_role
@@ -306,8 +370,10 @@ def _fresh_canary(proof: CanaryProof | None, now_s: float) -> bool:
 def select_healthy_destination(
     candidates: Iterable[RouteCandidate], *, broken_provider: str,
     now_s: float, pinned_record_id: str | None = None,
+    policy: OutagePolicy | None = None,
 ) -> RouteCandidate | None:
     """Return the first explicitly identified, positively proved candidate."""
+    effective_policy = policy or OutagePolicy()
     for candidate in candidates:
         if pinned_record_id is not None and candidate.record_id != pinned_record_id:
             continue
@@ -323,7 +389,7 @@ def select_healthy_destination(
             or candidate.pane_count >= 4
         ):
             continue
-        if _fresh_canary(candidate.canary, now_s):
+        if _fresh_canary(candidate.canary, now_s, effective_policy):
             return candidate
     return None
 
@@ -349,6 +415,7 @@ def run_health_canary(
     stop: Callable[[Any], bool],
     spawn: Callable[..., Any] | None = None,
     claim_snapshot: Callable[[], set[str]] = _node_claim_snapshot,
+    policy: OutagePolicy | None = None,
 ) -> CanaryProof | None:
     """Run, stop, and verify one neutral canary without entering node state."""
     if destination.harness not in {"codex", "opencode", "agy"}:
@@ -398,7 +465,7 @@ def run_health_canary(
         stopped=stopped,
         holds_node_claim=new_node_claim,
     )
-    return verified if _fresh_canary(verified, now_s) else None
+    return verified if _fresh_canary(verified, now_s, policy or OutagePolicy()) else None
 
 
 @dataclass(frozen=True)
@@ -456,7 +523,7 @@ def _refusal(record: OutageEvidence, reason: str) -> dict[str, Any]:
     }
 
 
-def _validate(record: OutageEvidence, now_s: float, pane_freshness_s: float) -> str | None:
+def _validate(record: OutageEvidence, now_s: float, policy: OutagePolicy) -> str | None:
     if record.source not in {"transcript", "pane"}:
         return "unknown_source"
     if not record.row_id or not record.harness:
@@ -470,8 +537,10 @@ def _validate(record: OutageEvidence, now_s: float, pane_freshness_s: float) -> 
             return "unknown_pane_identity"
         if not record.persisted or record.snapshot_at is None:
             return "pane_not_persisted"
-        if record.snapshot_at > now_s or now_s - record.snapshot_at > pane_freshness_s:
+        if record.snapshot_at > now_s or now_s - record.snapshot_at > policy.pane_freshness_s:
             return "pane_snapshot_stale"
+    if record.observed_at > now_s or now_s - record.observed_at > policy.evidence_freshness_s:
+        return "evidence_stale"
     if record.raw_kind == "content" and record.raw_status is None:
         return None
     if record.raw_kind != "api_error" or not isinstance(record.raw_status, int):
@@ -501,7 +570,9 @@ def _initial_state(prior_state: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _session_summaries(records: list[OutageEvidence]) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+def _session_summaries(
+    records: list[OutageEvidence], policy: OutagePolicy
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     sessions: dict[str, dict[str, Any]] = {}
     votes: list[dict[str, Any]] = []
     by_row: dict[str, list[OutageEvidence]] = defaultdict(list)
@@ -521,14 +592,22 @@ def _session_summaries(records: list[OutageEvidence]) -> tuple[dict[str, dict[st
             if record.raw_status == 429 and "fair usage policy" in record.content.lower():
                 terminal = record
         if terminal is not None:
+            from fno.adapters.providers.error_taxonomy import reset_epoch_from
+
+            reset_at = reset_epoch_from(terminal.content)
             sessions[row_id] = {
                 "state": "terminal", "kind": "fair_usage_policy", "consecutive": 1,
-                "reset_at": None, "manual_restoration": True,
+                "reset_at": reset_at, "manual_restoration": reset_at is None,
             }
-            votes.append({"record": terminal, "kind": "fair_usage_policy", "at": terminal.observed_at})
+            votes.append({
+                "record": terminal,
+                "kind": "fair_usage_policy",
+                "at": terminal.observed_at,
+                "reset_at": reset_at,
+            })
             continue
         span = consecutive[-1].observed_at - consecutive[0].observed_at if consecutive else 0
-        if len(consecutive) >= 3 and span >= OVERLOAD_PERSISTENCE_S:
+        if len(consecutive) >= policy.overload_count and span >= policy.overload_span_s:
             sessions[row_id] = {
                 "state": "session_persistent", "kind": "overloaded_529",
                 "consecutive": len(consecutive), "reset_at": None,
@@ -548,7 +627,10 @@ def _breaker_key(provider: str, account: str, kind: str) -> str:
     return json.dumps([provider, account, kind], separators=(",", ":"))
 
 
-def _breakers(votes: list[dict[str, Any]], prior: list[dict[str, Any]], now_s: float) -> list[dict[str, Any]]:
+def _breakers(
+    votes: list[dict[str, Any]], prior: list[dict[str, Any]], now_s: float,
+    policy: OutagePolicy,
+) -> list[dict[str, Any]]:
     prior_by_key = {
         _breaker_key(str(item.get("provider")), str(item.get("account")), str(item.get("kind"))): item
         for item in prior if item.get("provider") and item.get("account") and item.get("kind")
@@ -565,14 +647,25 @@ def _breakers(votes: list[dict[str, Any]], prior: list[dict[str, Any]], now_s: f
             if row_id not in newest_by_row or vote["at"] > newest_by_row[row_id]["at"]:
                 newest_by_row[row_id] = vote
         distinct = sorted(newest_by_row.values(), key=lambda item: item["at"])
-        window_s = FUP_QUORUM_WINDOW_S if kind == "fair_usage_policy" else OVERLOAD_QUORUM_WINDOW_S
-        if len(distinct) < 2 or distinct[-1]["at"] - distinct[0]["at"] > window_s:
+        window_s = (
+            policy.fup_window_s
+            if kind == "fair_usage_policy"
+            else policy.overload_cross_session_window_s
+        )
+        if (
+            len(distinct) < policy.quorum
+            or distinct[-1]["at"] - distinct[0]["at"] > window_s
+        ):
             continue
         key = _breaker_key(provider, account, kind)
         previous = prior_by_key.get(key, {})
         epoch = previous.get("outage_epoch")
         if not isinstance(epoch, (int, float)):
             epoch = distinct[0]["at"]
+        resets = [item.get("reset_at") for item in distinct]
+        reset_at = max(item for item in resets if isinstance(item, (int, float))) if any(
+            isinstance(item, (int, float)) for item in resets
+        ) else None
         out.append({
             "provider": provider,
             "account": account,
@@ -581,31 +674,46 @@ def _breakers(votes: list[dict[str, Any]], prior: list[dict[str, Any]], now_s: f
             "opened_at": previous.get("opened_at", now_s),
             "row_ids": sorted(item["record"].row_id for item in distinct),
             "fingerprints": sorted(item["record"].fingerprint for item in distinct),
-            "reset_at": None,
-            "manual_restoration": kind == "fair_usage_policy",
-            "basis": f"positive quorum=2 across {len(distinct)} distinct rows",
+            "reset_at": reset_at,
+            "manual_restoration": kind == "fair_usage_policy" and reset_at is None,
+            "basis": (
+                f"positive quorum={policy.quorum} across "
+                f"{len(distinct)} distinct rows"
+            ),
         })
     current_keys = {
         _breaker_key(item["provider"], item["account"], item["kind"]) for item in out
     }
     for item in prior:
         key = _breaker_key(str(item.get("provider")), str(item.get("account")), str(item.get("kind")))
-        if item.get("manual_restoration") is True and key not in current_keys:
+        if key in current_keys:
+            continue
+        reset_at = item.get("reset_at")
+        if item.get("manual_restoration") is True or (
+            isinstance(reset_at, (int, float))
+            and now_s <= float(reset_at) + policy.reset_grace_s
+        ):
             out.append(dict(item))
     return sorted(out, key=lambda item: (item["provider"], item["account"], item["kind"]))
 
 
 def fold_provider_outages(
     records: Iterable[OutageEvidence], *, prior_state: dict[str, Any] | None,
-    now_s: float, pane_freshness_s: float = PANE_FRESHNESS_S,
+    now_s: float, pane_freshness_s: float | None = None,
+    policy: OutagePolicy | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Pure fold over explicit records, prior durable state, and injected time."""
+    effective_policy = policy or OutagePolicy(
+        pane_freshness_s=(
+            PANE_FRESHNESS_S if pane_freshness_s is None else pane_freshness_s
+        )
+    )
     state = _initial_state(prior_state)
     known = {record.fingerprint: record for record in state["evidence"]}
     refusals: list[dict[str, Any]] = []
     pane_snapshots = {item.get("fingerprint"): item for item in state["pane_snapshots"]}
     for record in records:
-        reason = _validate(record, now_s, pane_freshness_s)
+        reason = _validate(record, now_s, effective_policy)
         if reason:
             refusals.append(_refusal(record, reason))
             continue
@@ -620,9 +728,15 @@ def fold_provider_outages(
                 "raw_kind": record.raw_kind,
                 "content": record.content,
             }
-    accepted = sorted(known.values(), key=lambda item: (item.observed_at, item.fingerprint))[-_MAX_EVIDENCE:]
-    sessions, votes = _session_summaries(accepted)
-    breakers = _breakers(votes, state["breakers"], now_s)
+    accepted = sorted(
+        (
+            record for record in known.values()
+            if _validate(record, now_s, effective_policy) is None
+        ),
+        key=lambda item: (item.observed_at, item.fingerprint),
+    )[-_MAX_EVIDENCE:]
+    sessions, votes = _session_summaries(accepted, effective_policy)
+    breakers = _breakers(votes, state["breakers"], now_s, effective_policy)
     counter = Counter(item["state"] for item in sessions.values())
     counts: dict[str, int] = {}
     if accepted:
@@ -686,7 +800,8 @@ def _write_journal(path: Path, state: dict[str, Any]) -> None:
 
 def measure_and_persist(
     records: Iterable[OutageEvidence], *, now_s: float, path: Path | None = None,
-    pane_freshness_s: float = PANE_FRESHNESS_S,
+    pane_freshness_s: float | None = None,
+    policy: OutagePolicy | None = None,
 ) -> dict[str, Any]:
     """Fold and atomically persist deduplication and breaker epochs."""
     target = path or journal_path()
@@ -699,6 +814,7 @@ def measure_and_persist(
             report, state = fold_provider_outages(
                 records, prior_state=prior, now_s=now_s,
                 pane_freshness_s=pane_freshness_s,
+                policy=policy,
             )
             _write_journal(target, state)
             return report

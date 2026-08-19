@@ -1006,6 +1006,7 @@ ROSTER_REFUSAL = (
 
 def measure_provider_outages(
     rows: list[Row], *, now_s: float,
+    settings: Any = None,
     entries_provider: Optional[Callable[[], list[Any]]] = None,
     transcript_path_for: Optional[Callable[[Any], Path | None]] = None,
     pane_read_fn: Optional[Callable[[str, Any], str]] = None,
@@ -1015,6 +1016,7 @@ def measure_provider_outages(
     """Collect durable transcript records, then persist exact pane fallbacks."""
     from fno.agents.provider_outage import (
         EvidenceIdentity,
+        OutagePolicy,
         collect_pane_evidence,
         collect_transcript_evidence,
         journal_path as provider_journal_path,
@@ -1052,18 +1054,18 @@ def measure_provider_outages(
         if isinstance(mux, dict):
             mux_by_row[row.row_id] = mux
     try:
-        from fno.config import load_settings
+        if settings is None:
+            from fno.config import load_settings
 
-        freshness = float(
-            load_settings().recovery.provider_outage_evidence_freshness_seconds
-        )
+            settings = load_settings()
+        policy = OutagePolicy.from_settings(settings)
     except Exception:  # noqa: BLE001 - use the schema floor on a config miss
-        freshness = 600
+        policy = OutagePolicy()
     records, refusals = collect_transcript_evidence(
         identities,
         now_s=now_s,
         transcript_path_for=transcript_path_for,
-        evidence_freshness_s=freshness,
+        evidence_freshness_s=policy.evidence_freshness_s,
     )
     unreadable_rows = {
         str(item.get("row_id"))
@@ -1114,7 +1116,9 @@ def measure_provider_outages(
             "counts": dict(counts),
             "refusals": refusals,
         }
-    report = measure_and_persist(records, now_s=now_s, path=journal)
+    report = measure_and_persist(
+        records, now_s=now_s, path=journal, policy=policy
+    )
     if refusals:
         report["refusals"] = [*report.get("refusals", []), *refusals]
         counts = Counter(str(item["reason"]) for item in refusals)
@@ -1139,7 +1143,7 @@ def supervise_provider_handoffs(
         HandoffRequest,
         production_handoff_dependencies,
     )
-    from fno.agents.provider_outage import select_healthy_destination
+    from fno.agents.provider_outage import OutagePolicy, select_healthy_destination
     from fno.recovery import recover_provider_outage
 
     if candidate_for is None:
@@ -1151,6 +1155,7 @@ def supervise_provider_handoffs(
 
         decision_fn = record_decision
     root = journal_root or (sweep_path().parent / "recovery" / "transactions")
+    policy = OutagePolicy.from_settings(settings)
     by_id = {row.row_id: row for row in rows}
     outcomes: list[dict[str, Any]] = []
     for breaker in provider_outages.get("breakers") or []:
@@ -1168,11 +1173,18 @@ def supervise_provider_handoffs(
                     "account": str(breaker.get("account") or ""),
                 })
                 continue
-            candidate = candidate_for(breaker, row, now_s)
+            candidate = (
+                production_handoff_candidate(
+                    breaker, row, now_s, settings=settings
+                )
+                if candidate_for is production_handoff_candidate
+                else candidate_for(breaker, row, now_s)
+            )
             selected = select_healthy_destination(
                 [candidate] if candidate is not None else [],
                 broken_provider=broken_provider,
                 now_s=now_s,
+                policy=policy,
             )
             if selected is None or not selected.model:
                 outcomes.append({
@@ -1236,6 +1248,7 @@ def supervise_provider_handoffs(
 
 def production_handoff_candidate(
     breaker: dict[str, Any], row: Row, now_s: float, *,
+    settings: Any = None,
     entries_provider: Optional[Callable[[], list[Any]]] = None,
     route_policy_provider: Optional[Callable[[Row], tuple[list[str], dict[str, str]]]] = None,
     account_env_for: Optional[Callable[[str, Path], dict[str, str]]] = None,
@@ -1250,9 +1263,11 @@ def production_handoff_candidate(
     from fno.agents.provider_outage import (
         CanaryProof,
         HEALTH_MARKER,
+        OutagePolicy,
         RouteCandidate,
         run_health_canary,
     )
+    policy = OutagePolicy.from_settings(settings) if settings is not None else OutagePolicy()
 
     # Candidate route discovery is intentionally conservative: only a route
     # already stamped on a registry row is eligible. Missing explicit model,
@@ -1427,6 +1442,7 @@ def production_handoff_candidate(
                 now_s=now_s,
                 collect_proof=collect,
                 stop=stop,
+                policy=policy,
             )
             if proof is not None:
                 return RouteCandidate(**{**candidate.__dict__, "canary": proof})

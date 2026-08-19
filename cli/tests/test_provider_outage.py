@@ -9,6 +9,7 @@ import pytest
 from fno.agents.provider_outage import (
     CanaryProof,
     EvidenceIdentity,
+    OutagePolicy,
     OutageEvidence,
     RouteCandidate,
     collect_transcript_evidence,
@@ -40,6 +41,139 @@ def _record(row_id, at, content, *, status, kind="api_error", role="assistant",
 
 def _fold(records, prior=None):
     return fold_provider_outages(records, prior_state=prior, now_s=NOW)
+
+
+def test_policy_quorum_and_fup_window_change_breaker_thresholds():
+    records = [
+        _record("row-1", NOW - 302, FUP, status=429),
+        _record("row-2", NOW - 1, FUP, status=429),
+        _record("row-3", NOW, FUP, status=429),
+    ]
+    report, _ = fold_provider_outages(
+        records,
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(quorum=3, fup_window_s=302),
+    )
+    assert report["breakers"][0]["row_ids"] == ["row-1", "row-2", "row-3"]
+
+    below_quorum, _ = fold_provider_outages(
+        records[:2],
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(quorum=3, fup_window_s=302),
+    )
+    assert below_quorum["breakers"] == []
+
+
+def test_policy_529_count_span_and_cross_session_window_change_behavior():
+    records = []
+    for row_id, newest_offset in (("row-1", 0), ("row-2", 601)):
+        records.extend([
+            _record(row_id, NOW - 900 - newest_offset, "API Error: 529 Overloaded", status=529),
+            _record(row_id, NOW - 840 - newest_offset, "API Error: 529 Overloaded", status=529),
+            _record(row_id, NOW - 780 - newest_offset, "API Error: 529 Overloaded", status=529),
+            _record(row_id, NOW - 779 - newest_offset, "API Error: 529 Overloaded", status=529),
+        ])
+    report, _ = fold_provider_outages(
+        records,
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(
+            overload_count=4,
+            overload_span_s=121,
+            overload_cross_session_window_s=601,
+            evidence_freshness_s=2_000,
+        ),
+    )
+    assert len(report["breakers"]) == 1
+
+    three_records = [
+        _record("count", NOW - 121, "API Error: 529 Overloaded", status=529),
+        _record("count", NOW - 60, "API Error: 529 Overloaded", status=529),
+        _record("count", NOW, "API Error: 529 Overloaded", status=529),
+    ]
+    count_report, _ = fold_provider_outages(
+        three_records,
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(overload_count=4),
+    )
+    assert count_report["sessions"]["count"]["state"] == "retrying"
+
+    span_records = [
+        _record("span", NOW - 120, "API Error: 529 Overloaded", status=529),
+        _record("span", NOW - 60, "API Error: 529 Overloaded", status=529),
+        _record("span", NOW, "API Error: 529 Overloaded", status=529),
+    ]
+    span_report, _ = fold_provider_outages(
+        span_records,
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(overload_span_s=121),
+    )
+    assert span_report["sessions"]["span"]["state"] == "retrying"
+
+    narrow_report, _ = fold_provider_outages(
+        records,
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(
+            overload_count=4,
+            overload_span_s=121,
+            overload_cross_session_window_s=600,
+            evidence_freshness_s=2_000,
+        ),
+    )
+    assert narrow_report["breakers"] == []
+
+
+def test_policy_pane_and_transcript_freshness_change_acceptance():
+    pane = _record(
+        "pane", NOW - 121, FUP, status=429, source="pane", pane_id="7",
+        persisted=True, snapshot_at=NOW - 121,
+    )
+    transcript = _record("transcript", NOW - 601, FUP, status=429)
+    report, _ = fold_provider_outages(
+        [pane, transcript],
+        prior_state=None,
+        now_s=NOW,
+        policy=OutagePolicy(pane_freshness_s=121, evidence_freshness_s=601),
+    )
+    assert report["counts"]["accepted"] == 2
+
+
+def test_policy_reset_grace_keeps_expiring_breaker_open_for_configured_window():
+    prior = {
+        "breakers": [{
+            "provider": "zai", "account": "acct-a", "kind": "fair_usage_policy",
+            "outage_epoch": NOW - 500, "opened_at": NOW - 500,
+            "row_ids": ["row-1", "row-2"], "fingerprints": ["a", "b"],
+            "reset_at": NOW - 121, "manual_restoration": False,
+            "basis": "positive quorum=2 across 2 distinct rows",
+        }],
+    }
+    report, _ = fold_provider_outages(
+        [],
+        prior_state=prior,
+        now_s=NOW,
+        policy=OutagePolicy(reset_grace_s=121),
+    )
+    assert len(report["breakers"]) == 1
+
+
+def test_policy_health_marker_ttl_changes_destination_freshness():
+    candidate = RouteCandidate(
+        record_id="codex", harness="codex", provider="openai", account="acct",
+        account_env={}, canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=NOW - 121,
+            persisted=True, assistant_role=False, pane_id="7", stopped=True,
+        ),
+    )
+    assert select_healthy_destination(
+        [candidate], broken_provider="zai", now_s=NOW,
+        policy=OutagePolicy(health_marker_ttl_s=121),
+    ) is candidate
 
 
 def test_ac2_429_fup_without_reset_is_terminal_but_one_session_is_not_quorum():

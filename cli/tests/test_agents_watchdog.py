@@ -1148,6 +1148,39 @@ def test_ac1_det_readable_transcript_is_not_duplicated_as_a_pane_vote(tmp_path):
     assert reads == []
 
 
+def test_production_measure_applies_validated_outage_policy_settings(tmp_path):
+    from fno.config import RecoveryBlock
+
+    fup = "API Error: Request rejected (429): Fair Usage Policy"
+    entries = []
+    rows = []
+    paths = {}
+    for index in (1, 2):
+        sid = f"session-{index}"
+        transcript = tmp_path / f"{sid}.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-08-16T18:39:30Z",
+            "isApiErrorMessage": True, "apiErrorStatus": 429,
+            "message": {"role": "assistant", "content": fup},
+        }) + "\n")
+        paths[sid] = transcript
+        entries.append(SimpleNamespace(
+            harness_session_id=sid, harness="claude", route_provider_id="zai",
+            account_record_id="acct-a", cwd=str(tmp_path), mux=None,
+        ))
+        rows.append(Row(sid, sid, "working", "x-abcd", str(tmp_path)))
+
+    report = watchdog.measure_provider_outages(
+        rows,
+        now_s=NOW_1840,
+        settings=SimpleNamespace(recovery=RecoveryBlock(provider_outage_quorum=3)),
+        entries_provider=lambda: entries,
+        transcript_path_for=lambda identity: paths[identity.session_id],
+        journal=tmp_path / "provider-outages.json",
+    )
+    assert report["breakers"] == []
+
+
 def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp_path):
     from fno.agents.provider_outage import CanaryProof
 
@@ -1283,6 +1316,48 @@ def test_ac12_obs_handoff_mode_requires_fresh_canary_then_runs_one_transaction(
     assert calls[0].evidence_fingerprints == ("f1", "f2")
     assert decisions[0]["authority_source"] == "daemon-automation"
     assert decisions[0]["source"] == "daemon"
+
+
+def test_production_supervisor_applies_configured_canary_ttl(tmp_path):
+    from fno.agents.outage_handoff import HandoffResult
+    from fno.agents.provider_outage import CanaryProof, RouteCandidate
+    from fno.config import RecoveryBlock
+
+    settings = SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=RecoveryBlock(
+            enabled=True, watchdog="handoff", provider_health_marker_ttl_seconds=121,
+        ),
+    )
+    candidate = RouteCandidate(
+        record_id="codex-work", harness="codex", provider="openai",
+        account="acct-b", account_env={}, model="gpt-5.6-sol", route_env={},
+        canary=CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK",
+            observed_at=NOW_1840 - 121, persisted=True, assistant_role=False,
+            pane_id="pane-7", stopped=True,
+        ),
+    )
+    calls = []
+    results = watchdog.supervise_provider_handoffs(
+        {"instrument": "measured", "breakers": [{
+            "provider": "zai", "account": "acct-a", "outage_epoch": 1,
+            "row_ids": ["source"], "fingerprints": ["f1", "f2"],
+        }]},
+        [Row("source", "worker", "working", "x-abcd", str(tmp_path))],
+        settings=settings,
+        now_s=NOW_1840,
+        candidate_for=lambda *_args: candidate,
+        handoff_fn=lambda request, **_kwargs: calls.append(request) or HandoffResult(
+            node=request.node, outage_epoch=request.outage_epoch,
+            attempt="attempt-1", phase="committed", replayed=False,
+        ),
+        deps_factory=lambda: object(),
+        decision_fn=lambda **_kwargs: None,
+        journal_root=tmp_path / "transactions",
+    )
+    assert results[0]["phase"] == "committed"
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("phase,replayed,expected", [
