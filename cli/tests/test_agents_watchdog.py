@@ -1227,6 +1227,71 @@ def test_ac5_hlth_production_candidate_uses_policy_order_and_observed_health(tmp
     assert canaries == ["good"]
 
 
+def test_ac5_hlth_production_candidate_canaries_configured_route_without_registry_row(
+    tmp_path,
+):
+    from fno.agents.provider_outage import CanaryProof
+
+    config = tmp_path / ".fno" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("""
+[accounts]
+active_combo = "outage"
+
+[[accounts.records]]
+id = "broken"
+name = "Broken"
+harness = "claude"
+auth = "api_key"
+model_provider = "zai"
+model_name = "glm-5.3"
+env = { ANTHROPIC_API_KEY = "test" }
+
+[[accounts.records]]
+id = "codex-backup"
+name = "Codex backup"
+harness = "codex"
+auth = "api_key"
+model_provider = "openai"
+model_name = "gpt-5.6-sol"
+env = { OPENAI_API_KEY = "test" }
+
+[accounts.combos.outage]
+providers = ["broken", "codex-backup"]
+strategy = "fallback"
+""", encoding="utf-8")
+    canaries = []
+
+    def canary(candidate, _row, now_s):
+        canaries.append(candidate)
+        return CanaryProof(
+            source="pane", content="FNO_PROVIDER_HEALTH_OK", observed_at=now_s,
+            persisted=True, assistant_role=False, pane_id="88", stopped=True,
+        )
+
+    selected = watchdog.production_handoff_candidate(
+        {"provider": "zai", "account": "broken"},
+        Row("source", "worker", "working", "x-missing", str(tmp_path)),
+        NOW_1840,
+        entries_provider=lambda: [],
+        runtime_exhausted_fn=lambda _account, _root: False,
+        harness_installed_fn=lambda harness: harness == "codex",
+        pane_occupancy_fn=lambda _harness: 0,
+        canary_fn=canary,
+        open_breakers_provider=lambda: [],
+    )
+
+    assert selected is not None
+    assert (
+        selected.record_id,
+        selected.harness,
+        selected.provider,
+        selected.model,
+    ) == ("codex-backup", "codex", "openai", "gpt-5.6-sol")
+    assert selected.account_env == {"OPENAI_API_KEY": "test"}
+    assert [candidate.record_id for candidate in canaries] == ["codex-backup"]
+
+
 def test_ac5_hlth_node_pin_to_broken_route_refuses_automatic_movement(tmp_path):
     canaries = []
     selected = watchdog.production_handoff_candidate(
@@ -1363,6 +1428,7 @@ def test_production_supervisor_applies_configured_canary_ttl(tmp_path):
 @pytest.mark.parametrize("phase,replayed,expected", [
     ("committed", True, 0),
     ("parked", False, 1),
+    ("refused", False, 0),
 ])
 def test_ac12_obs_terminal_decision_is_once_only(phase, replayed, expected, tmp_path):
     from fno.agents.outage_handoff import HandoffResult

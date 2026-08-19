@@ -196,18 +196,21 @@ def test_ac6_con_double_tick_has_one_successor_and_terminal_replay_is_inert(tmp_
     assert calls == before
 
 
-def test_ac10_err_unknown_source_stop_parks_without_mutation(tmp_path: Path):
+def test_ac7_err_unknown_source_stop_refuses_without_terminal_receipt(tmp_path: Path):
     calls: list[str] = []
     result = run_outage_handoff(
         _request(), deps=_deps(tmp_path, calls, stopped=False), journal_root=tmp_path / "journal"
     )
 
-    assert result.phase == "parked"
+    assert result.phase == "refused"
     assert result.failed_phase == "source_stopped"
     assert result.counts["source_stop_evidence"] == 0
     assert "archive" not in calls
     assert "claim-release" not in calls
     assert "spawn" not in calls
+    receipts = list((tmp_path / "journal").glob("*.json"))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_text())["phase"] != "parked"
 
 
 def test_ac7_con_evidence_drift_under_lease_refuses_before_stop(tmp_path: Path):

@@ -850,7 +850,15 @@ def run_outage_handoff(
         proof = deps.stop_source(snapshot.source)
         counts["source_stop_evidence"] = proof.evidence_count
         if not proof.confirmed_dead:
-            return _park(path, request, attempt, "source_stopped", proof.reason, counts)
+            return HandoffResult(
+                node=request.node,
+                outage_epoch=request.outage_epoch,
+                attempt=attempt,
+                phase="refused",
+                failed_phase="source_stopped",
+                reason=proof.reason,
+                counts=counts,
+            )
         source_dead = True
         _journal(path, phase="source_stopped", request=request, attempt=attempt,
                  stop_kind=proof.kind, source_stop_evidence=proof.evidence_count)
