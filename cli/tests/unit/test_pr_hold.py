@@ -23,13 +23,13 @@ def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=
     }]
     graph.write_text(json.dumps({"entries": resolved_entries}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    # x-a93a: hold_for_pr scopes its "anything to check" gate to
-    # detect_project(entries), which matches an entry's own `cwd` against
-    # this repo's root (repo_root()) - the SAME lookup node intake uses, so
-    # it can never disagree with a node's own `project` field. Every entry
-    # here already carries cwd=str(tmp_path), so pinning repo_root() to
-    # tmp_path is what makes that match land in a test sandbox.
-    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(tmp_path))
+    # x-a93a: hold_for_pr scopes its "anything to check" gate by matching an
+    # entry's own `cwd` against this repo's canonical root
+    # (resolve_canonical_worktree(cwd)) - never against a resolved
+    # project-NAME string. Every entry here already carries
+    # cwd=str(tmp_path), so pinning the resolver to tmp_path is what makes
+    # that match land in a test sandbox.
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
     monkeypatch.setattr(
         "fno.pr.closure.fetch_pr_closure_context",
         lambda pr_number, **k: PrClosureContext(
@@ -133,7 +133,7 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
         {"id": "x-1111", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
 
     def _boom(pr_number, **k):
         raise ClosureQueryError("gh pr view timed out")
@@ -163,7 +163,7 @@ def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nod
         {"id": "x-2222", "cwd": str(other_root), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(our_root))
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: our_root)
 
     def _unreachable(pr_number, **k):
         raise AssertionError("fetch_pr_closure_context must not be called")
@@ -188,7 +188,7 @@ def test_hold_for_pr_still_checks_when_this_repos_project_has_a_ref_less_node(
         {"id": "x-3333", "cwd": str(tmp_path), "plan_path": str(plan)},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
 
     calls: list[int] = []
 
@@ -219,7 +219,7 @@ def test_hold_for_pr_still_checks_when_the_matching_node_has_a_null_project(
         {"id": "x-4444", "cwd": str(tmp_path), "plan_path": str(plan), "project": None},
     ]}))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
-    monkeypatch.setattr("fno.graph._intake.repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr("fno.paths.resolve_canonical_worktree", lambda *a, **k: tmp_path)
 
     calls: list[int] = []
 
@@ -233,6 +233,51 @@ def test_hold_for_pr_still_checks_when_the_matching_node_has_a_null_project(
     monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _spy)
     assert _hold.hold_for_pr(42, str(tmp_path)) is None
     assert calls == [42]
+
+
+def test_hold_for_pr_resolves_root_from_the_passed_cwd_not_the_process_cwd(
+    tmp_path, monkeypatch,
+):
+    """Review fix: hold_for_pr(pr_number, cwd) must resolve its own repo
+    root from the PASSED cwd, not the invoking process's own directory -
+    `fno pr hold-check --repo <path>` is a real, documented call shape
+    where the two differ. Exercises the real (unmocked)
+    resolve_canonical_worktree against two distinct fake git repos to
+    prove cwd, not process cwd, drives the match."""
+    import subprocess
+
+    process_repo = tmp_path / "process-repo"
+    target_repo = tmp_path / "target-repo"
+    for repo in (process_repo, target_repo):
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    plan = target_repo / "held.md"
+    plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-5555", "cwd": str(target_repo), "pr_number": 42,
+            "pr_url": "https://github.com/o/r/pull/42", "plan_path": str(plan),
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr(
+        "fno.pr.closure.fetch_pr_closure_context",
+        lambda pr_number, **k: PrClosureContext(
+            number=pr_number, body="", url="https://github.com/o/r/pull/42",
+            state="MERGED", merged_at="2026-01-01T00:00:00Z",
+        ),
+    )
+    monkeypatch.chdir(process_repo)
+
+    verdict = _hold.hold_for_pr(42, str(target_repo))
+    assert verdict is not None
+    assert verdict.owner_id == "x-5555"
 
 
 def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):

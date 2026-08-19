@@ -53,10 +53,25 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         return None
 
     import os
+    from pathlib import Path
 
-    from fno.graph._intake import repo_root
+    from fno.paths import resolve_canonical_worktree
 
-    _root = os.path.normpath(repo_root())
+    # resolve_canonical_worktree(cwd) - NOT a plain `git rev-parse
+    # --show-toplevel` - is load-bearing: hold_for_pr is called with an
+    # explicit `cwd` that is not always the process's own (`fno pr
+    # hold-check --repo <path>` passes an arbitrary directory), and a plain
+    # toplevel resolution run FROM A LINKED WORKTREE returns that worktree's
+    # own path, not the canonical/main root every node's `cwd` field
+    # actually stores - so either ignoring `cwd` (review fix) or resolving
+    # the wrong root from it would both silently mismatch a genuinely-held
+    # node's own repo.
+    _canonical_root = resolve_canonical_worktree(Path(cwd))
+    _root = (
+        os.path.normpath(str(_canonical_root))
+        if _canonical_root is not None
+        else os.path.normpath(cwd)
+    )
     _root_prefix = _root.rstrip(os.sep) + os.sep
 
     def _cwd_in_this_repo(entry: object) -> bool:
@@ -64,7 +79,10 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
             return False
         raw_cwd = entry.get("cwd")
         if not isinstance(raw_cwd, str) or not raw_cwd:
-            return False
+            # A no-cwd node can't be proven NOT this repo's, and there is no
+            # cost to including it - only candidate_ids (populated below
+            # from the ref/trailer match) can ever trigger a gh call.
+            return True
         norm = os.path.normpath(os.path.expanduser(raw_cwd))
         return norm == _root or norm.startswith(_root_prefix)
 
@@ -81,8 +99,8 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
         # plan, legitimately carries `project: null`, which a name-string
         # comparison would silently treat as "not this repo" even when its
         # cwd matches exactly. Matching on cwd sidesteps both failure modes
-        # (review fix). Local only (a `git worktree list` / `git rev-parse`
-        # read - no network) so this costs nothing extra when it doesn't
+        # (review fix). Local only (a `git worktree list` read - no
+        # network) so this costs nothing extra when it doesn't
         # short-circuit.
         return None
 
