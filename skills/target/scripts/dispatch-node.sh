@@ -258,7 +258,8 @@ DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
 DISPATCH_COMMAND_BASE="$DISPATCH_COMMAND"
 
 # ---- per-node dispatch ------------------------------------------------------
-n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
+n_launched=0; n_parked=0; n_already=0; n_skipped=0
+n_wedged=0; n_done=0; n_failed=0; n_capped=0
 
 for id in "${NODES[@]}"; do
   # --max soft cap: once reached, report the remainder rather than dropping silently.
@@ -596,7 +597,15 @@ for id in "${NODES[@]}"; do
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
+        remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
+        # A remedy is present only when the guard tried to clear this and could
+        # not prove the holder dead - the positive marker for a wedge. A batch
+        # keeps sweeping either way; the exit code below is what changes.
+        if [[ -n "$remedy" ]]; then
+          echo "$remedy"
+          n_wedged=$((n_wedged + 1))
+        fi
         n_skipped=$((n_skipped + 1))
       else
         # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-
@@ -900,6 +909,11 @@ for id in "${NODES[@]}"; do
           continue ;;
         suspect-claim)
           echo "skipped-contested $id reason=\"suspect-claim by shared family-2 guard; no worker launched\""
+          remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
+          if [[ -n "$remedy" ]]; then
+            echo "$remedy"
+            n_wedged=$((n_wedged + 1))
+          fi
           n_skipped=$((n_skipped + 1))
           continue ;;
         auto-deferred)
@@ -974,10 +988,18 @@ for id in "${NODES[@]}"; do
   n_launched=$((n_launched + 1))
 done
 
-echo "summary: launched=$n_launched parked=$n_parked already=$n_already skipped=$n_skipped done=$n_done failed=$n_failed capped=$n_capped"
+echo "summary: launched=$n_launched parked=$n_parked already=$n_already skipped=$n_skipped done=$n_done failed=$n_failed capped=$n_capped wedged=$n_wedged"
 # Exit non-zero only when nothing launched AND at least one hard failure, so a
 # caller can detect a total dispatch failure while a mixed batch still exits 0.
 if [[ "$n_launched" -eq 0 && "$n_failed" -gt 0 ]]; then
+  exit 1
+fi
+# A WEDGE fails only a SINGLE-node invocation. A batch sweep must not fail
+# because one node of twenty is wedged - it did the other nineteen - but
+# `dispatch-node.sh <one-id>` that launched nothing because that node is wedged
+# has no other work to report, and exiting 0 tells its caller the launch worked
+# (x-05be shape 3). The remedy line is already on stdout above.
+if [[ "$n_wedged" -gt 0 && "${#NODES[@]}" -eq 1 && "$n_launched" -eq 0 ]]; then
   exit 1
 fi
 exit 0

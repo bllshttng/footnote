@@ -308,8 +308,11 @@ if [[ ! -f "$DISPATCH" ]]; then
   exit 0
 fi
 
-out="$(bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"
-line="$(printf '%s\n' "$out" | grep -E '^(launched|already-running|failed|parked|skipped-done) ' | head -1)"
+out="$(bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"; dispatch_rc=$?
+# skipped-contested is in this list because a wedge used to fall through to the
+# wildcard below and be reported as "unexpected dispatch output" - the refusal
+# blamed the instrument instead of naming the node nobody can build.
+line="$(printf '%s\n' "$out" | grep -E '^(launched|already-running|failed|parked|skipped-done|skipped-contested) ' | head -1)"
 case "$line" in
   launched\ *)        if [[ -n "${_epic_redirect:-}" ]]; then
                         echo "auto-${line} (first ready child of epic ${_epic_redirect})"
@@ -319,7 +322,14 @@ case "$line" in
   already-running\ *) echo "$line" ;;
   parked\ *)          echo "$line" ;;
   skipped-done\ *)    echo "$line" ;;
+  skipped-contested\ *) echo "$line"
+                      # The remedy dispatch-node.sh printed under the verdict.
+                      printf '%s\n' "$out" | grep -E '^  (Clear it|Override): ' || true ;;
   failed\ *)          echo "autolaunch-${line}" ;;      # -> "autolaunch-failed <node> ..."
   *)                  echo "autolaunch-failed $node reason=\"unexpected dispatch output: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)\"" ;;
 esac
-exit 0
+# Propagate rather than the unconditional exit 0 this used to end on. This runs
+# for ONE node, so dispatch-node.sh's single-node wedge exit is exactly the case
+# a caller needs to see: nothing launched, nobody will, and an operator has to
+# clear it. Swallowing that told every caller the launch worked (x-05be).
+exit "$dispatch_rc"

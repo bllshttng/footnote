@@ -23,6 +23,14 @@
 #   result=already-running name=<n> reason="<why>"
 #   result=failed reason="<real captured error>"
 # Exit: 0 launched | 0 already-running | 1 failed.
+#
+# already-running vs failed is the DEDUP/WEDGE cut, not a severity dial. A live
+# worker holds the node, so the desired end state is already true and a sweep
+# must keep going: already-running, exit 0. A suspect claim or a held
+# reservation means nobody is building it and nobody will until an operator
+# intervenes: failed, exit 1, and the message carries the clearing command. Both
+# used to exit 0 while launching nothing, so a caller reading the exit code was
+# told the launch worked (x-05be).
 
 set -uo pipefail
 
@@ -181,9 +189,15 @@ if [[ -n "$NODE" ]]; then
         fi
       elif [[ "$reason" == "suspect-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="suspect worker claim holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
+        # A WEDGE, not benign dedup. The guard already tried to clear this and
+        # could not prove the holder dead, so nobody is building this node and
+        # nobody will until an operator intervenes. Exiting 0 here told a caller
+        # reading the exit code that the launch worked (x-05be).
+        fail "suspect worker claim holds node:$NODE ($holder); no worker launched
+$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null)"
       else
-        printf 'result=already-running name=%s reason="family-2 guard blocked node:%s"\n' "$NAME" "$NODE"
+        fail "family-2 guard blocked node:$NODE; no worker launched
+$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null)"
       fi
       exit 0 ;;
     corrupted)
