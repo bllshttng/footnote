@@ -145,15 +145,14 @@ OpenCode, the selected effort becomes the persisted variant for that explicit
 `provider/model` in `~/.local/state/opencode/model.json`, matching OpenCode's
 own variant toggle behavior.
 
-## Ephemeral one-shot (`--once` / `-o`, codex and gemini)
+## Ephemeral one-shot (`--once` / `-o`)
 
 ```bash
 fno agents spawn "summarize the failing tests" --name tmp1 -H codex --once
 ```
 
-Create, exchange, tear down: stdout is the model's reply verbatim (the deliverable); the teardown receipt rides stderr (`once: tmp1 (codex/<session-id>) torn down`); no registry row survives. This is the explicit home of what `ask`-on-a-new-name used to do implicitly for codex/gemini.
+Create, exchange, tear down: stdout is the model's reply verbatim (the deliverable); the teardown receipt rides stderr (`once: tmp1 (codex/<session-id>) torn down`); no registry row survives. This is the explicit home of what `ask`-on-a-new-name used to do implicitly. For Claude, `--once` selects the `headless` substrate and launches `claude -p`.
 
-- `--once` with claude is refused (exit 2): claude peers are persistent bg threads; use plain spawn.
 - If teardown fails after a successful exchange, the peer is NOT silently leaked: a loud stderr warning names it and points at `fno agents rm <name>`, and the exit stays 0 (the exchange succeeded).
 - An empty initial message defaults to a `"hello"` probe on the once paths.
 
@@ -176,7 +175,6 @@ Precedence is `--cwd` > `--fresh` > caller cwd. An explicit `--cwd` always wins;
 | Name already registered | 2 | `agent '<name>' already exists; use 'fno agents rm <name>' first or pick another name` |
 | No `--harness` for a new name | 2 | harness required |
 | Unknown provider | 2 | `unknown provider '<p>'; supported: claude, codex, gemini` |
-| `--once` with claude | 2 | persistent bg threads; use plain spawn |
 | Unsupported provider/effort pair | 2 | names the provider's supported effort values |
 | Plain codex/gemini spawn on the Python fallback | 13 | requires the fno-agents daemon (Rust runtime); use `--once` |
 | Registry unreadable | 12 | `registry read failed: ...` |
