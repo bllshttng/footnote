@@ -719,13 +719,22 @@ def _dispatch_hold_refusal(command=""):
         return None
     if _targets_other_repo(command):
         return "cannot verify plan dispatch hold for a merge targeting another repository"
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "timeout": _HOLD_PROBE_TIMEOUT,
+    }
     try:
-        proc = subprocess.run(
-            ["fno", "pr", "hold-check", pr_number],
-            capture_output=True,
-            text=True,
-            timeout=_HOLD_PROBE_TIMEOUT,
-        )
+        try:
+            proc = subprocess.run(
+                ["fno", "pr", "hold-check", pr_number],
+                **kwargs,
+            )
+        except FileNotFoundError:
+            proc = subprocess.run(
+                [sys.executable, "-m", "fno.cli", "pr", "hold-check", pr_number],
+                **kwargs,
+            )
     except Exception as exc:  # noqa: BLE001 - unreadable means held
         return f"dispatch hold check unavailable ({type(exc).__name__}); refusing to assume unheld"
     if proc.returncode == 0:

@@ -113,6 +113,20 @@ def test_dispatch_hold_veto_allows_proven_unheld(monkeypatch):
     assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
 
 
+def test_dispatch_hold_veto_falls_back_to_source_cli(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "fno":
+            raise FileNotFoundError("fno")
+        return _Proc(0, stdout="PR 900: no plan dispatch hold\n")
+
+    monkeypatch.setattr(git_protection.subprocess, "run", fake_run)
+    assert git_protection._dispatch_hold_refusal("gh pr merge 900") is None
+    assert calls[1][:4] == [sys.executable, "-m", "fno.cli", "pr"]
+
+
 @pytest.mark.parametrize(
     "failure",
     [FileNotFoundError("fno"), subprocess.TimeoutExpired("fno", 25)],
