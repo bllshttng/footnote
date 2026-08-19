@@ -21,7 +21,6 @@ What each harness fundamentally is, from fno's point of view:
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
 The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
-
 Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt includes `status: live`, `session_id`, and the derived eight-character `short_id`. If binding expires, fno reaps the pane and exits nonzero. It does not return an unaddressable `status: spawning` receipt.
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
@@ -45,7 +44,6 @@ Session binding has a separate type. Codex requires `rollout-fd` evidence and wa
 Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported.
 
 Permission responses are rule-gated. Without explicit authorization, a matched permission rule reports `blocked`, never `live`. With an authorized action, fno resolves the harness-native keys. It re-reads the prompt fingerprint while it holds the pane writer claim. Then it sends only those keys and waits for the positive ready marker.
-
 ## Verbs: creating and reviving workers
 
 | Verb | claude | codex | gemini | agy | opencode | What it does |

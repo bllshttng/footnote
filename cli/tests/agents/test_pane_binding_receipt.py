@@ -34,6 +34,7 @@ from fno.agents.mux_spawn import (
 
 MUX = {"session": "main", "pane_id": 81}
 SID = "019cc081-de0d-7283-97cc-751c46742a07"
+AGY_HARNESS = "agy"
 
 #: `fno mux pane wait --timeout 0` exit codes: 12 = the child exited
 #: (EXIT_WAIT_EXITED, a POSITIVE death marker), 0/11 = still up, anything else
@@ -407,7 +408,7 @@ def test_seed_field_defaults_to_no_seed_and_carries_submission() -> None:
     assert default is None
     result = MuxSpawnResult(
         name="w",
-        provider="agy",
+        provider=AGY_HARNESS,
         session="main",
         pane_id=81,
         child_pid=4242,
