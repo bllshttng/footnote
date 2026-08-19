@@ -11,7 +11,8 @@ Run the shared setup in [README.md](README.md). Use two terminals: one for the n
 ## 1. Prove the shell-integration snippet
 
 ```run
-fno mux shell-init zsh --json | jq -c '{shell,has_preexec:(.snippet|contains("preexec"))}'
+set -o pipefail
+fno mux shell-init zsh --json | tee "$DEMO_ROOT/l15-shell-init.json" | jq -c '{shell,has_preexec:(.snippet|contains("preexec"))}'
 ```
 
 ```expected
@@ -53,7 +54,7 @@ PANE_ID="$(jq -r .pane_id "$DEMO_ROOT/l15-pane.json")"
 ## 5. Send a command and read its completed block
 
 ```run
-fno mux pane send "$PANE_ID" --session recording15 --text 'eval "$(fno mux shell-init zsh)"' --json
+fno mux pane send "$PANE_ID" --session recording15 --text "eval \"$(jq -r .snippet \"$DEMO_ROOT/l15-shell-init.json\")\"" --json
 fno mux pane send "$PANE_ID" --session recording15 --text $'\r' --json
 sleep 1
 fno mux pane send "$PANE_ID" --session recording15 --text 'printf "mux-ready\\n"' --json
