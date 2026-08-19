@@ -1626,6 +1626,12 @@ def resolve_or_suggest(
     They are hoists, never second implementations. The tier-0 match, the
     transcript lookup and the fallback all stay here, so a batch resolves a
     handle through the same code a single call does.
+
+    One rule for ``discovery_cache``: reuse a dict only across calls that pass
+    the SAME store overrides. It is keyed on the scan variant, not on the paths
+    being scanned, so sharing one across calls with different ``projects_dir``
+    or ``registry_path`` returns the first call's scan for the second's stores.
+    Batch mode holds every override constant and varies only the handle.
     """
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
