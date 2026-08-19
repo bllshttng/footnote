@@ -1118,6 +1118,105 @@ def _behind_by(pr_number: int, cwd: str) -> int:
         return _miss(f"probe error: {exc}")
 
 
+def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
+    """Files the BASE branch gained since the PR head diverged, or None on any
+    probe miss. The reverse compare ({head}...{base}) names exactly the commits
+    the head lacks, so its file list IS the base move an overlap hold measures.
+
+    Fails CLOSED, inverting `_behind_by` on purpose: there we did not know
+    whether we were behind at all and a read of ours failing must not block a
+    merge, while here we already know the base moved and cannot tell whether it
+    overlapped - so the caller holds. A truncated compare under-reports the
+    move (GitHub caps the response at 300 files) and fails in the merging
+    direction, so truncation is a miss too."""
+
+    def _miss(why: str) -> None:
+        sys.stderr.write(
+            f"pr-merge: overlap probe unavailable ({why}); holding for a rebase\n"
+        )
+
+    try:
+        view = _gh(
+            ["pr", "view", str(pr_number), "--json", "baseRefName,headRefName"], cwd
+        )
+        if not view.ok:
+            return _miss("gh pr view failed")
+        try:
+            refs = json.loads(view.stdout or "{}")
+        except json.JSONDecodeError:
+            return _miss("unparseable pr view output")
+        base = refs.get("baseRefName") if isinstance(refs, dict) else None
+        head = refs.get("headRefName") if isinstance(refs, dict) else None
+        if not base or not head:
+            return _miss("missing base/head ref")
+        res = _gh(
+            [
+                "api",
+                f"repos/{{owner}}/{{repo}}/compare/{head}...{base}",
+                "--jq",
+                "{truncated: .truncated, names: [.files[].filename]}",
+            ],
+            cwd,
+        )
+        if not res.ok:
+            return _miss("gh reverse compare failed")
+        try:
+            payload = json.loads(res.stdout or "{}")
+        except json.JSONDecodeError:
+            return _miss("unparseable compare output")
+        if not isinstance(payload, dict):
+            return _miss("compare payload not an object")
+        names = payload.get("names")
+        if not isinstance(names, list):
+            return _miss("compare payload carries no file list")
+        paths = [str(p) for p in names if str(p)]
+        if payload.get("truncated") or len(paths) >= 300:
+            return _miss(f"compare truncated ({len(paths)} files; caps at 300)")
+        return paths
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED: holding equals today's behavior
+        return _miss(f"probe error: {exc}")
+
+
+def _pr_changed_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
+    """The PR's own changed file paths (the same read `_pr_payload_is_code`
+    makes), or None on a probe miss - the same fail-closed contract as
+    `_base_move_paths`: an unknown PR file set cannot prove a non-overlap, so
+    the caller holds. An EMPTY list is not a miss: a PR with no diff cannot
+    overlap anything."""
+    if not shutil.which("gh"):
+        return None
+    res = _gh(
+        ["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], cwd
+    )
+    if not res.ok:
+        sys.stderr.write(
+            "pr-merge: overlap probe unavailable (gh pr view files failed); "
+            "holding for a rebase\n"
+        )
+        return None
+    try:
+        names = [str(p) for p in json.loads(res.stdout)]
+    except (ValueError, TypeError):
+        sys.stderr.write(
+            "pr-merge: overlap probe unavailable (unparseable pr file list); "
+            "holding for a rebase\n"
+        )
+        return None
+    return names
+
+
+def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
+    """Sorted intersection of two changed-file lists, documentation paths
+    dropped from both sides first. The overlap hold's whole decision, pure over
+    pre-computed path lists so it unit-tests with no gh and no git - the same
+    discipline `review_freshness` follows for the same reason. Empty means no
+    overlap: a base move that touches none of the PR's files cannot carry a
+    semantic conflict into this merge."""
+    base = {p for p in base_paths if not _is_documentation_path(p)}
+    pr = {p for p in pr_paths if not _is_documentation_path(p)}
+    return sorted(base & pr)
+
+
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
@@ -1361,13 +1460,20 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             )
             return 2
 
-    # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
+    # (2b) Merge serialization + overlap hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
-    # PR whose head is behind its base is held for `fno pr rebase` first, so a
-    # lane never merges a stale base. Both checks run UNDER the lock: a peer
-    # merge landing between the freshness read and our merge is exactly the
-    # race the lock exists to close. Sequential runs (no live lanes) skip the
-    # freshness hold and see only an uncontended lock - behavior unchanged.
+    # PR whose changed files OVERLAP the base move is held for `fno pr rebase`
+    # first, so a lane never merges code the base moved under. The predicate is
+    # overlap, not distance: a base move that touches none of the PR's files
+    # cannot carry a semantic conflict into this merge, while holding on
+    # distance alone taxed every open lane with a rebase and a re-review per
+    # peer merge (N open PRs, N-1 rebases each round, GitHub itself reporting
+    # MERGEABLE the whole time). `_behind_by` stays the cheap first test: at
+    # zero there is no base move, so the overlap probes never run in the common
+    # sequential case. Both checks run UNDER the lock: a peer merge landing
+    # between the freshness read and our merge is exactly the race the lock
+    # exists to close. Sequential runs (no live lanes) skip the freshness hold
+    # and see only an uncontended lock - behavior unchanged.
     with _merge_lock() as lock:
         if lock == "held":
             _emit(
@@ -1381,15 +1487,37 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         if _live_lane_count() > 0:
             behind = _behind_by(pr_number, repo)
             if behind > 0:
-                _emit(
-                    pr_number,
-                    "held",
-                    f"stale base: head is {behind} commit(s) behind base with "
-                    "parallel lanes live; run fno pr rebase, then retry",
-                    "none",
-                    err=False,
+                base_paths = _base_move_paths(pr_number, repo)
+                pr_paths = (
+                    None if base_paths is None else _pr_changed_paths(pr_number, repo)
                 )
-                return 2
+                if base_paths is None or pr_paths is None:
+                    _emit(
+                        pr_number,
+                        "held",
+                        "stale base: overlap probe unavailable (base moved; "
+                        "could not compare file sets); run fno pr rebase, "
+                        "then retry",
+                        "none",
+                        err=False,
+                    )
+                    return 2
+                overlap = _overlaps(base_paths, pr_paths)
+                if overlap:
+                    shown = ", ".join(overlap[:3])
+                    extra = (
+                        f" and {len(overlap) - 3} more" if len(overlap) > 3 else ""
+                    )
+                    _emit(
+                        pr_number,
+                        "held",
+                        f"stale base: base move touches files this PR also "
+                        f"changes ({shown}{extra}); run fno pr rebase, then "
+                        "retry",
+                        "none",
+                        err=False,
+                    )
+                    return 2
         # (2c) Stacked-base guard: a base branch that no longer leads to the
         # default branch merges green and ships nothing. Inside the lock because
         # the event that kills a base IS a peer merge, which is what the lock
