@@ -2752,7 +2752,13 @@ mod tests {
         // treat the now-empty squad as prunable under the empty-squad grace
         // arm - that only happens on a LATER call, against fresh state.
         let _s = Scratch::new("member-reap-cov");
-        upsert("archived-crew", "", &[], &[tomb("deadbee1"), tomb("deadbee2")]).unwrap();
+        upsert(
+            "archived-crew",
+            "",
+            &[],
+            &[tomb("deadbee1"), tomb("deadbee2")],
+        )
+        .unwrap();
 
         let live = std::collections::HashSet::<String>::new(); // nothing live
         let outcome = prune(
