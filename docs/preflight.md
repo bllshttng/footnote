@@ -180,7 +180,7 @@ Behavior:
 
 ## Ship-phase wiring
 
-Preflight runs before a push only at the policy's request. The single decision point is `fno pr evidence-required`. It reads `config.preflight.required` (default false) plus the `FNO_SKIP_PREFLIGHT=1` escape. The ship phase, `fno pr create`, the worker ship lane, and the batch lane all ask it. The bash path and the Python lanes cannot disagree. A failed or unparsable policy call fails open on the ship paths: no local preflight, and CI verifies the PR head. The `/pr create` router is stricter. It refuses outright when the policy call itself cannot be evaluated.
+Preflight runs before a push only at the policy's request. The single decision point is `fno pr evidence-required`. It reads `config.preflight.required` (default false) plus the `FNO_SKIP_PREFLIGHT=1` escape. The ship phase, `fno pr create`, the worker ship lane, and the batch lane all ask it. The bash path and the Python lanes cannot disagree. A failed or unparsable policy call fails open on the ship paths: no local preflight, and CI verifies the PR head. The `/pr create` router is stricter. When the policy call itself cannot be evaluated, it refuses outright.
 
 On a stock config the pre-push obligation is the focused checks below, each seconds. There is deliberately no wrapper script for them. Every check already runs in CI. A new mandatory local runner rebuilds the gate this contract removes, one rung smaller.
 
