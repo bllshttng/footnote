@@ -3849,6 +3849,9 @@ class MuxBlock(BaseModel):
     # interactive Rust client (same split-brain as attach_digest); modeled here so
     # the off-switch is discoverable via `fno config get/set`.
     hover_focus: bool = True
+    # Show the mux status row. The interactive Rust client reads this directly
+    # from config.toml, matching the `hover_focus` startup path.
+    status_row: bool = True
     # The mux chrome theme name (x-f75e): one of the shipped palettes the modal
     # chrome reads (`terminal`, `catppuccin`, `tokyo-night`, `gruvbox`). Read by
     # the interactive Rust client via the same config ladder as `hover_focus`;

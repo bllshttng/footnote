@@ -10753,6 +10753,7 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
