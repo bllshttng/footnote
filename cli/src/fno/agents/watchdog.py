@@ -114,17 +114,10 @@ RETIRE_GRACE_S = 900
 #: question pending" for a turn that ended on one - the exact stranding this
 #: whole check exists to prevent. A self-closing tag is last and takes itself.
 #:
-#: KNOWN GAP, accepted, and wider than it first reads: ANY bare `<promise>` or
-#: `<watching>` mention swallows everything after it, whether or not a real
-#: promise follows. So a turn ending "the loop keys on <promise> here. Should I
-#: widen it?" strips to "the loop keys on" and answers no-question-pending, and
-#: that row retires with the operator's question unanswered. For that one shape
-#: this is a regression against a raw `endswith("?")`, traded for the modal
-#: promise-last shape, which is the trade worth making. Agents working on THIS
-#: repo write the tag in prose routinely, so the gap is not hypothetical here.
-#: Not resolved locally because every other reader shares the ambiguity - the
-#: loop's own `_PROMISE_RE` already reads a prose mention as a promise - and
-#: fixing it in one place would make the fleet disagree with itself.
+#: A bare mention still consumes to end of text, so this pattern alone would
+#: lose a question asked after one. `_question_pending` closes that by asking
+#: the RAW text before it strips: a turn already ending on a question needs no
+#: stripping to prove it. Both readings are needed, neither is sufficient.
 _TERMINAL_TAG_RE = re.compile(
     r"<(promise|watching)\b[^>]*>.*?</\1>"
     r"|<(?:promise|watching)\b[^>]*(?<!/)>.*"
@@ -447,6 +440,16 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
         return False
     text = facts.last_text or ""
     if _HELP_RE.search(text) is not None:
+        return True
+    # Ask the RAW text first. Stripping terminal tags fixes the promise-last
+    # shape, but any bare `<promise>` mention consumes to end of text, so a turn
+    # ending "the loop keys on <promise> here. Should I widen it?" stripped to
+    # "the loop keys on" and answered no-question-pending - and agents working on
+    # this repo write that tag in prose routinely. This is not a trade against
+    # the promise-last shape: one clause satisfies both, because a turn that
+    # already ends on a question needs no stripping to prove it. It can only
+    # ever DECLINE to retire, never cause a stop.
+    if text.rstrip().endswith("?"):
         return True
     # Strip the terminal markers BEFORE asking where the turn ends. The worker
     # is instructed to emit its promise last (skills/target/references/

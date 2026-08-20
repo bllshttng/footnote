@@ -2621,7 +2621,10 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
-        return "unattempted", "pane frame unreadable, seed submission not attempted", "delivered"
+        # source is "", not "delivered": nothing was typed into the pane, and
+        # `delivered` is the word the send arms use for text that WAS. A receipt
+        # reading seed=unattempted with seed_source=delivered contradicts itself.
+        return "unattempted", "pane frame unreadable, seed submission not attempted", ""
     frame = screen.stdout or ""
     if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
         try:
@@ -2639,10 +2642,10 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit, so nothing can run in this pane until a human answers it or ~/.gemini/trustedFolders.json grants the directory", "trust-cleared"
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit, so nothing can run in this pane until a human answers it or ~/.gemini/trustedFolders.json grants the directory", "trust-cleared"
         trust_source = "trust-cleared"
     else:
         trust_source = ""

@@ -393,13 +393,34 @@ def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
     assert row.origin == "operator", "a store heal must not demote an operator session"
 
 
-def test_store_healing_still_stamps_a_row_with_no_origin(mailbox):
-    """The counterweight: the marker must still land where there is nothing to
-    protect, or adopted rows stay indistinguishable from spawned ones."""
+def test_store_healing_never_stamps_adopted_onto_an_existing_row(mailbox):
+    """`adopted` is a BIRTH fact, so a refresh never applies it - not even to a
+    row with no origin at all.
+
+    A genuine spawn row carries `origin=None`, and the healer upserts on
+    (provider, session_id). So a resolution that misses by name while a row with
+    that session id exists would stamp a real worker `adopted`, and nothing ever
+    clears it: `_row_spawned` then answers unknown for that worker forever and it
+    is permanently exempt from the retire lane. Silent and irreversible.
+    """
     from fno.agents.registry import register_existing_session, load_registry
 
     sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
     register_existing_session(provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox))
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin is None, "a heal must not exempt a spawned worker from the lane"
+
+
+def test_a_genuinely_new_adoption_still_carries_the_marker(mailbox):
+    """The counterweight: the marker must land at BIRTH, or adopted rows stay
+    indistinguishable from spawned ones and the guard has nothing to read."""
+    from fno.agents.registry import register_existing_session, load_registry
+
+    sid = "5b2d93e2-33cc-4dd4-9ee5-7f8a9b01c3d4"
     register_existing_session(
         provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
     )

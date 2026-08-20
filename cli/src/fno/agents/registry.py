@@ -1418,15 +1418,17 @@ def register_existing_session(
                 # Only restamp origin when the caller passed one: the harness-store
                 # healer refreshes rows without it, and a blind `entry.origin = None`
                 # would clobber an operator stamp a re-firing hook must preserve.
-                # `adopted` is the WEAKEST origin and never downgrades a
-                # stronger one. The healer infers it from a store hit; every
-                # other value was asserted by the session itself. Without this,
-                # healing a hand-registered session by a token that misses the
-                # registry restamps `operator` as `adopted`, and the
-                # attended-miss escalation stops firing for it forever - the
-                # same clobber the comment above was written against, arriving
-                # through the one caller that does pass an origin.
-                if origin is not None and not (origin == "adopted" and entry.origin):
+                # `adopted` is a BIRTH fact and never lands on a refresh. The
+                # healer infers it from a store hit, so it describes how a row
+                # came to exist, not what the session is now. Applying it here
+                # overwrote two different things: an `operator` stamp, which
+                # silently stopped attended-miss escalation for that session
+                # (the very clobber the comment above was written against), and
+                # a spawn row's ABSENT origin, which permanently and invisibly
+                # exempted a real worker from the lanes that read this field.
+                # Neither is recoverable, because nothing ever clears it. The
+                # create path stamps it, which is the only place it is true.
+                if origin is not None and origin != "adopted":
                     entry.origin = origin
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg

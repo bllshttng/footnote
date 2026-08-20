@@ -874,6 +874,14 @@ def test_tag_stripping_never_hides_a_pending_question():
         ("All green.\n<promise>DONE</promise>", False),
         ("All done, nothing pending.", False),
         ("<watching>x</watching>\nStill ok?\n<promise>D</promise>", True),
+        # A bare prose mention consumes to end of text when stripped, so this
+        # shape is caught by the RAW read instead. Agents working on this repo
+        # write the tag in prose routinely; without the raw read the row retires
+        # with the operator's question unanswered.
+        ("the loop keys on <promise> here. Should I widen it?", True),
+        ("I mentioned <watching> above. Ready to merge?", True),
+        # And the raw read must not invent a question where there is none.
+        ("the loop keys on <promise> here. Widening it now.", False),
     ):
         facts = _facts(tail, age_min=20)
         assert watchdog._question_pending(facts) is pending, tail
