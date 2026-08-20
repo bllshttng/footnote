@@ -1425,6 +1425,11 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
             .iter()
             .map(|(id, reason)| json!({"id": id, "reason": reason}))
             .collect();
+        let node_refused: Vec<Value> = summary
+            .node_session_refused
+            .iter()
+            .map(|(id, reason)| json!({"id": id, "reason": reason}))
+            .collect();
         return format!(
             "{}\n",
             json!({
@@ -1432,6 +1437,7 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
                 "reaped_backstop": summary.reaped_backstop,
                 "reaped_dormant": summary.reaped_dormant,
                 "cascade_refused": refused,
+                "node_session_refused": node_refused,
                 "kept_dirty": kept,
                 "kept_uncorroborated": summary.kept_uncorroborated,
                 "dry_run": dry_run,
@@ -1462,6 +1468,9 @@ fn render_reap(summary: &fno_agents::daemon::GcSummary, json_out: bool, dry_run:
         out.push_str(&format!(
             "  harness session kept {id} (cascade refused: {reason})\n"
         ));
+    }
+    for (id, reason) in &summary.node_session_refused {
+        out.push_str(&format!("  kept {id} (node session refused: {reason})\n"));
     }
     for (id, path) in &summary.kept_dirty {
         out.push_str(&format!("  kept {id} (dirty worktree: {path})\n"));
@@ -3344,6 +3353,21 @@ mod tests {
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
         assert_eq!(v["reaped"], json!(["a1"]));
         assert_eq!(v["reaped_backstop"], json!(["b1"]));
+    }
+
+    #[test]
+    fn reap_json_carries_node_session_refusals() {
+        let s = fno_agents::daemon::GcSummary {
+            node_session_refused: vec![("node-1".into(), "read-back failed".into())],
+            ..Default::default()
+        };
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(
+            v["node_session_refused"],
+            json!([{"id": "node-1", "reason": "read-back failed"}])
+        );
+        assert!(render_reap(&s, false, false).contains("node session refused"));
     }
 
     #[test]

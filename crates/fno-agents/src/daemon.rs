@@ -425,6 +425,9 @@ pub struct GcSummary {
     /// REFUSED or failed. Surfaced, never swallowed; the registry reap is not
     /// rolled back for any of them.
     pub cascade_refused: Vec<(String, String)>,
+    /// `(row id, reason)` for every target/reconcile row whose node-session
+    /// cleanup refused or failed. Those rows are restored for a later retry.
+    pub node_session_refused: Vec<(String, String)>,
     /// Past-grace rows kept by the corroboration gate alone: no confirmed-dead
     /// pid, no positively-stale transcript, and a liveness surface still on
     /// record - short of the backstop horizon too (x-9de7 task 5). This is
@@ -1198,6 +1201,99 @@ fn restore_unaccounted_row(home: &AgentsHome, entry: &RegistryEntry) -> Result<(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NodeSessionCascadeReceipt {
+    row_removed: bool,
+    status_before: Option<String>,
+    status_after: Option<String>,
+    remaining_open_do: usize,
+}
+
+fn reap_node_session(
+    entry: &state::RegistryEntry,
+    node_id: &str,
+    harness: &str,
+    session_id: &str,
+) -> Result<NodeSessionCascadeReceipt, String> {
+    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    use std::io::Read;
+    let mut child = std::process::Command::new(&fno)
+        .current_dir(&entry.cwd)
+        .args([
+            "backlog",
+            "session",
+            "reap-open",
+            node_id,
+            "--harness",
+            harness,
+            "--session-id",
+            session_id,
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn node session reap: {err}"))?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    if let Some(mut stream) = child.stdout.take() {
+        stream
+            .read_to_end(&mut stdout_bytes)
+            .map_err(|err| format!("read node session reap stdout: {err}"))?;
+    }
+    if let Some(mut stream) = child.stderr.take() {
+        stream
+            .read_to_end(&mut stderr_bytes)
+            .map_err(|err| format!("read node session reap stderr: {err}"))?;
+    }
+    let exit = child
+        .wait()
+        .map_err(|err| format!("wait for node session reap: {err}"))?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    if !exit.success() {
+        return Err(format!(
+            "node session reap exited with code {:?}: {}{}",
+            exit.code(),
+            stdout.trim(),
+            if stderr.trim().is_empty() {
+                String::new()
+            } else {
+                format!("; stderr: {}", stderr.trim())
+            }
+        ));
+    }
+    let payload: Value = serde_json::from_str(stdout.trim())
+        .map_err(|err| format!("node session reap returned invalid JSON: {err}"))?;
+    if payload.get("settled") != Some(&Value::Bool(true)) {
+        return Err("node session reap returned no positive settled marker".into());
+    }
+    let row_removed = payload
+        .get("row_removed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "node session reap omitted row_removed".to_string())?;
+    let status_before = payload
+        .get("status_before")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let status_after = payload
+        .get("status_after")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let remaining_open_do = payload
+        .get("remaining_open_do")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "node session reap omitted remaining_open_do".to_string())?
+        .try_into()
+        .map_err(|_| "node session reap remaining_open_do overflowed usize".to_string())?;
+    Ok(NodeSessionCascadeReceipt {
+        row_removed,
+        status_before,
+        status_after,
+        remaining_open_do,
+    })
+}
+
 /// Dead-row garbage collection sweep (x-b1aa). Removes terminal, past-grace,
 /// clean agent-view rows from the registry so finished rows stop accumulating
 /// "like browser tabs." Shared by the daemon idle tick (the automatic path) and
@@ -1223,13 +1319,14 @@ pub fn gc_sweep(
 ) -> GcSummary {
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    gc_sweep_impl(
+    gc_sweep_impl_with_node_cascade(
         home,
         emitter,
         grace_for_harness,
         false,
         &live_truth_tail_state,
         &|e| store.borrow_mut().matches(e),
+        Some(&|e, node_id, harness, session_id| reap_node_session(e, node_id, harness, session_id)),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
 }
@@ -1250,13 +1347,14 @@ pub fn gc_sweep_dry_run(
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(HarnessStoreIndex::default());
     let cascade_store = std::cell::RefCell::new(HarnessStoreIndex::default());
-    gc_sweep_impl(
+    gc_sweep_impl_with_node_cascade(
         home,
         &emitter,
         grace_for_harness,
         true,
         &live_truth_tail_state,
         &|e| store.borrow_mut().matches(e),
+        None,
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
     )
 }
@@ -1269,7 +1367,29 @@ fn live_truth_tail_state(handle: &str) -> Option<String> {
     crate::claude_ask::family1_truth_probe(handle).map(|p| p.state)
 }
 
+#[allow(dead_code)]
 fn gc_sweep_impl(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    grace_for_harness: &dyn Fn(&str) -> Duration,
+    dry_run: bool,
+    truth_tail_state: &dyn Fn(&str) -> Option<String>,
+    store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
+) -> GcSummary {
+    gc_sweep_impl_with_node_cascade(
+        home,
+        emitter,
+        grace_for_harness,
+        dry_run,
+        truth_tail_state,
+        store_matches,
+        None,
+        cascade,
+    )
+}
+
+fn gc_sweep_impl_with_node_cascade(
     home: &AgentsHome,
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
@@ -1279,6 +1399,16 @@ fn gc_sweep_impl(
     // store holds for its session id), injected so a sweep-level test never
     // depends on what lives in the developer's real ~/.claude / ~/.codex.
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+    // Node-session cleanup is separate from the harness-store cascade: failure
+    // restores the registry row and skips every later cascade.
+    node_cascade: Option<
+        &dyn Fn(
+            &state::RegistryEntry,
+            &str,
+            &str,
+            &str,
+        ) -> Result<NodeSessionCascadeReceipt, String>,
+    >,
     // The post-reap harness-store cascade, injected for the same reason: a
     // test must be able to stage a refusal without mutating PATH/HOME.
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
@@ -1619,6 +1749,84 @@ fn gc_sweep_impl(
                     if !accounted {
                         continue;
                     }
+                    let row_id = if e.short_id.is_empty() {
+                        e.name.clone()
+                    } else {
+                        e.short_id.clone()
+                    };
+                    let node_session = if let (Some(node_id), Some(node_cascade)) =
+                        (node_id.as_deref(), node_cascade)
+                    {
+                        let harness = e.harness_name();
+                        let Some(session_id) = e
+                            .harness_session_id
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                        else {
+                            let reason = "missing harness session identity".to_string();
+                            let detail = match restore_unaccounted_row(home, e) {
+                                Ok(()) => reason,
+                                Err(err) => format!("{reason}; restore failed: {err}"),
+                            };
+                            summary
+                                .node_session_refused
+                                .push((row_id.clone(), detail.clone()));
+                            let _ = emitter.emit(
+                                "daemon_recovery_error",
+                                &json!({
+                                    "op": "node_session_refused",
+                                    "short_id": e.short_id,
+                                    "node_id": node_id,
+                                    "error": detail,
+                                }),
+                            );
+                            continue;
+                        };
+                        if harness.is_empty() {
+                            let reason = "missing harness identity".to_string();
+                            let detail = match restore_unaccounted_row(home, e) {
+                                Ok(()) => reason,
+                                Err(err) => format!("{reason}; restore failed: {err}"),
+                            };
+                            summary
+                                .node_session_refused
+                                .push((row_id.clone(), detail.clone()));
+                            let _ = emitter.emit(
+                                "daemon_recovery_error",
+                                &json!({
+                                    "op": "node_session_refused",
+                                    "short_id": e.short_id,
+                                    "node_id": node_id,
+                                    "error": detail,
+                                }),
+                            );
+                            continue;
+                        }
+                        match node_cascade(e, node_id, harness, session_id) {
+                            Ok(receipt) => Some(receipt),
+                            Err(reason) => {
+                                let detail = match restore_unaccounted_row(home, e) {
+                                    Ok(()) => reason,
+                                    Err(err) => format!("{reason}; restore failed: {err}"),
+                                };
+                                summary
+                                    .node_session_refused
+                                    .push((row_id.clone(), detail.clone()));
+                                let _ = emitter.emit(
+                                    "daemon_recovery_error",
+                                    &json!({
+                                        "op": "node_session_refused",
+                                        "short_id": e.short_id,
+                                        "node_id": node_id,
+                                        "error": detail,
+                                    }),
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     // CASCADE (AC6): two stores, act on both, report both.
                     // Deferred until AFTER dispatch accounting confirms this
                     // row - cascading first and failing accounting second
@@ -1665,6 +1873,35 @@ fn gc_sweep_impl(
                                 e.harness_session_id
                                     .clone()
                                     .map_or(Value::Null, Value::String),
+                            ),
+                            ("node_session_cleared", Value::Bool(node_session.is_some())),
+                            (
+                                "node_row_removed",
+                                node_session
+                                    .as_ref()
+                                    .map(|receipt| Value::Bool(receipt.row_removed))
+                                    .unwrap_or(Value::Null),
+                            ),
+                            (
+                                "node_status_before",
+                                node_session
+                                    .as_ref()
+                                    .and_then(|receipt| receipt.status_before.clone())
+                                    .map_or(Value::Null, Value::String),
+                            ),
+                            (
+                                "node_status_after",
+                                node_session
+                                    .as_ref()
+                                    .and_then(|receipt| receipt.status_after.clone())
+                                    .map_or(Value::Null, Value::String),
+                            ),
+                            (
+                                "node_remaining_open_do",
+                                node_session
+                                    .as_ref()
+                                    .map(|receipt| Value::from(receipt.remaining_open_do))
+                                    .unwrap_or(Value::Null),
                             ),
                             // A dormant reap is a finished turn, not a death:
                             // the resumable handle (harness + session id above)
@@ -8724,6 +8961,108 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         );
     }
 
+    #[test]
+    fn gc_sweep_node_session_clears_before_emitting_reap() {
+        let home = tmp_home("gc-node-session-success");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("target-x-292e-worker", Some(exited_at.as_str()));
+            e.short_id = "node-success".into();
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("codex-session-292e".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl_with_node_cascade(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| Some(Vec::new()),
+            Some(&|entry, node_id, harness, session_id| {
+                assert_eq!(entry.name, "target-x-292e-worker");
+                assert_eq!(
+                    (node_id, harness, session_id),
+                    ("x-292e", "codex", "codex-session-292e")
+                );
+                Ok(NodeSessionCascadeReceipt {
+                    row_removed: true,
+                    status_before: Some("in_progress".into()),
+                    status_after: Some("ready".into()),
+                    remaining_open_do: 0,
+                })
+            }),
+            &|_| None,
+        );
+
+        assert_eq!(summary.reaped, vec!["node-success".to_string()]);
+        assert!(summary.node_session_refused.is_empty());
+        let events = read_events(&home);
+        let reap = events
+            .iter()
+            .find(|event| event.get("type").and_then(Value::as_str) == Some("agent_row_reaped"))
+            .expect("positive reap event");
+        assert_eq!(reap["data"]["node_session_cleared"], true);
+        assert_eq!(reap["data"]["node_row_removed"], true);
+        assert_eq!(reap["data"]["node_status_after"], "ready");
+        assert_eq!(reap["data"]["node_remaining_open_do"], 0);
+    }
+
+    #[test]
+    fn gc_sweep_node_session_refusal_restores_registry() {
+        let home = tmp_home("gc-node-session-refused");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("target-x-292e-refuse", Some(exited_at.as_str()));
+            e.short_id = "node-refused".into();
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("codex-session-refused".into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl_with_node_cascade(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|_| None,
+            &|_| Some(Vec::new()),
+            Some(&|_, _, _, _| Err("node read-back failed".into())),
+            &|_| panic!("harness cascade must be skipped after node refusal"),
+        );
+
+        assert!(summary.reaped.is_empty());
+        assert_eq!(
+            summary.node_session_refused,
+            vec![("node-refused".into(), "node read-back failed".into())]
+        );
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(reg.entries.iter().any(|e| e.name == "target-x-292e-refuse"));
+        let events = read_events(&home);
+        assert!(events.iter().all(|event| {
+            event.get("type").and_then(Value::as_str) != Some("agent_row_reaped")
+        }));
+        assert!(events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("daemon_recovery_error")
+                && event["data"]["op"] == "node_session_refused"
+        }));
+    }
+
     /// AC4 end-to-end: an Orphaned row earns an exit stamp on first sight and
     /// reaps once past grace with corroboration - the immortal-row mechanism.
     #[test]
@@ -9150,7 +9489,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         )
         .unwrap();
 
-        let summary = gc_sweep(&home, &emitter, &|_| Duration::from_secs(0));
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(0),
+            false,
+            &live_truth_tail_state,
+            &|_| None,
+            &|_| None,
+        );
         assert_eq!(summary.reaped.len(), 2);
 
         let reaps = read_events(&home);

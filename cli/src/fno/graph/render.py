@@ -17,7 +17,6 @@ from fno.graph._intake import (
     make_effective_priority,
     make_selection_sort_key,
 )
-from fno.graph.statuses import live_claimed_node_ids
 
 # Canonical Kanban column order, left to right. Single source of truth for both
 # renderers: render_graph_md (below) and render_html.COLUMNS import this, so the
@@ -57,18 +56,16 @@ def in_progress_epic_ids(
     entries: list[dict],
     live_claimed: Collection[str] = frozenset(),
 ) -> frozenset[str]:
-    """Parent ids whose work is underway: an epic with a done or claimed child.
+    """Parent ids whose work is underway: an epic with a done child.
 
     Sessions claim the leaf CHILDREN of an epic, never the container, so an
     in-progress epic carries no claim/session of its own and would otherwise sit
-    in its priority column. The board surfaces it in Now by id, derived purely
-    from its children - the epic's own ``status`` is never mutated, so the
-    ``claimed => session_id`` invariant holds (x-33b2). Mirrors the epics-first
-    in-progress signal in ``_intake.make_selection_sort_key``.
+    in its priority column. The board surfaces it in Now by id, derived from
+    the stored child status and completion fields.
     """
     from fno.graph._intake import in_progress_epic_ids as _shared_epic_ids
 
-    return _shared_epic_ids(entries, live_claimed)
+    return _shared_epic_ids(entries)
 
 
 def _kanban_column(
@@ -111,15 +108,6 @@ def _kanban_column(
     # epic's `status` stays honest (never a claim without a session_id).
     if isinstance(entry_id, str) and entry_id in in_progress_epics:
         return "Now"
-    # Live-claim overlay (x-4845): a node another session is actively driving
-    # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
-    # so its `status` is not "in_progress" and it would otherwise route by bare
-    # priority. Surface it in Now off the lockfile truth. Display-only — the
-    # graph `status` is never mutated (x-33b2: claimed => session_id stays a
-    # pure derivation). Additive: placed below the exclusions so a dead/off-board
-    # node is never resurrected, and it only ever promotes to Now.
-    if isinstance(entry_id, str) and entry_id in live_claimed:
-        return "Now"
     # Queued is orthogonal to status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
     # human ack" (via `fno backlog pick`), not active work, so it must NOT
@@ -142,11 +130,8 @@ def make_kanban_column(
     strict_claims: bool = False,
 ):
     """Bind whole-graph overlays into the sole kanban column authority."""
-    if live_claimed is None:
-        live_claimed = frozenset(live_claimed_node_ids(strict=strict_claims))
-    else:
-        live_claimed = frozenset(live_claimed)
-    in_progress_epics = in_progress_epic_ids(entries, live_claimed)
+    live_claimed = frozenset()
+    in_progress_epics = in_progress_epic_ids(entries)
     priority_for = make_effective_priority(entries)
 
     def column_for(entry: dict) -> str | None:
@@ -168,10 +153,7 @@ def make_kanban_classifiers(
     live_claimed: Collection[str] | None = None,
 ):
     """Bind one live-claim snapshot into board ordering and column routing."""
-    if live_claimed is None:
-        live_claimed = frozenset(live_claimed_node_ids())
-    else:
-        live_claimed = frozenset(live_claimed)
+    live_claimed = frozenset()
     board_order = make_selection_sort_key(
         entries,
         orphans,

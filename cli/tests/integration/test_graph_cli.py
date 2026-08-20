@@ -67,6 +67,37 @@ def _read_graph(g: Path) -> list[dict]:
     return json.loads(g.read_text()).get("entries", [])
 
 
+def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
+    """AC3: observer reap removes the exact open row and reads it back."""
+    tmp_graph.write_text(json.dumps({
+        "entries": [{
+            "id": "x-reap0001",
+            "title": "Reap me",
+            "sessions": [{
+                "phase": "do",
+                "harness": "codex",
+                "session_id": "dead-session",
+                "started_at": "2026-08-20T00:00:00Z",
+            }],
+        }]
+    }) + "\n")
+
+    result = _invoke(
+        "backlog", "session", "reap-open", "x-reap0001",
+        "--harness", "codex", "--session-id", "dead-session", "--json",
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["settled"] is True
+    assert receipt["row_removed"] is True
+    assert receipt["status_after"] == "idea"
+    assert receipt["remaining_open_do"] == 0
+    saved = _read_graph(tmp_graph)[0]
+    assert saved["sessions"] == []
+    assert saved["status"] == "idea"
+
+
 # --- x-30f6: ambient provenance stamp at node birth ---
 
 def test_ac_hp_idea_stamps_ambient_session(tmp_graph, tmp_path, monkeypatch):

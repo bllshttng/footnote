@@ -279,15 +279,12 @@ def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
 
 
 def test_roadmap_uses_live_epic_priority_and_shared_order(
-    tmp_graph, tmp_path, monkeypatch
+    tmp_graph, tmp_path
 ):
-    import fno.graph.render as render
-
-    monkeypatch.setattr(render, "live_claimed_node_ids", lambda: {"ab-claimed1"})
     _seed(tmp_graph, [
         {"id": "ab-live0001", "title": "Live epic", "type": "epic",
          "status": "ready", "priority": "p1", "project": "fno"},
-        {"id": "ab-child001", "title": "Promoted child", "status": "ready",
+        {"id": "ab-child001", "title": "Promoted child", "status": "in_progress",
          "priority": "p2", "project": "fno", "public": True,
          "parent": "ab-live0001"},
         {"id": "ab-loose001", "title": "Loose now", "status": "ready",
@@ -302,7 +299,7 @@ def test_roadmap_uses_live_epic_priority_and_shared_order(
         {"id": "ab-done001", "title": "Done child", "status": "done",
          "priority": "p2", "project": "fno", "parent": "ab-active01",
          "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-claimed1", "title": "Claimed later", "status": "ready",
+        {"id": "ab-claimed1", "title": "Claimed later", "status": "in_progress",
          "priority": "p3", "project": "fno", "public": True},
     ])
 

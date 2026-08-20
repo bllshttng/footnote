@@ -5649,6 +5649,74 @@ def cmd_session_add(
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
 
 
+@session_app.command("reap-open")
+def cmd_session_reap_open(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex."),
+    harness: str = typer.Option(..., "--harness", help="Harness owning the dead session."),
+    session_id: str = typer.Option(..., "--session-id", help="Dead harness session id."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
+) -> None:
+    """Reap one exact open do row after the observer proves session death."""
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.statuses import is_open_do_row
+    from fno.graph.store import reap_open_session_record, read_graph
+
+    entries = read_graph(_graph_path())
+    match = resolve_node(node, entries)
+    if match.kind != "exact":
+        typer.echo(f"session reap-open: no exact node matches {node!r}.", err=True)
+        raise typer.Exit(code=2)
+    node_id = match.candidates[0]["id"]
+    try:
+        receipt = reap_open_session_record(
+            _graph_path(), node_id, phase="do", harness=harness, session_id=session_id
+        )
+    except (ValueError, OSError, RuntimeError) as exc:
+        typer.echo(f"session reap-open: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    reread = read_graph(_graph_path())
+    rebound = next((entry for entry in reread if entry.get("id") == node_id), None)
+    if rebound is None:
+        typer.echo(f"session reap-open: node {node_id} disappeared on read-back.", err=True)
+        raise typer.Exit(code=1)
+    rows = rebound.get("sessions") or []
+    matching_open = any(
+        is_open_do_row(row)
+        and (row.get("harness"), row.get("session_id")) == (harness.strip(), session_id.strip())
+        for row in rows
+    )
+    remaining = sum(is_open_do_row(row) for row in rows)
+    higher_precedence = any(
+        rebound.get(field)
+        for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
+    ) or rebound.get("status") == "blocked"
+    expected_in_progress = bool(rebound.get("locked_by")) or remaining > 0
+    status_ok = higher_precedence or ((rebound.get("status") == "in_progress") == expected_in_progress)
+    if matching_open or not status_ok:
+        typer.echo(
+            f"session reap-open: read-back did not settle {node_id} "
+            f"(matching_open={matching_open}, status={rebound.get('status')!r}, "
+            f"remaining_open_do={remaining}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    receipt.update({
+        "node_id": node_id,
+        "settled": True,
+        "status_after": rebound.get("status"),
+        "remaining_open_do": remaining,
+    })
+    if json_out:
+        typer.echo(json.dumps(receipt, sort_keys=True))
+    else:
+        typer.echo(
+            f"settled {node_id}: row_removed={receipt['row_removed']} "
+            f"status={receipt['status_after']} remaining_open_do={remaining}"
+        )
+
+
 cli.add_typer(session_app, name="session", hidden=True)
 
 
@@ -12295,7 +12363,8 @@ _TRACKER_OWNED_VERBS = frozenset({
     "dispatch-lanes",
     # footnote-owned DATA with a graph-resident write path (refused until the
     # write moves to the sidecar seam)
-    "cost", "session add", "decide", "decisions", "decide-reindex",
+    "cost", "session add", "session reap-open", "decide", "decisions",
+    "decide-reindex",
     # sub-app mutations
     "triage apply", "capture promote",
     "batch join", "batch prepare", "batch ship", "batch ship-closeable",

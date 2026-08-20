@@ -180,17 +180,14 @@ def test_in_progress_epic_ids_detects_done_or_claimed_child():
     assert ids == frozenset({"ab-epic0001", "ab-epic0002"})
 
 
-def test_live_claimed_child_promotes_parent_epic_to_now(monkeypatch):
+def test_live_claimed_child_does_not_promote_parent_epic_to_now():
     epic = _entry("ab-epic0004", type="epic", priority="p3")
     child = _entry("ab-kid00004", parent=epic["id"], priority="p3")
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {child["id"]}
-    )
 
-    column_for = make_kanban_column([epic, child])
+    column_for = make_kanban_column([epic, child], {child["id"]})
 
-    assert column_for(epic) == "Now"
-    assert column_for(child) == "Now"
+    assert column_for(epic) == "Later"
+    assert column_for(child) == "Later"
     assert epic["status"] == "ready"
 
 
@@ -584,12 +581,11 @@ def test_ac1_hp_render_done_cap_at_10(tmp_path):
 
 # -- x-4845: live node-claim overlay --
 
-def test_overlay_live_claim_routes_to_now():
-    """AC: a node with a LIVE node:<id> claim and no session_id (so status is
-    not 'claimed') routes to Now off the lockfile, not by bare priority."""
+def test_overlay_live_claim_does_not_route_to_now():
+    """AC6: a live claim without an open do row does not invent display state."""
     e = _entry("x-aaaa", priority="p3")  # p3 would be Later without the overlay
     assert _kanban_column(e) == "Later"
-    assert _kanban_column(e, frozenset(), frozenset({"x-aaaa"})) == "Now"
+    assert _kanban_column(e, frozenset(), frozenset({"x-aaaa"})) == "Later"
 
 
 def test_overlay_absent_for_unclaimed_node():
@@ -616,27 +612,19 @@ def test_overlay_does_not_resurrect_offboard():
         assert _kanban_column(e, frozenset(), frozenset({"x-dddd"})) is None
 
 
-def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
-    """AC: claims subsystem unreadable -> the helper returns an empty overlay
-    (it swallows faults), so render still succeeds with status-only placement."""
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
-    )
+def test_render_does_not_need_claims_for_status_placement(tmp_path):
+    """Markdown rendering succeeds from stored status without claim reads."""
     entries = [_entry("x-eeee", priority="p2")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
     assert output.exists()
 
 
-def test_render_md_places_live_claimed_in_now(tmp_path, monkeypatch):
-    """End-to-end: render_graph_md consults live_claimed_node_ids and places the
-    claimed node under the Now column even though its priority is p3."""
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {"x-ffff"}
-    )
+def test_render_md_does_not_place_live_claimed_in_now(tmp_path):
+    """AC6: markdown rendering consumes stored status, not claim liveness."""
     entries = [_entry("x-ffff", title="LiveNode", priority="p3")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
     content = output.read_text()
-    now_section = content.split("## Next")[0]  # everything before Next col
-    assert "LiveNode" in now_section
+    later_section = content.split("## Later")[1].split("## Triage")[0]
+    assert "LiveNode" in later_section

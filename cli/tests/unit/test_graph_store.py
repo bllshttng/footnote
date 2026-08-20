@@ -16,6 +16,7 @@ from fno.graph.store import (
     GraphCorruptError,
     _acquire_flock,
     _apply_graph_defaults,
+    append_session_record,
     _read_json,
     _release_flock,
     _write_json,
@@ -422,3 +423,150 @@ def test_legacy_underscore_status_key_migrates_on_read(tmp_path):
     assert "_status" not in entry
     # STATUS_MIGRATION still applies after the key fold.
     assert entry["status"] == "in_progress"
+
+
+def _ready_plan_entry(tmp_path: Path, node_id: str = "ab-open0001") -> tuple[Path, dict]:
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n", encoding="utf-8")
+    return plan, {
+        "id": node_id,
+        "cwd": str(tmp_path),
+        "plan_path": plan.name,
+        "sessions": [],
+    }
+
+
+def test_open_do_row_persists_in_progress_and_closed_row_demotes(tmp_path):
+    """AC1/AC2: the open do row is the stored progress projection."""
+    _plan, entry = _ready_plan_entry(tmp_path)
+    path = _make_graph(tmp_path, [entry])
+
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        started_at="2026-08-20T00:00:00Z",
+    )
+    assert (found, added) == (True, True)
+    saved = json.loads(path.read_text())["entries"][0]
+    assert saved["status"] == "in_progress"
+
+    found, added = append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-open",
+        ended_at="2026-08-20T00:01:00Z",
+    )
+    assert (found, added) == (True, False)
+    saved = json.loads(path.read_text())["entries"][0]
+    assert saved["status"] == "ready"
+    assert saved["sessions"][0]["ended_at"] == "2026-08-20T00:01:00Z"
+
+
+def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
+    """AC4: reaping/closing one concurrent session keeps progress stored."""
+    _plan, entry = _ready_plan_entry(tmp_path, "ab-open0002")
+    path = _make_graph(tmp_path, [entry])
+    for session_id in ("session-one", "session-two"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id=session_id,
+            started_at="2026-08-20T00:00:00Z",
+        )
+
+    append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-one",
+        ended_at="2026-08-20T00:01:00Z",
+    )
+    assert json.loads(path.read_text())["entries"][0]["status"] == "in_progress"
+
+    append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="session-two",
+        ended_at="2026-08-20T00:02:00Z",
+    )
+    assert json.loads(path.read_text())["entries"][0]["status"] == "ready"
+
+
+def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path):
+    """AC3/AC4: observer reaping removes one exact open row and settles status."""
+    _plan, entry = _ready_plan_entry(tmp_path, "ab-reap0001")
+    path = _make_graph(tmp_path, [entry])
+    for session_id in ("dead-session", "live-session"):
+        append_session_record(
+            path,
+            entry["id"],
+            phase="do",
+            harness="codex",
+            session_id=session_id,
+            started_at="2026-08-20T00:00:00Z",
+        )
+
+    from fno.graph import store as graph_store
+
+    reap_open_session_record = getattr(graph_store, "reap_open_session_record", None)
+    assert callable(reap_open_session_record)
+    result = reap_open_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="dead-session",
+    )
+
+    assert result == {
+        "found": True,
+        "settled": True,
+        "row_removed": True,
+        "status_before": "in_progress",
+        "status_after": "in_progress",
+        "remaining_open_do": 1,
+    }
+    rows = json.loads(path.read_text())["entries"][0]["sessions"]
+    assert [(r["harness"], r["session_id"]) for r in rows] == [("codex", "live-session")]
+
+
+def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):
+    """AC3: observer reap is idempotent and preserves closed provenance."""
+    _plan, entry = _ready_plan_entry(tmp_path, "ab-reap0002")
+    path = _make_graph(tmp_path, [entry])
+    append_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="closed-session",
+        started_at="2026-08-20T00:00:00Z",
+        ended_at="2026-08-20T00:01:00Z",
+    )
+
+    from fno.graph import store as graph_store
+
+    reap_open_session_record = getattr(graph_store, "reap_open_session_record", None)
+    assert callable(reap_open_session_record)
+    result = reap_open_session_record(
+        path,
+        entry["id"],
+        phase="do",
+        harness="codex",
+        session_id="closed-session",
+    )
+
+    assert result["settled"] is True
+    assert result["row_removed"] is False
+    assert result["remaining_open_do"] == 0
+    assert json.loads(path.read_text())["entries"][0]["sessions"][0]["ended_at"]

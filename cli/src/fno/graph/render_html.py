@@ -21,7 +21,6 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-import fno.graph.render as graph_render
 from fno.graph.render import (
     KANBAN_COLUMNS,
     UNSCOPED_LABEL,
@@ -735,8 +734,6 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     statuses, projects = _stats(entries)
     vault = _load_obsidian_vault()
     caps = _load_wip_caps()
-    live_claimed = frozenset(graph_render.live_claimed_node_ids())
-
     parts: list[str] = []
     parts.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">")
     parts.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
@@ -759,7 +756,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     parts.append('<label class="toggle"><input type="checkbox" id="show-done"> Show done</label>')
     parts.append("</header>")
 
-    master = _bucket(entries, live_claimed=live_claimed)
+    master = _bucket(entries)
     master_total = sum(len(items) for items in master.values())
     parts.append(
         f'<details class="board-section" id="master" open>'
@@ -783,7 +780,6 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
             proj_entries,
             all_orphans,
             ordering_entries=entries,
-            live_claimed=live_claimed,
         )
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (

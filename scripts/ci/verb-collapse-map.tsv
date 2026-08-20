@@ -111,6 +111,7 @@ backlog reopen	T1	backlog reopen	3
 backlog reprioritize	T1	backlog reprioritize	1
 backlog roadmap	T1	backlog roadmap	1
 backlog session add	T1	backlog session add	4
+backlog session reap-open	T1	backlog session reap-open	3
 backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10
 backlog triage apply	T1	backlog triage apply	3

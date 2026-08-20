@@ -295,21 +295,33 @@ def test_maintain_wip_count_matches_in_progress_epic_overlay(
     assert json.loads(result.output)["now_overflow"] == [2, 1]
 
 
-def test_maintain_wip_count_matches_live_claim_overlay(
-    tmp_graph, monkeypatch
-):
-    import fno.graph.render as render
+def test_maintain_wip_count_matches_stored_progress(tmp_graph, monkeypatch):
     import fno.graph.render_html as render_html
 
     monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
-    monkeypatch.setattr(
-        render,
-        "live_claimed_node_ids",
-        lambda **_kwargs: {"ab-claim01", "ab-claim02"},
-    )
     _seed(tmp_graph, [
-        _node("ab-claim01", status="ready", priority="p3"),
-        _node("ab-claim02", status="ready", priority="p3"),
+        _node(
+            "ab-claim01",
+            status="in_progress",
+            priority="p3",
+            sessions=[{
+                "phase": "do",
+                "harness": "codex",
+                "session_id": "session-claim01",
+                "started_at": "2026-08-20T00:00:00Z",
+            }],
+        ),
+        _node(
+            "ab-claim02",
+            status="in_progress",
+            priority="p3",
+            sessions=[{
+                "phase": "do",
+                "harness": "codex",
+                "session_id": "session-claim02",
+                "started_at": "2026-08-20T00:00:00Z",
+            }],
+        ),
     ])
 
     result = _invoke(["--json"])
