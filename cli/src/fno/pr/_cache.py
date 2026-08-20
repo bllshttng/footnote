@@ -26,6 +26,7 @@ from __future__ import annotations
 import fcntl
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -110,17 +111,25 @@ def _write_row_locked(p: Path, row: dict) -> None:
 
 
 def _num(row: dict, key: str) -> float:
-    """A numeric row field, 0.0 when absent or unparseable.
+    """A numeric row field, 0.0 when absent, unparseable, or NOT FINITE.
 
     A row written by a different schema (a concurrent fno install polling the
     same PR) must read as a miss, never crash a caller - the same discipline
     `_serve` already applies to a corrupt exit code. Every numeric read of a
     row goes through here so no one path keeps the raw `float()`.
+
+    The finite check is not belt-and-braces. `json.loads` accepts a bare
+    `NaN` / `Infinity` by default, so a row carrying `"ts": Infinity` parsed
+    cleanly, survived `float()`, and then raised `OverflowError` out of
+    `time.gmtime` - the crash this helper's own docstring promised to stop,
+    on the one path it claimed to cover. A guard that still raises where its
+    stated invariant reaches is decorative.
     """
     try:
-        return float(row.get(key) or 0)
+        v = float(row.get(key) or 0)
     except (TypeError, ValueError):
         return 0.0
+    return v if math.isfinite(v) else 0.0
 
 
 def _serve(row: dict, *, stale: bool) -> int:
@@ -272,6 +281,13 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             # Capture the one JSON line the verb prints so the row holds
             # exactly what a caller saw (verdict, checks, coverage - all of
             # it; partial caching would let a hit serve a mixed row).
+            # The clock the backoff decision uses, read BEFORE the network
+            # call. `run_status` can burn tens of seconds before a
+            # secondary-limit refusal, and the shortest window is 60s, so a
+            # window that expires DURING the read flipped `held` false and let
+            # the refused refresh double the fleet's wait - the exact harm the
+            # comment below refuses.
+            before_read = time.time()
             buf = io.StringIO()
             real_stdout = sys.stdout
             sys.stdout = buf
@@ -297,12 +313,17 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # window to the 900s cap - the very "retry that sustains the
                 # refusal it is waiting out" this module refuses to be.
                 prior_until = _num(row or {}, "backoff_until")
-                held = refresh and prior_until > now
+                held = refresh and prior_until > before_read
                 fails = int(_num(row or {}, "fail_count")) + (0 if held else 1)
+                # Held: the window is written back VERBATIM, never
+                # recomputed as `now + remaining`. The old form leaned on
+                # `now + (prior_until - now)` cancelling exactly, and that
+                # identity died the moment `held` moved to the pre-read
+                # clock: a read spanning the expiry then pushed the window
+                # PAST where it stood, extending the fleet's wait by the
+                # duration of the read.
                 backoff = (
-                    prior_until - now
-                    if held
-                    else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                    None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
                 )
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
@@ -321,7 +342,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                         "exit": (row or {}).get("exit") if had_prior else 4,
                         "output": (row or {}).get("output") if had_prior else output,
                         "fail_count": fails,
-                        "backoff_until": now + backoff,
+                        "backoff_until": prior_until if backoff is None else now + backoff,
                     },
                 )
                 return code

@@ -525,3 +525,78 @@ def test_a_known_flag_still_parses_to_the_pr_number(cache_env, monkeypatch, caps
     assert _status.main(["--refresh", "42"]) == 0
     capsys.readouterr()
     assert calls["n"] == 2, "both spellings must bypass the row"
+
+
+def test_a_non_finite_row_number_reads_as_a_miss_not_a_crash(cache_env, monkeypatch, capsys):
+    """`json.loads` accepts a bare `Infinity`, and `float()` happily keeps it.
+
+    So a foreign-schema row parsed clean, survived the guard, and then raised
+    `OverflowError` out of `time.gmtime` - the crash `_num`'s own docstring
+    promised to stop, on the path it claimed to cover. A guard that raises
+    where its stated invariant reaches is decorative.
+    """
+    assert _cache._num({"ts": float("inf")}, "ts") == 0.0
+    assert _cache._num({"ts": float("-inf")}, "ts") == 0.0
+    assert _cache._num({"ts": float("nan")}, "ts") == 0.0
+
+    cache_dir, head = cache_env
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Written the way a foreign writer would: bare Infinity, which json
+    # accepts by default on the way back in.
+    _row_path(cache_dir).write_text(
+        '{"ts": Infinity, "exit": 0, "output": {"verdict": "green", "head": "a"}}'
+    )
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    # No traceback: the row is unusable, so the live read decides.
+    assert _cache.cached_status("42") == 0
+    assert calls["n"] == 1
+
+
+def test_a_window_expiring_during_the_read_still_holds_the_refresh(
+    cache_env, monkeypatch, capsys
+):
+    """`held` is decided from the PRE-read clock, never the post-read one.
+
+    `run_status` can burn tens of seconds before a secondary-limit refusal and
+    the shortest window is 60s. Deciding after the read let a window that
+    expired mid-call flip `held` false, so the refused `--refresh` doubled the
+    fleet's wait - the exact harm the comment beside it refuses.
+    """
+    cache_dir, head = cache_env
+    err = (None, "HTTP 403: You have exceeded a secondary rate limit")
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    p = _row_path(cache_dir)
+    row = json.loads(p.read_text())
+    row["ts"] -= 3600
+    p.write_text(json.dumps(row))
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    _cache.cached_status("42")
+    opened = json.loads(p.read_text())
+    assert opened["fail_count"] == 1
+    capsys.readouterr()
+
+    # A CONTROLLED clock, because the real one cannot be made to cross a 60s
+    # window inside a test. Writing the expiry to the row mid-read does not
+    # work either: `prior_until` is read from the in-memory row before the
+    # call, so that version of this test passed against the unfixed code -
+    # a test that cannot fail, which is the defect this file exists to catch.
+    row = json.loads(p.read_text())
+    t0 = row["backoff_until"] - 30  # 30s of window left when the read starts
+    clock = iter([t0, t0, t0 + 120])  # pre-lock, pre-read, post-read
+    last = [t0 + 120]
+
+    def fake_clock():
+        try:
+            last[0] = next(clock)
+        except StopIteration:
+            pass
+        return last[0]
+
+    monkeypatch.setattr(_cache.time, "time", fake_clock)
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    assert _cache.cached_status("42", refresh=True) == 4
+    after = json.loads(p.read_text())
+    assert after["fail_count"] == 1, "a refused refresh must not escalate"
+    assert after["backoff_until"] <= row["backoff_until"], "nor extend the window"
