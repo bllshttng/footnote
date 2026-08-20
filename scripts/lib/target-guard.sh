@@ -109,14 +109,20 @@ target_claim_is_live() {
     # --no-roster for the same reason as the twin above: `state` is all this
     # reads, so the cross-check would be a subprocess bought and thrown away.
     # The unflagged retry covers a DEPLOYED fno that predates the flag and
-    # rejects it. Keyed on empty output, never on the exit code, so the two
-    # calls can never both print and concatenate their JSON.
+    # rejects it. It fires only on non-zero AND empty output, so the two calls
+    # can never both print and concatenate their JSON.
     #
-    # STRICT is unchanged, and it now rests on the case arm rather than on a
-    # bare exit code: an empty or truncated read matches no live/suspect
-    # pattern, falls to `*)`, and returns 1. An incomplete read is not live.
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
-    [ -n "$claim_json" ] || claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    # STRICT, and the exit code still decides. A non-zero exit means the read
+    # did not complete, and a TRUNCATED payload can still carry the bytes
+    # `"state": "live"` - so falling through to the case arm on a failed read
+    # would answer live from a partial one. Only the unknown-flag shape retries:
+    # non-zero AND no output at all.
+    local rc
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null); rc=$?
+    if [ "$rc" -ne 0 ] && [ -z "$claim_json" ]; then
+        claim_json=$(fno claim status "$claim_key" -J 2>/dev/null); rc=$?
+    fi
+    [ "$rc" -eq 0 ] || return 1
     case "$claim_json" in
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;

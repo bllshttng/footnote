@@ -374,10 +374,19 @@ def _spawn_guard_decision(
         # an unwritable claims dir, for one. Raised inside this handler, that
         # escapes past the sibling `except Exception` below as a traceback where
         # the honest answer is the refusal we already have.
-        try:
-            cleared, bucket = _reclaim_if_provably_dead(res_key)
-        except Exception:  # noqa: BLE001 - a failed recovery clears nothing
-            cleared, bucket = None, "unrecoverable"
+        # ONLY when this caller will replace the barrier it removes. Clearing a
+        # dead spawner's reservation is justified by the node claim covering the
+        # window instead, and that claim is taken further down only when a
+        # `handover_holder` was passed. `fno agents spawn-guard` never passes
+        # one, so in its reserving mode this cleared a booting worker's
+        # boot-window reservation and held nothing but a reservation of its own.
+        if handover_holder:
+            try:
+                cleared, bucket = _reclaim_if_provably_dead(res_key)
+            except Exception:  # noqa: BLE001 - a failed recovery clears nothing
+                cleared, bucket = None, "unrecoverable"
+        else:
+            cleared, bucket = None, "no-replacement-barrier"
         reservation_recovered = cleared is not None
         if cleared is None:
             # A live spawner is mid-launch: benign dedup, and naming a
@@ -454,6 +463,19 @@ def _spawn_guard_decision(
                 ttl_ms=_parse_ttl(HANDOVER_TTL),
                 root=claims_root_for(node_key),
             )
+        except CLAIM_UNAVAILABLE as exc:
+            # SOMEBODY ELSE HOLDS THE NODE, and that is not a hiccup. The
+            # reservation above only dedups other DISPATCHERS, so a session that
+            # already claimed this node through its own `fno target init` is
+            # invisible to it. Swallowing this as best-effort put a second
+            # worker on a node a live session was building, which is the whole
+            # failure this PR exists to close.
+            return {
+                "verdict": "already-running",
+                "reason": "live-claim",
+                "holder": getattr(exc, "holder", "") or "unknown",
+                "detail": f"node:{node_id} is held ({exc}); no worker launched",
+            }, 0
         except Exception as exc:  # noqa: BLE001 - visibility is best-effort here
             if reservation_recovered:
                 # The ONE combination where nothing is protecting the launch

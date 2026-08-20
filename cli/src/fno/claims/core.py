@@ -505,11 +505,17 @@ def _rebound_claim(
     holding it still refuses an anchor whose session began AFTER the claim -
     which is the cross-session takeover a re-anchor must never perform.
     """
-    acquired = existing.acquired_at if keep_acquired_at else now_ms()
+    # TWO CLOCKS, and conflating them froze the lease. `acquired` is the record
+    # of when this claim began; the DEADLINE always runs from now. Deriving the
+    # deadline from a held `acquired` made a re-anchoring refresh extend the
+    # claim by zero, and on a short window it wrote a deadline in the PAST, so
+    # the heartbeat drove its own claim from suspect straight to stale.
+    now = now_ms()
+    acquired = existing.acquired_at if keep_acquired_at else now
     if ttl_ms is not None:
-        expires_at: Optional[int] = acquired + ttl_ms
+        expires_at: Optional[int] = now + ttl_ms
     elif existing.expires_at is not None:
-        expires_at = acquired + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
+        expires_at = now + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
     else:
         expires_at = None
     return Claim(

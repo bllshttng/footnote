@@ -70,7 +70,9 @@ def test_allowed_codex_panes_deduplicate_simultaneous_callers(monkeypatch, tmp_p
             trigger="autonomous",
         )
         assert dispatch["substrate"] == "pane"
-        verdict, exit_code = _spawn_guard_decision("N", holder, ttl="3m")
+        verdict, exit_code = _spawn_guard_decision(
+            "N", holder, ttl="3m", handover_holder=f"spawn-handover:t-{holder}"
+        )
         assert exit_code == 0
         return verdict
 
@@ -197,7 +199,12 @@ def test_a_dead_spawners_reservation_blocks_nothing(monkeypatch, tmp_path):
     acquire_claim(
         "dispatch:N", "spawn-cli:99", ttl_ms=180_000, pid=_dead_pid(), root=tmp_path
     )
-    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    # The handover holder is what makes the clear legitimate: this caller
+    # replaces the reservation it removes with the node claim itself. The real
+    # dispatch path (`fno agents spawn --node`) always passes one.
+    verdict, exit_code = _spawn_guard_decision(
+        "N", "spawn-cli:me", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
     assert verdict["verdict"] == "dispatchable", verdict
     assert exit_code == 0
 
@@ -215,7 +222,9 @@ def test_a_live_spawners_reservation_is_benign_dedup_with_no_remedy(
     acquire_claim(
         "dispatch:N", "spawn-cli:other", ttl_ms=180_000, pid=os.getpid(), root=tmp_path
     )
-    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    verdict, exit_code = _spawn_guard_decision(
+        "N", "spawn-cli:me", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
     assert verdict == {"verdict": "already-running", "reason": "reservation-held"}
     assert exit_code == 0
 
@@ -580,3 +589,24 @@ def test_a_no_reserve_probe_performs_no_recovery(monkeypatch, tmp_path):
     verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", no_reserve=True)
     assert verdict["verdict"] == "already-running"
     assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
+
+
+def test_the_bare_guard_verb_never_clears_a_barrier_it_cannot_replace(
+    monkeypatch, tmp_path
+):
+    """`fno agents spawn-guard` takes no handover holder, so it never takes the
+    node claim. Clearing a dead spawner's reservation there removed a booting
+    worker's only barrier and put nothing in its place. The clear is legitimate
+    only for the caller that replaces it."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "dispatch:N", "spawn-cli:99", ttl_ms=180_000, pid=_dead_pid(), root=tmp_path
+    )
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["verdict"] == "already-running"
+    assert verdict["reason"] == "reservation-held"
+    # The positive marker: the reservation is still on disk, holder unchanged.
+    assert claim_status("dispatch:N", root=tmp_path)["holder"] == "spawn-cli:99"
+    assert exit_code == 0

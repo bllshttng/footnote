@@ -148,25 +148,49 @@ class TestRefreshReanchorsADeadPid:
         assert refreshed.pid == os.getpid()
         assert claim_status("node:x-resp", root=tmp_path)["state"] == "live"
 
-    def test_the_anchor_moves_with_the_pid_so_reuse_detection_survives(
-        self, tmp_path, monkeypatch
-    ):
-        """acquired_at MUST be rewritten too. Left stale, the fresh pid reads as
-        recycled (create_time > acquired_at) and the re-anchor fixes nothing."""
-        acquire_claim(
+    def test_the_anchor_is_held_while_the_pid_moves(self, tmp_path, monkeypatch):
+        """acquired_at STAYS. The do provenance row keys started_at on it, so
+        moving it makes the release stamp open a second row instead of closing
+        the one this claim opened. Reuse detection still passes because the
+        anchor process started BEFORE the claim, asserted here by classifying
+        LIVE rather than by reading the field alone."""
+        from fno.claims.core import claim_status
+
+        original = acquire_claim(
             key="node:x-anchor", holder="target-session:s", ttl_ms=3_600_000,
             pid=_dead_pid(), root=tmp_path,
         )
+        assert claim_status("node:x-anchor", root=tmp_path)["state"] == "suspect"
         _anchor(monkeypatch, os.getpid())
         refreshed = refresh_claim(
             key="node:x-anchor", holder="target-session:s", ttl_ms=3_600_000,
             root=tmp_path,
         )
-        started = psutil.Process(os.getpid()).create_time() * 1000
-        assert refreshed.acquired_at > started, (
-            "acquired_at did not move with the pid; reuse detection would read "
-            "the live session's own pid as recycled"
+        assert refreshed.acquired_at == original.acquired_at
+        assert refreshed.pid == os.getpid()
+        assert claim_status("node:x-anchor", root=tmp_path)["state"] == "live"
+
+    def test_a_re_anchoring_refresh_still_extends_the_deadline(
+        self, tmp_path, monkeypatch
+    ):
+        """The deadline runs from NOW, never from the held acquire time. Tying
+        it to `acquired_at` made this refresh extend the lease by zero, and on a
+        short window it wrote a deadline in the PAST - the heartbeat driving its
+        own claim from suspect to stale."""
+        original = acquire_claim(
+            key="node:x-deadline", holder="target-session:s", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
         )
+        _anchor(monkeypatch, os.getpid())
+        refreshed = refresh_claim(
+            key="node:x-deadline", holder="target-session:s", ttl_ms=3_600_000,
+            root=tmp_path,
+        )
+        assert refreshed.acquired_at == original.acquired_at
+        assert refreshed.expires_at > original.expires_at, (
+            "a re-anchoring refresh did not extend the lease"
+        )
+        assert refreshed.expires_at > now_ms()
 
     def test_a_live_anchor_is_never_rewritten(self, tmp_path, monkeypatch):
         """A healthy claim keeps the anchor it was acquired with, so a peer
