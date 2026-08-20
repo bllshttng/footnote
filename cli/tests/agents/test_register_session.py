@@ -59,6 +59,56 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     assert rows[0].status == "idle"
 
 
+def test_registry_registration_separates_harness_and_model_vendor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import register_existing_session
+
+    entry = register_existing_session(
+        harness="codex",
+        provider="openai",
+        model="gpt-5.5",
+        effort="low",
+        session_id="codex-session",
+        cwd="/project",
+    )
+
+    assert entry.harness == "codex"
+    assert entry.provider == "openai"
+    assert entry.model == "gpt-5.5"
+    assert entry.effort == "low"
+
+
+def test_main_passes_harness_and_model_vendor_to_registry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import register_session
+    from fno.agents.registry import AgentEntry
+
+    seen: dict[str, object] = {}
+
+    def fake_register(**kwargs):
+        seen.update(kwargs)
+        return AgentEntry(
+            name="session",
+            harness="claude",
+            provider="anthropic",
+            harness_session_id="session-id",
+            cwd="/project",
+            log_path="",
+        )
+
+    monkeypatch.setattr(register_session, "register_existing_session", fake_register)
+
+    assert register_session.main(
+        ["--harness", "claude", "--session-id", "session-id", "--cwd", "/project"]
+    ) == 0
+    assert seen["harness"] == "claude"
+    assert seen["provider"] == "anthropic"
+
+
 def test_ac7_hp_idempotent_on_resame_session(tmp_path: Path, monkeypatch) -> None:
     """The hook re-firing for the same session refreshes, never duplicates."""
     use_tmpdir(monkeypatch, tmp_path)

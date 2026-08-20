@@ -2601,6 +2601,11 @@ def dispatch_spawn_pane(
         # route tokens or a passthrough `-c`/`--model` flag is a silent
         # last-wins against the route's own setting.
         pane_passthrough_tokens(passthrough, codex_route.config_args)
+    from fno.agents.spawn_defaults import resolve_lane_vendor
+
+    resolved_lane_provider = route_provider or resolve_lane_vendor(
+        argv, env=os.environ, harness=provider
+    )
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
@@ -3183,7 +3188,9 @@ def dispatch_spawn_pane(
                 AgentEntry(
                     name=name,
                     harness=provider,
-                    provider=route_provider,
+                    provider=resolved_lane_provider,
+                    model=model,
+                    effort=effort,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
                     # a concurrent reconcile cannot land one without the other

@@ -1150,6 +1150,19 @@ def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
         assert argv[argv.index("--model") + 1] == _PER_HARNESS_DEFAULT_MODEL["opencode"]
 
 
+def test_ac1_hp_unrouted_codex_pane_stamps_model_vendor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unrouted Codex pane records its model vendor, not its harness."""
+    _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS)
+
+    from fno.agents.registry import load_registry
+
+    row = load_registry()[0]
+    assert row.harness == "codex"
+    assert row.provider == "openai"
+
+
 def test_opencode_default_is_a_table_lookup(tmp_path: Path, monkeypatch) -> None:
     # AC7-EDGE: opencode's default reads from the provider-keyed table, not a
     # hardcoded branch. Retargeting the entry retargets the injected argv;

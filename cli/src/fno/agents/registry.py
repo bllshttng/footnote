@@ -235,6 +235,8 @@ class AgentEntry:
     # back-fills both from a legacy row's ``provider`` / per-provider keys on read.
     harness: str
     provider: Optional[str] = None
+    model: Optional[str] = None
+    effort: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     status: AgentStatus = "live"
     last_message_at: Optional[str] = None
@@ -1284,15 +1286,18 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
 
 def register_existing_session(
     *,
-    provider: str,
     session_id: str,
     cwd: str,
+    harness: Optional[str] = None,
+    provider: Optional[str] = None,
     name: Optional[str] = None,
     log_path: str = "",
     short_id: str = "",
     status: Optional[AgentStatus] = None,
     origin: Optional[str] = None,
     delivery_policy: Optional[str] = None,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -1303,7 +1308,7 @@ def register_existing_session(
     to the row's name; with no live transport the send demotes to the
     durable queue, which the session's own inbox-wake hook surfaces (US7).
 
-    Idempotent on ``(provider, session_id)``: re-registering the same
+    Idempotent on ``(harness, session_id)``: re-registering the same
     session (the hook re-fires after a resume/compaction) refreshes the
     row in place rather than appending a duplicate. A genuinely new session
     whose generated canonical handle names the SAME session as another row is
@@ -1317,17 +1322,18 @@ def register_existing_session(
     (``register_session.main``) fails open and emits a warning event
     (AC7-ERR), so a locked/unwritable registry never blocks session start.
     """
-    # Re-keyed on the shared harness mapping (x-8dfc); the parameter is still
-    # the caller's provider (== harness on every current row), so the message
-    # names what was passed.
-    if provider not in HARNESS_SESSION_ID_FIELDS:
+    # ``provider`` was the old spelling for the harness. Keep that call shape
+    # working, but when both axes are supplied treat it as the model vendor.
+    if harness is None and provider in HARNESS_SESSION_ID_FIELDS:
+        harness, provider = provider, None
+    if harness not in HARNESS_SESSION_ID_FIELDS:
         raise ValueError(
-            f"unknown provider for registration: {provider!r}; "
+            f"unknown provider for registration: {harness or provider!r}; "
             f"known: {sorted(HARNESS_SESSION_ID_FIELDS)}"
         )
     if not session_id:
         raise ValueError("session_id must be non-empty")
-    session_field = HARNESS_SESSION_ID_FIELDS[provider]
+    session_field = HARNESS_SESSION_ID_FIELDS[harness]
 
     # A hand-started session has NO live messaging transport (no daemon PTY,
     # no bg jobId/socket): a peer cannot inject into it. Registering it "live"
@@ -1375,7 +1381,7 @@ def register_existing_session(
             # Keyed on harness_session_id, the canonical id every row carries --
             # `session_field` is `short_id` for claude, which a caller may set to
             # the 8-hex transport key rather than the session id we match on.
-            if entry.harness == provider and entry.harness_session_id == session_id:
+            if entry.harness == harness and entry.harness_session_id == session_id:
                 # Same session re-registering: refresh, do not duplicate.
                 #
                 # An EXPLICIT status never demotes a live row. The harness-store
@@ -1413,6 +1419,12 @@ def register_existing_session(
                     entry.delivery_policy = (
                         None if delivery_policy == "off" else delivery_policy
                     )
+                if provider is not None:
+                    entry.provider = provider
+                if model is not None:
+                    entry.model = model
+                if effort is not None:
+                    entry.effort = effort
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated, same_session_only=True):
@@ -1435,7 +1447,10 @@ def register_existing_session(
             suffix += 1
         fresh = AgentEntry(
             name=chosen,
-            harness=provider,
+            harness=harness,
+            provider=provider,
+            model=model,
+            effort=effort,
             harness_session_id=session_id,
             cwd=cwd,
             log_path=log_path,
@@ -1456,12 +1471,12 @@ def register_existing_session(
 
     persisted = update_registry(_updater, path=registry_path)
     for entry in persisted:
-        if entry.harness == provider and entry.harness_session_id == session_id:
+        if entry.harness == harness and entry.harness_session_id == session_id:
             return entry
     # update_registry returns the persisted entries list (the updater's
     # output), so the row must be present; a miss means the upsert dropped it.
     raise RuntimeError(
-        f"registration for {provider} session {session_id!r} did not persist"
+        f"registration for {harness} session {session_id!r} did not persist"
     )
 
 

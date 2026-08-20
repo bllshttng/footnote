@@ -178,10 +178,11 @@ def test_reconcile_warns_and_skips_retired_gemini_row(
 
     assert result.scanned == 1
     assert result.errors == [
-        {
-            "name": "legacy-gemini",
-            "provider": "gemini",
-            "id": "legacy-session",
+            {
+                "name": "legacy-gemini",
+                "provider": None,
+                "harness": "gemini",
+                "id": "legacy-session",
             "reason": "retired-provider",
         }
     ]
