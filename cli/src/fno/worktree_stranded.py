@@ -326,6 +326,7 @@ def act_on_stranded(row: Row) -> dict:
     path = row.facts["path"]
     branch = row.facts.get("branch")
     node = row.node
+    assert node is not None, "act_on_stranded requires a STRANDED row, which always has a resolved node"
     acts: list[dict] = []
 
     sha_p = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True)
