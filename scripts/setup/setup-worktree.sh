@@ -1356,6 +1356,13 @@ link_dir ".gemini"
 # execution time via `git rev-parse --show-toplevel`, so it stays correct
 # no matter which worktree fires it.
 _salvage_marker="worktree-salvage-ref.sh"
+# The one source of truth for the dispatcher body, built once and reused by
+# both the create and the append path below, so a future change (e.g. a
+# guard) cannot land in one copy and drift from the other.
+_salvage_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+script="$toplevel/hooks/'"$_salvage_marker"'"
+[[ -x "$script" ]] && exec "$script"
+exit 0'
 _common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)"
 if [[ -n "$_common_hooks_dir" ]]; then
   [[ "$_common_hooks_dir" = /* ]] || _common_hooks_dir="$WORKTREE/$_common_hooks_dir"
@@ -1363,25 +1370,22 @@ if [[ -n "$_common_hooks_dir" ]]; then
   mkdir -p "$_common_hooks_dir" 2>/dev/null || true
   _post_commit="$_common_hooks_dir/post-commit"
   if [[ ! -e "$_post_commit" ]]; then
-    cat > "$_post_commit" <<'HOOK'
-#!/usr/bin/env bash
-# Installed by scripts/setup/setup-worktree.sh (x-f4e9). Dispatches to the
-# COMMITTING worktree's own checked-out salvage-ref hook, never a fixed
-# worktree's copy - see hooks/worktree-salvage-ref.sh for the real logic.
-toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-script="$toplevel/hooks/worktree-salvage-ref.sh"
-[[ -x "$script" ]] && exec "$script"
-exit 0
-HOOK
+    {
+      echo "#!/usr/bin/env bash"
+      echo "# Installed by scripts/setup/setup-worktree.sh (x-f4e9). Dispatches to the"
+      echo "# COMMITTING worktree's own checked-out salvage-ref hook, never a fixed"
+      echo "# worktree's copy - see hooks/worktree-salvage-ref.sh for the real logic."
+      printf '%s\n' "$_salvage_dispatcher_body"
+    } > "$_post_commit"
     chmod +x "$_post_commit"
     echo "setup-worktree: installed shared post-commit salvage-ref hook at $_post_commit"
   elif ! grep -q "$_salvage_marker" "$_post_commit" 2>/dev/null; then
+    # The identical body: it is still the last statement in the file either
+    # way, so `exec` here is exactly as safe as in the create path above.
     {
       echo ""
       echo "# Appended by scripts/setup/setup-worktree.sh (x-f4e9)."
-      echo 'toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0'
-      echo "script=\"\$toplevel/hooks/$_salvage_marker\""
-      echo '[[ -x "$script" ]] && "$script"'
+      printf '%s\n' "$_salvage_dispatcher_body"
     } >> "$_post_commit"
     echo "setup-worktree: appended salvage-ref call to existing post-commit hook at $_post_commit"
   fi

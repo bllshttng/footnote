@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES as _ALIVE_STATUSES
 from fno.graph.fuzzy import resolve_node
 from fno.graph.store import (
     GraphMalformedRootError,
@@ -31,16 +32,6 @@ from fno.graph.store import (
     read_graph_strict,
 )
 from fno.paths import resolve_repo_root
-
-# Same non-terminal AgentStatus vocabulary worktree-status.py uses (mirrored
-# from crates/fno-agents/src/lib.rs `AgentStatus` /
-# cli/src/fno/agents/registry.py `_OWNERSHIP_LIVE_STATUSES`). Duplicated here
-# rather than imported because the two modules answer different questions
-# from the same registry read (worktree-status.py: which session owns this
-# path; here: is any input read trustworthy enough to act on), and the
-# import boundary between a `scripts/lib/` script and this package is not
-# worth crossing for one frozenset.
-_ALIVE_STATUSES = frozenset({"spawning", "ready", "idle", "busy", "live", "restarting"})
 
 _QUIET_TERMINAL_STATUSES = frozenset({"superseded", "deferred"})
 
@@ -165,16 +156,25 @@ def resolve_node_id(
 
 
 def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool]]:
-    """path -> (unpushed_count, ok). Shells to the shared
+    """path -> (unpushed_count, ok, age). Shells to the shared
     ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh) rather than a
     second implementation of its fail-toward-keep contract. All paths run in
     one bash process so the script's own per-process fetch cache (exported
     ``_WT_REMOTE_REFS_FRESH``/``_STALE``) verifies the remote exactly once
-    for the whole batch, not once per worktree."""
+    for the whole batch, not once per worktree - and the last-commit age
+    rides the same loop iteration rather than a second subprocess per path.
+
+    The script's own path is resolved from this FILE's location, never
+    ``resolve_repo_root()``: that helper reads the caller's ambient cwd (or
+    a process-wide cached env var) and has no idea which of possibly many
+    swept repos is in play, so a multi-repo sweep - or a daemon started
+    with no ambient cwd at all - could resolve the wrong repo, or none, for
+    every root after whichever one happened to be cached first. This
+    script always lives at a fixed offset from this module regardless of
+    which worktree's commits are being counted."""
     if not paths:
         return {}
-    repo_root = Path(resolve_repo_root())
-    script = repo_root / "scripts" / "lib" / "worktree-unpushed.sh"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-unpushed.sh"
     driver = (
         'source "$1"; shift\n'
         'for p in "$@"; do\n'
@@ -183,7 +183,8 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool]]:
         '  errtext="$(cat "$err")"; rm -f "$err"\n'
         '  ok=1\n'
         '  case "$errtext" in *"not verifiable"*) ok=0 ;; esac\n'
-        "  printf '%s\\x1f%s\\x1f%s\\n' \"$p\" \"$out\" \"$ok\"\n"
+        '  age="$(git -C "$p" log -1 --format=%cr 2>/dev/null)"\n'
+        "  printf '%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$p\" \"$out\" \"$ok\" \"$age\"\n"
         "done\n"
     )
     proc = subprocess.run(
@@ -191,28 +192,19 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool]]:
         capture_output=True,
         text=True,
     )
-    results: dict[str, tuple[int, bool]] = {}
+    results: dict[str, tuple[int, bool, str]] = {}
     for line in (proc.stdout or "").splitlines():
         parts = line.split("\x1f")
-        if len(parts) != 3:
+        if len(parts) != 4:
             continue
-        p, count_s, ok_s = parts
+        p, count_s, ok_s, age = parts
         count = int(count_s) if count_s.isdigit() else 1
-        results[p] = (count, ok_s == "1")
+        results[p] = (count, ok_s == "1", age or "unknown")
     # A path the driver never reported (bash itself failed) fails toward
     # "unpushed and unverifiable", the same posture wt_unpushed_count takes.
     for p in paths:
-        results.setdefault(p, (1, False))
+        results.setdefault(p, (1, False, "unknown"))
     return results
-
-
-def _last_commit_age(path: str) -> str:
-    out = subprocess.run(
-        ["git", "-C", path, "log", "-1", "--format=%cr"],
-        capture_output=True,
-        text=True,
-    )
-    return out.stdout.strip() or "unknown"
 
 
 # --- fleet input ---------------------------------------------------------
@@ -301,7 +293,7 @@ def sweep(repo: Optional[Path] = None) -> list[Row]:
 
     rows: list[Row] = []
     for branch, path in worktrees:
-        unpushed, unpushed_ok = unpushed_by_path.get(path, (1, False))
+        unpushed, unpushed_ok, age = unpushed_by_path.get(path, (1, False, "unknown"))
         node, node_entry = resolve_node_id(path, branch, entries_by_id)
         registry_status = registry.get(str(Path(path)))
         rows.append(
@@ -315,7 +307,7 @@ def sweep(repo: Optional[Path] = None) -> list[Row]:
                 graph_ok=graph_ok,
                 registry_status=registry_status,
                 registry_ok=registry_ok,
-                age=_last_commit_age(path),
+                age=age,
             )
         )
     return rows

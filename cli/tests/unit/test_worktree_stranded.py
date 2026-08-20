@@ -255,6 +255,35 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
     _git(work, "commit", "-q", "-m", "second, never pushed")
 
     counts = _unpushed_batch([str(work)])
-    count, ok = counts[str(work)]
+    count, ok, age = counts[str(work)]
+    assert ok is True
+    assert count > 0
+    assert age != ""
+
+
+def test_unpushed_batch_ignores_resolve_repo_root(tmp_path, monkeypatch):
+    """A code-review finding, confirmed by three independent finder angles:
+    the script's own path must never come from resolve_repo_root(), a
+    process-cached, cwd-dependent read with no idea which of possibly many
+    swept repos (pr-watch's multi-repo tick loop) is in play. Point it at
+    garbage and confirm the batch still finds the real script and runs."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    _git(work, "init", "-q")
+    _git(work, "config", "user.email", "t@t.co")
+    _git(work, "config", "user.name", "t")
+    _git(work, "remote", "add", "origin", str(remote))
+    (work / "f.txt").write_text("one\n")
+    _git(work, "add", "f.txt")
+    _git(work, "commit", "-q", "-m", "unpushed")
+
+    monkeypatch.setattr(
+        "fno.worktree_stranded.resolve_repo_root", lambda: "/nonexistent/decoy/repo"
+    )
+
+    counts = _unpushed_batch([str(work)])
+    count, ok, _age = counts[str(work)]
     assert ok is True
     assert count > 0

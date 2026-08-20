@@ -98,20 +98,26 @@ fi
 # when both sets are empty. A timeout - or any other reason the sweep did
 # not complete - says so rather than staying quiet, so an incomplete sweep
 # never reads as a clean one.
+#
+# A full sweep is a `git fetch --all --prune` plus a rev-list and a
+# last-commit read per worktree - measured at ~100s on this checkout's 68
+# worktrees, an order of magnitude over any bound an interactive SessionStart
+# hook can afford. So this NEVER runs the sweep inline: it reads whatever a
+# PRIOR sweep already cached, and kicks a background refresh (detached, never
+# awaited) when that cache is missing or stale. The first session after a
+# fresh checkout sees nothing to report yet - the same as a clean sweep, by
+# design - rather than block on the one sweep that would tell it otherwise.
+CACHE_MAX_AGE_S=900
+_CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
+_cache_age() {
+  local mtime
+  mtime="$(stat -f %m "$_CACHE_FILE" 2>/dev/null || stat -c %Y "$_CACHE_FILE" 2>/dev/null || echo 0)"
+  echo $(( $(date +%s) - mtime ))
+}
+
 stranded_lines=()
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  sweep_raw=""
-  sweep_rc=0
-  if command -v with_timeout >/dev/null 2>&1; then
-    sweep_raw="$(with_timeout 30 fno worktree stranded --json 2>/dev/null)"; sweep_rc=$?
-  else
-    sweep_raw="$(fno worktree stranded --json 2>/dev/null)"; sweep_rc=$?
-  fi
-  if (( sweep_rc == 124 )); then
-    stranded_lines+=('- stranded sweep did not complete (timeout). [fno-stranded-sweep-incomplete]')
-  elif [[ $sweep_rc -ne 0 || -z "$sweep_raw" ]]; then
-    stranded_lines+=('- stranded sweep did not complete. [fno-stranded-sweep-incomplete]')
-  else
+  if [[ -f "$_CACHE_FILE" ]]; then
     while IFS=$'\t' read -r klass node path; do
       [[ -n "$klass" ]] || continue
       case "$klass" in
@@ -122,7 +128,20 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
           stranded_lines+=("- ${node:-?} at ${path}: abandoned work, confirm with \`fno worktree cleanup --merged\`. [fno-stranded-abandoned]")
           ;;
       esac
-    done < <(printf '%s' "$sweep_raw" | jq -r '.rows[]? | select(.class=="UNKNOWN" or .class=="ABANDONED") | [.class, (.node // "?"), .path] | @tsv' 2>/dev/null)
+    done < <(jq -r '.rows[]? | select(.class=="UNKNOWN" or .class=="ABANDONED") | [.class, (.node // "?"), .path] | @tsv' "$_CACHE_FILE" 2>/dev/null)
+  fi
+
+  if [[ ! -f "$_CACHE_FILE" ]] || (( $(_cache_age) > CACHE_MAX_AGE_S )); then
+    (
+      mkdir -p "$(dirname "$_CACHE_FILE")" 2>/dev/null
+      tmp="$(mktemp "${_CACHE_FILE}.XXXXXX" 2>/dev/null)" || exit 0
+      if fno worktree stranded --json > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$_CACHE_FILE"
+      else
+        rm -f "$tmp"
+      fi
+    ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
   fi
 else
   stranded_lines+=('- stranded sweep skipped: fno or jq unavailable. [fno-stranded-sweep-incomplete]')
