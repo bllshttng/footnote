@@ -227,14 +227,19 @@ def git_writable_config_args(cwd: Path) -> list[str]:
     # bounded worker unable to create its claim lockfile. It then holds no claim
     # and the graph reads that node free while it runs. The create lane grants it
     # through `--add-dir`; this is the same grant on the lane resume takes.
-    from fno.agents.writable_dirs import worker_writable_dirs
+    #
+    # READ the seam-published value rather than recomputing: the Rust mirror of
+    # this builder cannot run the resolver, so it reads the env. Computing here
+    # would emit a different roots list from the same inputs whenever the
+    # variable is unset, and the argv-parity tests would (correctly) fail.
+    from fno.agents.writable_dirs import published_worker_writable_dirs
 
     roots = [
         root
         for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd))
         if root
     ]
-    for extra in worker_writable_dirs(cwd):
+    for extra in published_worker_writable_dirs():
         if extra not in roots:
             roots.append(extra)
     if not roots:

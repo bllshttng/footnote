@@ -217,12 +217,20 @@ def test_computed_set_is_skipped_on_a_provider_with_no_additive_grant(
     computed default: raising here would refuse every opencode spawn."""
     from fno.agents.mux_spawn import build_pane_argv
 
+    import fno.agents.writable_dirs as wd
+
+    wd._SKIP_NOTED.discard("opencode")
     argv = build_pane_argv("opencode", "t", tmp_path, False, None)
     assert "--add-dir" not in argv
     assert "--dir" not in argv
     err = capsys.readouterr().err
     assert "opencode" in err
     assert "claim" in err
+
+    # Once per process: the set is non-empty on every machine, so an unguarded
+    # print fires on every opencode spawn including argv-parity builds.
+    build_pane_argv("opencode", "t", tmp_path, False, None)
+    assert capsys.readouterr().err == ""
 
 
 def test_explicit_add_dir_still_refuses_on_that_provider(tmp_path: Path) -> None:
@@ -341,3 +349,30 @@ def test_seam_export_clears_an_inherited_value(
     env = {WORKER_ADD_DIRS_ENV: "/some/other/project"}
     assert export_worker_writable_dirs(tmp_path, env) == []
     assert WORKER_ADD_DIRS_ENV not in env
+
+
+def test_resume_lane_reads_the_published_value_rather_than_recomputing(
+    fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`codex exec resume` is built by BOTH runtimes and Rust cannot run the
+    resolver, so both must read one published value. A Python side that computed
+    instead would emit a different roots list whenever the env is unset, which is
+    what the rust/py argv-parity tests catch."""
+    from fno.agents.harnesses.codex import git_writable_config_args
+    from fno.agents.writable_dirs import (
+        WORKER_ADD_DIRS_ENV,
+        published_worker_writable_dirs,
+    )
+
+    monkeypatch.delenv(WORKER_ADD_DIRS_ENV, raising=False)
+    assert published_worker_writable_dirs() == []
+    # Unset env: the resume roots carry no state grant, matching Rust.
+    unset = git_writable_config_args(tmp_path)
+    assert str(fake_state) not in "".join(unset)
+
+    # Published: it rides, because writable_roots is a WHOLE-VALUE override and
+    # a list without the state root leaves a resumed worker unable to claim.
+    monkeypatch.setenv(WORKER_ADD_DIRS_ENV, str(fake_state))
+    assert published_worker_writable_dirs() == [str(fake_state)]
+    published = git_writable_config_args(tmp_path)
+    assert str(fake_state) in "".join(published)

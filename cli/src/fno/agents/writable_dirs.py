@@ -53,12 +53,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
-from typing import Callable, Iterable, MutableMapping, Optional, Sequence
+from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence
 
 __all__ = [
     "WORKER_ADD_DIRS_ENV",
     "add_dir_tokens",
     "export_worker_writable_dirs",
+    "published_worker_writable_dirs",
     "worker_writable_dirs",
 ]
 
@@ -79,6 +80,9 @@ WORKER_ADD_DIRS_ENV = "FNO_WORKER_ADD_DIRS"
 
 
 ADD_DIR_PROVIDERS = ("claude", "codex", "agy")
+
+#: Providers already warned about the skipped grant, once per process.
+_SKIP_NOTED: set[str] = set()
 
 
 def add_dir_tokens(
@@ -113,11 +117,18 @@ def add_dir_tokens(
         if supported:
             for d in computed_dirs:
                 out += ["--add-dir", d]
-        else:
+        elif provider not in _SKIP_NOTED:
+            # Once per provider per process. The computed set is non-empty on
+            # essentially every machine, so an unguarded print fires on EVERY
+            # opencode and gemini spawn - including the argv-parity paths that
+            # only build a token list and launch nothing. The fact is worth
+            # stating; repeating it per call is noise that trains the reader to
+            # skip the line.
+            _SKIP_NOTED.add(provider)
             print(
                 f"note: no state-root grant on {provider} (its --add-dir cell is "
-                "not additive); this worker's claim writes may fail, so "
-                "`fno claim status` can report free while it runs",
+                "not additive); this worker's claim writes may fail, so the "
+                "graph can read its node free while it runs",
                 file=sys.stderr,
             )
     return out
@@ -240,3 +251,19 @@ def export_worker_writable_dirs(cwd: "Path", env: "MutableMapping[str, str]") ->
         # claim true rather than only true from a clean environment.
         env.pop(WORKER_ADD_DIRS_ENV, None)
     return dirs
+
+
+def published_worker_writable_dirs(env: "Mapping[str, str] | None" = None) -> list[str]:
+    """Read back what the seam published, WITHOUT recomputing.
+
+    The resume lane must read this rather than call :func:`worker_writable_dirs`
+    itself. `codex exec resume` is built by both runtimes, and Rust cannot run
+    the resolver, so it reads the env. A Python side that computed instead would
+    emit a different roots list from the same inputs whenever the variable is
+    unset, which is exactly the divergence the rust/py argv-parity tests exist to
+    catch. One published value, two readers.
+    """
+    import os as _os
+
+    raw = (env if env is not None else _os.environ).get(WORKER_ADD_DIRS_ENV, "")
+    return [p for p in raw.split(_os.pathsep) if p]
