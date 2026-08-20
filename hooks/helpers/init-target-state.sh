@@ -1244,7 +1244,19 @@ PYEOF
     [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
       _MULTI_HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
     _MULTI_OK=1
-    for _mnode in $_GUARD_MATCHES; do
+    # THE SPAWN-BOUND NODE GOES FIRST, whatever order the payload named ids in.
+    # The loop breaks on the first sibling held elsewhere, so in token order it
+    # could abort before ever reaching $FNO_NODE - the one node this worker is
+    # actually about to build. The rollback's keep-FNO_NODE guard then had
+    # nothing to keep, and the session ran on the 15m spawn-side claim alone.
+    _MULTI_ORDER="$_GUARD_MATCHES"
+    if [[ -n "${FNO_NODE:-}" ]] && printf '%s' " $_GUARD_MATCHES " | grep -q " ${FNO_NODE} "; then
+      _MULTI_ORDER="$FNO_NODE"
+      for _mn in $_GUARD_MATCHES; do
+        [[ "$_mn" == "${FNO_NODE}" ]] || _MULTI_ORDER="$_MULTI_ORDER $_mn"
+      done
+    fi
+    for _mnode in $_MULTI_ORDER; do
       # The handover flag belongs here too. `fno agents spawn --node X` takes a
       # claim on X, and a payload naming X plus a second id lands on THIS loop,
       # not the single-node block. Without it the acquire on X collides with the

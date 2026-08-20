@@ -474,6 +474,7 @@ def _rebound_claim(
     new_holder: Optional[str] = None,
     new_reason: Optional[str] = None,
     new_harness: Optional[str] = None,
+    new_metadata: Optional[dict] = None,
     keep_acquired_at: bool = False,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
@@ -529,7 +530,7 @@ def _rebound_claim(
         machine_id=machine_id() or None,
         reason=new_reason if new_reason is not None else existing.reason,
         harness=new_harness if new_harness is not None else existing.harness,
-        metadata=existing.metadata,
+        metadata=new_metadata if new_metadata else existing.metadata,
     )
 
 
@@ -540,6 +541,7 @@ def compare_and_rebind(
     new_holder: Optional[str] = None,
     new_reason: Optional[str] = None,
     new_harness: Optional[str] = None,
+    new_metadata: Optional[dict] = None,
     new_pid: Optional[int] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
@@ -666,6 +668,7 @@ def compare_and_rebind(
         # the rename or not at all. Applying them to a refused handover let a
         # caller rewrite another holder's fields while leaving the holder alone.
         effective_new_reason = new_reason if handover_allowed else None
+        effective_new_metadata = new_metadata if handover_allowed else None
         # A handover with no PINNED harness resolves one from the ambient
         # markers, exactly as `_make_claim` does on the ordinary acquire path.
         # Preserving the spawner's tag instead left a claude worker under a
@@ -694,6 +697,7 @@ def compare_and_rebind(
             rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -713,6 +717,7 @@ def compare_and_rebind(
                 rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
             )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
@@ -750,6 +755,7 @@ def compare_and_rebind(
         rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
             )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
@@ -776,11 +782,18 @@ def compare_and_rebind(
 
 
 #: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
-#: a worker that does not exist yet. Worker-specific (it carries the worker's
-#: name) and delivered only in that worker's environment, so naming it back is
-#: evidence of being the intended successor rather than a bystander who read a
-#: holder off the store. The handover branch above enforces it, which is why the
-#: constant lives here rather than in the command module that re-exports it.
+#: a worker that does not exist yet. The handover branch above accepts ONLY this
+#: prefix as a replaceable prior holder, which is why the constant lives here
+#: rather than in the command module that re-exports it.
+#:
+#: WHAT THIS IS NOT: a secret. `fno claim status` publishes every holder, so
+#: naming one back proves nothing about who is asking. What the prefix restricts
+#: is the BLAST RADIUS - only a launch-window claim can be taken over this way,
+#: never a working session's `target-session:` claim, which `ClaimHeldByOther`
+#: still protects. The window is TTL-bound (`HANDOVER_TTL`), so the exposure is
+#: bounded to it, and before this change that same window carried NO claim at
+#: all. Closing it properly needs a secret the worker alone holds, which is its
+#: own change.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
 #: Suffix of the per-claim recovery mutex directory. One definition: this

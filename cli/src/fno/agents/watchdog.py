@@ -113,6 +113,12 @@ _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: already guards.
 _WAKE_STATES = frozenset({"working", "blocked", "stopped"})
 
+#: Graph statuses that mean the work is over, so an absent claim is the system
+#: working rather than a gap. Read from the node, never from the row: the row
+#: can still say `working` while the node is done, which is exactly the shape
+#: that put completed work in the digest.
+_FINISHED_NODE_STATUSES = frozenset({"done", "superseded", "deferred"})
+
 #: Prefix of the headroom notice below. It marks the ONE warning that says
 #: nothing about completeness: the probe finished and returned every row, it
 #: merely took over half its budget doing so. A reader that treats it as an
@@ -328,7 +334,7 @@ def verdicts(
         # louder and more actionable, and burying it under a record-keeping
         # note would trade a real signal for an advisory one.
         if verdict.verdict == LEAVE:
-            unclaimed_basis = _unclaimed_node_basis(row, claim_for)
+            unclaimed_basis = _unclaimed_node_basis(row, claim_for, node_state_for)
             if unclaimed_basis:
                 verdict = verdict._replace(
                     verdict=UNCLAIMED, basis=f"{verdict.basis}; {unclaimed_basis}"
@@ -670,7 +676,11 @@ def _verdict_one(
     return Verdict(row.row_id, row.name, row.state, LEAVE, basis, "none")
 
 
-def _unclaimed_node_basis(row: Row, claim_for: Callable[[str], dict]) -> str:
+def _unclaimed_node_basis(
+    row: Row,
+    claim_for: Callable[[str], dict],
+    node_state_for: Callable[[str], Optional[dict]],
+) -> str:
     """Is this live row working a node that no claim covers?
 
     BLIND SPOT, stated here beside the two the module header already records.
@@ -706,6 +716,19 @@ def _unclaimed_node_basis(row: Row, claim_for: Callable[[str], dict]) -> str:
     # digest every tick, which is the permanent noise this advisory must not
     # become. It is also the reading the never-renewed multi-node claims carry.
     if claim.get("state") != "free":
+        return ""
+    # A FINISHED node has no claim because the work is over and the claim was
+    # released, which is the system behaving. Reporting it is the same permanent
+    # noise the terminal-row skip above exists to prevent, arriving by the other
+    # door: the row still reads `working` while the graph says done, so it
+    # reaches this LEAVE and gets upgraded. An unreadable node state answers
+    # nothing and the advisory stays silent, because a report built on a failed
+    # read trains its reader to ignore the report.
+    try:
+        node_state = node_state_for(row.node) or {}
+    except Exception:  # noqa: BLE001 - a failed read is never a finding
+        return ""
+    if str(node_state.get("status") or "").lower() in _FINISHED_NODE_STATUSES:
         return ""
     return f"node {row.node} carries NO claim while this row is live"
 

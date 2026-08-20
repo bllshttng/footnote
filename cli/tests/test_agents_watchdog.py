@@ -1992,6 +1992,37 @@ def test_every_terminal_row_state_is_skipped_not_just_done(state):
     assert v.verdict != UNCLAIMED
 
 
+def test_a_finished_node_is_not_flagged_as_unclaimed():
+    """A done node has no claim because the work is over and the claim was
+    released. The row can still read `working` while the graph says done, so it
+    reaches the LEAVE and was upgraded, putting correctly-completed work in the
+    events stream and the mail digest every tick."""
+    rows = [Row("cccc3333-0009", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0009": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "free"}},
+        nodes={"x-76d1": {"status": "done"}},
+    )
+    assert v.verdict != UNCLAIMED
+
+
+def test_an_unreadable_node_state_flags_nothing():
+    """A report built on a failed read trains its reader to ignore the report."""
+    def _boom(_node):
+        raise RuntimeError("graph unreadable")
+
+    rows = [Row("cccc3333-0010", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = verdicts(
+        rows,
+        transcript_for=lambda sid: _facts("still going", age_min=2),
+        claim_for=lambda node: {"state": "free"},
+        node_state_for=_boom,
+        now_s=NOW_1840,
+    )
+    assert v.verdict != UNCLAIMED
+
+
 def test_a_lapsed_claim_is_not_flagged():
     """`stale` is the NORMAL reading for a healthy worker parked in a CI wait:
     the heartbeat runs on tool calls, so a session waiting on purpose stops

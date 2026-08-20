@@ -265,6 +265,10 @@ def acquire(
                 # claim, and silently keeping the spawner's tag would defeat it.
                 new_reason=reason or None,
                 new_harness=harness,
+                # --metadata means the same thing on both acquire paths. It was
+                # silently dropped here, so one flag behaved differently
+                # depending on on-disk state the caller cannot see.
+                new_metadata=_parse_metadata(metadata) or None,
                 new_pid=pid,
                 ttl_ms=_parse_ttl(ttl),
                 root=_node_aware_root(key),

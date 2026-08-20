@@ -92,6 +92,12 @@ def _remedy_for(key: str) -> str:
 #: outliving its own exit because it takes no node claim to replace it.
 _SPAWN_CLI_HOLDER_PREFIX = "spawn-cli:"
 
+#: Buckets where force-release advice is HONEST: recovery ran, nobody was found
+#: on the node, and the claim is still there. Every other bucket is either a
+#: measured live holder or an unmeasured one, and telling an operator to clear
+#: something nobody checked is worse advice than none.
+_REMEDIABLE_BUCKETS = frozenset({"release-failed", "suspect", "suspect_unprobed"})
+
 #: `_reclaim_if_provably_dead` bucket meaning "a holder we PROVED is alive".
 #: The discriminator between benign dedup and a wedge: somebody is genuinely
 #: working, so the refusal is the system behaving correctly and there is nothing
@@ -394,14 +400,16 @@ def _spawn_guard_decision(
             return {
                 "verdict": "already-running",
                 "reason": "reservation-held",
-                # NO remedy when nothing was measured. `_HOLDER_ALIVE` means we
-                # PROVED a live spawner; `no-replacement-barrier` means we never
-                # looked, because this caller cannot replace what it would
-                # clear. Force-release advice against a spawner that is
-                # mid-launch is the worse-than-nothing advice the comment above
-                # forbids, and an unmeasured bucket cannot rule that out.
-                **({} if bucket in (_HOLDER_ALIVE, "no-replacement-barrier")
-                   else {"remedy": _remedy_for(res_key)}),
+                # A remedy is EARNED, and this names the buckets that earn it
+                # rather than the ones that do not. The exclusion polarity gave
+                # force-release advice to every bucket nobody had thought about
+                # yet, `foreign-reservation` among them - and that one is `fno
+                # backlog advance`'s boot barrier, the single reservation this
+                # file says must never be cleared. An operator following the
+                # printed advice double-dispatches onto a node advance just
+                # staffed.
+                **({"remedy": _remedy_for(res_key)} if bucket in _REMEDIABLE_BUCKETS
+                   else {}),
             }, 0
         try:
             acquire_claim(
