@@ -29,9 +29,16 @@ if ! printf '%s\n' "$matches" | grep -q '^fno-process-proxy|argv-pr|cli/src/fno/
   echo "direct-graphql-pr-read: argv inventory missed _merge.py" >&2
   exit 1
 fi
-if ! grep -q 'protected = worker_environment(os.environ)' cli/src/fno/cli.py \
+# Pin the BOUNDARY, never the line that happens to express it today. Both of
+# the first two pins broke on ordinary edits that changed nothing about the
+# boundary: `worker_environment(os.environ)` became `worker_environment(base)`,
+# and the `gh_bin` default was wrapped across two lines. A whole-line grep then
+# reports "a named enforcement boundary is missing" for a boundary that is
+# present and working, which is a false red nobody can act on. Match the
+# assignment and the callee, or the binary name, and let formatting move.
+if ! grep -q 'protected = worker_environment(' cli/src/fno/cli.py \
     || ! grep -q 'Command::new("fno-gh-coverage")' crates/fno-agents/src/finalize.rs \
-    || ! grep -q 'let mut gh_bin = "fno-gh-loopcheck"' crates/fno-agents/src/loopcheck.rs; then
+    || ! grep -q '"fno-gh-loopcheck"' crates/fno-agents/src/loopcheck.rs; then
   echo "direct-graphql-pr-read: a named enforcement boundary is missing" >&2
   exit 1
 fi
