@@ -14,6 +14,11 @@ from fno.paths import github_cli_proxy_dir
 PROXY_EXEC_LINE = 'exec fno-gh-proxy "$@"'
 _WRAPPER = f"#!/bin/sh\n{PROXY_EXEC_LINE}\n"
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
+# The proxy stamps this into the env it hands `os.execve`, so its own successor
+# can recognize itself. It is good for that one hop only. Anything else building
+# a gh environment drops it, or a descendant inherits a marker it never earned
+# and the proxy refuses a first-and-only entry.
+PROXY_DEPTH_ENV = "FNO_GH_PROXY_DEPTH"
 _WHICH = shutil.which
 
 
@@ -79,6 +84,9 @@ def ensure_proxy(
 def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     inherited_delegate = base.get("FNO_REAL_GH")
     env = dict(base)
+    # Dropped once, before any return: a worker inherits the marker from a
+    # delegated gh, never earns it, and would have its first gh call refused.
+    env.pop(PROXY_DEPTH_ENV, None)
     requested_dir = env.get(_PROXY_DIR_ENV)
     found = inherited_delegate or _WHICH("gh", path=env.get("PATH"))
     if not found:

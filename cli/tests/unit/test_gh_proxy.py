@@ -235,3 +235,119 @@ def test_resolve_real_gh_returns_a_path_even_with_no_proxy_dir_to_skip(
 
     assert resolved == str(real.resolve())
     assert os.sep in resolved
+
+
+def test_main_refuses_to_run_when_the_marker_carries_our_own_pid(monkeypatch, capsys):
+    # os.execve leaves no child and PRESERVES the pid, so a marker equal to our
+    # own pid is the only evidence of a repeat.
+    monkeypatch.setattr(sys, "argv", ["gh", "api", "rate_limit"])
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", str(os.getpid()))
+    with pytest.raises(SystemExit) as exc:
+        gh_proxy.main()
+    # `.code`, never `match=`: `match` is a regex SEARCH over the exception
+    # text, so `match="2"` also passes for SystemExit(127) and pins nothing.
+    assert exc.value.code == 2
+    assert "re-entered itself" in capsys.readouterr().err
+
+
+def test_a_descendant_inheriting_a_stale_marker_is_not_refused(monkeypatch, capsys):
+    """The marker rides into the real gh's whole process tree, so a descendant
+    that reaches a proxy again carries a value it never earned. Keyed to the
+    pid, its FIRST entry is a first entry: execve preserves the pid and a child
+    never shares it. A bare flag refused here, on a legitimate call."""
+    monkeypatch.setattr(sys, "argv", ["gh", "auth", "status"])
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", str(os.getpid() + 1))
+    monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", lambda: "/real/gh")
+    calls = []
+    monkeypatch.setattr(gh_proxy, "delegate", lambda real, args: calls.append(real))
+    with pytest.raises(AssertionError, match="os.execv returned"):
+        gh_proxy.main()
+    assert calls == ["/real/gh"], "a stale marker from an ancestor must not refuse"
+    assert "re-entered itself" not in capsys.readouterr().err
+
+
+def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatch):
+    seen = {}
+
+    def execve(path, argv, env):
+        seen["env"] = env
+        raise RuntimeError("exec sentinel")
+
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", execve)
+    monkeypatch.setattr(
+        "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
+    )
+    with pytest.raises(RuntimeError, match="exec sentinel"):
+        delegate("/real/gh", ["auth", "status"])
+    # The successor execve creates keeps this pid, which is what makes the
+    # marker mean "I am myself again" rather than "someone upstream ran gh".
+    assert seen["env"]["FNO_GH_PROXY_DEPTH"] == str(os.getpid())
+
+
+def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gh", "auth", "status"])
+    monkeypatch.delenv("FNO_GH_PROXY_DEPTH", raising=False)
+
+    def broken():
+        raise gh_proxy._quota.ProxyIdentityError("config load failed")
+
+    monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", broken)
+    with pytest.raises(SystemExit) as exc:
+        gh_proxy.main()
+    assert exc.value.code == 2
+    assert "cannot identify its own install directory" in capsys.readouterr().err
+
+
+def test_process_proxy_boundary_drops_an_inherited_reentry_marker(monkeypatch, tmp_path):
+    # The boundary prepends the proxy to PATH. Every bare-`gh` shell-out from
+    # this process then hits it, and an inherited marker would refuse them all.
+    original = "/original/bin"
+    proxy = str(tmp_path / "proxy")
+    monkeypatch.setenv("PATH", original)
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {
+            key: value
+            for key, value in {**dict(base), "PATH": f"{proxy}{os.pathsep}{original}"}.items()
+            if key != "FNO_GH_PROXY_DEPTH"
+        },
+    )
+    closed = []
+
+    class Context:
+        def call_on_close(self, callback):
+            closed.append(callback)
+
+    protect_process_path(Context())
+    assert "FNO_GH_PROXY_DEPTH" not in os.environ
+    closed[0]()
+    assert os.environ["FNO_GH_PROXY_DEPTH"] == "1"
+
+
+def test_worker_environment_drops_the_marker_even_with_no_gh_to_proxy(monkeypatch):
+    # The early return is one of three exits, and a guard on one of N paths is
+    # decorative: a PATH that gains gh later would meet a marker it never earned.
+    env = worker_environment({"PATH": "/nowhere", "FNO_GH_PROXY_DEPTH": "1"})
+    assert "FNO_GH_PROXY_DEPTH" not in env
+
+
+def test_worker_environment_drops_an_inherited_reentry_marker(monkeypatch, tmp_path):
+    # A delegated gh runs git, a git hook runs fno, and fno builds a worker env
+    # from os.environ. The marker rides along and the worker's first, only gh
+    # call would refuse. Same reason FNO_REAL_GH is dropped one line above.
+    real = tmp_path / "real"
+    real.mkdir()
+    gh = real / "gh"
+    gh.write_text("#!/bin/sh\necho real\n")
+    gh.chmod(0o755)
+    env = worker_environment(
+        {"PATH": str(real), "FNO_GH_PROXY_DEPTH": "1", "FNO_GH_PROXY_DIR": str(tmp_path / "proxy")}
+    )
+    assert "FNO_GH_PROXY_DEPTH" not in env
+
+
+def test_delegate_environment_drops_the_marker_before_running_the_real_gh(monkeypatch):
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert "FNO_GH_PROXY_DEPTH" not in gh_proxy._quota.delegate_environment()

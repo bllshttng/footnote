@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from fno.pr import _quota
 from fno.pr._proc import Result
 
@@ -299,3 +301,38 @@ def test_is_proxy_shim_does_not_match_a_real_gh_that_mentions_the_name(tmp_path)
     path.chmod(0o755)
 
     assert _quota._is_proxy_shim(path) is False
+
+
+def test_proxy_dirs_fails_closed_instead_of_reporting_no_proxy(monkeypatch):
+    # An empty set reads as "there is no proxy", and resolve_real_gh then hands
+    # back the proxy's own shim. The lookup failure must surface, not vanish.
+    def broken():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", broken)
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    with pytest.raises(_quota.ProxyIdentityError, match="config load failed"):
+        _quota._proxy_dirs()
+
+
+def test_proxy_dirs_keeps_the_inherited_dir_when_the_config_load_fails(monkeypatch, tmp_path):
+    # An inherited FNO_GH_PROXY_DIR already answers "where do my shims live?".
+    # Refusing there would fail every gh command over an unrelated config error.
+    def broken():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", broken)
+    monkeypatch.setenv("FNO_GH_PROXY_DIR", str(tmp_path))
+    assert _quota._proxy_dirs() == {str(tmp_path.resolve())}
+
+
+def test_execute_graphql_refuses_when_the_proxy_cannot_identify_itself(monkeypatch):
+    def broken():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", broken)
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    monkeypatch.delenv("FNO_REAL_GH", raising=False)
+    result = _quota.execute_graphql("discretionary", ["api", "graphql", "-f", "query=x"])
+    assert result.returncode == 2
+    assert "cannot identify its own install directory" in result.stderr

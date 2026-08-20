@@ -130,27 +130,30 @@ def execute(
     runner: Callable = run,
     real_gh: str | None = None,
 ) -> Result:
-    gh = real_gh or _quota.resolve_real_gh()
-    if not gh:
-        return Result(127, "", "gh not found on PATH")
-    if len(args) >= 2 and args[:2] == ["pr", "checks"]:
-        return _checks(args, cwd=cwd, real_gh=gh, runner=runner)
-    if len(args) >= 2 and args[:2] == ["pr", "view"]:
-        fields = set((_option(args, "--json") or "").split(","))
-        if fields and fields <= _METADATA_FIELDS:
-            return _metadata(args, cwd=cwd, real_gh=gh, runner=runner)
-        return _quota.execute_graphql(
-            purpose, args, runner=runner, real_gh=gh, cwd=cwd
-        )
-    if len(args) >= 2 and args[:2] == ["api", "graphql"]:
-        return _quota.execute_graphql(
-            purpose, args, runner=runner, real_gh=gh, cwd=cwd
-        )
-    if len(args) >= 2 and args[:2] in (["pr", "list"], ["pr", "status"]):
-        return _quota.execute_graphql(
-            purpose, args, runner=runner, real_gh=gh, cwd=cwd
-        )
-    return runner([gh, *args], cwd=cwd, env=_quota.delegate_environment())
+    try:
+        gh = real_gh or _quota.resolve_real_gh()
+        if not gh:
+            return Result(127, "", "gh not found on PATH")
+        if len(args) >= 2 and args[:2] == ["pr", "checks"]:
+            return _checks(args, cwd=cwd, real_gh=gh, runner=runner)
+        if len(args) >= 2 and args[:2] == ["pr", "view"]:
+            fields = set((_option(args, "--json") or "").split(","))
+            if fields and fields <= _METADATA_FIELDS:
+                return _metadata(args, cwd=cwd, real_gh=gh, runner=runner)
+            return _quota.execute_graphql(
+                purpose, args, runner=runner, real_gh=gh, cwd=cwd
+            )
+        if len(args) >= 2 and args[:2] == ["api", "graphql"]:
+            return _quota.execute_graphql(
+                purpose, args, runner=runner, real_gh=gh, cwd=cwd
+            )
+        if len(args) >= 2 and args[:2] in (["pr", "list"], ["pr", "status"]):
+            return _quota.execute_graphql(
+                purpose, args, runner=runner, real_gh=gh, cwd=cwd
+            )
+        return runner([gh, *args], cwd=cwd, env=_quota.delegate_environment())
+    except _quota.ProxyIdentityError as exc:
+        return Result(2, "", _quota.proxy_identity_refusal(exc))
 
 
 def _main(purpose: str) -> None:

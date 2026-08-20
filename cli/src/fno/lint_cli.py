@@ -427,12 +427,17 @@ def style(
         raise typer.Exit(2)
 
     if diff_base is not None:
-        violations, inspected, changed, unexplained = _style_added_lines(
+        violations, inspected, changed, unexplained, exempted = _style_added_lines(
             diff_base, files
         )
         typer.echo(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
+        # Named, not counted. A skipped file still counts as changed while
+        # adding nothing to inspected, so the line above reads identically
+        # whether the file had nothing to inspect or was never read at all.
+        # Naming it lets a reader judge the exception; a count cannot.
+        _style_skip_receipt(exempted)
         if unexplained:
             # Reported AFTER the violations below, never instead of them.
             # Raising here discarded every real finding in the same run: a PR
@@ -459,15 +464,19 @@ def style(
 
         text = sys.stdin.read()
         if style_mod.has_exception(text):
+            _style_skip_receipt(["<stdin>"])
             raise typer.Exit(0)
         violations = style_mod.check(text, surface=surface)
     elif files:
         violations = []
+        skipped: list[str] = []
         for path in files:
             text = path.read_text(encoding="utf-8")
             if style_mod.has_exception(text):
+                skipped.append(str(path))
                 continue
             violations.extend(style_mod.check(text, surface=surface))
+        _style_skip_receipt(skipped)
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
         raise typer.Exit(2)
@@ -628,15 +637,38 @@ def _existed_at_base(rel: str, diff_base: str, repo: Path) -> bool:
     return probe.returncode == 0
 
 
+def _style_skip_receipt(names: list[str]) -> None:
+    """Name what a style-exception skipped, on every branch that can skip.
+
+    A skipped input reads exactly like a clean one: silence and exit 0. The
+    guarantee is worth nothing on the one branch that happens to print it, so
+    all three callers route through here.
+    """
+    if not names:
+        return
+    typer.echo(
+        f"style: skipped {len(names)} input(s) by style-exception, "
+        "so no line in them was read:\n  " + "\n  ".join(names)
+    )
+
+
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
-) -> "tuple[list, int, int, list[str]]":
-    """Return (violations, added-line count, changed-file count, unexplained).
+) -> "tuple[list, int, int, list[str], list[str]]":
+    """Return (violations, added-lines, changed-files, unexplained, exempted).
 
     Per file: a whole-file style-exception marker exempts it; otherwise only the
     ADDED lines since diff_base are checked. A bad diff-base fails loud (exit 2),
     not open: a malformed base that inspects nothing is the absence the pitfalls
     corpus names, indistinguishable from "no violations found".
+
+    ``exempted`` collects the PATHS skipped by a whole-file style-exception
+    marker. They are named on the receipt because the count alone cannot say
+    it happened: a skipped file still lands in ``changed`` while contributing
+    nothing to ``inspected``, so "0 added line(s) across 1 changed file(s)"
+    reads the same for a file with nothing to inspect and a file that was
+    never read. That is the absence-versus-outcome collapse the rest of this
+    function guards against, inside the receipt rather than the scan.
 
     ``unexplained`` collects the PATHS of changed files where GIT and this
     parser disagree about the added-line count. That is an instrument failure
@@ -719,12 +751,21 @@ def _style_added_lines(
     violations = []
     inspected = 0
     unexplained: list[str] = []
+    exempted: list[str] = []
     for rel in changed:
         full = repo / rel
         if not full.is_file():
+            # git lists it as changed, and it is absent from the working tree.
+            # A deletion in the diff is a legitimate zero, so it stays silent.
+            # A file git says ADDED lines to is the dirty-tree loss: those lines
+            # are never read, and `continue` used to jump past the count guard
+            # written for exactly that. Route it there instead of swallowing it.
+            if added_by_path.get(rel, 0):
+                unexplained.append(rel)
             continue
         whole = full.read_text(encoding="utf-8")
         if style_mod.has_exception(whole):
+            exempted.append(rel)
             continue
         nums = _git_added_line_nums(rel, diff_base, repo, renames.get(rel))
         inspected += len(nums)
@@ -751,7 +792,7 @@ def _style_added_lines(
             # Paths are collected rather than counted, since a count is not
             # investigable.
             unexplained.append(rel)
-    return violations, inspected, len(changed), unexplained
+    return violations, inspected, len(changed), unexplained, exempted
 
 
 def _git_added_line_nums(
