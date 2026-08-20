@@ -52,7 +52,11 @@ Send the fork a message and ask it to finish in-context and report its findings 
 
 Never kill it and never re-run it. A second run is a second writer on the worktree, and one has soft-reset two committed commits out from under a worker on this repo.
 
-The positive marker is what a finished run produces: it returns findings, or it states that it found none. Silence is neither. Treat silence past a reasonable window as a wedge and reach into the fork, rather than waiting longer.
+The positive marker is what a finished run produces: it returns findings, or it states that it found none. Silence is neither.
+
+Silence alone is not a wedge, so probe before you conclude. `git status` naming modified files is the portable positive marker for writing. `stat` is the precise one. Spell it `stat -f '%m %N' <paths>` on BSD and `stat -c '%Y %n' <paths>` on GNU. Compare either against `date +%s`. Read epoch seconds on both sides, because a local-time format string compared against a UTC clock makes a file written seconds ago look hours stale.
+
+The probe answers in the positive direction only. A fresh write proves a live writer. A stale read proves nothing, because a fork thinking between edits and a fork wedged look identical from outside. A wedge call needs the fork's registry row gone, or a finish that reports no findings. Never a quiet probe alone, and never a timer alone.
 
 This section is prose and stays prose. A gate needs a mechanical signal, and the whole defect is that no signal arrives.
 
