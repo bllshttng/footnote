@@ -2198,8 +2198,13 @@ def _codex_bind_report() -> dict[str, Any]:
             label="codex-bind-canary",
         )
         session_id = binding.session_id
+        error = None if session_id else "neither oracle bound within the window"
     else:
+        # No window was waited out here at all - a missing child pid is a
+        # pane-lookup miss, not a timed-out bind, and reporting the timeout
+        # message would hide that real cause from whoever reads the canary.
         session_id = None
+        error = "no child pid found for the canary pane"
     elapsed = time.monotonic() - started
     _reap_spawned_pane(session, pane_id, subprocess.run)
     return {
@@ -2207,7 +2212,7 @@ def _codex_bind_report() -> dict[str, Any]:
         "oracle": oracle_used[0] if oracle_used else None,
         "elapsed_s": round(elapsed, 2),
         "codex_version": version,
-        "error": None if session_id else "neither oracle bound within the window",
+        "error": error,
     }
 
 
