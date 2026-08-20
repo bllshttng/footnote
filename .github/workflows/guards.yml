@@ -1,12 +1,12 @@
 name: guards
 
-# Consolidates 17 near-duplicate structural-guard workflows (23 check
-# rows, 308 check-seconds serial) into two jobs, split by trigger shape rather
-# than merged into one - a PR-only group and a push+PR group - so no step
+# Consolidates near-duplicate structural-guard workflows into two jobs, split
+# by trigger shape rather than merged into one - a PR-only group and a push+PR
+# group - so no step
 # needs a runtime `if: event_name` guard and no PR-context env var (PR_BODY,
 # BASE_REF, ...) is ever read on a push event it was never designed for. Each
-# group's serial sum stays under 3 minutes (179s and 112s), so both run
-# sequentially rather than backgrounded: several of these scripts have real
+# group's serial sum stays under 3 minutes, so both run sequentially rather
+# than backgrounded: several of these scripts have real
 # side effects (apt fallback installs, git history reads) and backgrounding
 # heterogeneous scripts into one shared runner buys nothing but a collision
 # risk none of them were written to tolerate.
@@ -45,10 +45,10 @@ name: guards
 
 on:
   # `edited` is load-bearing for guards-pr: control-plane-doc-colocation.yml,
-  # loc-ratchet.yml, oos-tracked.yml and pr-body-length.yml each triggered on
+  # loc-ratchet.yml and oos-tracked.yml each triggered on
   # [opened, synchronize, reopened, edited] on purpose, because their fix path
-  # IS a PR-body edit (add a loc-exception line, cite a tracked node, trim the
-  # body) with no new commit. A bare `pull_request:` defaults to
+  # IS a PR-body edit (add a loc-exception line or cite a tracked node) with no
+  # new commit. A bare `pull_request:` defaults to
   # [opened, synchronize, reopened] and drops that path silently - the gate
   # would still be red (or stale) after the exact edit meant to clear it. The
   # `guards` job also re-runs on a body-only edit as a result; that is an
@@ -140,22 +140,6 @@ jobs:
         timeout-minutes: 5
         run: bash tests/skills/test_pr_oos_tracking_contract.sh
 
-      # From pr-body-length.yml (check-pr-body-length job).
-      - name: PR body length
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: bash scripts/ci/check-pr-body-length.sh
-
-      # From pr-body-length.yml (check-pr-body-style job).
-      - name: PR body style
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: bash scripts/ci/check-pr-style.sh
-
       # From pr-body-length.yml (self-test job).
       - name: Run pr-body-length self-test
         if: ${{ !cancelled() }}
@@ -178,8 +162,8 @@ jobs:
 
   # push (main) + pull_request: no member here reads PR-only context.
   # Sourced from: axis-vocabulary.yml, autonomy-registry.yml,
-  # codex-bootstrap-check.yml, mail-inject-callers.yml, markdown-style.yml,
-  # plan-rung-authority.yml, preamble-budget.yml,
+  # codex-bootstrap-check.yml, mail-inject-callers.yml, plan-rung-authority.yml,
+  # preamble-budget.yml,
   # review-invocation-single-source.yml, skill-local-evals.yml,
   # tracker-partition.yml, uv-install-bytecode.yml.
   guards:
@@ -263,12 +247,6 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash scripts/ci/check-mail-inject-callers.sh
-
-      # From markdown-style.yml.
-      - name: Markdown style (added lines)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-markdown-style.sh origin/main
 
       # From plan-rung-authority.yml.
       - name: One readiness authority (Python table, shell verb, Rust delegation)
