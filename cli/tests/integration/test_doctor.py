@@ -240,7 +240,7 @@ def test_check_agent_profiles_flags_incompatible_substrate() -> None:
     from fno.setup.doctor import check_agent_profiles
 
     settings = SettingsModel(
-        agents={"profiles": {"target": {"provider": "codex", "substrate": "bg", "permission_mode": "yolo"}}}
+        agents={"profiles": {"target": _lane("codex", substrate="bg", permission_mode="yolo")}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
@@ -254,10 +254,22 @@ def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            {"provider": "claude", "substrate": "bg", "route": "zai/glm-5.3[1m]"},
+            _lane("claude", substrate="bg", route="zai/glm-5.3[1m]"),
         ]}}}
     )
     assert check_agent_profiles(settings) == []
+
+
+def _lane(harness: str, **fields: object) -> dict:
+    """A lanes[] entry, keyed by the AXIS the value actually is.
+
+    The schema spells the harness axis ``provider`` (it matches its
+    ``agents.defaults``/``agents.profiles`` siblings), but the value is a
+    HARNESS, not a vendor. Building it through one adapter keeps the test
+    reading in the right vocabulary, instead of scattering harness literals
+    under a vendor-named key across the file.
+    """
+    return {"provider": harness, **fields}
 
 
 def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
@@ -270,7 +282,7 @@ def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            {"provider": "codex", "substrate": "pane"},
+            _lane("codex", substrate="pane"),
         ]}}}
     )
     assert check_agent_profiles(settings) == []
@@ -284,7 +296,7 @@ def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            {"provider": "codex", "substrate": "bg"},
+            _lane("codex", substrate="bg"),
         ]}}}
     )
     problems = check_agent_profiles(settings)

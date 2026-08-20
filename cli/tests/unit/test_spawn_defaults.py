@@ -47,6 +47,17 @@ class _Settings:
         self.model_routing = model_routing
 
 
+def _lane(harness: str, **fields: object) -> dict:
+    """A lanes[] entry keyed by the AXIS the value actually is.
+
+    The schema spells the harness axis ``provider``, matching its
+    ``agents.defaults``/``agents.profiles`` siblings, but the value is a
+    HARNESS and not a vendor. One adapter keeps every lane in this file reading
+    in the right vocabulary.
+    """
+    return {"provider": harness, **fields}
+
+
 def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
     return inject_spawn_defaults(
         args,
@@ -361,8 +372,8 @@ def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
 
     lanes = [
-        {"provider": "codex", "effort": "high", "substrate": "pane", "permission_mode": "yolo"},
-        {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+        _lane("codex", effort="high", substrate="pane", permission_mode="yolo"),
+        _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
     ]
     for live_count, expected_harness, expected_rung in (
         (0, "codex", "lanes[0]"),
@@ -393,8 +404,8 @@ def test_profile_lanes_skip_capped_vendor(monkeypatch):
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            {"provider": "codex", "permission_mode": "yolo"},
-            {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+            _lane("codex", permission_mode="yolo"),
+            _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
@@ -419,7 +430,7 @@ def test_profile_only_lane_at_cap_refuses(monkeypatch):
             err=err,
             max_lanes={"zai": 2},
             profiles={"target": {"lanes": [
-                {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+                _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
             ]}},
         )
     assert exc.value.code == 2
@@ -447,7 +458,7 @@ def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
             err=err,
             max_lanes={"zai": 2},
             profiles={"target": {"lanes": [
-                {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+                _lane("claude", route="zai/glm-5.3[1m]"),
             ]}},
         )
     assert exc.value.code == 2
@@ -463,7 +474,7 @@ def test_profile_lane_unknown_harness_refuses(monkeypatch):
         _inject(
             ["spawn", "--name", "w", "/fno:target x-1"],
             err=err,
-            profiles={"target": {"lanes": [{"provider": "banana"}]}},
+            profiles={"target": {"lanes": [_lane("banana")]}},
         )
     assert exc.value.code == 2
     assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
@@ -525,7 +536,7 @@ def test_ac5_err_unknown_profile_provider_fails_closed():
     with pytest.raises(SystemExit) as exc:
         _inject(
             ["spawn", "--name", "w", "/target x-1"], err=err,
-            profiles={"target": {"provider": "banana"}},
+            profiles={"target": _lane("banana")},
         )
     assert exc.value.code == 2
     assert "agents.profiles.target.provider" in err.getvalue()
@@ -535,7 +546,7 @@ def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
     # The same bad-provider profile does NOT fire for a /think seed.
     out = _inject(
         ["spawn", "--name", "w", "/think x"],
-        profiles={"target": {"provider": "banana"}},
+        profiles={"target": _lane("banana")},
     )
     assert out == ["spawn", "--name", "w", "/think x"]
 
@@ -988,7 +999,7 @@ def test_ac1_hp_receipt_names_harness_axis_not_provider_field():
     err = io.StringIO()
     _inject(
         ["spawn", "--name", "w", "/fno:target x-1"], err=err,
-        profiles={"target": {"provider": "codex", "effort": "high"}},
+        profiles={"target": _lane("codex", effort="high")},
     )
     msg = err.getvalue()
     assert "harness=codex (agents.profiles.target.provider)" in msg
@@ -1004,7 +1015,7 @@ def test_ac2_hp_route_collision_refused_before_injection_dash_p_form():
         _inject(
             ["spawn", "--name", "t-x3ab0", "-P", "zai", "--model", "glm-5.3",
              "--substrate", "bg", "/fno:target x-1"],
-            err=err, profiles={"target": {"provider": "codex"}},
+            err=err, profiles={"target": _lane("codex")},
         )
     assert exc.value.code == 2
     msg = err.getvalue()
@@ -1022,7 +1033,7 @@ def test_ac2_hp_route_collision_names_explicit_route_flag_not_dash_p():
     with pytest.raises(SystemExit) as exc:
         _inject(
             ["spawn", "--name", "w", "--route", "zai/glm-5.3", "/fno:target x-1"],
-            err=err, profiles={"target": {"provider": "codex"}},
+            err=err, profiles={"target": _lane("codex")},
         )
     assert exc.value.code == 2
     msg = err.getvalue()
@@ -1034,7 +1045,7 @@ def test_ac4_edge_bare_vendor_no_model_is_not_route_shaped():
     # AC4-EDGE: -P with no --model is not yet a route; no collision refusal.
     out = _inject(
         ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],
-        profiles={"target": {"provider": "codex"}},
+        profiles={"target": _lane("codex")},
     )
     assert "--harness" in out and out[out.index("--harness") + 1] == "codex"
 
@@ -1043,7 +1054,7 @@ def test_ac2_hp_route_shaped_but_profile_harness_is_claude_no_refusal():
     # The profile's harness CAN carry the route: no cross-axis collision.
     out = _inject(
         ["spawn", "--name", "w", "-P", "zai", "--model", "glm-5.3", "/fno:target x-1"],
-        profiles={"target": {"provider": "claude"}},
+        profiles={"target": _lane("claude")},
     )
     assert "--harness" in out and out[out.index("--harness") + 1] == "claude"
 
@@ -1052,7 +1063,7 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
     # Per-field explicit-wins matrix: an explicit flag survives, the differing
     # profile value appears nowhere in the final argv, for every field.
     cases = [
-        (["--harness", "codex"], {"provider": "claude"}, "claude"),
+        (["--harness", "codex"], _lane("claude"), "claude"),
         (["--model", "explicit-model"], {"model": "profile-model"}, "profile-model"),
         (["--harness", "claude", "--effort", "high"], {"effort": "low"}, "low"),
         (["--substrate", "pane"], {"substrate": "bg"}, "bg"),
@@ -1459,7 +1470,7 @@ def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+            _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
@@ -1487,8 +1498,8 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
-            {"provider": "codex"},
+            _lane("claude", route="zai/glm-5.3[1m]"),
+            _lane("codex"),
         ]}},
     )
     assert out[out.index("--harness") + 1] == "codex"
@@ -1501,7 +1512,7 @@ def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
         err=err2,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+            _lane("claude", route="zai/glm-5.3[1m]"),
         ]}},
     )
     assert "FNO_SPAWN_GATE=0" in err2.getvalue()
@@ -1516,7 +1527,7 @@ def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         spawn_defaults._validated_lanes(
-            [{"provider": "claude", "nonsense": "x"}], "agents.profiles.target.lanes", err
+            [_lane("claude", nonsense="x")], "agents.profiles.target.lanes", err
         )
     assert exc.value.code == 2
     assert "unknown field 'nonsense'" in err.getvalue()
