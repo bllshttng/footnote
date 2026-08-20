@@ -235,7 +235,8 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
         raise CrownScopeError(
             f"{raw!r} is a {entry.get('type') or 'node'}, not an epic. "
             "Implementers get no crowns - a single node is work, not a territory. "
-            "Crown the epic above it, or its project."
+            f"If {raw} IS meant to be an epic: fno backlog update {raw} --type epic. "
+            "Otherwise crown the epic above it, or its project."
         )
     return 2, raw
 

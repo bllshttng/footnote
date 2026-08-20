@@ -1023,6 +1023,47 @@ def test_succession_by_an_agent_caller_still_refuses_on_the_live_holder_scan(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_agent_caller_with_a_wrongly_typed_scope_sees_the_type_refusal_not_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP ordering: resolve_crown runs BEFORE the authority check, so an
+    agent caller naming a feature-typed node hits the type refusal - not an
+    identity/containment refusal. This fails on the pre-reorder code for the
+    ordering reason alone, which is the proof the reorder landed."""
+    from fno import paths
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "n-1", "type": "feature", "project": "alpha"}]}),
+        encoding="utf-8",
+    )
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "n-1")
+
+    assert result.exit_code == 2
+    assert "fno backlog update n-1 --type epic" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_in_place_crown_canonicalizes_a_portfolio_and_derives_its_level(
     tmp_path: Path, monkeypatch
 ) -> None:
