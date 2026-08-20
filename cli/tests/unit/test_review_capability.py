@@ -249,7 +249,7 @@ def test_self_review_invocation_names_the_harness_verb():
     # grammar is unverified); claude carries its arg grammar.
     assert rc.self_review_invocation("codex") == "/review"
     assert rc.self_review_invocation("opencode") == "/review-changes"
-    assert rc.self_review_invocation("claude") == "/code-review medium --comment --fix"
+    assert rc.self_review_invocation("claude") == "/code-review medium --comment"
     # An unknown harness gets the portable fno review, NEVER claude's verb
     # silently - a wrong answer where no answer was available.
     assert rc.self_review_invocation("agy") == "/fno:review"
@@ -270,11 +270,11 @@ def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(mon
     sized = rc.level_for_diff(30, 3000)
     monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
     rendered = rc.render_self_review_invocation("claude", project_root=None)
-    assert rendered == f"/code-review {sized} --comment --fix"
+    assert rendered == f"/code-review {sized} --comment"
     assert "<level>" not in rendered
 
     monkeypatch.setattr(rc, "diff_review_level", lambda root: None)
-    assert rc.render_self_review_invocation("claude") == "/code-review <level> --comment --fix"
+    assert rc.render_self_review_invocation("claude") == "/code-review <level> --comment"
 
     # Harness-less invocation resolves the ambient session; sizing still rides
     # the same path. A dead render never raises - it degrades to the placeholder.
@@ -319,12 +319,12 @@ def test_self_review_invocation_takes_the_level():
 
     assert (
         rc.self_review_invocation("claude", level="high")
-        == "/code-review high --comment --fix"
+        == "/code-review high --comment"
     )
     # No diff in hand yet: the placeholder survives for a pre-diff surface.
     assert (
         rc.self_review_invocation("claude", level=None)
-        == "/code-review <level> --comment --fix"
+        == "/code-review <level> --comment"
     )
     # Codex never grows args, whatever level is offered.
     assert rc.self_review_invocation("codex", level="high") == "/review"
@@ -334,7 +334,7 @@ def test_satisfiable_verdict_carries_the_arg_grammar():
     s = SessionCapability(harness="claude", substrate="pane", attended=True)
     v = resolve_reviewers(["code-review"], s)[0]
     assert v.status == "satisfiable"
-    assert "--comment --fix" in v.reason
+    assert "--comment" in v.reason
     assert "<level>" in v.reason
     codex = SessionCapability(harness="codex", substrate="pane", attended=True)
     cv = resolve_reviewers(["code-review"], codex)[0]
@@ -383,7 +383,7 @@ def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
 
     out = CliRunner().invoke(target_app, ["review-invocation", "--harness", "claude"])
     assert out.exit_code == 0, out.output
-    assert out.output.strip() == f"/code-review {sized} --comment --fix"
+    assert out.output.strip() == f"/code-review {sized} --comment"
 
     bare = CliRunner().invoke(target_app, ["review-invocation", "--harness", "codex"])
     assert bare.exit_code == 0, bare.output

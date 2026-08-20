@@ -1107,8 +1107,10 @@ struct PrInfo {
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
 /// rendering. The self-review verb is the one case: `/code-review <level>
-/// --comment --fix` on claude (the Python builder sizes `<level>` from the
-/// diff; `ultra` is not issuable), `/review` bare on codex, `/review-changes`
+/// --comment` on claude (the Python builder sizes `<level>` from the
+/// diff; `ultra` is not issuable). No `--fix`: this table is the machinery
+/// hint for a worker held at a head-pinned gate, and a fix pass moves HEAD
+/// and voids the attestation. `/review` bare on codex, `/review-changes`
 /// bare on opencode (its flag grammar is unverified against its docs, and an
 /// appended guess is the codex trap in a new coat). The codex value
 /// must stay bare - prose after the verb flips codex to a no-merge-base review
@@ -1118,13 +1120,24 @@ struct PrInfo {
 /// verb their harness cannot run). agy has no native verb and takes the fno
 /// review. Kept honest against the Python descriptor's `invocations` map by
 /// check-reviewer-descriptor-parity.sh.
+/// The ordering every "you are not reviewed yet" remedy must teach, and the
+/// producer it ends at. A verb name alone leaves two ways to waste the round:
+/// attesting over an open finding (the gate then lies to the whole board), and
+/// reviewing before the last commit is pushed (a later code commit voids the
+/// attestation). The emitter is named because the fallback arms of these
+/// messages render where `fno` does not resolve, so nothing else in the line
+/// tells the reader what actually produces the event.
+const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
+     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
+     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
+
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
     (
         "code-review",
         "/fno:review",
         false,
-        "claude=/code-review <level> --comment --fix;codex=/review;opencode=/review-changes;agy=/fno:review",
+        "claude=/code-review <level> --comment;codex=/review;opencode=/review-changes;agy=/fno:review",
     ),
     ("declare", "/fno:review declare", true, ""),
 ];
@@ -3250,11 +3263,19 @@ fn publish_coverage_status(
             "no covered review at {}; run the review verb at HEAD",
             short_sha(pr_head_oid)
         );
+        // No hint (or no room for one) is the case a CI runner hits, where
+        // `fno` does not resolve. The bare stem names no producer, so it sends
+        // the human reading the PR page nowhere. Name the emitter instead - it
+        // fits inside the 140-char cap, and the sized verb still wins when the
+        // bridge did resolve.
         let description = match self_review_hint.as_deref() {
             Some(hint) if base.len() + hint.len() + 6 <= 140 => {
                 format!("{base} - `{hint}`")
             }
-            _ => base,
+            _ => format!(
+                "no covered review at {}; review at HEAD, then skills/review/scripts/emit-attestation.sh <reviewer>",
+                short_sha(pr_head_oid)
+            ),
         };
         ("failure", description)
     };
@@ -5159,9 +5180,14 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                     stale.join(", ")
                 )
             } else {
+                // Both arms carry the ordering, because the verb alone does not
+                // teach it: close findings, commit, push, review at the final
+                // head, attest last. The None arm is the one a CI runner prints
+                // (no `fno` on PATH there), so it must still name a producer -
+                // a bare "run the review verb" names none.
                 match self_review_hint {
-                    Some(hint) => format!("run the review verb at HEAD - `{hint}`"),
-                    None => "run the review verb at HEAD".to_string(),
+                    Some(hint) => format!("run the review verb at HEAD - `{hint}` - {REVIEW_ORDER}"),
+                    None => format!("run the review verb at HEAD - {REVIEW_ORDER}"),
                 }
             };
             // `stale` counts in the tally and is NAMED in the next action, like
@@ -10898,7 +10924,7 @@ mod tests {
         // An unsized render keeps its `<level>` placeholder; embedding that in
         // a copy-me slot hands the reader a string it cannot run, so the
         // filter reads it as no hint at all.
-        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment --fix\\n'\n");
+        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment\\n'\n");
         assert_eq!(
             sized_self_review_hint(placeholder.to_str().unwrap(), dir, None),
             None
@@ -13115,7 +13141,7 @@ mod tests {
         );
         assert_eq!(
             reviewer_invocation_for("code-review", Some("claude")),
-            Some(("/code-review <level> --comment --fix", false))
+            Some(("/code-review <level> --comment", false))
         );
         assert_eq!(
             reviewer_invocation_for("code-review", Some("opencode")),
