@@ -279,7 +279,7 @@ The two gates are an AND, never an OR. Neither implementation can launder the ot
 
 One constraint decided every branch of `coverage-carry.sh`: a patch-id match proves the code is identical. It never proves a bot reviewed it. So the script only ever carries a `success` status that already exists on the previous head. That status must match the publisher allowlist the workflow already preserves: `covered*` or `no review lane*`. All three spellings of `coverage-override*` are refused by name. A green the override label bought must never survive its own withdrawal by riding a rebase onto the next head. Every read failure falls through to today's failure post, and so does a match between two empty diffs.
 
-One shape does not carry, and it is not a bug: a chain of rebases where an intermediate `synchronize` run was cancelled. The head that run would have re-greened carries no status. The next run's `--before` has nothing to carry forward. That falls to failure - the same outcome as today, on a head no run ever finished evaluating.
+One shape does not carry, and it is not a bug: a chain of rebases where an intermediate `synchronize` run was cancelled. The cancelled run never posts to its head, so that head carries no status. The next run's `--before` has nothing to carry forward. That falls to failure - the same outcome as today, on a head no run ever finished evaluating.
 
 ### Scope: which PR an attestation is about
 

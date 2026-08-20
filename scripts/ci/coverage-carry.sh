@@ -52,12 +52,14 @@ fi
 # The combined-status endpoint: one entry per context, the latest - the same
 # read check-merge-coverage-audit.sh uses and for the same tie-breaking
 # reason (the status list is newest-first with one-second granularity, so a
-# same-second tie needs the combined endpoint, not the list).
-status_field() { # <sha> <jq-tail: .state or .description>
+# same-second tie needs the combined endpoint, not the list). One request
+# returns both fields tab-separated, rather than two round trips for the
+# same already-fetched response.
+status_read() { # <sha> -> prints "state<TAB>description"
   local attempt out
   for attempt in 1 2 3; do
     if out="$(gh api "repos/${repo}/commits/${1}/status" \
-      --jq "[.statuses[] | select(.context == \"${ctx}\")] | first | ${2} // empty")"; then
+      --jq "[.statuses[] | select(.context == \"${ctx}\")] | first | ((.state // \"\") + \"\t\" + (.description // \"\"))")"; then
       printf '%s' "$out"
       return 0
     fi
@@ -67,14 +69,12 @@ status_field() { # <sha> <jq-tail: .state or .description>
   return 1
 }
 
-if ! before_state="$(status_field "$before" '.state')"; then
+if ! status_out="$(status_read "$before")"; then
   no_carry "status-read-failed"
 fi
+IFS=$'\t' read -r before_state before_desc <<<"$status_out"
 if [ "$before_state" != "success" ]; then
   no_carry "no-previous-head"
-fi
-if ! before_desc="$(status_field "$before" '.description')"; then
-  no_carry "status-read-failed"
 fi
 
 # The publisher allowlist: EXACTLY the workflow's own preserve list, no
@@ -93,9 +93,14 @@ esac
 # repository being compared. Three-dot compare semantics mean the answer
 # does not move when the base ref moves under it.
 patch_id() { # <sha>
+  # `|| true`: a failed compare call must degrade to an empty identity, not
+  # crash the script - the caller's `set -e` treats a failing command
+  # substitution assignment as fatal, and pipefail would otherwise carry a
+  # failed `gh api` through the pipe's exit status. An empty identity falls
+  # through to the existing no-diff-identity check below either way.
   gh api "repos/${repo}/compare/${base}...${1}" \
     -H 'Accept: application/vnd.github.v3.diff' 2>/dev/null \
-    | git patch-id --stable 2>/dev/null | cut -d' ' -f1
+    | git patch-id --stable 2>/dev/null | cut -d' ' -f1 || true
 }
 
 before_pid="$(patch_id "$before")"
