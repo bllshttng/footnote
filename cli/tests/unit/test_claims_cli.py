@@ -774,6 +774,19 @@ def test_free_node_with_nobody_names_the_scan_it_consulted(cwd_tmp, fake_roster)
     assert "free, no live worker found (roster scanned: 1 rows)" in r.output
 
 
+def test_the_crosscheck_leaves_stdout_parseable_as_json(cwd_tmp, fake_roster):
+    """`handoff.sh` pipes this command into jq without --json. A prose line on
+    stdout broke that read exactly when the claim had lapsed, which is the case
+    the operator most needs a truthful holder for. The verdict goes to stderr."""
+    import json as _json
+
+    fake_roster(rows=[_row("t-x76d1-rmtruth", "working", "x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"], catch_exceptions=False)
+    assert r.exit_code == 0, r.output
+    assert _json.loads(r.stdout)["state"] == "free"
+    assert "UNCLAIMED but a live worker" in r.output
+
+
 def test_roster_read_failure_never_renders_a_clean_free(cwd_tmp, fake_roster):
     """An instrument that did not run must not render as an answer."""
     fake_roster(rows=[], warnings=["claude binary not found on PATH"])

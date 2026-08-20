@@ -1248,9 +1248,13 @@ PYEOF
       # claim taken for this very worker, the all-or-nothing rollback below
       # releases the sibling, and the session ends up holding nothing - a
       # two-node payload back to zero claims, which is the defect being fixed.
+      # The harness flag belongs with the handover for the same reason the
+      # single-node path carries it: a rebind keeps the PRIOR holder's harness
+      # tag unless this call names the new one, so a claude worker inheriting a
+      # codex spawner's claim would read as codex for the rest of its life.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:${_mnode}" \
             --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
-            $_MULTI_HANDOVER_FLAGS \
+            $_MULTI_HANDOVER_FLAGS ${_CLAIM_HARNESS_FLAG:-} \
             --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
         _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
       else

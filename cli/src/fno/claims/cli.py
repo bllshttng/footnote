@@ -893,7 +893,11 @@ def status(
         return
     typer.echo(json.dumps(info, indent=2))
     if crosschecked:
-        typer.echo(_roster_verdict_line(info))
+        # STDERR: stdout stays parseable JSON on every path. `handoff.sh` pipes
+        # this command straight into jq without --json, and a trailing prose
+        # line makes that read fail exactly when the claim has lapsed, which is
+        # the case the operator most needs a truthful answer for.
+        typer.echo(_roster_verdict_line(info), err=True)
 
 
 def _merge_claims_across_roots(

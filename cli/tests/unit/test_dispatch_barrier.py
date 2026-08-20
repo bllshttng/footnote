@@ -298,6 +298,45 @@ def test_an_unprovable_wedge_refuses_and_names_the_way_out(monkeypatch, tmp_path
     assert "fno claim reap --apply" in verdict["remedy"]
 
 
+def test_a_probe_reports_the_wedge_as_untried_and_offers_no_remedy(monkeypatch, tmp_path):
+    """A probe takes no recovery, so it has nothing to say about whether the
+    wedge clears. It says untried, and the shell callers read that and go on to
+    the real spawn - which is the only path that can clear the claim. Handing
+    back force-release advice here sent an operator to fix by hand a claim the
+    launch would have cleared by itself."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(
+        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+    )
+    _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+
+    verdict, _exit = _spawn_guard_decision(
+        "N", "probe:me", ttl="3m", no_reserve=True
+    )
+    assert verdict["reason"] == "suspect-claim"
+    assert verdict["recovery"] == "not-attempted"
+    assert "remedy" not in verdict
+
+
+def test_the_launch_path_still_names_the_way_out(monkeypatch, tmp_path):
+    """The other half of the pair: on the path that DID try to recover and
+    could not, the remedy is earned and must still be there."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.core import acquire_claim
+
+    acquire_claim(
+        "node:N", "target-session:dead", ttl_ms=3_600_000, pid=_dead_pid(), root=tmp_path
+    )
+    _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+
+    verdict, _exit = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["reason"] == "suspect-claim"
+    assert "recovery" not in verdict
+    assert "fno claim reap --apply" in verdict["remedy"]
+
+
 def test_a_blind_roster_never_clears_a_node_claim(monkeypatch, tmp_path):
     """The same run as above, stated as the safety property: an instrument that
     did not run must never authorize a clear."""

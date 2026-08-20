@@ -14,6 +14,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 
+import pytest
 import typer
 
 from fno.agents import watchdog
@@ -1973,6 +1974,21 @@ def test_an_unreadable_claim_is_not_a_finding():
     # an unanswered read as a healthy row. What matters here is that it is not
     # reported as an unclaimed node.
     assert v.verdict == STALE
+    assert v.verdict != UNCLAIMED
+
+
+@pytest.mark.parametrize("state", ["done", "completed", "exited", "killed", "stopped"])
+def test_every_terminal_row_state_is_skipped_not_just_done(state):
+    """A finished row released its claim correctly, so flagging it reports the
+    system working. `claude agents --json --all` keeps terminal rows forever,
+    so a set narrower than the module's own terminal states put `completed`,
+    `exited` and `killed` rows in the digest permanently."""
+    rows = [Row("cccc3333-0007", "t-worker", state, "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0007": _facts("done here", age_min=2)},
+        claims={"x-76d1": {"state": "free"}},
+    )
     assert v.verdict != UNCLAIMED
 
 

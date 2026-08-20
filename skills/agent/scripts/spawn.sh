@@ -189,21 +189,33 @@ if [[ -n "$NODE" ]]; then
         fi
       elif [[ "$reason" == "suspect-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        # A WEDGE, not benign dedup. The guard already tried to clear this and
-        # could not prove the holder dead, so nobody is building this node and
-        # nobody will until an operator intervenes. Exiting 0 here told a caller
-        # reading the exit code that the launch worked (x-05be).
-        # The remedy goes to STDERR, never inside the receipt: `fail` renders
-        # `result=failed reason="..."` and this file's contract is ONE line on
-        # stdout. A newline inside the quoted reason breaks every caller that
-        # parses that line.
-        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
-        fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
+        recovery="$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)"
+        # A WEDGE, not benign dedup: dead pid, unexpired TTL, so nobody is
+        # building this node and nobody will until it clears.
+        #
+        # The call above is a PROBE and takes no recovery, so a wedge it reports
+        # has not been tried yet. Failing here is what made the recovery this PR
+        # adds unreachable from `/fno:agent spawn --node`: the only path that
+        # clears the claim is the real `fno agents spawn` below, and this exited
+        # before reaching it. Fall through instead. That spawn runs the same
+        # guard WITH a reservation, clears what it can prove dead, and refuses
+        # with a remedy on stderr when it cannot.
+        if [[ "$recovery" == "not-attempted" ]]; then
+          wedge_untried=1
+        else
+          # The remedy goes to STDERR, never inside the receipt: `fail` renders
+          # `result=failed reason="..."` and this file's contract is ONE line on
+          # stdout. A newline inside the quoted reason breaks every caller that
+          # parses that line. `fail` exits non-zero: exiting 0 here told a
+          # caller reading the exit code that the launch worked (x-05be).
+          printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
+          fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
+        fi
       else
         printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
         fail "family-2 guard blocked node:$NODE; no worker launched"
       fi
-      exit 0 ;;
+      [[ "${wedge_untried:-0}" == 1 ]] || exit 0 ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
     refused)

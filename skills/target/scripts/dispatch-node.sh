@@ -585,6 +585,8 @@ for id in "${NODES[@]}"; do
   # could leak onto stdout), then parse the verdict.
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
+  # Per-node, so one node's untried wedge cannot leak into the next iteration.
+  wedge_untried=0
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
@@ -597,16 +599,27 @@ for id in "${NODES[@]}"; do
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
-        remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
-        echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
-        # A remedy is present only when the guard tried to clear this and could
-        # not prove the holder dead - the positive marker for a wedge. A batch
-        # keeps sweeping either way; the exit code below is what changes.
-        if [[ -n "$remedy" ]]; then
-          echo "$remedy"
-          n_wedged=$((n_wedged + 1))
+        recovery="$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null || true)"
+        if [[ "$recovery" == "not-attempted" ]]; then
+          # The probe takes no recovery, so this wedge has not been tried yet.
+          # Skipping here is what made the recovery unreachable for a batch: the
+          # only path that clears the claim is the real spawn below. Go there.
+          # It runs the same guard WITH a reservation, clears what it can prove
+          # dead, and refuses with a remedy on stderr when it cannot.
+          wedge_untried=1
+        else
+          echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
+          # A remedy is present only when the guard tried to clear this and
+          # could not prove the holder dead - the positive marker for a wedge. A
+          # batch keeps sweeping either way; the exit code below is what changes.
+          remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
+          if [[ -n "$remedy" ]]; then
+            echo "$remedy"
+            n_wedged=$((n_wedged + 1))
+          fi
+          n_skipped=$((n_skipped + 1))
+          continue
         fi
-        n_skipped=$((n_skipped + 1))
       else
         # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-
         # held, or won the visibility barrier). Mirror spawn.sh's receipt so the
@@ -615,7 +628,9 @@ for id in "${NODES[@]}"; do
         echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds $res_key)\""
         n_already=$((n_already + 1))
       fi
-      continue ;;
+      # An untried wedge falls through to the real spawn; every other shape here
+      # has already reported and moves to the next node.
+      [[ "${wedge_untried:-0}" == 1 ]] || continue ;;
     corrupted)
       # The worker's init-side `fno claim acquire` cannot reclaim a corrupted
       # claim, so launching would run WITHOUT the node:<id> mutex and leave the
@@ -909,7 +924,11 @@ for id in "${NODES[@]}"; do
           continue ;;
         suspect-claim)
           echo "skipped-contested $id reason=\"suspect-claim by shared family-2 guard; no worker launched\""
-          remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
+          # From THIS refusal's stderr, not the probe JSON above: that variable
+          # was assigned once, before the spawn, and by here always reads
+          # `dispatchable`, so its `.remedy` was always empty and n_wedged could
+          # never increment.
+          remedy="$(printf '%s' "$spawn_err" | grep -E '^  (Clear it|Override): ' || true)"
           if [[ -n "$remedy" ]]; then
             echo "$remedy"
             n_wedged=$((n_wedged + 1))

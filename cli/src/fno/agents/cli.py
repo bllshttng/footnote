@@ -264,12 +264,30 @@ def _spawn_guard_decision(
                     "holder": observation.holder,
                     "truth_status": observation.truth_status,
                 }
+                # The cleared claim makes this the first reading with the node
+                # free, so the failure-limit arm can fire here for the first
+                # time. Report what it decided. Falling through would label an
+                # auto-deferred node `already-running` and hand back a
+                # force-release remedy that does nothing for it.
+                if observation.action in ("auto-deferred", "defer-failed"):
+                    return {
+                        "verdict": "refused",
+                        "reason": observation.action,
+                        **common,
+                    }, 0
         if observation.blocks_dispatch:
+            # The remedy is force-release advice, and it is only honest once
+            # recovery has been TRIED and failed. A probe takes no recovery, so
+            # it says the wedge is recoverable-untried instead and the caller
+            # goes on to the real spawn, which recovers or refuses for real.
+            wedged = state == "suspect"
+            recovery = "not-attempted" if wedged and no_reserve else None
             return {
                 "verdict": "already-running",
-                "reason": "suspect-claim" if state == "suspect" else "live-claim",
+                "reason": "suspect-claim" if wedged else "live-claim",
+                **({"recovery": recovery} if recovery else {}),
                 **({"remedy": _remedy_for(node_key, observation.holder)}
-                   if state == "suspect" else {}),
+                   if wedged and not no_reserve else {}),
                 **common,
             }, 0
     if no_reserve:
@@ -1574,6 +1592,12 @@ def cmd_spawn(
                 "no worker launched",
                 file=sys.stderr,
             )
+            # This is the launch path, so a remedy here HAS earned itself:
+            # recovery ran and could not prove the holder dead. Printing it is
+            # what makes the way out reach an operator; the shell callers read
+            # this stream and pass it through.
+            if guard.get("remedy"):
+                print(guard["remedy"], file=sys.stderr)
             raise typer.Exit(code=guard_exit or 2)
         node_reservation = (
             guard["reservation_key"],

@@ -74,10 +74,6 @@ LEAVE = "leave"
 #: the row surfaces in the digest, which is the whole point: nothing today
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
-#: Row states whose claim is expected to be gone: the session finished its turn
-#: and released. The advisory skips them, mirroring the same cut the claim
-#: status cross-check makes.
-_FINISHED_ROW_STATES = frozenset({"done"})
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
@@ -676,11 +672,14 @@ def _unclaimed_node_basis(row: Row, claim_for: Callable[[str], dict]) -> str:
     that raises, or any state that is not a plain ``free`` reports nothing: an
     advisory that fires on an unreadable store trains its reader to ignore it.
     """
-    if not row.node or row.state in _FINISHED_ROW_STATES:
+    if not row.node or row.state in _TERMINAL_STATES:
         # A finished row's claim was CORRECTLY released, so flagging it reports
         # the system working. `claude agents --json --all` keeps terminal rows
         # forever, so without this the digest accumulates permanent noise and
-        # the advisory trains its reader to ignore it.
+        # the advisory trains its reader to ignore it. Every terminal state
+        # counts, not just `done`: a narrower set here flagged `completed`,
+        # `exited` and `killed` rows forever, which is the same noise under a
+        # different name.
         return ""
     try:
         claim = claim_for(row.node)

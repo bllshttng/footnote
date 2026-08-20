@@ -1695,15 +1695,40 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 /// harness ancestor - because the caller's fallback is to leave the anchor
 /// exactly as it found it. An unresolvable pid is not a reason to write a worse
 /// one.
+/// Wall-clock ceiling on the `claim session-pid` shell-out. Generous enough for
+/// a cold python start, short enough that a hung one does not hold the recovery
+/// mutex for a human-noticeable time.
+const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn durable_session_pid() -> Option<i32> {
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    let out = std::process::Command::new(&fno)
+    let mut child = std::process::Command::new(&fno)
         .args(["claim", "session-pid", "--from-pid"])
         .arg(std::process::id().to_string())
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
+    // BOUNDED, because this runs inside the per-claim recovery mutex: an
+    // unbounded wait on a slow python start stalls every acquire, refresh and
+    // reap contending on the same key. The host has no `timeout` binary, so the
+    // bound is native: poll `try_wait`, then kill. A kill degrades to None, and
+    // None leaves the anchor exactly as it was found.
+    let deadline = std::time::Instant::now() + SESSION_PID_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
