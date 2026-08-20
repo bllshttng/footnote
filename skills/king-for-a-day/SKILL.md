@@ -53,7 +53,7 @@ Naming one epic makes an epic king, one project a project king, and several proj
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
 
-A crown is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark crowned rows, so a minion resolves who to escalate to. `fno agents court` names every live crown, whether the registry and the graph agree, and any scope two live rows hold at once. `fno whoami` prints a `crown:` line, present only when the session holds one, so you recover your own authority after a compaction.
+A crown is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark crowned rows, so a minion resolves who to escalate to. `fno agents court` names every live crown, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a crown, `fno whoami` prints it as a `crown:` line, so you recover your own authority after a compaction.
 
 Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
 
