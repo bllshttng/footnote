@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
 import re
 import subprocess
@@ -105,14 +106,22 @@ def classify(
         ]
         return Row(UNKNOWN, node, unpushed, age, {**facts, "reason": f"read failed: {','.join(failed)}"})
 
+    # LIVE outranks every node-status read below it, not just PR_OPEN: a
+    # code-review finding caught that a node auto-transitioning to "done" or
+    # a terminal status (deferred/superseded) WHILE a worker is still
+    # mid-commit in that worktree misclassified as SHIPPED/ABANDONED instead
+    # of LIVE, and the hook then suggested `worktree cleanup --merged` on a
+    # genuinely live session. The fleet leg is the only input that
+    # distinguishes a live worker from a corpse; nothing about node status
+    # ever overrides it.
+    if registry_status in _ALIVE_STATUSES:
+        return Row(LIVE, node, unpushed, age, facts)
+
     if node_entry.get("status") == "done":
         return Row(SHIPPED, node, unpushed, age, facts)
 
     if node_entry.get("status") in _QUIET_TERMINAL_STATUSES:
         return Row(ABANDONED, node, unpushed, age, facts)
-
-    if registry_status in _ALIVE_STATUSES:
-        return Row(LIVE, node, unpushed, age, facts)
 
     if node_entry.get("pr_number"):
         return Row(PR_OPEN, node, unpushed, age, facts)
@@ -373,22 +382,37 @@ def record_unknown(row: Row) -> dict:
 def _emit_sweep_event(
     row: Row, *, node: Optional[str], branch: Optional[str], sha: Optional[str], acts: list[str]
 ) -> bool:
-    data = json.dumps(
-        {
-            "path": row.facts.get("path"),
-            "branch": branch,
-            "class": row.klass,
-            "unpushed": row.unpushed,
-            "sha": sha,
-            "acts": acts,
-            "reason": row.facts.get("reason"),
-        }
-    )
-    args = ["fno", "event", "emit", "-t", "stranded_sweep", "-d", data]
-    if node:
-        args.extend(["--node", node])
-    ev_p = subprocess.run(args, capture_output=True, text=True)
-    return ev_p.returncode == 0
+    """In-process, not a shell to `fno event emit`: the same pattern
+    fno.agents.watchdog.emit_event already uses for this daemon's sibling
+    fleet-watchdog leg. A miss is swallowed loudly (a log warning, not
+    silence) so a whole lane of telemetry going missing is never mistaken
+    for a clean run, but it still never breaks the sweep. Also fixes a bug
+    the subprocess form had regardless of process cost: `stranded_sweep`
+    was never registered in events/schema.yaml, so every emit here was
+    silently failing validation - and `--node` on the CLI form is a no-op
+    for any non-x-dbaf-family type (envelope stays None), so `node` goes in
+    `data` instead, where it is actually stored."""
+    data = {
+        "path": row.facts.get("path"),
+        "branch": branch,
+        "class": row.klass,
+        "unpushed": row.unpushed,
+        "sha": sha,
+        "acts": acts,
+        "reason": row.facts.get("reason"),
+        "node": node,
+    }
+    try:
+        from fno import paths as _paths
+        from fno.events import _build, append_event
+
+        append_event(_build("stranded_sweep", "daemon", data), _paths.state_dir() / "events.jsonl")
+        return True
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break the sweep
+        logging.getLogger(__name__).warning(
+            "worktree_stranded: event stranded_sweep not written: %s", exc
+        )
+        return False
 
 
 def apply_sweep(rows: list[Row], *, wake: bool = True) -> list[dict]:

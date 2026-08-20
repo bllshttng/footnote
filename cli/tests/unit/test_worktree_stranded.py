@@ -89,6 +89,25 @@ def test_live_outranks_pr_open():
     assert row.klass == LIVE
 
 
+@pytest.mark.parametrize(
+    "node_status",
+    [
+        pytest.param("done", id="live-outranks-shipped"),
+        pytest.param("superseded", id="live-outranks-abandoned-superseded"),
+        pytest.param("deferred", id="live-outranks-abandoned-deferred"),
+    ],
+)
+def test_live_outranks_terminal_node_status(node_status):
+    """A code-review finding: a node auto-transitioning to a terminal status
+    WHILE a worker is still mid-commit in that worktree must still read
+    LIVE, not SHIPPED/ABANDONED - the same LIVE-outranks-everything-below-it
+    principle test_live_outranks_pr_open already covers for PR_OPEN. Reading
+    this as ABANDONED would have the SessionStart hook suggest `worktree
+    cleanup --merged` on a genuinely live session."""
+    row = classify(**_base_kwargs(registry_status="busy", node_entry={"status": node_status}))
+    assert row.klass == LIVE
+
+
 # --- both fail-open paths -----------------------------------------------
 
 
