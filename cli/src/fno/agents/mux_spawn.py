@@ -47,6 +47,7 @@ from fno.agents.dispatch import (
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
+from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -76,8 +77,6 @@ _DEFAULT_SESSION = "main"
 #: Per-harness spelling for a model selected by the route table. The route
 #: table owns the model choice; this map only adapts its provider/model id to a
 #: harness that requires the provider prefix in its argv.
-from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
-
 _PER_HARNESS_MODEL_SPELLING = {
     "opencode": f"zai-coding-plan/{DEFAULT_SECONDARY_MODEL}",
 }
