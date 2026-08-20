@@ -123,6 +123,71 @@ def test_window_expiry_with_a_live_pane_is_still_booting() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The codex app-server daemon oracle, at the receipt level: composed through
+# _make_codex_bind_probe into the same _await_pane_binding wait this file
+# already exercises, so the bound == bool(short_id) invariant and the
+# still-booting-not-died asymmetry hold for a daemon-sourced id exactly as
+# they do for an fd-sourced one.
+# ---------------------------------------------------------------------------
+
+
+def _codex_probe(monkeypatch, *, candidate, alive: bool = True, baseline=frozenset()):
+    from fno.agents.mux_spawn import _make_codex_bind_probe
+
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: candidate)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: alive)
+    return _make_codex_bind_probe(
+        cwd=Path("/w/proj"),
+        spawn_started_ms=0,
+        child_pid=4242,
+        codex_sessions_dir=None,
+        daemon_baseline_ids=set(baseline),
+        mux=MUX,
+        runner=_runner(),
+    )
+
+
+def test_daemon_oracle_bind_produces_a_bound_receipt(monkeypatch) -> None:
+    probe = _codex_probe(monkeypatch, candidate=SID)
+    out = _await_pane_binding(
+        MUX, probe, runner=_runner(), sleep=_no_sleep, window_s=999.0
+    )
+    assert out.session_id == SID
+    assert out.pane_alive is True
+    assert out.reason == ""
+
+
+def test_daemon_oracle_ambiguity_resolves_still_booting_not_died(monkeypatch) -> None:
+    # None every time: the candidate function itself is what refuses on two
+    # new ids (unit-tested directly in test_spawn_codex_session_capture.py),
+    # so at the probe/receipt level ambiguity looks identical to "no answer
+    # yet" - and must resolve the same way every other still-booting case
+    # in this file does, never to died.
+    probe = _codex_probe(monkeypatch, candidate=None)
+    out = _await_pane_binding(
+        MUX, probe, runner=_runner(wait_rc=WAIT_ALIVE), sleep=_no_sleep, window_s=0.0
+    )
+    assert out.session_id is None
+    assert out.pane_alive is True
+    assert out.reason == "binding-window-expired"
+
+
+def test_daemon_unavailable_leaves_the_fd_oracle_alone_to_decide(monkeypatch) -> None:
+    # A None candidate is what an unreachable daemon also produces, so this
+    # exercises the same degrade path: the fd probe (also None here) is the
+    # only vote, and the receipt reports the ordinary still-booting outcome
+    # rather than anything daemon-shaped.
+    probe = _codex_probe(monkeypatch, candidate=None)
+    out = _await_pane_binding(
+        MUX, probe, runner=_runner(wait_rc=WAIT_ALIVE), sleep=_no_sleep, window_s=0.0
+    )
+    assert out.session_id is None
+    assert out.reason == "binding-window-expired"
+
+
+# ---------------------------------------------------------------------------
 # The asymmetry rule: ambiguity resolves to still-booting, never to died.
 # A false "died" kills a working worker; a false "still booting" costs a retry.
 # ---------------------------------------------------------------------------
