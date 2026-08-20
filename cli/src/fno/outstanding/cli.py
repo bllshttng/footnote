@@ -225,10 +225,10 @@ def clear(
             # Routed through record_decision so the decision gets both halves
             # a `fno decide` record has: the event AND the graph projection
             # onto the subject node, which is what `fno decide list` reads.
-            # The decider is the operator by definition on this path
-            # (closed_by records the typing session on the close event);
-            # decided_by must not depend on whether the closing session could
-            # be resolved.
+            # decided_by is left unset on purpose, so record_decision stamps
+            # whoever actually ran the verb. Naming the operator here would
+            # assert it, and an agent clearing a question on their behalf would
+            # then be indistinguishable from the operator answering it.
             recorded: "str | None" = None
             if answer is not None:
                 from fno.decide import record_decision

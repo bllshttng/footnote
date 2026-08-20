@@ -15,10 +15,11 @@ and unreadable by the verb that promised to recover it.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 DECISION_EVENT = "operator_decision"
 
@@ -26,6 +27,19 @@ DECISION_EVENT = "operator_decision"
 # This safely postdates every row that writer produced during the cutover; the
 # reader refuses to fabricate law from those ambiguous append-only records.
 AUTHORITY_LANE_CUTOVER = "2026-08-21T00:00:00Z"
+
+# Enforced on the WRITE path only, never in schema.yaml. The index on disk
+# already holds `crown-l1`, `crown-l2-x-f3d0` and `crown-l2-x-b79f` in this
+# field, invented by kings who had no correct value to pass. A JSON-Schema enum
+# would make `fno decide reindex` reject those rows as unusable and silently
+# drop recall for real rulings, so the closed set binds where the value is
+# authored and the reader stays permissive.
+AUTHORITY_SOURCES: tuple[str, ...] = (
+    "operator",   # a human at an attended terminal: law
+    "crown",      # a king ruling inside its own crown scope: coordination
+    "agent",      # any other agent ruling: coordination
+    "beastmode",  # an agent acting under an explicit grant
+)
 
 PROJECTION_FIELDS = (
     "decision_id",
@@ -36,6 +50,8 @@ PROJECTION_FIELDS = (
     "asked_at",
     "options",
     "decided_by",
+    "attested_by",
+    "relayed_by",
     "authority_source",
     "rationale",
     "supersedes",
@@ -73,10 +89,40 @@ def mint_decision_id() -> str:
     return f"d-{secrets.token_hex(4)}"
 
 
+class Provenance(NamedTuple):
+    """Who recorded a ruling, and how much of that a reader may trust.
+
+    Four values travel together and only one of them is trustworthy on its own,
+    so they are named rather than positional: a caller reading the wrong slot of
+    a bare 4-tuple is exactly the confusion this record exists to remove.
+    """
+
+    decided_by: str
+    authority_source: str
+    attested_by: str | None
+    relayed_by: str | None
+
+
 def _resolve_decider(
     decided_by: str | None, authority_source: str | None
-) -> tuple[str, str]:
-    """Resolve omitted provenance from the ambient harness identity."""
+) -> Provenance:
+    """Resolve provenance from the ambient harness identity.
+
+    ``decided_by`` is STAMPED, never stated, whenever a session identity
+    resolves. A name the caller supplies is a claim about someone else, so it
+    lands in ``relayed_by`` and leaves the trusted column untypeable.
+
+    That split is the whole point. On 2026-08-19 five workers were told to
+    verify their orders by reading ``decided_by``. Each did it correctly and got
+    a fabricated yes, because an agent had typed a human's name into the field.
+    The ``coord`` lane bounded that only where the lane was visible, and a row
+    quoted in mail carries no lane.
+
+    Refusing a supplied name outright would be the wrong fix: an agent relaying
+    a real operator answer it obtained by asking is an honest record worth
+    keeping (d-ab302914). Splitting the columns keeps it and still makes the
+    trusted one unforgeable.
+    """
     from fno.harness_identity import canonical_handle, resolve_harness_identity
 
     ident = resolve_harness_identity()
@@ -87,10 +133,15 @@ def _resolve_decider(
     )
     if agent and authority_source == "operator":
         raise RefusedAuthorityError(agent)
-    return (
-        decided_by or agent or "operator",
-        authority_source or ("agent" if agent else "operator"),
-    )
+    if agent:
+        # Relayed only when it says something the stamp does not. A caller
+        # passing its own handle relayed nothing.
+        relayed = decided_by if decided_by and decided_by != agent else None
+        return Provenance(agent, authority_source or "agent", None, relayed)
+    # No ambient identity: a human at an attended terminal. The name they state
+    # IS the record, and attested_by marks it as one a person stood behind.
+    decider = decided_by or "operator"
+    return Provenance(decider, authority_source or "operator", decider, None)
 
 
 def record_decision(
@@ -123,7 +174,7 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
-    decided_by, authority_source = _resolve_decider(decided_by, authority_source)
+    provenance = _resolve_decider(decided_by, authority_source)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
@@ -140,8 +191,10 @@ def record_decision(
         asked_by=asked_by,
         asked_at=asked_at,
         options=options,
-        decided_by=decided_by,
-        authority_source=authority_source,
+        decided_by=provenance.decided_by,
+        attested_by=provenance.attested_by,
+        relayed_by=provenance.relayed_by,
+        authority_source=provenance.authority_source,
         rationale=rationale,
         supersedes=supersedes,
     )
@@ -440,7 +493,10 @@ def _subject_matcher(subject: str):
 def _decision_lane(row: dict) -> str:
     """Map stored provenance to the authority lane a reader can trust."""
     authority = str(row.get("authority_source") or "")
-    if authority == "agent":
+    if authority in ("agent", "crown"):
+        # A king ruling inside its own crown scope is still coordination. It
+        # needs no lane of its own; it needed a value it could pass without
+        # inventing one.
         return "coord"
     if authority == "beastmode":
         return "grant"
@@ -449,6 +505,46 @@ def _decision_lane(row: dict) -> str:
             return "law"
         return "unattributed"
     return "unattributed"
+
+
+_DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{4,32}$", re.IGNORECASE)
+
+
+def looks_like_decision_id(token: str) -> bool:
+    """Is this argument shaped like a decision id rather than a subject?
+
+    Shape only. It says nothing about whether such a decision exists, and the
+    caller must not read it as an answer about the store.
+    """
+    return bool(_DECISION_ID_RE.match(token.strip()))
+
+
+def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
+    """Recorded subjects that nearly match, newest-heaviest first.
+
+    A near miss is indistinguishable from a real absence today: four rulings
+    filed under the free-text subject ``x-f7b9 scope`` are invisible to
+    ``--subject x-f7b9``, and recovering them needed a raw grep of the index.
+    Containment in EITHER direction counts, because the writer is as likely to
+    have recorded the longer spelling as the shorter one.
+
+    One function, read by both the human block and ``--json``, so the two
+    surfaces cannot drift into disagreeing about what nearly matched.
+    """
+    want = subject.strip().casefold()
+    if not want:
+        return []
+    rows, _ = _read_index(_index_path(), warn=False)
+    counts: "dict[str, int]" = {}
+    for row in rows:
+        recorded = str(row.get("subject") or "")
+        folded = recorded.strip().casefold()
+        if not folded or folded == want:
+            continue
+        if want in folded or folded in want:
+            counts[recorded] = counts.get(recorded, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ranked[:10]
 
 
 def list_decisions(
@@ -483,7 +579,21 @@ def list_decisions(
         if rank > superseded_by.get(str(target), ("", ""))[0:2]:
             superseded_by[str(target)] = rank
 
-    matches = _subject_matcher(subject) if subject else None
+    # A d- token is a decision id before it is a subject. The id is the first
+    # column of the row's own output, so answering "no decisions recorded" for
+    # the key the tool just printed is the defect this verb polices, wearing
+    # the verb's own name. Fall through to the subject match when nothing
+    # carries the id, so a subject that merely looks like one still resolves.
+    by_id = None
+    if subject and looks_like_decision_id(subject):
+        want_id = subject.strip().casefold()
+        by_id = [
+            r for r in rows if str(r.get("decision_id") or "").casefold() == want_id
+        ]
+    if by_id:
+        rows, matches = by_id, None
+    else:
+        matches = _subject_matcher(subject) if subject else None
     out: "list[dict]" = []
     emitted: "set[str]" = set()
     for row in rows:
