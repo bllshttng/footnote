@@ -37,6 +37,8 @@ class Move(NamedTuple):
 
 
 VERB_MOVES: dict[str, Move] = {
+    "approvals": Move(kind="deprecated", to="inbox approvals"),
+    "notify": Move(kind="deprecated", to="inbox notify"),
     "outstanding": Move(kind="deprecated", to="inbox outstanding"),
     "pr": Move(
         kind="deprecated",
@@ -61,7 +63,7 @@ def deprecation_line(verb: str, rest: list[str], move: Move) -> str | None:
     leaf-qualified destination for every other first argument
     (``fno pr create`` -> ``fno do pr create``); an entry without them
     announces the bare destination, because its arguments are values
-    (``fno notify TITLE BODY``), not subcommands to teach.
+    (``fno inbox notify TITLE BODY``), not subcommands to teach.
     """
     if move.kind == "alias":
         return None

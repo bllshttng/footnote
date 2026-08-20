@@ -783,9 +783,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
 
     // ── STUCK ONLY: file an unanswered operator question (x-32f3 HALF TWO) ──
     // A worker that idles on an unanswered question and then dies (measured:
-    // 7h idle, "awaiting operator's terminal/mux info", `fno outstanding`
+    // 7h idle, "awaiting operator's terminal/mux info", `fno inbox outstanding`
     // empty the whole time) takes the diagnosis it already completed down
-    // with it. The verb (`fno outstanding ask`) already exists; nothing
+    // with it. The verb (`fno inbox outstanding ask`) already exists; nothing
     // forced the filing. Mechanical, not instructional: the same STUCK bucket
     // that gets a postmortem, with an operator-directed question in its last
     // message and nothing already filed for this session, gets it filed here.
@@ -2564,12 +2564,12 @@ fn extract_operator_question(text: &str) -> Option<String> {
 }
 
 /// Has this session already filed an open question? Read via the same `fno
-/// outstanding --json` an operator would run, so dedup can never drift from
-/// what is actually on record (never re-derived state).
+/// inbox outstanding --json` an operator would run, so dedup can never drift
+/// from what is actually on record (never re-derived state).
 fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
     let out = match Command::new("fno")
         .current_dir(cwd)
-        .args(["outstanding", "--json"])
+        .args(["inbox", "outstanding", "--json"])
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -2588,7 +2588,8 @@ fn session_already_filed(cwd: &Path, session_id: &str) -> bool {
 
 fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> bool {
     let mut cmd = Command::new("fno");
-    cmd.current_dir(cwd).args(["outstanding", "ask", question]);
+    cmd.current_dir(cwd)
+        .args(["inbox", "outstanding", "ask", question]);
     if let Some(n) = node {
         cmd.args(["--node", n]);
     }

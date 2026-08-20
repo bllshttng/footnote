@@ -3,7 +3,10 @@
 Messaging is one namespace over the jsonl-canon bus log: `mail send` publishes
 a durable envelope; `mail unread`/`ack` are the per-recipient cursor consume;
 `mail rebuild-render` regenerates the derived markdown from the log. The old
-`fno inbox` namespace is retired clean (no pointer, no shim).
+`fno inbox` namespace (mail's alias for `mail unread`) was retired clean (no
+pointer, no shim). x-afa6 later minted a real `fno inbox` root for an
+unrelated purpose (approvals/notify/outstanding/the king board); mail's old
+`unread` leaf never came back under it.
 """
 from __future__ import annotations
 
@@ -46,13 +49,15 @@ def mailbox(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# AC5-HP: `fno inbox` is gone clean (no redirect)
+# AC5-HP: mail's old `inbox unread` alias is gone clean (no redirect)
 # ---------------------------------------------------------------------------
 
 def test_inbox_namespace_is_retired(runner, mailbox):
+    """`fno inbox` itself is real again (x-afa6's unrelated reorg root), but
+    mail's old `unread` leaf never rode back in under it."""
     res = runner.invoke(app, ["inbox", "unread"])
     assert res.exit_code != 0
-    assert "No such command 'inbox'" in (res.stdout + (res.stderr or ""))
+    assert "No such command 'unread'" in (res.stdout + (res.stderr or ""))
 
 
 # ---------------------------------------------------------------------------

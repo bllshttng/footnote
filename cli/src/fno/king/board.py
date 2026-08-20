@@ -63,7 +63,7 @@ SRC_CLAIMS = "fno claim list -J --include-stale --prefix node:"
 SRC_PRS = (
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup"
 )
-SRC_QUESTIONS = "fno outstanding --json"
+SRC_QUESTIONS = "fno inbox outstanding --json"
 SRC_NEEDS = "fno agents needs --json"
 
 
@@ -327,8 +327,8 @@ def build_board(
             # cannot see a queue it could have shrunk. A blind report-only queue
             # is loud (the exit code below) and still uncounted, because the
             # rule that a human-gated queue never gates NoWork does not get
-            # weaker when the verb behind it breaks. `fno outstanding` timing
-            # out is a measured failure on this machine, and counting it would
+            # weaker when the verb behind it breaks. `fno inbox outstanding`
+            # timing out is a measured failure on this machine, and counting it would
             # wedge the loop on exactly the queue that must never wedge it.
             if q["actionable"]:
                 actionable += 1
@@ -440,7 +440,7 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
 
 
 def _read_questions(timeout: int) -> SourceRead:
-    read = _run_json([*_fno(), "outstanding", "--json"], timeout=timeout)
+    read = _run_json([*_fno(), "inbox", "outstanding", "--json"], timeout=timeout)
     if not read.ok:
         return read
     payload = read.payload if isinstance(read.payload, dict) else {}

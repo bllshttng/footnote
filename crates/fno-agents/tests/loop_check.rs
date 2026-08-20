@@ -4810,7 +4810,7 @@ fn nudge_unresponsive_bot_gives_up_on_backstop() {
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     isolate_settings(cwd);
-    // Suppress the give-up OS notification so the test spawns no `fno notify`.
+    // Suppress the give-up OS notification so the test spawns no `fno inbox notify`.
     std::env::set_var("FNO_LOOPCHECK_NO_NOTIFY", "1");
 
     let manifest_path = cwd.join("target-state.md");

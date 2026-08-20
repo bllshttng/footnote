@@ -77,6 +77,6 @@ def send_notification(title: str, message: str) -> tuple[int, str]:
         return 0, ""
 
     return 1, (
-        "fno notify: no OS notification tool available (need osascript on "
+        "fno inbox notify: no OS notification tool available (need osascript on "
         "macOS or notify-send on Linux); notification not sent."
     )

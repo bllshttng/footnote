@@ -1,7 +1,7 @@
 """fno notify CLI - in-package OS notification helper.
 
 Exposes:
-    fno notify TITLE MESSAGE
+    fno inbox notify TITLE MESSAGE
 
 Formerly a thin wrapper that sourced ``scripts/lib/notify.sh``; the dispatch is
 now internalized in :mod:`fno.notify._impl` so the verb runs from the installed

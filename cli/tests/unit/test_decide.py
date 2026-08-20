@@ -1264,7 +1264,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     )
     assert refused.exit_code == 3, refused.output
     assert handle in refused.output
-    assert "fno outstanding ask" in refused.output
+    assert "fno inbox outstanding ask" in refused.output
     assert "drop --authority operator" in refused.output
 
     # The successful-control write proves both stores were inspected after the

@@ -2181,14 +2181,14 @@ event_types:
     consumers: [operator]
 
   - name: operator_question
-    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno outstanding` and rendered in the SessionStart block; read unchanged by the `crates/fno-agents/src/needs.rs` fold arm that maps this to NeedKind::Decision in the mux needs-me queue."
+    description: "An agent asked the operator something and needs an answer to proceed. Captured AT ASK TIME rather than derived later from transcript shape: session_truth classifies from the tail (records[-1]), so a question survives only while it is the last assistant turn, and in a mail-driven mesh where fno mail send injects user-shaped text the agent answers the mail and its own earlier question stops existing for the detector. A fact recorded when it is true does not evaporate. Deliberately NOT a carveout --kind question: the word is wrong for a question, and routing questions through that verb would raise carve-out volume, which is the thing the last-resort rewrite exists to lower. Folded by `fno inbox outstanding` and rendered in the SessionStart block; read unchanged by the `crates/fno-agents/src/needs.rs` fold arm that maps this to NeedKind::Decision in the mux needs-me queue."
     sources: [target, hook, subagent, daemon, test]
     data:
       required: [question_id, question]
       properties:
         question_id:
           type: string
-          description: "Stable id for this question (q-<hex>), the handle `fno outstanding clear` takes."
+          description: "Stable id for this question (q-<hex>), the handle `fno inbox outstanding clear` takes."
         question:
           type: string
           description: "The question text as asked, truncated at emit so the render stays bounded."
@@ -2236,7 +2236,7 @@ event_types:
 
   - name: operator_decision
     retention: durable
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno decide list` reads. See docs/architecture/decision-record.md."
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno inbox outstanding clear --answer` (the answer IS the decision) and from `fno decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno decide list` reads. See docs/architecture/decision-record.md."
     sources: [target, hook, subagent, test]
     data:
       required: [decision_id, decision]
@@ -2249,7 +2249,7 @@ event_types:
           description: "What was chosen."
         question_id:
           type: string
-          description: "Optional. The operator_question this answers, when the decision arrived through `fno outstanding clear`."
+          description: "Optional. The operator_question this answers, when the decision arrived through `fno inbox outstanding clear`."
         question:
           type: string
           description: "Optional. The question as asked, copied so the record reads whole without a join."
@@ -4030,7 +4030,7 @@ event_types:
         event_id:
           type: string
           description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
-    consumers: [fno approvals ls]
+    consumers: [fno inbox approvals ls]
 
   - name: approval_decided
     description: "An authorized principal approved or declined one exact request digest. Approval alone never satisfies execution or delivery evidence."
@@ -4060,7 +4060,7 @@ event_types:
         event_id:
           type: string
           description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
-    consumers: [fno approvals show]
+    consumers: [fno inbox approvals show]
 
   - name: effect_state_changed
     description: "One durable effect-attempt transition. `unknown` means the external outcome is ambiguous, never that it failed or succeeded."
@@ -4093,7 +4093,7 @@ event_types:
         event_id:
           type: string
           description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
-    consumers: [delivery evaluation, fno approvals show]
+    consumers: [delivery evaluation, fno inbox approvals show]
 
   # ── generic delivery evidence family ────────────────────────────────────
   # These events serialize immutable source facts and derived verdicts. They

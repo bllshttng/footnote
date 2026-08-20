@@ -181,14 +181,17 @@ FOREIGN_BINARIES = {
 # One control per SHAPE, not one per site. Four shapes, each verified as a real
 # baselined leaf at a real call site:
 #   agents needs           the fno-agents prefix case (array is ["needs"])
-#   notify                 single-token leaf
+#   update                 single-token leaf (crates/fno/src/client.rs's
+#                          `.args(["update", "--check"])`; `notify` held this
+#                          slot until x-afa6 nested it under `inbox`, so every
+#                          live Rust call site became a two-token array)
 #   plan                   collapsed dispatcher credited from `plan fidelity`
 #   pr                     collapsed dispatcher credited from the hyphenated
 #                          `pr base-lineage-check` action, separately from the
 #                          `gh pr view` arrays next to it
 RUST_ARGV_CONTROLS = {
     "agents needs": 1,
-    "notify": 1,
+    "update": 1,
     "plan": 1,
     "pr": 1,
 }

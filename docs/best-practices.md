@@ -48,10 +48,7 @@ fno carveout add --kind deferred --need "<open question>" "<what + why>"
 fno carveout add --kind oos-bug --priority p2 "<what + why>"
 ```
 
-The retro-triage harvest at merge turns surviving items into backlog nodes.
-That harvest is manual by design.
-Only `fno retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you.
-Run `fno outstanding` to see what has piled up.
+The retro-triage harvest at merge turns surviving items into backlog nodes. That harvest is manual by design. Only `fno retro sweep-carveouts --apply` clears the ledger, and nothing runs it for you. Run `fno inbox outstanding` to see what has piled up.
 
 ## Record a ruling, so the next session can read it back
 
@@ -63,7 +60,7 @@ fno decide list --subject <same>        # newest first, superseded rows marked
 fno decide list                         # the recent decisions across every subject
 ```
 
-When a node exists, its id is the subject. Otherwise use `pr-<n>`, or the area. When a ruling changes what a worker does next, record it. An answered question is already recorded for you, because `fno outstanding clear --answer` writes the decision on the same call.
+When a node exists, its id is the subject. Otherwise use `pr-<n>`, or the area. When a ruling changes what a worker does next, record it. An answered question is already recorded for you, because `fno inbox outstanding clear --answer` writes the decision on the same call.
 
 Full contract in [decision-record](architecture/decision-record.md).
 

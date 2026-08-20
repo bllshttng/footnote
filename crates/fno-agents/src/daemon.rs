@@ -6649,7 +6649,7 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 
 /// Fire a fire-and-forget OS notification for a badge transition (x-dd84).
 ///
-/// Detached to its own thread so a missing or slow `fno notify` can never stall
+/// Detached to its own thread so a missing or slow `fno inbox notify` can never stall
 /// the registry write that observed the transition - the same bounded/fail-open
 /// discipline as the external claim-status writer that once froze admit
 /// (memory project_grid_rail_drive_freeze). `FNO_BIN` selects the binary
@@ -6659,11 +6659,11 @@ pub(crate) fn notify_transition(title: String, body: String) {
     // var_os (not var) so a non-UTF-8 FNO_BIN passes through to Command
     // unmangled, matching scrape::fno_bin (gemini MEDIUM on #161).
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    // ponytail: reap on the detached thread; `fno notify` is a sub-second
+    // ponytail: reap on the detached thread; `fno inbox notify` is a sub-second
     // osascript/notify-send call, so waiting on it here cannot realistically leak.
     std::thread::spawn(move || {
         match std::process::Command::new(&fno)
-            .args(["notify", &title, &body])
+            .args(["inbox", "notify", &title, &body])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -11407,7 +11407,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 worker_bin,
                 reconcile_on_start: true,
                 dead_row_grace_cwd: PathBuf::from("/dev/null"),
-                // Off in tests: a unit test must never spawn a real `fno notify`.
+                // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
             },
@@ -11430,7 +11430,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 worker_bin,
                 reconcile_on_start: true,
                 dead_row_grace_cwd: PathBuf::from("/dev/null"),
-                // Off in tests: a unit test must never spawn a real `fno notify`.
+                // Off in tests: a unit test must never spawn a real `fno inbox notify`.
                 notify_on_blocked: false,
                 notify_on_done: false,
             },

@@ -1,4 +1,4 @@
-"""`fno outstanding` - read what is waiting on a human; ask and clear questions.
+"""`fno inbox outstanding` - read what is waiting on a human; ask and clear questions.
 
 Machine-first, mirroring `fno carveout`: stdout carries the value (the report,
 or a new question id), guidance and warnings go to stderr, and exit codes are
@@ -164,7 +164,7 @@ def ask(
         typer.echo(
             f"outstanding: recorded {exc.question_id} in the project journal, "
             f"but the recall index write failed: {exc}. Run "
-            "`fno outstanding reindex`; do not retry ask, which would mint a "
+            "`fno inbox outstanding reindex`; do not retry ask, which would mint a "
             "second id for the same question.",
             err=True,
         )
@@ -175,7 +175,7 @@ def ask(
 
     typer.echo(
         f"outstanding: recorded {qid}. Clear it once answered: "
-        f'fno outstanding clear {qid} --answer "..."',
+        f'fno inbox outstanding clear {qid} --answer "..."',
         err=True,
     )
     # stdout carries the value: the new question id.
@@ -326,7 +326,7 @@ def clear(
             typer.echo(
                 f"outstanding: recorded the close for {exc.question_id} in the "
                 f"project journal, but the recall index write failed: {exc}. "
-                "Run `fno outstanding reindex`; do not retry clear blindly.",
+                "Run `fno inbox outstanding reindex`; do not retry clear blindly.",
                 err=True,
             )
             raise typer.Exit(1)

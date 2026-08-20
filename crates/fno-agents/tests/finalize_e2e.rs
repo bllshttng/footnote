@@ -69,10 +69,10 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     .unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // `fno` stub (x-32f3 HALF TWO): a tiny python3 double for `fno outstanding
-    // --json` / `fno outstanding ask`, keyed off FNO_STUB_STORE /
-    // FNO_STUB_CALLS_LOG so a test can assert the filing (and its dedup)
-    // without depending on the real Python outstanding store.
+    // `fno` stub (x-32f3 HALF TWO): a tiny python3 double for `fno inbox
+    // outstanding --json` / `fno inbox outstanding ask`, keyed off
+    // FNO_STUB_STORE / FNO_STUB_CALLS_LOG so a test can assert the filing
+    // (and its dedup) without depending on the real Python outstanding store.
     let fno_stub = bin_dir.join("fno");
     fs::write(
         &fno_stub,
@@ -83,14 +83,14 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          if calls_log:\n\
          \x20   open(calls_log, 'a').write('fno ' + ' '.join(args) + '\\n')\n\
          store = os.environ.get('FNO_STUB_OUTSTANDING_STORE')\n\
-         if args[:2] == ['outstanding', '--json']:\n\
+         if args[:3] == ['inbox', 'outstanding', '--json']:\n\
          \x20   if store and os.path.exists(store):\n\
          \x20       sys.stdout.write(open(store).read())\n\
          \x20   else:\n\
          \x20       sys.stdout.write(json.dumps({'carveouts': {'total': 0, 'by_kind': {}, 'oldest_ts': None}, 'questions': []}))\n\
          \x20   sys.exit(0)\n\
-         if args[:2] == ['outstanding', 'ask']:\n\
-         \x20   question = args[2] if len(args) > 2 else ''\n\
+         if args[:3] == ['inbox', 'outstanding', 'ask']:\n\
+         \x20   question = args[3] if len(args) > 3 else ''\n\
          \x20   node = args[args.index('--node') + 1] if '--node' in args else None\n\
          \x20   session_id = os.environ.get('FNO_STUB_SESSION_ID', '')\n\
          \x20   data = {'carveouts': {'total': 0, 'by_kind': {}, 'oldest_ts': None}, 'questions': [\n\
@@ -1723,7 +1723,7 @@ fn fno_calls(env: &Env) -> String {
 }
 
 /// The specimen this fix exists for: a worker idles seven hours on an
-/// unanswered question, then dies with `fno outstanding` empty the whole
+/// unanswered question, then dies with `fno inbox outstanding` empty the whole
 /// time. Assert the question survives the death.
 #[test]
 fn finalize_files_outstanding_question_on_stuck_terminal() {

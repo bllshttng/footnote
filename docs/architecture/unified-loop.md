@@ -200,7 +200,7 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 | `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
 | `stale_claim` | `fno claim list -J --include-stale` | yes, by `fno claim reap` |
-| `operator_question` | `fno outstanding --json` | no, a human answers it |
+| `operator_question` | `fno inbox outstanding --json` | no, a human answers it |
 | `unreachable_worker` | `fno agents needs --json` | not yet |
 
 The split in that last column is what makes the loop converge. A queue only a human can clear holds the loop open forever, so it is reported and never counted toward done. The rule survives a broken verb. An unreadable report-only queue is loud (the board exits non-zero) and still uncounted. A human-gated queue never gates `NoWork`, and a failed reader behind it does not weaken that.

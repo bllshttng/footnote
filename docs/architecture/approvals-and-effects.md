@@ -20,8 +20,7 @@ Approval is not execution.
 Execution is not acknowledgment.
 Acknowledgment is not aggregate delivery.
 
-Each is a separate record with its own event, so no consumer can collapse them.
-`fno approvals decide --approve` records a decision and dispatches nothing, and its output says so in both human and JSON form.
+Each is a separate record with its own event, so no consumer can collapse them. `fno inbox approvals decide --approve` records a decision and dispatches nothing, and its output says so in both human and JSON form.
 
 ## Component graph
 
@@ -35,7 +34,7 @@ graph TD
     S --> E[events.jsonl]
     S --> V[EvidenceRef projection]
     V --> X[delivery evaluation]
-    C[fno approvals ls/show/decide] --> S
+    C[fno inbox approvals ls/show/decide] --> S
 ```
 
 ## Authority
@@ -145,7 +144,7 @@ It is not a delivery verdict.
 
 ## Operator surface
 
-`fno approvals ls|show|decide` is hidden: invocable, not advertised in `fno --help`.
+`fno inbox approvals ls|show|decide` is hidden: invocable, not advertised in `fno --help`.
 
 `show` names every bound field, the decision and its transport, the expiration, each effect attempt and its state, and recovery instructions for an ambiguous one.
 `ls` and `show` read only.

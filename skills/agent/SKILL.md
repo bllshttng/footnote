@@ -803,5 +803,4 @@ See [docs/SKILL-COMPAT-MATRIX.md](../../docs/SKILL-COMPAT-MATRIX.md).
   `fno agents logs <name>`.
 - **interactive (`-i`):** the TUI genuinely waits at approval prompts. See it via
   `fno agents grid <name>` / `fno agents drive <name> --mode interactive`.
-- **no proactive push** fires for a codex/gemini worker today; a claude `--bg`
-  `/target` worker does fire `fno notify` when it stalls.
+- **no proactive push** fires for a codex/gemini worker today. When a claude `--bg` `/target` worker stalls, it does fire `fno inbox notify`.
