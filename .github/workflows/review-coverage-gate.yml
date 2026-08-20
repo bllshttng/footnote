@@ -183,11 +183,23 @@ jobs:
           # The LIVE label state, read by NAME. A grep over the raw JSON blob
           # also sees each label's description and colour, so an unrelated
           # label described "coverage-override" would re-stamp success on a
-          # head nobody reviewed.
+          # head nobody reviewed. Retries the same 3x/5s backoff as
+          # current_desc() above: this read runs first on every label event
+          # and every synchronize, so an un-retried transient 5xx here aborts
+          # the run one call earlier than current_desc()'s own hardening.
           override_held() {
-            gh pr view "${{ github.event.pull_request.number }}" \
-              -R "${GITHUB_REPOSITORY}" --json labels \
-              --jq '[.labels[].name] | index("coverage-override") != null'
+            local attempt out
+            for attempt in 1 2 3; do
+              if out="$(gh pr view "${{ github.event.pull_request.number }}" \
+                -R "${GITHUB_REPOSITORY}" --json labels \
+                --jq '[.labels[].name] | index("coverage-override") != null')"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              echo "review-coverage-gate: label read attempt ${attempt} failed; retrying after a backoff" >&2
+              sleep 5
+            done
+            return 1
           }
           case "$EVENT:$ACTION" in
             pull_request:labeled|pull_request:unlabeled)
