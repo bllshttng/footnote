@@ -46,6 +46,7 @@ from fno.agents.dispatch import (
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.registry import (
@@ -474,6 +475,7 @@ def tier3_pane_tokens(
     provider: str,
     *,
     add_dir: Optional[str] = None,
+    computed_dirs: Sequence[str] = (),
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
@@ -483,7 +485,10 @@ def tier3_pane_tokens(
     disallowedTools). Fail-closed per cell: a set flag with no equivalent for
     ``provider`` raises before spawn - never a silent drop. An empty/None value
     is unset (no token). Mirrors the Rust HarnessFlags mapping + the client.rs
-    guard, so pane and bg/headless agree on which cells exist."""
+    guard, so pane and bg/headless agree on which cells exist.
+
+    ``computed_dirs`` is fno's own writable-directory set and is the one cell
+    that degrades instead of raising; see :func:`add_dir_tokens`."""
 
     def unsupported(flag: str) -> "list[str]":
         raise DispatchAskError(
@@ -495,11 +500,7 @@ def tier3_pane_tokens(
     out: list[str] = []
     # --add-dir: claude/codex/agy grant extra write access. opencode --dir SETS
     # cwd (not additive) and gemini is unverified, so both fail closed.
-    if add_dir:
-        if provider in ("claude", "codex", "agy"):
-            out += ["--add-dir", add_dir]
-        else:
-            unsupported("--add-dir")
+    out += add_dir_tokens(provider, add_dir, computed_dirs, unsupported=unsupported)
     # --agent: claude and opencode select a sub-agent by name.
     if agent:
         if provider in ("claude", "opencode"):
@@ -1140,7 +1141,16 @@ def build_pane_argv(
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
     tier3 = tier3_pane_tokens(
-        provider, add_dir=add_dir, agent=agent, tools=tools, deny_tools=deny_tools
+        provider,
+        add_dir=add_dir,
+        # fno's own state directories. Computed here, at the ONE pane funnel, so
+        # the claude/codex/agy arms below cannot disagree about which spawn gets
+        # the grant. Without it a bounded worker cannot write ~/.fno/claims, so
+        # it holds no claim and the graph reads free while it works.
+        computed_dirs=worker_writable_dirs(cwd),
+        agent=agent,
+        tools=tools,
+        deny_tools=deny_tools,
     )
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes

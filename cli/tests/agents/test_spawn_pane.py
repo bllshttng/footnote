@@ -856,7 +856,7 @@ def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
-    tmp_path: Path, monkeypatch
+    no_state_grant: None, tmp_path: Path, monkeypatch
 ) -> None:
     result, runner = _spawn(monkeypatch, tmp_path)
 
@@ -1004,7 +1004,7 @@ def test_ac1_fr_billing_guard_refuses_print_argv_before_pane(
     assert mux_spawn.claude_argv_is_interactive(["claude", "--session-id", "u", "msg"])
 
 
-def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
+def test_build_pane_argv_provider_forms(no_state_grant: None, tmp_path: Path) -> None:
     from fno.agents.mux_spawn import build_pane_argv
 
     claude = build_pane_argv("claude", "task", tmp_path, False, "uuid-1")
@@ -1310,24 +1310,46 @@ def test_build_pane_argv_codex_grants_plan_directory(
     assert str(plan_dir) in grants
 
 
+@pytest.fixture
+def no_state_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize fno's computed writable-dir grant for exact-argv assertions.
+
+    The grant's CONTENT is machine-dependent (the resolved state root, and the
+    vault only when this project's plans live under one), so a test comparing a
+    literal argv cannot carry it. Tests about the grant itself assert it by name;
+    these assert provider argv FORM, which is a different axis.
+    """
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: []
+    )
+
+
 def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path) -> None:
-    """AC5-EDGE: the grant follows whether the pane is actually sandboxed.
+    """AC5-EDGE: the GIT grant follows whether the pane is actually sandboxed.
 
     Only the two unsandboxed postures skip it. --full-auto and any
     <sandbox>:<approval> form are still sandboxed and still need it.
+
+    Asserted on the git common dir rather than on the bare presence of
+    ``--add-dir``: fno's state-root grant now rides the same flag on every
+    posture, so the flag alone no longer names which grant is under test. An
+    absence has two explanations and this one is pinned to the symbol.
     """
+    from fno.agents.harnesses.codex import _git_common_dir
     from fno.agents.mux_spawn import build_pane_argv
 
     repo = _pane_repo(tmp_path)
+    git_dir = _git_common_dir(repo)
+    assert git_dir, "fixture repo must resolve a git common dir"
 
-    assert "--add-dir" not in build_pane_argv("codex", "t", repo, True, None)
-    assert "--add-dir" not in build_pane_argv(
+    assert git_dir not in build_pane_argv("codex", "t", repo, True, None)
+    assert git_dir not in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="yolo"
     )
-    assert "--add-dir" in build_pane_argv(
+    assert git_dir in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="full-auto"
     )
-    assert "--add-dir" in build_pane_argv(
+    assert git_dir in build_pane_argv(
         "codex", "t", repo, False, None, permission_mode="workspace-write:on-request"
     )
 
@@ -1336,11 +1358,21 @@ def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Pa
     """AC-EDGE: --add-dir is repeatable; a caller's own grant survives."""
     from fno.agents.mux_spawn import build_pane_argv
 
+    from fno.agents.writable_dirs import worker_writable_dirs
+
     repo = _pane_repo(tmp_path)
     argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
 
-    assert argv.count("--add-dir") == 3
+    # git common dir + plan dir + the caller's own grant, plus fno's state-root
+    # set. Counted from the resolver rather than hardcoded, because the state
+    # set's SIZE is machine-dependent (one entry, or two when the plan lives in
+    # a vault); its presence is asserted by name below.
+    assert argv.count("--add-dir") == 3 + len(worker_writable_dirs(repo))
     assert "/extra" in argv
+    # The caller's explicit grant leads fno's computed set: it composes, never
+    # replaced by it.
+    first_state = worker_writable_dirs(repo)[0]
+    assert argv.index("/extra") < argv.index(first_state)
 
 
 def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
@@ -3487,7 +3519,7 @@ def test_happy_pane_success_returns_live_receipt(
     assert result.short_id, "a live receipt must carry a non-empty short_id"
 
 
-def test_claude_pane_argv_carries_the_worker_name(tmp_path: Path) -> None:
+def test_claude_pane_argv_carries_the_worker_name(no_state_grant: None, tmp_path: Path) -> None:
     """The pane lane forwards `--name`, like the bg lane always has.
 
     Without it claude names the session from the launching session's lineage,

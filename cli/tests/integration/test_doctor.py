@@ -272,7 +272,10 @@ def test_check_agent_profiles_flags_codex_lane_without_permission_mode() -> None
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
     assert "agents.profiles.target.lanes[0].permission_mode" in problems[0]
-    assert "codex" in problems[0] and "~/.fno" in problems[0]
+    # The message no longer claims claims will fail: fno grants the state root
+    # itself now (writable_dirs). What survives is the narrower true statement.
+    assert "codex" in problems[0] and "--add-dir" in problems[0]
+    assert "OUTSIDE its cwd" in problems[0]
 
 
 def test_check_worktree_policy_flags_out_of_enum(
@@ -355,3 +358,51 @@ def test_check_wip_caps_non_dict_top_level(tmp_path: Path, monkeypatch: pytest.M
     f.write_text("- just\n- a\n- list\n")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
     assert check_wip_caps() == []
+
+
+def test_state_root_probe_is_quiet_when_the_claim_store_is_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe WRITES to answer, so a pass is a positive marker rather than
+    the absence of an error."""
+    from fno.setup.doctor import check_state_root_writable
+
+    store = tmp_path / ".fno" / "claims"
+    store.mkdir(parents=True)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path)
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: store)
+
+    assert check_state_root_writable() == []
+    # And it cleaned up after itself.
+    assert list(store.iterdir()) == []
+
+
+def test_state_root_probe_names_the_remedy_and_writes_no_settings_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator ruling d-926a2b90: fno advises, it does not edit a harness
+    settings file. The message must name the consequence (a claim that silently
+    never happens) rather than only the errno."""
+    from fno.setup.doctor import check_state_root_writable
+
+    store = tmp_path / "locked" / ".fno" / "claims"
+    store.mkdir(parents=True)
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"untouched": true}')
+    store.chmod(0o500)
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "s-1")
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "locked")
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: store)
+    try:
+        problems = check_state_root_writable()
+    finally:
+        store.chmod(0o700)
+
+    assert len(problems) == 1
+    message = problems[0]
+    assert str(store) in message
+    assert "claude" in message
+    assert "additionalDirectories" in message
+    assert "reports free while it works" in message
+    assert settings.read_text() == '{"untouched": true}'

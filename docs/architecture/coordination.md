@@ -329,6 +329,26 @@ fno claim status node:ab-thisnode
 # to dispatch. Inspect the holder PID and walker state.
 ```
 
+## The worker must be able to write the claim store
+
+A claim is only mutual exclusion if the worker can create the lockfile. Every harness sandboxes writes to the launch cwd by default, and fno's state lives outside it, so a spawned worker on a bounded posture writes nothing and holds no claim. `fno claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any king reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
+
+This is not one harness's problem. codex `workspace-write` is the visible case, but a claude worker fails the same way; it looks fine on a maintainer's machine only when a personal `~/.claude/settings.json` grants `permissions.additionalDirectories`. The repository ships no such file, so a fresh clone reproduces it.
+
+**How the grant reaches the worker.** `fno.agents.writable_dirs.worker_writable_dirs()` computes the set per spawn and passes it through the `--add-dir` cell that already maps natively for claude, codex and agy. fno never writes into a harness settings file (operator ruling `d-926a2b90`). The set is by need, never blanket, because `--add-dir` is a WRITE grant:
+
+| Directory | When |
+|---|---|
+| The state root (`fno.paths.state_dir()`, plus the config-free claims root when an override splits them) | Always. No worker functions without the claim store, the graph and the ledger. |
+| The vault root | Only when this spawn's plan resolves under it. A code worker whose plan sits in the repo gets no vault grant. |
+| Sibling project roots | Only for a multi-repo wave, passed by the caller. |
+
+Three funnels carry it and each is tested on its own lane: the pane builder, claude's bg/headless builder, and codex's headless builder. A grant on one of several reachable paths is decorative.
+
+**The provider with no additive grant.** opencode's `--dir` sets the working directory rather than adding one, so there is no cell to carry the set. An explicit operator `--add-dir` keeps its hard refusal there; the computed set is skipped with one named line on stderr instead. Fail-closed is right for something a human typed and wrong for a default the caller never asked for, which would refuse every opencode spawn.
+
+**The half a spawn cannot reach.** A per-spawn grant says nothing about a session the operator started by hand, or one that joined by `/fno-me`, and the first session on any machine cannot come from `fno agents spawn`. So `fno doctor` probes it by writing a real file into the claim store and removing it, then prints the remedy for the detected harness and exits nonzero. It advises and never writes. The probe writes rather than parsing settings files because doctor runs inside the session being asked about, so it is the sample, and because an absence has two explanations while a completed write has one.
+
 ## Reference implementation
 
 PID-liveness + `O_CREAT|O_EXCL` + idempotent re-acquire is a standard

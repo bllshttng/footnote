@@ -211,6 +211,84 @@ def check_worktree_policy() -> list[str]:
     return problems
 
 
+def _detected_harness() -> str:
+    """Best-effort name of the harness running this shell, for the remedy line."""
+    import os
+
+    for env, name in (
+        ("CLAUDE_SESSION_ID", "claude"),
+        ("CLAUDECODE", "claude"),
+        ("CLAUDE_CONFIG_DIR", "claude"),
+        ("CODEX_THREAD_ID", "codex"),
+        ("CODEX_HOME", "codex"),
+        ("AGY_SESSION_ID", "agy"),
+        ("OPENCODE_SESSION_ID", "opencode"),
+    ):
+        if os.environ.get(env):
+            return name
+    return ""
+
+
+_REMEDY = {
+    "claude": (
+        "add the state root to permissions.additionalDirectories in your "
+        "~/.claude/settings.json"
+    ),
+    "codex": (
+        "add the state root to sandbox_workspace_write.writable_roots in your "
+        "~/.codex/config.toml, or run this session on a bypass posture"
+    ),
+    "agy": "grant the state root write access in your agy settings",
+    "opencode": (
+        "opencode's --dir SETS the working directory rather than adding one, so "
+        "launch this session from a root that contains the state directory"
+    ),
+}
+
+
+def check_state_root_writable() -> list[str]:
+    """Probe whether THIS session can write the claim store, by writing to it.
+
+    A per-spawn ``--add-dir`` grant (:mod:`fno.agents.writable_dirs`) cannot reach
+    a session the operator started by hand, or one that joined by ``/fno-me``: the
+    first session on any machine does not come from ``fno agents spawn``. So the
+    grant needs an advisory half, and this is it.
+
+    Do NOT infer the answer by parsing each harness's settings file. Doctor runs
+    INSIDE the hand-started session, so it IS the sample: create a real file in
+    the claim store and remove it. That is a positive marker rather than an
+    absence, and an absence has two explanations - unwritable, and the probe
+    never ran. It costs one temp file.
+
+    Advises and never writes to any settings file (operator ruling d-926a2b90).
+    """
+    import os
+    import tempfile
+
+    try:
+        from fno.claims.io import claims_dir, global_claims_root
+
+        store = claims_dir(global_claims_root())
+    except Exception as exc:
+        return [f"could not resolve the claim store: {exc}"]
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(store))
+        os.close(fd)
+        os.unlink(probe_path)
+    except OSError as exc:
+        harness = _detected_harness()
+        remedy = _REMEDY.get(harness, "grant this session write access to the state root")
+        who = f" (detected harness: {harness})" if harness else ""
+        return [
+            f"the claim store at {store} is not writable by this session{who}: "
+            f"{exc.strerror or exc}. A worker here takes no node claim, so "
+            f"`fno claim status` reports free while it works and a second worker "
+            f"can be dispatched onto the same node. Remedy: {remedy}."
+        ]
+    return []
+
+
 def check_agent_profiles(settings: object) -> list[str]:
     """Report stage lanes that cannot launch with their resolved posture."""
     from fno.agents.spawn_defaults import _substrate_compatible
@@ -248,9 +326,10 @@ def check_agent_profiles(settings: object) -> list[str]:
                 )
             if provider == "codex" and not permission:
                 problems.append(
-                    f"{path}.permission_mode is empty for codex; the default "
-                    "workspace-write sandbox cannot reach ~/.fno, so claims, "
-                    "graph writes, and mail will fail"
+                    f"{path}.permission_mode is empty for codex, so the lane "
+                    "runs on the default workspace-write sandbox. fno now grants "
+                    "the state root through --add-dir, so claims work; anything "
+                    "this lane writes OUTSIDE its cwd and that grant still fails"
                 )
     return problems
 
@@ -362,7 +441,17 @@ def run_doctor() -> int:
             print(f"  - {reason}")
         print("\nSet compatible substrate and permission_mode values on each delivery lane.")
 
-    if errors or issues or cap_problems or wt_problems or profile_problems:
+    store_problems = check_state_root_writable()
+    if store_problems:
+        print(f"\n[doctor] {len(store_problems)} state-root write issue(s):")
+        for reason in store_problems:
+            print(f"  - {reason}")
+        print(
+            "\nfno prints this line and never edits a harness settings file; the "
+            "grant is yours to make."
+        )
+
+    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")

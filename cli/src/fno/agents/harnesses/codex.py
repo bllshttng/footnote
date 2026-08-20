@@ -769,7 +769,23 @@ def create(
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
     # x-b6e2: a user --add-dir grants extra write access on `codex exec`
     # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
-    add_dir_args = ["--add-dir", add_dir] if add_dir else []
+    # The computed set rides the same cell through the shared decision, so the
+    # headless lane grants the state root exactly as the pane lane does. It is
+    # emitted on EVERY posture, bypass included: codex accepts --add-dir
+    # alongside --dangerously-bypass-approvals-and-sandbox (verified against
+    # codex 0.148.0), and one unconditional rule cannot be wrong about a posture
+    # the way a per-posture matrix can.
+    from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+
+    def _unreachable(flag: str) -> object:  # pragma: no cover - codex maps --add-dir
+        raise AssertionError(f"codex has no {flag} mapping")
+
+    add_dir_args = add_dir_tokens(
+        "codex",
+        add_dir,
+        worker_writable_dirs(cwd),
+        unsupported=_unreachable,
+    )
     # The bounded sandbox refuses git metadata writes; grant the git common dir
     # so the worker can actually commit. Full yolo is already unsandboxed.
     git_args = [] if eff_yolo else git_writable_args(cwd)
