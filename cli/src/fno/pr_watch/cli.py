@@ -232,6 +232,12 @@ class _WatchdogBudgetSpent(Exception):
 #: legs behind it.
 _WAKE_APPLY_FLOOR_S = 200
 
+#: A stranded sweep is one batched git fetch plus a rev-list and a
+#: last-commit-age call per worktree - cheap, but not free at 60+
+#: worktrees. Skipping under this floor costs nothing: the next tick
+#: sweeps from scratch, there is no partial state to lose.
+_STRANDED_FLOOR_S = 10.0
+
 
 class TickDeadlineExceeded(BaseException):
     """The tick's wall-clock deadline fired; the phase marker names where.
@@ -602,6 +608,41 @@ def tick() -> None:
                 log.info("pr-watch: watchdog leg skipped: %s", exc)
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
                 log.warning("pr-watch: watchdog sweep failed: %s", exc)
+
+        # Stranded-worktree recovery (x-f4e9), same arming gate as the fleet
+        # watchdog above: this is a second read of the same "is recovery
+        # armed" decision, not a second dispatcher - config.recovery.watchdog
+        # + recovery.enabled + autonomy.enabled all still gate whether
+        # anything here acts. Report, never reap: only STRANDED rows get
+        # pushed and filed; only UNKNOWN rows get recorded; every other
+        # class, LIVE included, is quiet and untouched.
+        set_tick_phase("stranded")
+        if _wd_lane_armed(settings):
+            try:
+                left = deadline - (time.monotonic() - started)
+                if left < _STRANDED_FLOOR_S:
+                    raise _WatchdogBudgetSpent(
+                        f"{left:.1f}s left, under the {_STRANDED_FLOOR_S:.0f}s "
+                        "a stranded sweep costs"
+                    )
+                from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
+
+                stranded_n = unknown_n = acted_n = failed_n = 0
+                for root in _catchup_roots():
+                    rows = sweep(repo=root)
+                    outcomes = apply_sweep(rows)
+                    stranded_n += sum(1 for r in rows if r.klass == STRANDED)
+                    unknown_n += sum(1 for r in rows if r.klass == UNKNOWN)
+                    acted_n += len(outcomes)
+                    failed_n += sum(1 for o in outcomes if o["stopped_at"])
+                typer.echo(
+                    f"stranded sweep: stranded={stranded_n} unknown={unknown_n} "
+                    f"acted={acted_n} failed={failed_n}"
+                )
+            except _WatchdogBudgetSpent as exc:
+                log.info("pr-watch: stranded leg skipped: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - never let the stranded sweep break pr-watch
+                log.warning("pr-watch: stranded sweep failed: %s", exc)
 
         # Canonical-sync catch-up. The dispatch above is event-time-only:
         # it acts on merges it DETECTS, so a merge that landed while the daemon was
