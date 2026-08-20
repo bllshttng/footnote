@@ -6086,7 +6086,7 @@ fn coverage_receipt_covered_names_reviewers() {
         "",
         COV_HEAD,
     );
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
     assert!(line.contains("chatgpt-codex-connector"), "{line}");
 }
@@ -6111,7 +6111,7 @@ fn coverage_receipt_zero_names_refused_and_absent() {
         "",
         COV_HEAD,
     );
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(line.contains("0 reviewed"), "{line}");
     assert!(line.contains("1 refused"), "{line}");
     assert!(line.contains("chatgpt-codex-connector"), "{line}");
@@ -6158,7 +6158,7 @@ fn coverage_receipt_zero_prescribes_the_verb_when_the_only_reviewer_refused() {
         "",
         COV_HEAD,
     );
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(line.contains("1 refused"), "{line}");
     assert!(line.contains("0 absent"), "{line}");
     assert!(line.contains("run the review verb at HEAD"), "{line}");
@@ -6170,7 +6170,7 @@ fn coverage_receipt_unknown_says_unknown() {
         coverage: Coverage::Unknown,
         verdicts: vec![],
     };
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(
         line.contains("unknown"),
         "unknown must say unknown, not a number: {line}"
@@ -6477,7 +6477,7 @@ fn coverage_receipt_names_origin_buckets() {
         "",
         COV_HEAD,
     );
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(line.contains("self 1"), "{line}");
     assert!(line.contains("other 0"), "{line}");
     assert!(line.contains("unknown 0"), "{line}");
@@ -6503,7 +6503,7 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
         COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(2));
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
     assert!(line.contains("self 1"), "{line}");
     assert!(line.contains("other 0"), "{line}");
     assert!(line.contains("unknown 1"), "{line}");
@@ -6533,7 +6533,7 @@ fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
         COV_HEAD,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
-    let line = coverage_receipt_line(&rep);
+    let line = coverage_receipt_line(&rep, None);
 
     // The affirmation, and the sole self-attested verdict it is affirming.
     // Scoped to ORIGINS: `n` does drop human approvals, so a bare "all counted"
