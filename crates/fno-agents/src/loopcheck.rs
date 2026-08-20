@@ -8923,8 +8923,10 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     };
     if !pr.state.is_open_or_merged() {
         let guidance = match pr.state {
-            PrState::Closed => "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`",
-            _ => "PR state is not open or merged - verify on GitHub and update locally"
+            PrState::Closed => {
+                "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`"
+            }
+            _ => "PR state is not open or merged - verify on GitHub and update locally",
         };
         return format!(
             "no open/merged PR for HEAD (pr_state={}). {}",
@@ -8961,10 +8963,11 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             _ => "CI",
         };
         return format!(
-            "CI red on PR #{}: {} failed. Debug and fix with `fno pr checks --watch {}`",
+            "CI red on PR #{}: {} failed. Read check logs: `fno pr status {}` or GitHub.{}",
             pr.number,
             check_name,
-            pr.number
+            pr.number,
+            hint("ci")
         );
     }
 
