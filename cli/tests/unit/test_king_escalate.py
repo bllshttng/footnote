@@ -22,6 +22,15 @@ from fno.outstanding.core import read_open_questions
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
 
+@pytest.fixture(autouse=True)
+def isolate_question_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "fno.paths.questions_jsonl",
+        lambda: tmp_path / "questions.jsonl",
+        raising=False,
+    )
+
+
 def _run(root: Path, ids: list[str], reason: str = "NoProgress") -> tuple[str, str]:
     return escalate(ids, reason=reason, root=root, session_id="k-test", cwd=root)
 

@@ -51,7 +51,7 @@ class OutstandingError(Exception):
     """
 
 
-class QuestionIndexWriteError(RuntimeError):
+class QuestionIndexWriteError(OutstandingError, RuntimeError):
     """A question event is durable but missing from the recall index."""
 
     def __init__(self, question_id: str, cause: BaseException) -> None:
@@ -196,7 +196,10 @@ def append_question_event(event: dict[str, Any], root: Path) -> None:
     question_id = data.get("question_id") if isinstance(data, dict) else None
     if not question_id:
         raise ValueError("question event has no question_id")
-    append_event(event, events_path=events_path(root))
+    try:
+        append_event(event, events_path=events_path(root))
+    except Exception as exc:
+        raise OutstandingError(f"failed to append question to project journal: {exc}") from exc
     try:
         append_event(event, events_path=questions_path())
     except Exception as exc:  # noqa: BLE001 - caller needs the durable event id
@@ -275,15 +278,12 @@ def _resolve_question_liveness(
         answers: "dict[str, bool]" = {}
         try:
             for asker in dict.fromkeys(askers):
-                if clock() >= deadline:
-                    break
                 try:
                     reachable, ambiguous = resolver(asker)
                     answer = reachable is not None and not ambiguous
                 except Exception:  # noqa: BLE001 - a completed refusal is stale
                     answer = False
-                if clock() <= deadline:
-                    answers[asker] = answer
+                answers[asker] = answer
         finally:
             try:
                 send.send(answers)
