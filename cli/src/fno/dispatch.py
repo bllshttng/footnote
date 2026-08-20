@@ -631,7 +631,13 @@ def _dispatch_one(
         # before any lane slot exists, so the node stays re-dispatchable.
         max_lanes = max(1, load_settings().parallel.max_lanes or 1)
         if acquire_lane_slot(max_lanes, node_id) is None:
-            release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+            # Through the one funnel, not a direct release_claim. A direct call
+            # that raised would land in `except Exception` below, which re-enters
+            # _release_both and turns an exit-0 `lanes-full` into a `failed`
+            # verdict carrying a claims-store error. _release_both is idempotent
+            # and best-effort per hold, and releasing an unheld lane slot is a
+            # documented no-op, so routing through it preserves the verdict.
+            _release_both()
             return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}
 
         workdir = Path(cwd) if cwd else Path.cwd()

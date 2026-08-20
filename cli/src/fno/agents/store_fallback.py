@@ -479,6 +479,16 @@ def heal_from_harness_store(
             cwd=hit.cwd,
             short_id=short_id,
             status="orphaned",
+            # This row is ADOPTED from the claude store, not a spawn receipt:
+            # nothing here proves footnote started the session, and it is
+            # routinely an operator's own terminal that no SessionStart hook
+            # registered. `origin` carries that because it is durable - `status`
+            # is a liveness stamp `reconcile` flips back to "live" the moment
+            # the session answers a probe, so a reader keying on it gets one
+            # pass of protection and then none. Lanes that stop a session read
+            # this field to answer "footnote-spawned?" with unknown rather than
+            # with the absence of an operator marker.
+            origin="adopted",
             registry_path=registry_path,
         )
     except AgentResolutionError:

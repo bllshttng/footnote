@@ -102,6 +102,15 @@ VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
 #: still be asked one more thing before anything stops it.
 RETIRE_GRACE_S = 900
 
+#: The terminal markers a worker emits at the END of its last turn, stripped
+#: before asking whether that turn ends on a question. Matching the tag pair
+#: rather than a bare `<promise` so a mention inside prose cannot swallow the
+#: rest of the text.
+_TERMINAL_TAG_RE = re.compile(
+    r"<(promise|watching)\b[^>]*>.*?</\1>|<(promise|watching)\b[^>]*/?>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
 #: transcript is not a ghost - stopped is already the operator's answer.
@@ -416,7 +425,17 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
     if facts is None or facts.last_role != "assistant":
         return False
     text = facts.last_text or ""
-    return text.rstrip().endswith("?") or _HELP_RE.search(text) is not None
+    if _HELP_RE.search(text) is not None:
+        return True
+    # Strip the terminal markers BEFORE asking where the turn ends. The worker
+    # is instructed to emit its promise last (skills/target/references/
+    # pre-promise.md), so the real shape of the case this function exists for is
+    # "...open the PR too?\n<promise>MISSION COMPLETE</promise>" - a turn that
+    # ends on `>`. Reading `endswith("?")` against the raw text answers False on
+    # exactly the population the docstring above describes, and the row retires
+    # with the question stranded. Removing the tags first puts the question back
+    # at the end where it actually is.
+    return _TERMINAL_TAG_RE.sub("", text).rstrip().endswith("?")
 
 
 def retire_decision(
@@ -507,16 +526,26 @@ def retire_decision(
 
 
 def retire_grace_s() -> float:
-    """The configured grace. Any config trouble falls back to the default
-    rather than to zero: a lane that silently disarms on a partial settings read
-    is the decorative guard this module keeps refusing to ship."""
+    """The configured grace. Fails CLOSED, like ``_reap_execution_enabled``.
+
+    `0` is a documented off switch for a lane that stops sessions, and
+    `load_settings()` raises on an invalid value ANYWHERE in the file - so an
+    operator who disarmed retire, then mistyped an unrelated key, would have it
+    silently re-armed at 900 by a fallback-to-default. A read that did not
+    answer cannot be allowed to answer "armed"; the operator re-runs it after
+    fixing the config, which is the direction this lane is allowed to fail in.
+    """
     try:
         from fno.config import load_settings
 
         value = getattr(load_settings().recovery, "retire_grace_s", RETIRE_GRACE_S)
         return max(0.0, float(value))
-    except Exception:  # noqa: BLE001 - a partial settings stub keeps the default
-        return float(RETIRE_GRACE_S)
+    except Exception as exc:  # noqa: BLE001 - an unreadable config never arms a stop
+        logging.getLogger(__name__).warning(
+            "retire lane disarmed, config unreadable (%s). Fix the config and "
+            "re-run; it will not act on a default", exc,
+        )
+        return 0.0
 
 
 # ---------------------------------------------------------------------------

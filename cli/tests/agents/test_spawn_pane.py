@@ -4318,13 +4318,21 @@ def test_pane_run_env_does_not_latch_the_writable_dir_grant(
 # Those five now split on one question: was a send attempted? An unreadable
 # frame and a blank frame answer no and return `unattempted`, because an alive
 # unpainted child is still a live worker. The two send failures and both agy
-# trust-gate arms answer yes and stay `unconfirmed`. Both states retry once;
-# only `unconfirmed` fails the spawn after that.
+# trust-gate arms answer yes and stay `unconfirmed`.
+#
+# Only `unattempted` is retried, because it is the only state where nothing can
+# already be sitting in the pane's buffer. `unconfirmed` fails the spawn on its
+# first answer.
 
 
 def _seed_script(monkeypatch, *states: str) -> list[tuple]:
     """Drive `_submit_spawn_seed` through a scripted sequence of outcomes."""
     from fno.agents import mux_spawn
+
+    # The retry's real delay exists for a TUI that has not painted; a scripted
+    # sequence has no TUI, so paying it would just add a second of wall clock
+    # per test for nothing.
+    monkeypatch.setattr(mux_spawn, "_SEED_RETRY_DELAY_S", 0)
 
     calls: list[tuple] = []
     seq = iter(states)

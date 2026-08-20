@@ -838,6 +838,32 @@ def test_a_promise_that_also_asks_a_question_never_retires():
     assert "question the operator owes" in v.basis
 
 
+def test_a_question_asked_before_the_promise_never_retires():
+    """The REAL shape, and the one the ordering above does not cover. The worker
+    is instructed to emit its promise last (skills/target/references/
+    pre-promise.md), so a turn that asks and then finishes ends on `>`, not on
+    `?`. Reading `endswith("?")` against the raw text answers False on exactly
+    the population `_question_pending` exists for, and the row retires with the
+    question stranded."""
+    row = _spawned()
+    tail = "Plan mailed. Should I open the PR too?\n<promise>MISSION COMPLETE</promise>"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_a_clean_promise_with_no_question_still_retires():
+    """The counterweight: stripping the terminal tags must not invent a question
+    where there is none, or the lane never fires at all."""
+    row = _spawned()
+    for tail in (
+        FINISHED_TAIL,
+        "All done, PR is green.\n<promise>MISSION COMPLETE</promise>",
+    ):
+        [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+        assert v.verdict == watchdog.RETIRE, tail
+
+
 def test_a_promise_carrying_a_help_tag_never_retires():
     row = _spawned()
     tail = f"{FINISHED_TAIL}\n<help reason='blocked'>needs a ruling</help>"
@@ -942,8 +968,13 @@ def test_an_adopted_store_session_never_retires():
 
     The positive control rides along on purpose: without it every assertion
     here would still pass if the fixture stopped reaching the lane at all."""
+    # `adopted`, and never the row's `status`. Keying on status was a hole:
+    # status is a LIVENESS stamp that `fno agents reconcile` flips back to
+    # "live" as soon as the session answers a probe, so the guard survived
+    # exactly one pass and the adopted operator terminal then read as a worker.
+    # `origin` is written once at registration and nothing flips it.
     facts = {"dddd4444-0000": _facts(FINISHED_TAIL, age_min=20)}
-    for origin in (None, "adopted"):
+    for origin in (None, "adopted", "something-new"):
         row = Row("dddd4444-0000", "adopted-session", "idle", None, "/tmp/bp", origin)
         [v] = _retire_run([row], facts)
         assert v.verdict != watchdog.RETIRE, origin
@@ -951,6 +982,19 @@ def test_an_adopted_store_session_never_retires():
     control = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", "spawn")
     [v] = _retire_run([control], facts)
     assert v.verdict == watchdog.RETIRE
+
+
+def test_store_fallback_stamps_a_durable_adoption_marker():
+    """The producer half of the test above. An adopted row must carry the marker
+    at registration, or the consumer has nothing durable to read."""
+    import inspect
+
+    from fno.agents import store_fallback
+
+    source = inspect.getsource(store_fallback)
+    assert 'origin="adopted"' in source, (
+        "store_fallback must mark adopted rows; status alone is flipped by reconcile"
+    )
 
 
 def test_arming_the_lane_never_demotes_the_stale_escalation():
