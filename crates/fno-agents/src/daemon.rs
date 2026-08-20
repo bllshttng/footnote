@@ -8195,6 +8195,49 @@ mod tests {
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    #[tokio::test]
+    async fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
+        // The refusal string and the parser drift independently: the refusal
+        // once printed `main:76` while the parser demanded a bare number, so
+        // the instrument named a way out that errored with EXIT_USAGE. Hold
+        // both sides in one test: extract the command this handler really
+        // printed and feed it to the real parse_pane_args, no hardcoded
+        // expected string anywhere.
+        let home = short_home("stoprefusal");
+        let mut row = ask_row("pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("opencode".into());
+        row.status = AgentStatus::Live;
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 76,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.stop", json!({"name": "pane-worker"}));
+
+        let response = handle_stop(&ctx, &request).await;
+
+        let error = response.error().expect("a pane row must be refused");
+        let printed = error
+            .message
+            .split("Kill the pane: `")
+            .nth(1)
+            .expect("refusal names the kill command")
+            .split('`')
+            .next()
+            .expect("the printed command is backtick-closed");
+        let selector = printed
+            .strip_prefix("fno mux pane kill ")
+            .expect("the printed command is the pane kill verb");
+        let args: Vec<std::ffi::OsString> = vec!["kill".into(), selector.into()];
+        let parsed =
+            fno::mux_cli::parse_pane_args(&args).expect("the refusal's own command must parse");
+        assert_eq!(parsed.session.as_deref(), Some("main"));
+        assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76 });
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     #[test]
     fn mux_missing_pane_receipt_is_idempotent_absence() {
         assert!(mux_pane_is_absent("fno mux: no such pane: 24"));

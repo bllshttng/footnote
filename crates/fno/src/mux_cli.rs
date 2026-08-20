@@ -1922,7 +1922,7 @@ fn wait_exit_code(outcome: WaitOutcome) -> i32 {
 
 /// Where `pane send` gets its bytes.
 #[derive(Debug, PartialEq, Eq)]
-enum SendSource {
+pub enum SendSource {
     Text(String),
     Stdin,
 }
@@ -1930,7 +1930,7 @@ enum SendSource {
 /// What `pane focus` (and `mux view`) was pointed at (x-b80d): a pane id, a
 /// registry selector, or the interactive picker.
 #[derive(Debug, PartialEq, Eq)]
-enum FocusTarget {
+pub enum FocusTarget {
     Pane(u64),
     Selector(String),
     /// `--fzf` with no positional: open the filter list over pane-hosted rows.
@@ -1953,9 +1953,11 @@ fn parse_focus_target(raw: Option<&String>) -> Result<FocusTarget, String> {
 }
 
 /// A parsed `pane` verb (the wire-facing subset; `--session`/`--json` ride
-/// alongside on [`ParsedPane`]).
+/// alongside on [`ParsedPane`]). Public so the agents daemon's tests can feed
+/// a refusal's printed command to this real parser (crates/fno-agents);
+/// closing that visibility again breaks that round-trip test by design.
 #[derive(Debug, PartialEq, Eq)]
-enum PaneCmd {
+pub enum PaneCmd {
     Ls {
         /// (x-d865) `--fno-id <id>`: filter the listing to panes hosting this
         /// fno session id (client-side over `PaneInfo.fno_id`).
@@ -2024,11 +2026,13 @@ enum PaneCmd {
     },
 }
 
+/// The result of parsing the tokens after `mux pane`. Public for the same
+/// reason as [`PaneCmd`]: the daemon-side refusal round-trip test reads it.
 #[derive(Debug, PartialEq, Eq)]
-struct ParsedPane {
-    session: Option<String>,
-    json: bool,
-    cmd: PaneCmd,
+pub struct ParsedPane {
+    pub session: Option<String>,
+    pub json: bool,
+    pub cmd: PaneCmd,
 }
 
 /// Read the value of a `--flag value` pair, advancing `i` past the value.
@@ -2090,9 +2094,10 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
     }
 }
 
-/// Parse the tokens after `mux pane` into a [`ParsedPane`]. Pure, so the whole
-/// grammar (verbs, flags, the exit-code-bearing outcomes) is unit-testable
-/// without a socket.
+/// Parse the tokens after `mux pane`. Pure, so the whole grammar (verbs, flags,
+/// the exit-code-bearing outcomes) is unit-testable without a socket, and the
+/// agents daemon's tests can feed a refusal's printed command to this real
+/// parser rather than a copy of its grammar.
 /// The `pane` verbs, named ONCE. Three surfaces quote this list - the
 /// missing-verb message, the unknown-verb one, and the `main.rs` usage line -
 /// and the first two had already drifted before the constant existed:
@@ -2101,7 +2106,7 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// exist do not.
 pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
 
-fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
+pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
@@ -2285,11 +2290,29 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         i += 1;
     }
 
-    let pane_arg = |what: &str| -> Result<u64, String> {
+    // A pane positional is a bare pane id (`76`) or a `<session>:<pane>`
+    // selector (`main:76`) - the exact form the daemon's pane-worker
+    // refusals print and the agents JSON contract documents as the kill
+    // remedy. An explicit `--session` flag wins over the selector's
+    // session, the same explicit-flag-first order `resolve_session`
+    // applies to FNO_SESSION.
+    let mut selector_session: Option<String> = None;
+    let mut pane_arg = |what: &str| -> Result<u64, String> {
         let raw = positionals
             .first()
             .ok_or_else(|| format!("pane {what} needs a pane id"))?;
-        parse_u64(raw, "pane id")
+        match raw.split_once(':') {
+            Some((session, pane)) if !session.is_empty() => match pane.parse::<u64>() {
+                Ok(id) => {
+                    if selector_session.is_none() {
+                        selector_session = Some(session.to_string());
+                    }
+                    Ok(id)
+                }
+                Err(_) => Err(format!("pane id needs a number, got {raw:?}")),
+            },
+            _ => parse_u64(raw, "pane id"),
+        }
     };
 
     let cmd = match verb {
@@ -2359,6 +2382,9 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     };
     if fzf && verb != "focus" {
         return Err("--fzf pairs only with pane focus".into());
+    }
+    if session.is_none() {
+        session = selector_session;
     }
     Ok(ParsedPane { session, json, cmd })
 }
@@ -4725,6 +4751,66 @@ mod tests {
         assert_eq!(resolve_session(None, None), DEFAULT_SESSION);
         // An empty env var reads as unset, not as a session named "".
         assert_eq!(resolve_session(None, Some("")), DEFAULT_SESSION);
+    }
+
+    fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
+        let args: Vec<OsString> = tokens.iter().map(OsString::from).collect();
+        parse_pane_args(&args)
+    }
+
+    #[test]
+    fn pane_positional_takes_a_session_colon_pane_selector() {
+        // The daemon's pane-worker refusals print exactly `main:76`; the
+        // parser must accept its own instrument's remedy.
+        let parsed = pane_args(&["kill", "main:76"]).expect("selector must parse");
+        assert_eq!(parsed.session.as_deref(), Some("main"));
+        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+    }
+
+    #[test]
+    fn pane_explicit_session_flag_beats_the_selector_session() {
+        let parsed = pane_args(&["kill", "--session", "other", "main:76"]).expect("must parse");
+        assert_eq!(parsed.session.as_deref(), Some("other"));
+        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+    }
+
+    #[test]
+    fn pane_bare_id_still_parses_with_no_session() {
+        let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
+        assert_eq!(parsed.session, None);
+        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+    }
+
+    #[test]
+    fn pane_malformed_selector_names_the_raw_token() {
+        assert_eq!(
+            pane_args(&["kill", "main:x"]).unwrap_err(),
+            r#"pane id needs a number, got "main:x""#
+        );
+        assert_eq!(
+            pane_args(&["kill", "main:"]).unwrap_err(),
+            r#"pane id needs a number, got "main:""#
+        );
+        assert_eq!(
+            pane_args(&["kill", ":76"]).unwrap_err(),
+            r#"pane id needs a number, got ":76""#
+        );
+    }
+
+    #[test]
+    fn pane_selector_serves_every_pane_positional_verb() {
+        // One grammar for every pane positional, not a kill-only special case.
+        let parsed = pane_args(&["send", "work:9", "--text", "hi"]).expect("must parse");
+        assert_eq!(parsed.session.as_deref(), Some("work"));
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Send {
+                pane: 9,
+                source: SendSource::Text("hi".into()),
+                guarded: false,
+                submit: false
+            }
+        );
     }
 
     // -- shared selector resolution (x-b80d) --------------------------------
