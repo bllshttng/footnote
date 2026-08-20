@@ -2642,10 +2642,10 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit, so nothing can run in this pane until a human answers it or ~/.gemini/trustedFolders.json grants the directory", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit, so nothing can run in this pane until a human answers it or ~/.gemini/trustedFolders.json grants the directory", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
         trust_source = "trust-cleared"
     else:
         trust_source = ""

@@ -499,7 +499,7 @@ def retire_decision(
     # Written as positive membership because an unreadable state (`_row_state`
     # returns `""`) and an unmapped new spelling are both absences, and a
     # negative test admits them. `_RETIRABLE_STATES` carries why it is not the
-    # complement of `_STOPPED_STATES`, and why `done` belongs in it.
+    # complement of the stopped words, and why `done` belongs in it.
     if row.state not in _RETIRABLE_STATES:
         return False, ""
     # A session waiting out a rate limit is silent and is NOT finished. The
@@ -1445,20 +1445,18 @@ _ENGAGED_TAILS = frozenset({"watching", "your-move", "working"})
 #: terminal word is expected and anything else is news.
 _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"})
 
-#: The subset of the above whose word is about the PROCESS rather than about
-#: the WORK. `done` and `completed` are deliberately absent: claude's own
-#: KNOWN_LIVE_STATUSES carries `Done`, so a pane painting it is alive - and a
-#: finished-but-alive pane is exactly what the retire lane exists to stop.
-#: Retire keys on this set for that reason; nothing may widen it back to
-#: `_TERMINAL_STATES` without re-adopting the 2026-08-15 lie named above.
-_STOPPED_STATES = frozenset({"stopped", "exited", "killed"})
-
-#: The states retire will act on, as a POSITIVE membership test. This is the
-#: fold of claude's own KNOWN_LIVE_STATUSES through `_CANONICAL_STATE`, so it
-#: tracks the harness rather than a hand-kept list.
+#: The states retire will act on, as a POSITIVE membership test.
 #:
-#: Positive, not "anything except `_STOPPED_STATES`", and the difference is the
-#: whole point. `_row_state` returns `""` for a row carrying no state under
+#: HAND-KEPT, and it does not track the harness by itself. Claude's live
+#: vocabulary folds to four canonical words; three are here and `blocked` is
+#: deliberately out. A fifth would fold to a word this set does not carry, and
+#: `_row_state` returns no drift warning for it because `_LIVE_STATUS_INPUT`
+#: mapped it fine - so retire would silently stop classifying that population
+#: and the slot leak would come back with nothing said. A test asserts the fold
+#: is fully accounted for, which is what actually tracks the harness.
+#:
+#: Positive, not "anything the roster does not call stopped", and the
+#: difference is the whole point. `_row_state` returns `""` for a row carrying no state under
 #: either alias, and returns an unmapped new spelling verbatim; neither is a
 #: stopped word, so a negative test admits both. Its own docstring records that
 #: claude has already renamed that field once and every row read `""`. Under a

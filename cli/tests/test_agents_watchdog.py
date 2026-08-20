@@ -985,15 +985,47 @@ def test_an_unreadable_transcript_never_retires():
 def test_a_row_whose_process_is_gone_never_retires():
     """Retire exists to reclaim a LIVE slot. A stopped process holds none, so
     stopping it again frees nothing and the receipt's promised undo is false."""
-    for state in sorted(watchdog._STOPPED_STATES):
+    for state in ("stopped", "exited", "killed"):
         row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
         [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
         assert v.verdict != watchdog.RETIRE, state
 
 
+def test_the_retirable_set_accounts_for_every_live_state_claude_has():
+    """`_RETIRABLE_STATES` is hand-kept, so something has to make it track the
+    harness. Nothing else does: a new claude status that `_LIVE_STATUS_INPUT`
+    maps folds to a canonical word `_row_state` returns with an EMPTY drift
+    warning, and a word absent from the set simply stops being classified. The
+    lane would go quiet on that population and the slot leak would come back
+    with nothing said.
+
+    So every canonical word claude's live vocabulary folds to must be either
+    retirable or listed here as a deliberate exclusion. Adding a status without
+    deciding which fails this test."""
+    from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
+
+    # Deliberately NOT retirable, each for a reason `_RETIRABLE_STATES` records.
+    excluded = {"blocked"}
+
+    folded = {
+        watchdog._CANONICAL_STATE.get(mapped, mapped.lower())
+        for mapped in _LIVE_STATUS_INPUT.values()
+    }
+    unaccounted = folded - watchdog._RETIRABLE_STATES - excluded
+    assert not unaccounted, (
+        "claude gained live state(s) "
+        + ", ".join(sorted(unaccounted))
+        + "; decide whether retire acts on them and update _RETIRABLE_STATES "
+        "or this test's exclusion list"
+    )
+    # The exclusion list is itself a claim about the harness: a word that is no
+    # longer live must not sit here looking like a considered decision.
+    assert excluded <= folded, "an exclusion naming a state claude no longer emits"
+
+
 def test_a_live_pane_painting_done_still_retires():
     """The counterweight to the test above, and the reason retire keys on
-    `_STOPPED_STATES` rather than `_TERMINAL_STATES`. `Done` is a member of
+    the stopped words rather than `_TERMINAL_STATES`. `Done` is a member of
     claude's own KNOWN_LIVE_STATUSES, so a pane wearing it is ALIVE - a worker
     that finished and parked, which is this lane's entire target population.
     Excluding it reads as caution and silently empties the lane."""

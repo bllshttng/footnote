@@ -287,15 +287,24 @@ class AgentEntry:
     # evidence for "did a birth trigger spawn this?" was a timestamp gap
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
-    # Registration origin: "operator" for a session a human started by hand (the
-    # SessionStart register hook / ``fno agents register``), "spawn" for a
-    # footnote-created worker, None for a row nothing ever stamped. Those are
-    # THREE values, not two. Absence does NOT read as worker: the reap lane
-    # treats a never-recorded origin as UNKNOWN and refuses, because an absence
-    # cannot separate "no human here" from "nobody wrote it down". Reading it
-    # the other way is the defect this field's own node was filed against.
-    # Additive-optional so pre-existing rows and the Rust RegistryEntry
-    # round-trip losslessly.
+    # What created this row, written once at birth and never restamped:
+    # "operator" for a session a human started by hand (the SessionStart
+    # register hook / ``fno agents register``), "spawn" for a worker footnote
+    # launched, "adopted" for one the harness-store healer found already
+    # running, None for a row nothing ever stamped. Those are FOUR values, not
+    # two. Additive-optional (None default) so pre-existing rows and the Rust
+    # RegistryEntry round-trip losslessly.
+    #
+    # ABSENCE MEANS UNKNOWN, never worker. The reap lane treats a never-recorded
+    # origin as UNKNOWN and refuses, because an absence cannot separate "no
+    # human here" from "nobody wrote it down", and the retire lane acts only on
+    # the positive "spawn". A row written before this field existed carries
+    # nothing, and an operator's own terminal adopted from the claude store is
+    # routinely one of those, so reading the absence as "we made this" put a
+    # human's session in a lane that stops sessions. Any new code path that
+    # creates a row must state which kind it made; a test in
+    # cli/tests/test_agents_watchdog.py walks the AST of this package to
+    # enforce that.
     origin: Optional[str] = None
 
     # ----------------------------------------------------------------------
