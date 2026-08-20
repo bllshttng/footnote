@@ -246,7 +246,12 @@ def derive_crown_level(scopes: list[str]) -> int:
     return resolve_crown(scopes)[0]
 
 
-def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
+def scope_contains(
+    outer: Optional[str],
+    inner: Optional[str],
+    *,
+    graph_entry=None,
+) -> bool:
     """Does a crown over ``outer`` strictly contain one over ``inner``?
 
     Real containment, not the honor system it replaces. The old rule could only
@@ -254,14 +259,13 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     project>epic>node containment was not derivable. Under this ladder it is: a
     project is in a portfolio by name, and an epic carries the project it belongs
     to, so a grantor can no longer hand down authority it does not hold.
-    """
-    def _canon(members: list[str]) -> set[str]:
-        # Alias-normalize both sides, or a portfolio stored as `alpha` fails to
-        # contain a project the caller spelled `a`.
-        return {(_canonical_project(m) or m) for m in members}
 
-    outer_members = _canon(split_scope(outer))
-    inner_members = _canon(split_scope(inner))
+    ``graph_entry`` overrides the per-call graph read (an ``id -> entry``
+    callable), so a caller scanning many rows pays one graph parse instead of
+    one per row.
+    """
+    outer_members = _canonical_members(outer)
+    inner_members = _canonical_members(inner)
     if not outer_members or not inner_members:
         return False
     if inner_members == outer_members:
@@ -273,7 +277,7 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     name = next(iter(inner_members))
     if name in outer_members:
         return True
-    entry = _graph_entry(name)
+    entry = (graph_entry or _graph_entry)(name)
     if not entry:
         return False
     # Canonicalize the entry's project before the comparison: graph intake stores
@@ -357,13 +361,21 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
     return None
 
 
+def _canonical_members(scope: Optional[str]) -> set:
+    """Alias-normalized member set of a stored scope; empty for None/blank.
+
+    Shared by containment (``scope_contains``) and equality
+    (``_same_territory``) on purpose: the strand scan relies on both
+    answering from ONE normalization, so a copy that drifts would let a
+    scope read as "same territory" to one and "strictly contained" to the
+    other.
+    """
+    return {(_canonical_project(m) or m) for m in split_scope(scope)}
+
+
 def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     """Do two stored scopes name the same territory, aliases normalized?"""
-
-    def _canon(scope: Optional[str]) -> set:
-        return {(_canonical_project(m) or m) for m in split_scope(scope)}
-
-    left, right = _canon(a), _canon(b)
+    left, right = _canonical_members(a), _canonical_members(b)
     return bool(left) and left == right
 
 
@@ -377,6 +389,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     This is deliberately not a general crown writer. Agent-to-agent grants and
     same-scope succession stay on ``spawn --crown``; this function only closes
     the human workflow where the useful target session already exists.
+
+    A row that already holds a crown is re-scoped, not refused: the new
+    territory replaces the old in the one write below, and the receipt reports
+    what was vacated. The live-holder check is the guard that matters here - it
+    is what keeps two rows from ruling the same territory.
     """
     caller = calling_agent_row()
     if caller is not None:
@@ -401,7 +418,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     try:
         target_name = resolve_agent(handle).entry.name
     except AgentResolutionError as exc:
-        raise CrownPromotionError(str(exc)) from exc
+        raise CrownPromotionError(
+            f"{exc}. `fno agents list` shows every handle you can crown."
+        ) from exc
 
     receipt: dict[str, Any] = {}
 
@@ -409,19 +428,32 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         target = next((row for row in rows if row.name == target_name), None)
         if target is None:
             raise CrownPromotionError(
-                f"no agent matching {handle!r}; the target disappeared before the grant committed"
+                f"no agent matching {handle!r}; the target disappeared before the "
+                "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: target status {target.status!r} is terminal"
+                f"refusing to crown {target.name!r}: target status {target.status!r} "
+                "is terminal. `fno agents list` shows which rows are live; crown "
+                "one of those instead."
             )
-        if any(
-            value is not None
-            for value in (target.crown_level, target.crown_scope, target.crown_grantor)
-        ):
+
+        # A row that already holds a crown is re-scoped, not refused: the
+        # replace() below overwrites the old territory in the same write that
+        # stamps the new one, so the vacated scope frees atomically and no
+        # reader ever sees two live crowns or zero. Captured BEFORE the stamp
+        # so the receipt can name what changed hands.
+        vacated_scope = target.crown_scope
+        vacated_level = target.crown_level
+        if (vacated_level is None) != (vacated_scope is None):
+            # Half a crown is unstampable by crown_validation_error, so no
+            # legal writer produces it; overwrite would erase the corruption
+            # signal instead of surfacing it.
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: it already holds "
-                f"{target.crown_label or 'crown metadata'}"
+                f"refusing to crown {target.name!r}: it holds half a crown "
+                f"(level={vacated_level!r}, scope={vacated_scope!r}), which "
+                "no legal crown produces. fno agents stop the row and "
+                "fno agents rm it, then crown the re-registered session."
             )
 
         holder = next(
@@ -436,8 +468,16 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         )
         if holder is not None:
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: scope {scope!r} is already held "
-                f"by live row {holder.name!r}"
+                f"refusing to crown {target.name!r}: scope {scope!r} is already "
+                f"held by live row {holder.name!r}. Three ways out, cheapest "
+                "first:\n"
+                f"  re-scope the holder   fno agents crown {holder.name} --scope "
+                "<other territory>   (both sessions stay live; retry this "
+                "command after)\n"
+                "  holder looks dead     fno agents reconcile   (a row whose "
+                "harness session is gone flips to orphaned, which frees the "
+                "scope)\n"
+                f"  end the holder        fno agents stop {holder.name}, then retry"
             )
 
         for index, row in enumerate(rows):
@@ -454,11 +494,86 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             level=level,
             scope=scope,
             grantor="human",
+            vacated_scope=vacated_scope,
+            vacated_level=vacated_level,
         )
         return rows
 
-    update_registry(_stamp)
+    # The persisted rows ARE the lock-window snapshot the strand scan needs:
+    # a post-release re-read could see a concurrent grant over the
+    # just-freed scope and mislabel that heir as stranded.
+    rows_after = update_registry(_stamp)
+    try:
+        receipt["stranded_subordinates"] = _stranded_subordinates(
+            receipt["vacated_scope"], scope, target_name, rows_after
+        )
+    except Exception:
+        # Advisory receipt data must never crash a crown that committed.
+        receipt["stranded_subordinates"] = None
     return receipt
+
+
+def _stranded_subordinates(
+    vacated: Optional[str], new_scope: str, target_name: str, rows: list
+) -> Optional[list[str]]:
+    """Live rows whose crown the vacated scope contained and the new one does not.
+
+    Advisory receipt data about a re-scope: containment is enforced at grant
+    time only, so a crown granted out of the old territory keeps reigning
+    after its grantor moves away. Two deliberate answers beyond the list:
+
+    ``[]`` on a no-op, widening, or FIRST-crown move, where no territory
+    actually left the new scope. ``None`` when the check could not run at all
+    (graph unreadable, or an external tracker backend) - which is not the same
+    answer as ``[]``, or the receipt would read as "verified no strands" on a
+    machine it could not check. A row whose epic id the graph no longer holds
+    is LISTED rather than nulled: containment for it is unknowable, and one
+    stale crowned row must not silence the determinate answers for every
+    other row. Computed by the caller AFTER the registry write returns, over
+    the persisted rows, so no graph I/O runs under the lock and no concurrent
+    grant can appear in the scan.
+    """
+    if vacated is None or _same_territory(vacated, new_scope):
+        return []
+    from fno.tracker.metadata import read_entries
+
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    try:
+        # One parse serves both the availability probe and every per-row
+        # epic lookup: raises ExternalMetadataUnavailable under an external
+        # tracker backend, where containment checks would silently degrade
+        # to "not contained".
+        entries = read_entries("agents.crown")
+    except Exception:
+        return None
+    by_id = {
+        e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")
+    }
+    stranded: list[str] = []
+    for row in rows:
+        if row.name == target_name or row.status in TERMINAL_STATUSES:
+            continue
+        members = split_scope(row.crown_scope)
+        # A single-member scope that names no project is an epic id, whose
+        # containment lives in the graph. If the graph does not hold it,
+        # containment is UNKNOWABLE for this row. It is listed anyway rather
+        # than nulling the report: one stale crowned row must not silence
+        # the determinate answers for every other row, and naming a row
+        # that turns out fine costs an operator a glance, while a missing
+        # name costs the move's audit trail.
+        unresolvable = (
+            len(members) == 1
+            and members[0] not in by_id
+            and _canonical_project(members[0]) is None
+        )
+        if unresolvable or (
+            scope_contains(
+                vacated, row.crown_scope, graph_entry=by_id.get
+            ) and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get)
+        ):
+            stranded.append(row.name)
+    return stranded
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
