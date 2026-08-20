@@ -125,6 +125,37 @@ def git_cmd(*args: str) -> str:
         return ""
 
 
+def _registry_axes(state: dict) -> dict[str, str]:
+    """Read lane axes from the registry row owned by this target session."""
+    candidates = {
+        value
+        for key in ("harness_session_id", "claude_transcript_id", "codex_thread_id")
+        if (value := state.get(key))
+    }
+    if not candidates:
+        return {}
+    try:
+        from fno.agents.registry import load_registry
+
+        rows = load_registry()
+    except Exception:  # noqa: BLE001 - ledger writes stay best-effort
+        return {}
+    for row in rows:
+        if not candidates.intersection(
+            {row.harness_session_id, row.short_id} - {None, ""}
+        ):
+            continue
+        axes = {}
+        if row.provider is not None:
+            axes["provider"] = row.provider
+        if row.model is not None:
+            axes["model"] = row.model
+        if row.effort is not None:
+            axes["effort"] = row.effort
+        return axes
+    return {}
+
+
 def _pr_number_from_ship_artifact(root_path: str, session_id: str) -> int | None:
     """Read pr_number from the ship handoff artifact the target skill writes.
 
@@ -349,6 +380,13 @@ def build_entry(
         as_type="int",
     )
     model = cj.get("primary_model") or state.get("model")
+    registry_axes = _registry_axes(state)
+    model = registry_axes.get("model") or model
+    effort = registry_axes.get("effort") or state.get("effort")
+    manifest_provider = state.get("provider")
+    lane_provider = registry_axes.get("provider") or state.get("lane_provider")
+    if lane_provider is None and manifest_provider != state.get("harness"):
+        lane_provider = manifest_provider
 
     # Sessions
     # The caller passes `session_id` as the Claude transcript UUID (from
@@ -448,6 +486,7 @@ def build_entry(
         "tokens_total": tokens_total,
         "cache_read_tokens": cache_read,
         "model": model,
+        "effort": effort,
         # Dual-write for one release: new rows carry both keys (same value);
         # matchers accept either so old (session_id-only) rows stay matchable.
         "fno_id": scalar_session_id,
@@ -459,6 +498,8 @@ def build_entry(
         "points": points,
         "notes": None,
     }
+    if lane_provider is not None:
+        entry["provider"] = lane_provider
 
     # Only include abort bookkeeping when the run actually aborted - keeps
     # done entries clean and doesn't churn the ledger schema for normal runs.

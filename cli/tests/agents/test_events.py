@@ -64,6 +64,46 @@ def test_emit_includes_kind_and_data_fields(tmp_path: Path, monkeypatch) -> None
     assert parsed["duration_ms"] == 1234
 
 
+def test_emit_provider_rate_limited_records_provider_account_and_timestamp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.events import emit_provider_rate_limited
+
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    emit_provider_rate_limited(
+        provider="zai",
+        account="readyrule",
+        observed_at="2026-08-20T10:00:00Z",
+        path=events_path,
+    )
+    parsed = json.loads(events_path.read_text(encoding="utf-8").strip())
+    assert parsed["kind"] == "provider_rate_limited"
+    assert parsed["provider"] == "zai"
+    assert parsed["account"] == "readyrule"
+    assert parsed["observed_at"] == "2026-08-20T10:00:00Z"
+
+
+def test_emit_promotes_fair_usage_error_to_rate_limited_event(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.events import emit
+
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    emit(
+        "agent_ask_failed",
+        provider="zai",
+        account="readyrule",
+        error="HTTP 429 Fair Usage code 1313",
+        path=events_path,
+    )
+    records = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert records[-1]["kind"] == "provider_rate_limited"
+    assert records[-1]["provider"] == "zai"
+    assert records[-1]["account"] == "readyrule"
+
+
 def test_emit_ts_is_iso8601_utc(tmp_path: Path, monkeypatch) -> None:
     """emit() stamps ts in ISO8601 UTC form (ends in Z or +00:00)."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -217,4 +257,3 @@ def test_emit_identity_resolution_records_markers_disposition_collision(
     assert rec["rejected"][0]["owner"] == "7ebb186c"
     assert rec["rejected"][0]["session_id"] == "foreign"
     assert rec["rejected"][0]["reason"] == "owned_by_live_row"
-

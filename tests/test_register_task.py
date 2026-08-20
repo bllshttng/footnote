@@ -282,6 +282,54 @@ def test_build_entry_provider_id_falls_back_to_provider():
     assert entry["provider_id"] == "claude"
 
 
+def test_build_entry_records_lane_axes():
+    entry = register_task.build_entry(
+        {
+            "input": "x",
+            "session_id": "sid",
+            "provider": "openai",
+            "model": "gpt-5.5",
+            "effort": "low",
+        },
+        "tid",
+    )
+    assert entry["provider"] == "openai"
+    assert entry["model"] == "gpt-5.5"
+    assert entry["effort"] == "low"
+
+
+def test_build_entry_prefers_registry_lane_axes(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda: [
+            SimpleNamespace(
+                harness_session_id="worker-sid",
+                short_id="",
+                provider="zai",
+                model="glm-5.3",
+                effort="low",
+            )
+        ],
+    )
+    entry = register_task.build_entry(
+        {
+            "input": "x",
+            "session_id": "sid",
+            "harness": "claude",
+            "provider": "claude",
+            "harness_session_id": "worker-sid",
+            "model": "opus",
+            "effort": "high",
+        },
+        "tid",
+    )
+    assert entry["provider"] == "zai"
+    assert entry["model"] == "glm-5.3"
+    assert entry["effort"] == "low"
+
+
 def test_build_entry_provider_id_prefers_explicit():
     # A rotation-written provider_id wins over the provider family fallback.
     entry = register_task.build_entry(
