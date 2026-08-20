@@ -783,11 +783,61 @@ pub struct PruneOutcome {
     pub kept_unknown: usize,
     pub skipped_named: usize,
     pub kept_protected: usize,
+    /// Tombstoned members reaped one-by-one out of squads that survived the
+    /// whole-squad decision above. `prune_decision_at`
+    /// returns `Keep`/`KeepUnknown` at the FIRST live (or unknown-liveness)
+    /// member it finds, so a tombstoned member sitting beside a live one in
+    /// the same squad was unreachable by any sweep before this.
+    pub members_reaped: usize,
 }
 
 impl PruneOutcome {
     pub fn removed_count(&self) -> usize {
         self.removed.len()
+    }
+}
+
+/// True when a tombstoned member is reapable: provably dead (absent from a
+/// KNOWN live set). A `None` live set (the liveness query failed) reaps
+/// nothing, the same fail-safe direction `KeepUnknown` takes for whole squads.
+/// `pub(crate)` so a `--dry-run` caller can preview the same count `prune`
+/// would actually remove, instead of the write path being the only place
+/// that knows this number.
+pub(crate) fn tombstone_reapable(
+    m: &StoredMember,
+    live: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    m.tombstone && live.is_some_and(|set| !set.contains(&m.attach_id))
+}
+
+/// One squad's fate under `decide` and `live`: its prune decision, and -- if
+/// it survives -- how many of its members would be reaped as tombstones.
+/// Shared by the real (locked) `prune` loop and `--dry-run`'s preview so the
+/// two classification loops can never diverge from each other (self-review
+/// finding: they used to be hand-duplicated, one over owned/drained squads,
+/// one over a borrowed read-only load).
+pub struct SquadFate {
+    pub decision: PruneDecision,
+    pub reaped_if_kept: usize,
+}
+
+pub fn classify_squad(
+    sq: &StoredSquad,
+    decide: &impl Fn(&StoredSquad) -> PruneDecision,
+    live: Option<&std::collections::HashSet<String>>,
+) -> SquadFate {
+    let decision = decide(sq);
+    let reaped_if_kept = if matches!(decision, PruneDecision::Prune) {
+        0
+    } else {
+        sq.members
+            .iter()
+            .filter(|m| tombstone_reapable(m, live))
+            .count()
+    };
+    SquadFate {
+        decision,
+        reaped_if_kept,
     }
 }
 
@@ -797,26 +847,35 @@ impl PruneOutcome {
 /// so a squad a concurrent recruit made live between the off-lock snapshot and
 /// the write is kept (AC1-FR lost-update guard). `external_lifecycle` records
 /// are preserved byte-for-byte: `mutate_file` applies `decide` to squads only.
-pub fn prune(decide: impl Fn(&StoredSquad) -> PruneDecision) -> io::Result<PruneOutcome> {
+///
+/// A squad that survives `decide` (Keep/KeepUnknown/SkipNamed) still has its
+/// tombstoned members reaped under this SAME lock, via [`tombstone_reapable`]
+/// against `live`. `decide` already ran against the squad's ORIGINAL member
+/// list, so a squad that reaps to zero members here is not re-judged by the
+/// empty-squad grace arm until the next `prune` call - one pass, one decision
+/// per squad, no double jeopardy inside it.
+pub fn prune(
+    decide: impl Fn(&StoredSquad) -> PruneDecision,
+    live: Option<&std::collections::HashSet<String>>,
+) -> io::Result<PruneOutcome> {
     let mut out = PruneOutcome::default();
     mutate_file(|sf| {
         let mut kept = Vec::with_capacity(sf.squads.len());
-        for sq in sf.squads.drain(..) {
-            match decide(&sq) {
-                PruneDecision::Prune => out.removed.push(PrunedSquad::from(&sq)),
-                PruneDecision::KeepUnknown => {
-                    out.kept_unknown += 1;
-                    kept.push(sq);
+        for mut sq in sf.squads.drain(..) {
+            let fate = classify_squad(&sq, &decide, live);
+            let counter = match fate.decision {
+                PruneDecision::Prune => {
+                    out.removed.push(PrunedSquad::from(&sq));
+                    continue;
                 }
-                PruneDecision::SkipNamed => {
-                    out.skipped_named += 1;
-                    kept.push(sq);
-                }
-                PruneDecision::Keep => {
-                    out.kept_protected += 1;
-                    kept.push(sq);
-                }
-            }
+                PruneDecision::KeepUnknown => &mut out.kept_unknown,
+                PruneDecision::SkipNamed => &mut out.skipped_named,
+                PruneDecision::Keep => &mut out.kept_protected,
+            };
+            *counter += 1;
+            sq.members.retain(|m| !tombstone_reapable(m, live));
+            out.members_reaped += fate.reaped_if_kept;
+            kept.push(sq);
         }
         sf.squads = kept;
     })?;
@@ -2612,8 +2671,11 @@ mod tests {
         ));
 
         let live = std::collections::HashSet::<String>::new(); // nothing live
-        let outcome =
-            prune(|sq| prune_decision(sq, false, Some(&live), &[], &|p| p == "/survives")).unwrap();
+        let outcome = prune(
+            |sq| prune_decision(sq, false, Some(&live), &[], &|p| p == "/survives"),
+            Some(&live),
+        )
+        .unwrap();
 
         // BOTH unnamed squads go. `kept` has a surviving origin, and that used to
         // save it; a squad whose every member is dead is finished wherever its
@@ -2653,5 +2715,106 @@ mod tests {
             1,
             "external_lifecycle preserved byte-for-byte across a prune"
         );
+    }
+
+    fn tomb(id: &str) -> StoredMember {
+        StoredMember {
+            attach_id: id.into(),
+            tombstone: true,
+            tab_name: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn member_reap_drops_tombstoned_members_a_live_member_keeps_the_squad_alive() {
+        // AC4-HP: a squad kept by one live member still has its tombstoned
+        // members reaped in the same pass, so a dead worker beside a live one
+        // does not synthesize a `cc-` row forever.
+        let _s = Scratch::new("member-reap-hp");
+        upsert(
+            "",
+            "keeper",
+            &[],
+            &[m("11111111"), tomb("deadbee1"), tomb("deadbee2")],
+        )
+        .unwrap();
+
+        let mut live = std::collections::HashSet::new();
+        live.insert("11111111".to_string());
+        let outcome = prune(
+            |sq| prune_decision(sq, false, Some(&live), &[], &|_| true),
+            Some(&live),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.removed_count(), 0, "the squad itself survives");
+        assert_eq!(outcome.members_reaped, 2);
+        let after = load();
+        assert_eq!(after.squads.len(), 1);
+        assert_eq!(after.squads[0].members.len(), 1);
+        assert_eq!(after.squads[0].members[0].attach_id, "11111111");
+    }
+
+    #[test]
+    fn member_reap_does_nothing_when_liveness_is_unknown() {
+        // AC4-EDGE: the liveness query failed (`live` is `None`). No member is
+        // removed - same fail-safe direction `KeepUnknown` takes for whole
+        // squads.
+        let _s = Scratch::new("member-reap-edge");
+        upsert(
+            "",
+            "keeper",
+            &[],
+            &[m("11111111"), tomb("deadbee1"), tomb("deadbee2")],
+        )
+        .unwrap();
+
+        let outcome = prune(|sq| prune_decision(sq, false, None, &[], &|_| true), None).unwrap();
+
+        assert_eq!(outcome.removed_count(), 0);
+        assert_eq!(outcome.members_reaped, 0, "an unknown roster reaps nothing");
+        let after = load();
+        assert_eq!(after.squads[0].members.len(), 3);
+    }
+
+    #[test]
+    fn member_reap_to_zero_does_not_get_double_pruned_in_the_same_pass() {
+        // AC4-COV: a NAMED squad skipped by `include_named` policy still has
+        // its tombstoned members reaped, and that can reap it to zero members
+        // in this call. `decide` already ran (SkipNamed) against the ORIGINAL
+        // member list before the reap, so this pass must not turn around and
+        // treat the now-empty squad as prunable under the empty-squad grace
+        // arm - that only happens on a LATER call, against fresh state.
+        let _s = Scratch::new("member-reap-cov");
+        upsert(
+            "archived-crew",
+            "",
+            &[],
+            &[tomb("deadbee1"), tomb("deadbee2")],
+        )
+        .unwrap();
+
+        let live = std::collections::HashSet::<String>::new(); // nothing live
+        let outcome = prune(
+            |sq| prune_decision(sq, false, Some(&live), &[], &|_| true),
+            Some(&live),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.removed_count(),
+            0,
+            "SkipNamed never proposes the squad for removal"
+        );
+        assert_eq!(outcome.skipped_named, 1);
+        assert_eq!(outcome.members_reaped, 2);
+        let after = load();
+        assert_eq!(
+            after.squads.len(),
+            1,
+            "the squad row survives with zero members, not pruned in this pass"
+        );
+        assert!(after.squads[0].members.is_empty());
     }
 }

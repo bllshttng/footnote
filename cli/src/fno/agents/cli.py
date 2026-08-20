@@ -3128,6 +3128,19 @@ def cmd_rm(
     a blocked row names model rotation as its remedy. Terminal rows need
     no separate stop first.
 
+    This implementation refuses a live row on its own stored status and the
+    harness teardown call's exit code; it does not itself re-check the
+    claude roster (that reconciliation, claude only today (codex/opencode
+    are not yet covered), is ``fno-agents``'s Rust ``agent.rm`` RPC, which
+    ``auto`` routing prefers when the binary is installed -- self-review
+    finding: this docstring is what a Python-fallback or
+    ``FNO_AGENTS_RUNTIME=python`` invocation actually runs, so it must not
+    claim a check only the other implementation makes, for a harness that
+    check does not even cover). If you tear a session down by hand instead,
+    ``claude rm`` (and ``claude stop``) take the harness's SHORT ID, never
+    the agent NAME this command takes -- passing the name to ``claude rm``
+    fails.
+
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with
     ``fno worktree cleanup --merged --apply``.

@@ -827,6 +827,19 @@ fn claude_row_id(e: &state::RegistryEntry) -> Option<String> {
         .map(|session_id| session_id.chars().take(8).collect())
 }
 
+/// True only when a KNOWN roster snapshot was consulted and the row is not
+/// in it. A `None`/unknown snapshot proves nothing, so it is never absent on
+/// that basis alone. The single predicate both the pre-cascade live-gate and
+/// the cascade's own already-absent check apply, so "what counts as absent"
+/// cannot diverge between the two call sites.
+fn claude_row_provably_absent(
+    claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
+    row_id: Option<&str>,
+) -> bool {
+    claude_agents
+        .is_some_and(|snap| snap.is_known() && row_id.is_some_and(|id| snap.find(id).is_none()))
+}
+
 fn cascade_harness_session_result_with(
     e: &state::RegistryEntry,
     claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
@@ -842,8 +855,7 @@ fn cascade_harness_session_result_with(
                 );
             };
             let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
-            let list_known = snapshot.is_known();
-            if list_known && snapshot.find(&short_id).is_none() {
+            if claude_row_provably_absent(Some(snapshot), Some(&short_id)) {
                 return CascadeOutcome::AlreadyAbsent(format!(
                     "claude row {short_id} already absent"
                 ));
@@ -1715,6 +1727,23 @@ fn gc_sweep_impl(
 /// Cheap in steady state: no markers -> one dir stat, no roster load. A stop
 /// failure leaves the marker for the next tick (retry); a marker whose session is
 /// already gone is dropped as stale.
+/// Run `claude stop <short>`, refusing to wait past `timeout`. `kill_on_drop`:
+/// on timeout the `output()` future is dropped, so the hung child does not
+/// keep running past the deadline this call gave up at (self-review finding:
+/// this was hand-duplicated at the RPC call site below; one shared helper
+/// now backs both).
+async fn bounded_claude_stop(
+    short: &str,
+    timeout: Duration,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let stop = tokio::process::Command::new("claude")
+        .arg("stop")
+        .arg(short)
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(timeout, stop).await
+}
+
 async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     // read_markers (dir list + N file reads) and the roster load/parse are
     // blocking fs; run them off the async runtime so a slow disk or a large
@@ -1759,17 +1788,10 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
         match crate::terminal_stop::stop_decision(short) {
             crate::terminal_stop::StopAction::Stop(short) => {
                 // Bound the subprocess so a hung `claude` can never wedge the
-                // sweep. A timeout leaves the marker for the next tick.
-                // `kill_on_drop`: on timeout the `output()` future is dropped;
-                // without this the hung child keeps running, and since the
-                // marker is retried every tick that would leak a subprocess per
-                // tick — the exact failure this feature exists to prevent.
-                let stop = tokio::process::Command::new("claude")
-                    .arg("stop")
-                    .arg(&short)
-                    .kill_on_drop(true)
-                    .output();
-                let stopped = tokio::time::timeout(Duration::from_secs(15), stop).await;
+                // sweep. A timeout leaves the marker for the next tick, since
+                // it is retried every tick, which is the failure this feature
+                // exists to prevent.
+                let stopped = bounded_claude_stop(&short, Duration::from_secs(15)).await;
                 match stopped {
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
                     Ok(Ok(o)) if o.status.success() => {
@@ -3975,6 +3997,48 @@ async fn stamp_orphaned(
 ///   and A is NOT touched (the exchange did not complete).
 ///
 /// Errors: `AgentNotFound` (unknown `to`), `InvalidParams` (missing/oversized).
+/// A resolved registry row's identity, captured once and compared later to
+/// confirm the SAME row across a lock gap. `switchboard_identity_matches`
+/// and `handle_rm_with`'s retain both re-derived this comparison by hand
+/// (self-review finding: two implementations of one operation, each missing
+/// the field the other's calling context happened not to need); this is now
+/// the one shared core both build a [`RowIdentity`] for and call.
+///
+/// A field left `None` here is UNASSERTED, not required-absent: `session_id`
+/// in particular sits at `None` on a codex row until `late_bind_codex_sessions`
+/// binds it, so a `None` captured before that bind must not read as a
+/// mismatch against the SAME row's later `Some` (the finding #1 bug,
+/// generalized here to the one place it also existed).
+struct RowIdentity<'a> {
+    harness: Option<&'a str>,
+    name: Option<&'a str>,
+    short_id: &'a str,
+    session_id: Option<&'a str>,
+    created_at: &'a str,
+}
+
+fn row_identity_matches(entry: &RegistryEntry, expected: &RowIdentity) -> bool {
+    if let Some(harness) = expected.harness {
+        if entry.harness_name() != harness {
+            return false;
+        }
+    }
+    if let Some(name) = expected.name {
+        if entry.name != name {
+            return false;
+        }
+    }
+    if entry.short_id != expected.short_id {
+        return false;
+    }
+    if let Some(session_id) = expected.session_id {
+        if entry.harness_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+    }
+    entry.created_at == expected.created_at
+}
+
 fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool {
     let Some(expected) = identity.as_object() else {
         return false;
@@ -3993,10 +4057,16 @@ fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool
         Some(Value::String(value)) => Some(value.as_str()),
         _ => return false,
     };
-    entry.harness_name() == harness
-        && entry.harness_session_id.as_deref() == session_id
-        && entry.short_id == short_id
-        && entry.created_at == created_at
+    row_identity_matches(
+        entry,
+        &RowIdentity {
+            harness: Some(harness),
+            name: None,
+            short_id,
+            session_id,
+            created_at,
+        },
+    )
 }
 
 async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
@@ -5040,12 +5110,30 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
 /// SIGTERM -> SIGKILL escalation is the recovery.
 const WORKER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bound on the WRITE half of a `worker.shutdown` round trip (x-76d1 self-review
+/// finding, mirrors [`crate::client::WRITE_TIMEOUT`]). A small JSON request to an
+/// already-connected local socket clears the kernel send buffer near instantly
+/// unless the worker has stopped reading its socket entirely; kept short and
+/// separate from `WORKER_ACK_TIMEOUT` so pairing it with the read's own 30s bound
+/// does not silently double the documented shutdown-ack budget in
+/// [`crate::client::RESPONSE_DEADLINE`]'s worst-case math.
+const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Fire-and-forget `worker.shutdown` to a worker that must not be left running
 /// (a spawn that failed or lost a name race): connect, ask it to tear down, and
 /// move on. Best-effort by design — the caller is already on an error path.
+///
+/// Same write+read bound as [`stop_worker_confirmed`]'s step 1 (<=35s worst
+/// case), paid on the `agent.adopt_stream` spawn-error paths that call this.
+/// Those paths return well before [`crate::client::RESPONSE_DEADLINE`], so
+/// this worst case needs no separate line in that constant's budget comment.
 async fn best_effort_worker_shutdown(sock: &std::path::Path) {
     if let Ok(mut conn) = UnixStream::connect(sock).await {
-        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_WRITE_TIMEOUT,
+            write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
+        )
+        .await;
         let _ = tokio::time::timeout(
             WORKER_ACK_TIMEOUT,
             crate::protocol::read_response(&mut conn),
@@ -5061,11 +5149,18 @@ async fn best_effort_worker_shutdown(sock: &std::path::Path) {
 /// while its PTY keeps running, Codex P1).
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
     let sock = ctx.home.worker_sock(&entry.short_id);
-    // 1. Graceful: ask the worker to tear down its PTY child + exit. The ACK
-    //    read is bounded (see WORKER_ACK_TIMEOUT): a worker that is wedged
-    //    must fall through to the escalation below, not park this handler.
+    // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the
+    //    write (WORKER_ACK_WRITE_TIMEOUT) and the ACK read (WORKER_ACK_TIMEOUT)
+    //    are bounded, asymmetrically like the client's own request/response
+    //    split: a worker that is wedged (including one that has stopped
+    //    reading its socket entirely, which blocks the write side too) must
+    //    fall through to the escalation below, not park this handler.
     if let Ok(mut conn) = UnixStream::connect(&sock).await {
-        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_WRITE_TIMEOUT,
+            write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
+        )
+        .await;
         let _ = tokio::time::timeout(
             WORKER_ACK_TIMEOUT,
             crate::protocol::read_response(&mut conn),
@@ -5293,13 +5388,15 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             );
         }
     };
-    match tokio::process::Command::new("claude")
-        .arg("stop")
-        .arg(&short)
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => {
+    // Bound the subprocess so a hung `claude` can never wedge this RPC
+    // handler, the same way the background-sweep twin above is bounded.
+    match bounded_claude_stop(&short, Duration::from_secs(15)).await {
+        Err(_) => Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!("claude stop {short} timed out"),
+        ),
+        Ok(Ok(o)) if o.status.success() => {
             // Surface a persist failure rather than reporting a clean stop while
             // the registry still reads live (silent-failure review).
             let claude_name = name.to_string();
@@ -5329,7 +5426,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 json!({"stopped": true, "backend": "claude", "short_id": short}),
             )
         }
-        Ok(o) => Response::err(
+        Ok(Ok(o)) => Response::err(
             req.id,
             ErrorCode::Internal,
             format!(
@@ -5337,7 +5434,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 String::from_utf8_lossy(&o.stderr).trim()
             ),
         ),
-        Err(e) => Response::err(
+        Ok(Err(e)) => Response::err(
             req.id,
             ErrorCode::Internal,
             format!("could not exec `claude stop`: {e}"),
@@ -5435,6 +5532,9 @@ async fn handle_rm_with(
             Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
         };
     let name = entry.name.clone();
+    // Computed once (self-review finding): every other reference in this
+    // handler reuses this allocation instead of re-deriving the same short id.
+    let harness_row_id = claude_row_id(&entry);
     let claude_agents = if entry.harness_name() == "claude" {
         Some(read_claude_agents())
     } else {
@@ -5442,7 +5542,7 @@ async fn handle_rm_with(
     };
     if claude_agents
         .as_ref()
-        .and_then(|snapshot| claude_row_id(&entry).and_then(|id| snapshot.find(&id)))
+        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
         .and_then(|row| row.state.as_deref())
         == Some("blocked")
     {
@@ -5454,14 +5554,55 @@ async fn handle_rm_with(
             ),
         );
     }
-    if entry.status == AgentStatus::Live && !force {
-        return Response::err(
-            req.id,
-            ErrorCode::Busy,
-            format!("agent {name} is still live; use `stop` first or pass --force"),
-        );
+    // The stored enum is what fno last WROTE, not what is true: a claude
+    // session torn down by hand with `claude stop`/`claude rm` never
+    // updates it. A claude row absent from the `claude agents --json --all`
+    // roster is provably gone, whoever removed it. Anything less than proof
+    // keeps refusing. This reconciliation is claude-only (codex/opencode
+    // support is unimplemented, self-review finding): `provably_gone`
+    // is unconditionally `false` for those harnesses, so they still hit the
+    // pre-fix stale-status refusal below with `--force` as the only escape.
+    let provably_gone =
+        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref());
+    if entry.status == AgentStatus::Live && !force && !provably_gone {
+        let row = harness_row_id
+            .clone()
+            .unwrap_or_else(|| "(no harness row id)".into());
+        let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
+        let detail = if entry.harness_name() != "claude" {
+            format!(
+                "agent {name} is still live. Stop it with `fno agents stop {name}`, or pass \
+                 --force."
+            )
+        } else if harness_row_id.is_none() {
+            // claude_row_provably_absent short-circuits to `false` (not
+            // provably gone) whenever the row id is None, independent of the
+            // roster -- so presence was never actually checked here, and the
+            // roster_known branch's "is present in" claim plus its runnable
+            // `claude stop <row>` commands would both be false (self-review
+            // finding).
+            format!(
+                "agent {name} is still live, but it has no resolvable harness row id, so \
+                 its presence in `claude agents --json --all` cannot be checked. Stop it \
+                 with `fno agents stop {name}`, or pass --force."
+            )
+        } else if roster_known {
+            format!(
+                "agent {name} is still live. Its harness row {row} is present in \
+                 `claude agents --json --all`. Stop it with `fno agents stop {name}`, or \
+                 by hand with `claude stop {row}` then `claude rm {row}` (claude takes the \
+                 SHORT ID {row}, never the agent name {name}). rm proceeds on its own \
+                 once that row is gone."
+            )
+        } else {
+            format!(
+                "agent {name} is still live, and its harness row {row}'s presence in \
+                 `claude agents --json --all` could not be confirmed (the roster read \
+                 failed). Retry once the roster is readable, or pass --force."
+            )
+        };
+        return Response::err(req.id, ErrorCode::Busy, detail);
     }
-    let harness_row_id = claude_row_id(&entry);
     let harness_outcome = cascade_harness_session_result_with(
         &entry,
         claude_agents.as_ref(),
@@ -5508,13 +5649,19 @@ async fn handle_rm_with(
             );
         }
     }
-    // Force-removing a live agent must stop its worker first, or it leaks a PTY
-    // process that `list`/`stop` can no longer address by name (Codex P2).
-    if entry.status == AgentStatus::Live && force && !stop_worker_confirmed(ctx, &entry).await {
+    // Removing a live agent must stop its own worker first, or it leaks a PTY
+    // process that `list`/`stop` can no longer address by name (Codex P2). The
+    // `provably_gone` path proceeds without `--force`, but it only proves the
+    // HARNESS session is gone; this row's local worker.sock is a separate
+    // process and can still be alive, so it needs the same confirmation.
+    if entry.status == AgentStatus::Live
+        && (force || provably_gone)
+        && !stop_worker_confirmed(ctx, &entry).await
+    {
         return Response::err(
             req.id,
             ErrorCode::Internal,
-            format!("agent {name}: could not stop the worker before force-remove; refusing to orphan a live PTY"),
+            format!("agent {name}: could not stop the worker before removing a live row; refusing to orphan a live PTY"),
         );
     }
     // Orphaned entries are removed with no subprocess action (AC8-FR); the
@@ -5525,15 +5672,75 @@ async fn handle_rm_with(
     // killed the worker, so a swallowed write leaves a dangling row pointing at
     // a dead worker.
     let rm_name = name.clone();
-    if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
-        r.entries.retain(|e| e.name != rm_name);
+    // Identity, not just name: `entry` was resolved off-lock, so a respawn
+    // under the same name between resolution and this write is a different
+    // row. Matching name alone would silently drop the NEW (possibly live)
+    // row instead of the one this request actually resolved and tore down --
+    // the same race `dispatch.py`'s `_recipient_identity_key` guards against,
+    // and `row_identity_matches` (this file, shared with
+    // `switchboard_identity_matches`) guards for mail delivery. `created_at`
+    // is load-bearing, not decorative: a codex row's `harness_session_id`
+    // sits at `None` until `late_bind_codex_sessions` binds it, and
+    // `short_id` is deterministically derived from `name`, so a respawn
+    // under a just-freed name can otherwise reproduce every other field on
+    // the stale row while it waits on its own late-bind.
+    let rm_short_id = entry.short_id.clone();
+    let rm_session_id = entry.harness_session_id.clone();
+    let rm_created_at = entry.created_at.clone();
+    // retain() cannot fail and cannot report what it dropped, so count across
+    // it via the closure's return value: a resolved name that no row in the
+    // file actually carries must not report removed:true (the silent no-op
+    // mode). Nor can it report WHICH rows it dropped, so the identity match
+    // above is also the only defense against dropping more than the one row
+    // this request resolved -- checked below.
+    let dropped = match update_registry_offloaded(ctx.home.registry_json(), move |r| {
+        let before = r.entries.len();
+        r.entries.retain(|e| {
+            !row_identity_matches(
+                e,
+                &RowIdentity {
+                    harness: None,
+                    name: Some(&rm_name),
+                    short_id: &rm_short_id,
+                    session_id: rm_session_id.as_deref(),
+                    created_at: &rm_created_at,
+                },
+            )
+        });
+        before - r.entries.len()
     })
     .await
     {
+        Ok(dropped) => dropped,
+        Err(e) => {
+            return Response::err(
+                req.id,
+                state_error_code(&e),
+                format!("agent {name}: removal did not persist: {e}"),
+            );
+        }
+    };
+    if dropped == 0 {
         return Response::err(
             req.id,
-            state_error_code(&e),
-            format!("agent {name}: removal did not persist: {e}"),
+            ErrorCode::Internal,
+            format!(
+                "agent {name}: resolved to a row the registry does not hold; nothing was removed. \
+                 Re-read it with `fno agents list --json` and rm by the exact `name` field."
+            ),
+        );
+    }
+    if dropped > 1 {
+        // The identity match above should select at most one row; more than
+        // one is an invariant violation, not a normal outcome, and must be
+        // loud rather than reported as a clean single-row removal.
+        return Response::err(
+            req.id,
+            ErrorCode::Internal,
+            format!(
+                "agent {name}: identity match dropped {dropped} rows, expected at most 1; \
+                 registry may need manual repair"
+            ),
         );
     }
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
@@ -7078,6 +7285,38 @@ mod tests {
         row
     }
 
+    #[test]
+    fn row_identity_matches_treats_a_none_session_capture_as_unasserted() {
+        // The one shared comparator both `handle_rm_with`'s retain and
+        // `switchboard_identity_matches` now call through (self-review
+        // finding #8): a session id captured as `None` (a codex row before
+        // `late_bind_codex_sessions` binds it) must not read as a mismatch
+        // against the SAME row's later `Some`.
+        let row = claude_rm_row("worker", "short1", "session-abc");
+        let unasserted = RowIdentity {
+            harness: None,
+            name: Some("worker"),
+            short_id: "short1",
+            session_id: None,
+            created_at: "2020-01-01T00:00:00Z",
+        };
+        assert!(row_identity_matches(&row, &unasserted));
+
+        // A captured `Some` that disagrees with the row IS a real mismatch.
+        let disagreeing = RowIdentity {
+            session_id: Some("some-other-session"),
+            ..unasserted
+        };
+        assert!(!row_identity_matches(&row, &disagreeing));
+
+        // A captured `Some` that agrees still matches.
+        let agreeing = RowIdentity {
+            session_id: Some("session-abc"),
+            ..unasserted
+        };
+        assert!(row_identity_matches(&row, &agreeing));
+    }
+
     fn claude_row_then_absent(
         short_id: &'static str,
         state: &'static str,
@@ -7320,6 +7559,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rm_removes_a_row_the_registry_actually_holds() {
+        // AC1-HP: a plain removal reports removed:true and a re-read shows
+        // zero rows for the name.
+        let home = short_home("rmhappy");
+        let row = ask_row("w1", Some("2020-01-01T00:00:00Z"));
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "w1"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_to_report_removed_when_the_row_is_already_gone() {
+        // AC1-NEG (silent-no-op mode): the row entry_for_lifecycle resolved is no
+        // longer in the file by the time the write runs (raced away by a
+        // concurrent teardown, e.g. another rm or a direct `claude rm`). The
+        // injected claude_rm closure deletes the row as its side effect,
+        // reproducing that race deterministically: retain() then has nothing
+        // to drop, and the handler must refuse rather than report removed:true.
+        let home = short_home("rmalreadygone");
+        let row = claude_rm_row(
+            "raced-worker",
+            "ccccdddd",
+            "ccccdddd-1111-2222-3333-444444444444",
+        );
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "raced-worker"}));
+        let raced_home = home.clone();
+        let snapshots = claude_row_then_absent("ccccdddd", "stopped");
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &snapshots,
+            &move |_| {
+                state::update_registry(&raced_home.registry_json(), |registry| {
+                    registry.entries.retain(|e| e.name != "raced-worker");
+                })
+                .unwrap();
+                Ok(())
+            },
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("registry does not hold"));
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
     async fn rm_reports_when_an_oversized_event_is_replaced() {
         let home = short_home("rmeventoversize");
         let row = claude_rm_row(
@@ -7461,6 +7773,124 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_removes_a_stored_live_row_provably_gone_from_the_roster() {
+        // AC2-HP (false-refusal mode): a row torn down by hand with `claude
+        // stop`/`claude rm` never gets AgentStatus::Live written back. The
+        // live gate must reconcile with the roster, not the stored enum.
+        let home = short_home("rmprovengone");
+        let mut row = claude_rm_row(
+            "hand-torn-down",
+            "ffff6666",
+            "ffff6666-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "hand-torn-down"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| panic!("row already absent from the roster must not reach claude rm"),
+            &|_, _| Ok(true),
+        )
+        .await;
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_a_stored_live_row_when_the_roster_is_unknown() {
+        // AC2-EDGE: an Unknown snapshot (the shellout failed, timed out, or
+        // parsed badly) is not proof of anything; keep refusing.
+        let home = short_home("rmrosterunknown");
+        let mut row = claude_rm_row(
+            "maybe-live",
+            "aaaa9999",
+            "aaaa9999-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "maybe-live"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::unknown("list timed out"),
+            &|_| panic!("an unknown roster must not reach claude rm"),
+            &|_, _| panic!("an unknown roster must not reach mux kill"),
+        )
+        .await;
+
+        assert!(response.error().is_some());
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refuses_a_row_the_roster_still_carries_and_names_no_force() {
+        // AC2-NEG + AC2-COV: the short id IS present in a known snapshot, so
+        // the row really is live. The refusal names the working incantation
+        // (claude takes the short id, not the agent name) and never --force,
+        // which a king previously read as the remedy and applied to five
+        // genuinely-live rows.
+        let home = short_home("rmstilllive");
+        let mut row = claude_rm_row(
+            "genuinely-live",
+            "bbbb8888",
+            "bbbb8888-1111-2222-3333-444444444444",
+        );
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "genuinely-live"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                    crate::claude_roster::ClaudeAgentRow::new("bbbb8888", Some("running")),
+                ])
+            },
+            &|_| panic!("a genuinely live row must not reach claude rm"),
+            &|_, _| panic!("a genuinely live row must not reach mux kill"),
+        )
+        .await;
+
+        let message = &response.error().unwrap().message;
+        assert!(message.contains("claude agents --json --all"));
+        assert!(message.contains("claude stop bbbb8888"));
+        assert!(message.contains("claude rm bbbb8888"));
+        assert!(!message.contains("--force"));
+        assert!(!message.contains("-F"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

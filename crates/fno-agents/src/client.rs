@@ -37,26 +37,32 @@ pub enum ClientError {
     #[error("daemon is not running")]
     DaemonNotRunning,
     #[error(
-        "daemon accepted the connection but sent no response within {0:?} - it is either \
+        "no response from the daemon for `{method}` within {timeout:?} - it is either \
          wedged (listening, not serving) or still working a slow handler. `fno agents \
          restart --force` recovers a wedged holder; retry before assuming one"
     )]
-    DaemonUnresponsive(Duration),
+    DaemonUnresponsive { method: String, timeout: Duration },
 }
 
 /// How long a client waits for the daemon's response frame before declaring it
 /// unresponsive (x-3498). An AF_UNIX connect succeeds into the listen backlog
 /// whether or not anyone ever calls accept, so connect time cannot tell
 /// "saturated" from "serving"; only a bounded read can. The value must sit
-/// ABOVE the daemon's own legitimate worst-case handler budget - a `stop`
-/// escalation alone runs ~42s (bounded shutdown ack + 5s + 5s + 2s), and an
-/// `rm --force` chains escalations to ~72s - or a healthy-but-slow verb fails
-/// with an error whose remedy kills a healthy daemon. 90s clears that worst
-/// chain and still turns the old forever-hang into a bounded failure.
-/// `FNO_AGENTS_RESPONSE_DEADLINE_MS` overrides it (tests drive a wedged-peer
-/// case through a child process so the override never touches a parallel
-/// test's ambient calls).
-pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(90);
+/// ABOVE the daemon's own legitimate worst-case handler budget: a `stop`
+/// escalation alone runs ~47s (bounded shutdown ack + 5s + 5s + 2s); a
+/// force-rm on a live, mux-hosted claude row pays `AGENTS_LIST_TIMEOUT` 15s
+/// twice (once up front, once after `claude_rm`) plus `CASCADE_TIMEOUT` 15s
+/// for that `claude_rm` itself plus another `CASCADE_TIMEOUT` 15s for
+/// `run_mux_pane_kill` plus `stop_worker_confirmed` <=35s in daemon.rs (5s
+/// `WORKER_ACK_WRITE_TIMEOUT` + 30s `WORKER_ACK_TIMEOUT`, paid on force OR on
+/// a `provably_gone` non-force removal alike), a 95s leg. 120s clears that
+/// worst case with real margin, not tight against it, so ordinary
+/// process-spawn slop does not trip it on a legitimate rm - and still turns
+/// the old forever-hang (measured as a 300s hang with the row already
+/// removed) into a bounded failure. `FNO_AGENTS_RESPONSE_DEADLINE_MS`
+/// overrides it (tests drive a wedged-peer case through a child process so
+/// the override never touches a parallel test's ambient calls).
+pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(120);
 
 pub(crate) fn response_deadline() -> Duration {
     std::env::var("FNO_AGENTS_RESPONSE_DEADLINE_MS")
@@ -67,17 +73,49 @@ pub(crate) fn response_deadline() -> Duration {
 }
 
 /// Read one response, bounded by `deadline` ([`RESPONSE_DEADLINE`] at the call
-/// sites, injected so a unit test can prove the bound without waiting 10s). The
-/// deadline lives in the CLIENT, not in `protocol::read_response`, because the
-/// daemon's own read path uses that function too and a deadline there would be
-/// wrong.
+/// sites, injected so a unit test can prove the bound without waiting 10s), and
+/// naming the request it was waiting on when it gave up. The deadline lives in
+/// the CLIENT, not in `protocol::read_response`, because the daemon's own read
+/// path uses that function too and a deadline there would be wrong.
 async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
     conn: &mut R,
+    method: &str,
     deadline: Duration,
 ) -> Result<Response, ClientError> {
     match tokio::time::timeout(deadline, read_response(conn)).await {
         Ok(r) => Ok(r?),
-        Err(_elapsed) => Err(ClientError::DaemonUnresponsive(deadline)),
+        Err(_elapsed) => Err(ClientError::DaemonUnresponsive {
+            method: method.to_string(),
+            timeout: deadline,
+        }),
+    }
+}
+
+/// Bound for the write half of a round trip (self-review finding). A small
+/// JSON request frame to an already-connected local socket clears the kernel
+/// send buffer near instantly unless the daemon has stopped reading its
+/// socket entirely; kept short and separate from [`RESPONSE_DEADLINE`] so
+/// pairing it with the read's own bound does not double that constant's
+/// carefully-tuned worst case into a ~240s round trip.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Write one request, refusing to wait past `timeout`. `read_response_bounded`
+/// bounds only the read half of the round trip; a daemon wedged before it
+/// starts reading its socket (e.g. stuck holding the registry lock before
+/// `read_request`) fills the OS receive buffer, and this half of the write
+/// blocks in the kernel with no deadline. Same failure this PR fixes on the
+/// read side, unbounded on the write side otherwise.
+async fn write_request_bounded(
+    conn: &mut UnixStream,
+    req: &Request,
+    timeout: Duration,
+) -> Result<(), ClientError> {
+    match tokio::time::timeout(timeout, write_request(conn, req)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(ClientError::DaemonUnresponsive {
+            method: req.method.clone(),
+            timeout,
+        }),
     }
 }
 
@@ -314,8 +352,8 @@ pub async fn call(
 ) -> Result<Response, ClientError> {
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
-    write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
+    write_request_bounded(&mut conn, req, WRITE_TIMEOUT).await?;
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -337,8 +375,8 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         }
         Err(e) => return Err(ClientError::Io(e)),
     };
-    write_request(&mut conn, req).await?;
-    Ok(read_response_bounded(&mut conn, response_deadline()).await?)
+    write_request_bounded(&mut conn, req, WRITE_TIMEOUT).await?;
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +752,74 @@ pub async fn restart_daemon(
 }
 
 #[cfg(test)]
+mod response_timeout_tests {
+    use super::*;
+    use crate::protocol::write_response;
+    use tokio::net::UnixListener;
+
+    fn temp_sock(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "fno-agents-client-test-{tag}-{}.sock",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn read_response_bounded_names_the_method_it_waited_on() {
+        // AC3-HP: a daemon that never answers must not hang the caller
+        // forever. The client-side read gives up within the deadline and
+        // names what it was waiting on.
+        let sock_path = temp_sock("hp");
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let accepted = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Hold the connection open and never write a response.
+            std::mem::forget(stream);
+        });
+
+        let mut conn = UnixStream::connect(&sock_path).await.unwrap();
+        let start = Instant::now();
+        let result = read_response_bounded(&mut conn, "agent.rm", Duration::from_millis(100)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline must bound the wait"
+        );
+        match result {
+            Err(ClientError::DaemonUnresponsive { method, .. }) => assert_eq!(method, "agent.rm"),
+            other => panic!("expected DaemonUnresponsive, got {other:?}"),
+        }
+        accepted.abort();
+        std::fs::remove_file(&sock_path).ok();
+    }
+
+    #[tokio::test]
+    async fn read_response_bounded_is_unchanged_on_a_normal_reply() {
+        // AC3-EDGE: a normal removal takes no deadline path; the response is
+        // exactly what the daemon sent.
+        let sock_path = temp_sock("edge");
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let resp = Response::ok(1, json!({"removed": true}));
+            write_response(&mut stream, &resp).await.unwrap();
+        });
+
+        let mut conn = UnixStream::connect(&sock_path).await.unwrap();
+        let response = read_response_bounded(&mut conn, "agent.rm", Duration::from_secs(5))
+            .await
+            .expect("normal reply must not time out");
+
+        assert_eq!(response.result().unwrap()["removed"], true);
+        server.await.unwrap();
+        std::fs::remove_file(&sock_path).ok();
+    }
+}
+
+#[cfg(test)]
 mod drift_restart_tests {
     use super::*;
 
@@ -775,11 +881,11 @@ mod drift_restart_tests {
         let (_silent, mut read_side) = tokio::io::duplex(64);
         let deadline = Duration::from_millis(150);
         let started = Instant::now();
-        let err = read_response_bounded(&mut read_side, deadline)
+        let err = read_response_bounded(&mut read_side, "agent.rm", deadline)
             .await
             .expect_err("silent peer must fail");
         assert!(
-            matches!(err, ClientError::DaemonUnresponsive(d) if d == deadline),
+            matches!(err, ClientError::DaemonUnresponsive { timeout, .. } if timeout == deadline),
             "wrong error: {err:?}"
         );
         assert!(

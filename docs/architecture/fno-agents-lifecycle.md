@@ -71,6 +71,14 @@ harnesses/codex.py
 9. **claude shellout timeouts: 30s for stop / rm, 10s for `claude logs --tail 1` during reconcile.** The operator can retry.
 10. **Revival of an exited claude row is probe-first, same-uuid.** `claude --resume <uuid>` continues the same session uuid. An exited claude bg row stays revivable. `resume <name>` is the smart human verb. It probes reality first (`locate_session` plus a 250ms socket connect), never the registry `status` field. On a live supervisor it wakes the session headlessly and verifies the state reached Working. It no longer attaches directly. On a dead one it execs `claude --resume <uuid>` in the recorded cwd. That read is registry-read-only, so the row stays exited and revivable later. `attach <name>` stays strict live-only. A dead claude row with a recorded uuid now refuses with the two revival commands instead of dead-ending. The colliding row must be exited, with a uuid matching its own. Then `spawn <name> --resume <uuid> --substrate bg` revives the row **in place** (fresh short_id, same uuid, status live). Every other same-name case (live row, uuid mismatch, no `--resume`) stays fail-closed. Probe-first is load-bearing. Two writers in one transcript is the failure this check exists to prevent. Liveness is always checked before the resume lane fires.
 
+## Writing a reaper against these verbs
+
+A reaper must confirm a removal with a positive marker: re-read the registry and check the row is gone. Never trust the exit code alone, and never treat a quiet run as proof. Both have lied on this surface, in opposite directions. One code path once reported success while the row stayed in the registry. Another once hung well past its own subprocess budget with the row already removed. An exit code cannot tell those two failures apart from a clean removal. Only the re-read can.
+
+Any hand-run roster enumeration must pass `--all`. `claude agents --json` alone omits stopped and completed sessions. A sweep run without it can read a small slice of the real roster and still report a clean fleet. Every reader inside fno already passes `--all`. The risk is a human typing the bare command.
+
+`claude rm` (and `claude stop`) take a SHORT ID, never an agent name. `fno agents rm` takes the agent NAME and resolves it internally. Passing the agent name straight to `claude rm` fails. A hand-driven teardown that mixes the two up can leave the fno registry holding a row `fno agents rm` still calls live.
+
 ## Failure modes addressed
 
 Three classes of silent failure are pinned by tests:
@@ -138,7 +146,7 @@ Worker shutdown escalates: graceful `worker.shutdown` RPC → poll up to a 5s gr
 
 ### rm (US6.8)
 
-`handle_rm` refuses with **exit 18 UNCONDITIONALLY** while a controlling driver is active — even with `--force`. Unlike `stop`, `--force` does NOT evict the driver here; the operator must detach → stop → wait `exited` → rm. A live agent without a driver still needs `--force` (also exit 18 without it). Force-removing a live agent stops its worker first (refusing if the worker can't be confirmed down, so a live PTY is never orphaned). Orphaned entries are removed with no subprocess action and emit `agent_removed{was_orphaned: true}`.
+`handle_rm` refuses with **exit 18 UNCONDITIONALLY** while a controlling driver is active — even with `--force`. Unlike `stop`, `--force` does NOT evict the driver here. The operator must detach, then stop, then wait for `exited`, then rm. A live agent without a driver still needs `--force`, and is refused with exit 18 without it. One exception: a claude row the daemon can independently prove is gone from the `claude agents --json --all` roster (`provably_gone`) proceeds without `--force`. This reconciliation covers claude only today. Codex and opencode are not yet covered, so those harnesses still hit the stale-status refusal, with `--force` as the only escape. Force-removing a live agent stops its worker first. If the worker cannot be confirmed down, the removal refuses, so a live PTY is never orphaned. Orphaned entries are removed with no subprocess action and emit `agent_removed{was_orphaned: true}`.
 
 ### reconcile (US6.9)
 

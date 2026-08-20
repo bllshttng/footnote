@@ -3403,9 +3403,16 @@ fn build_report_params(rest: &[String]) -> Result<Value, String> {
 /// push (E3.2). A per-turn hook calls this; it builds the `agent.report` RPC and
 /// sends it to an ALREADY-RUNNING daemon (never lazy-starts one -- a hook must
 /// not boot the daemon). Fire-and-forget: a down daemon is exit 0 (no grid to
-/// report to), a successful store/drop is exit 0; only a malformed invocation
-/// (exit 2) or a real transport error (exit 1) is loud, so a per-turn hook never
-/// reds a turn.
+/// report to), a wedged-but-live daemon that never answers is exit 0 too (the
+/// report is lost, not the turn), a successful store/drop is exit 0; only a
+/// malformed invocation (exit 2) or a real transport error (exit 1) is loud,
+/// so a per-turn hook never reds a turn. Bounded at its OWN short deadline,
+/// not `client::RESPONSE_DEADLINE` -- that one is sized for the human-facing
+/// blocking rm/stop RPCs, and inheriting it here would let a wedged daemon
+/// stall a turn for a minute-plus before this call's own permissive fallback
+/// ever gets to run.
+const REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
     let params = match build_report_params(rest) {
         Ok(p) => p,
@@ -3415,10 +3422,16 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
         }
     };
     let req = crate::protocol::Request::new(1, "agent.report", params);
-    match crate::client::call_if_running(home, &req).await {
-        Ok(_) => 0,
-        Err(crate::client::ClientError::DaemonNotRunning) => 0,
-        Err(e) => {
+    match tokio::time::timeout(REPORT_TIMEOUT, crate::client::call_if_running(home, &req)).await {
+        // Our own short deadline elapsed, or the client's longer one did
+        // (defense in depth: correct either way, never reached today since
+        // REPORT_TIMEOUT is far shorter) -- both are a lost report, not a
+        // turn failure.
+        Err(_) => 0,
+        Ok(Ok(_)) => 0,
+        Ok(Err(crate::client::ClientError::DaemonNotRunning)) => 0,
+        Ok(Err(crate::client::ClientError::DaemonUnresponsive { .. })) => 0,
+        Ok(Err(e)) => {
             eprintln!("fno-agents: report failed: {e}");
             1
         }
