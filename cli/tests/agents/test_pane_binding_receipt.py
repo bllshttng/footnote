@@ -525,6 +525,40 @@ def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
     assert source == "delivered"
 
 
+def test_a_blank_frame_is_unattempted_not_unconfirmed() -> None:
+    """The two must never collapse. `unconfirmed` says a send was tried and did
+    not land, which the caller may fail the spawn on. A blank frame says the
+    screen could not be read, so nothing was tried - an absence about the
+    instrument, not a fact about the seed. Folding them together reaps an alive
+    child that simply has not painted yet."""
+
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "   \n")
+        raise AssertionError(f"a blank frame must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    assert state == "unattempted"
+    assert "not attempted" in detail
+
+
+def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
+    """Same rule when the read itself raises."""
+    from fno.agents.mux_spawn import DispatchAskError
+
+    def run(argv, **_kw):
+        if argv[3] == "read":
+            raise DispatchAskError("mux read failed", exit_code=1)
+        raise AssertionError(f"an unreadable frame must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    assert state == "unattempted"
+    assert "not attempted" in detail
+
+
 def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
     reads = iter(
         [
@@ -568,9 +602,13 @@ def test_shared_readiness_waits_for_a_slow_first_paint() -> None:
         raise AssertionError(argv)
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    # A first paint that has not landed is `unattempted`, not `unconfirmed`:
+    # this call never reached a send, so it asserts nothing about the seed. The
+    # caller's one retry is what picks up the second frame, and only a send that
+    # was tried and dropped can fail the spawn.
     assert (state, detail, source) == (
-        "unconfirmed",
-        "text delivered, submission unconfirmed",
+        "unattempted",
+        "pane frame blank, seed submission not attempted",
         "",
     )
 

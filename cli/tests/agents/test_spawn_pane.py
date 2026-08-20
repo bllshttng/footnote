@@ -4305,3 +4305,101 @@ def test_pane_run_env_does_not_latch_the_writable_dir_grant(
     env = seen["env"]
     assert env is not None
     assert WORKER_ADD_DIRS_ENV not in env
+
+
+# --- An unconfirmed seed is a failed spawn, not a ready worker --------------
+#
+# `_submit_spawn_seed` returns "unconfirmed" on five paths: an unreadable frame,
+# an agy trust gate that will not clear, an empty frame, a DispatchAskError on
+# the send, and a non-zero send. The call site used to fold all five into a
+# rewritten `readiness_detail` and carry on, so the pane got a `ready` row and
+# `spawn_gate.LIVE_STATUSES` counted it live while it sat at an empty prompt
+# having executed nothing. That is a slot held by a worker that never started.
+
+
+def _seed_script(monkeypatch, *states: str) -> list[tuple]:
+    """Drive `_submit_spawn_seed` through a scripted sequence of outcomes."""
+    from fno.agents import mux_spawn
+
+    calls: list[tuple] = []
+    seq = iter(states)
+
+    def fake_submit(provider, session, pane_id, seed, runner):
+        calls.append((provider, session, pane_id, seed))
+        state = next(seq)
+        detail = "" if state == "submitted" else "text delivered, submission unconfirmed"
+        return state, detail, "delivered"
+
+    monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
+    return calls
+
+
+def test_a_submitted_seed_writes_one_row_and_submits_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The happy path is unchanged: one submit, a ready receipt, one row."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "submitted")
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert len(calls) == 1
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == [], "a submitted seed is never a reap"
+
+
+def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pane that painted late is the common transient. One retry recovers it,
+    and it must not produce a second pane or a second row."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unconfirmed", "submitted")
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert len(calls) == 2, "the retry must actually re-submit"
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == []
+
+
+def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The measured failure: readiness reported live for a worker that never
+    started. Two unconfirmed submits is not slow, it is a pane that will not
+    accept the payload, so it takes the existing readiness-failure path."""
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unconfirmed", "unconfirmed")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 2, "exactly one retry, then stop holding the slot"
+    message = str(exc.value)
+    assert "submission unconfirmed" in message
+    assert "reaped" in message
+    assert load_registry() == [], "an unstarted worker must not hold a live row"
+
+
+def test_a_failed_readiness_never_reaches_the_seed(tmp_path: Path, monkeypatch) -> None:
+    """Readiness already failed, so the seed block is skipped entirely and the
+    pre-existing failure path is byte-identical."""
+    from fno.agents.mux_spawn import DispatchAskError
+
+    calls = _seed_script(monkeypatch)  # any call would StopIteration
+
+    with pytest.raises(DispatchAskError):
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            runner=FakeRunner(read_stdout="", read_returncode=1, wait_returncode=0),
+        )
+
+    assert calls == []

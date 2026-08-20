@@ -2585,14 +2585,26 @@ def _submit_spawn_seed(
     seed: str,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
 ) -> tuple[str, str, str]:
-    """Submit a spawn seed after the shared readiness probe has painted."""
+    """Submit a spawn seed after the shared readiness probe has painted.
+
+    Three states, and the split between the last two is load-bearing:
+
+    ``submitted``    the seed is in flight (sent, or it rode in the argv).
+    ``unconfirmed``  a send WAS attempted and did not land. This is a fact
+                     about the seed, so the caller may fail the spawn on it.
+    ``unattempted``  the pane frame could not be read, so no send was tried.
+                     That is a fact about the INSTRUMENT, not about the seed,
+                     and an alive-but-unpainted child is still a live worker.
+                     Folding it into ``unconfirmed`` would reap a healthy pane
+                     for the crime of not having painted yet.
+    """
     try:
         screen = _run_mux(
             ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
             runner,
         )
     except DispatchAskError:
-        return "unconfirmed", "", "delivered"
+        return "unattempted", "pane frame unreadable, seed submission not attempted", "delivered"
     frame = screen.stdout or ""
     if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
         try:
@@ -2618,7 +2630,9 @@ def _submit_spawn_seed(
     else:
         trust_source = ""
     if not frame.strip():
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source
+        # A blank frame is an unpainted TUI, not a refused seed: nothing was
+        # sent, so there is nothing to call unconfirmed.
+        return "unattempted", "pane frame blank, seed submission not attempted", trust_source
     if provider != "agy" and seed not in frame:
         return "submitted", "", "argv"
     payload = "" if seed in frame else seed
@@ -3134,6 +3148,27 @@ def dispatch_spawn_pane(
                 provider, session, pane_id, message, runner
             )
             if seed_state == "unconfirmed":
+                # One retry. A send that did not land is transient-shaped, and
+                # a pane that painted late is the common case.
+                seed_state, seed_detail, seed_source = _submit_spawn_seed(
+                    provider, session, pane_id, message, runner
+                )
+            if seed_state == "unconfirmed":
+                # A pane that takes the payload and drops it twice is not slow,
+                # it is a worker that will never start. Rewriting the detail
+                # string and carrying on used to leave readiness at `ready`, and
+                # spawn_gate.LIVE_STATUSES counts `ready` as live - so the pane
+                # held a slot against max_live while sitting at an empty prompt
+                # having executed nothing. Hand it to the readiness-failure
+                # branch below, which reaps the pane and raises before any
+                # registry row is written.
+                #
+                # `unattempted` is deliberately NOT here. It says the frame
+                # could not be read, which is an absence, and an alive
+                # unpainted child keeps its row exactly as before.
+                readiness = "failed"
+                readiness_detail = seed_detail or "spawn seed never submitted"
+            elif seed_state == "unattempted":
                 readiness_detail = seed_detail or readiness_detail
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":
