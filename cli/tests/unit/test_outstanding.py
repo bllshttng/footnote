@@ -825,6 +825,38 @@ def test_capture_project_roots_reads_graph_without_importing_tracker(
     assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
 
 
+def test_capture_project_roots_does_not_resolve_every_graph_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: later physical-store dedup owns filesystem resolution."""
+    from fno.outstanding.core import _capture_project_roots
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"cwd": str(this)}, {"cwd": str(sibling)}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    real_resolve = Path.resolve
+    resolved: list[Path] = []
+
+    def track_resolve(path, *args, **kwargs):
+        resolved.append(path)
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", track_resolve)
+
+    roots = _capture_project_roots(this)
+
+    assert roots == [sibling, this]
+    assert resolved == [this]
+
+
 def test_capture_project_roots_preserves_external_backend_sidecars(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -848,6 +880,106 @@ def test_capture_project_roots_preserves_external_backend_sidecars(
     )
 
     assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
+
+
+def test_storage_root_skips_worktree_scan_in_canonical_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: a canonical checkout needs no git worktree subprocess."""
+    from fno.outstanding.cli import _storage_root
+
+    canonical = tmp_path / "canonical"
+    (canonical / ".git").mkdir(parents=True)
+    monkeypatch.chdir(canonical)
+
+    def refuse_repo_probe():
+        raise AssertionError("canonical checkout ran the repo resolver")
+
+    monkeypatch.setattr("fno.paths.resolve_repo_root", refuse_repo_probe)
+
+    def refuse_worktree_scan():
+        raise AssertionError("canonical checkout ran the worktree resolver")
+
+    monkeypatch.setattr(
+        "fno.carveout.core.resolve_carveout_root", refuse_worktree_scan
+    )
+
+    assert _storage_root() == canonical
+
+
+def test_session_id_reads_manifest_without_importing_state_stack(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: report ownership needs two scalars, not state/filelock."""
+    import builtins
+
+    from fno.outstanding.cli import _session_id
+
+    (root / ".fno" / "target-state.md").write_text(
+        "---\nfno_id: run-fast\nsession_id: run-legacy\n---\nbody session_id: wrong\n",
+        encoding="utf-8",
+    )
+    real_import = builtins.__import__
+
+    def refuse_state_import(name, *args, **kwargs):
+        if name == "fno.state" or name.startswith("fno.state."):
+            raise AssertionError("outstanding report imported the state stack")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_state_import)
+
+    assert _session_id() == "run-fast"
+
+
+def test_capture_fold_resolves_one_inbox_per_repo_but_reads_each_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: worktrees share config lookup, not capture-event history."""
+    from fno.outstanding.core import _read_open_captures_with_counts
+
+    canonical = tmp_path / "repo"
+    worktree_a = tmp_path / "worktree-a"
+    worktree_b = tmp_path / "worktree-b"
+    git_dir = canonical / ".git"
+    git_dir.mkdir(parents=True)
+    for name, worktree in (("a", worktree_a), ("b", worktree_b)):
+        worktree.mkdir()
+        worktree_git_dir = git_dir / "worktrees" / name
+        worktree_git_dir.mkdir(parents=True)
+        (worktree / ".git").write_text(
+            f"gitdir: {worktree_git_dir}\n", encoding="utf-8"
+        )
+    inbox = tmp_path / "inbox.md"
+    inbox.write_text("- [ ] fu-aaaaaa - one\n", encoding="utf-8")
+    roots = [canonical, worktree_a, worktree_b]
+    monkeypatch.setattr(
+        "fno.outstanding.core._capture_project_roots", lambda _root: roots
+    )
+    inbox_calls: list[Path] = []
+
+    def resolve_inbox(*, project_root):
+        inbox_calls.append(project_root)
+        return inbox
+
+    monkeypatch.setattr("fno.paths.inbox_path", resolve_inbox)
+    journal_calls: list[Path] = []
+
+    def added_at(project_root):
+        journal_calls.append(project_root)
+        return {}
+
+    monkeypatch.setattr("fno.outstanding.core._capture_added_at", added_at)
+    monkeypatch.setattr(
+        "fno.outstanding.core.events_path",
+        lambda project_root: project_root / ".fno" / "events.jsonl",
+    )
+
+    captures, file_total, row_total = _read_open_captures_with_counts(canonical)
+
+    assert inbox_calls == [canonical]
+    assert set(journal_calls) == set(roots)
+    assert [row.fu_id for row in captures] == ["fu-aaaaaa"]
+    assert (file_total, row_total) == (1, 1)
 
 
 @pytest.fixture()

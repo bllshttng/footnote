@@ -334,10 +334,41 @@ def _capture_project_roots(root: Path) -> "list[Path]":
                 if isinstance(raw, str) and raw:
                     p = Path(raw)
                     if p.is_dir():
-                        roots.add(p.resolve())
+                        # Graph checkout paths are already absolute in normal
+                        # records. Keep relative legacy rows absolute without
+                        # resolving every symlink here: the inbox and journal
+                        # folds below resolve their physical stores once for
+                        # deduplication, which is the authority that matters.
+                        roots.add(Path(os.path.abspath(p)))
     except Exception:  # noqa: BLE001 - the graph is advisory here, never fatal
         pass
     return sorted(roots)
+
+
+def _canonical_checkout_for(root: Path) -> Path:
+    """Collapse a linked worktree onto its canonical checkout without git.
+
+    Standard linked-worktree ``.git`` files point into
+    ``<canonical>/.git/worktrees/<name>``. Other shapes keep the existing
+    root so their established resolver can handle them.
+    """
+    root = Path(root)
+    marker = root / ".git"
+    if marker.is_dir():
+        return root
+    try:
+        line = marker.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return root
+    if not line.startswith("gitdir:"):
+        return root
+    git_dir = Path(line.partition(":")[2].strip())
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    if git_dir.parent.name != "worktrees" or git_dir.parent.parent.name != ".git":
+        return root
+    canonical = git_dir.parent.parent.parent
+    return canonical if (canonical / ".git").is_dir() else root
 
 
 def _question_journals(root: Path) -> "list[Path]":
@@ -474,15 +505,19 @@ def _read_open_captures_with_counts(root: Path) -> "tuple[list[Capture], int, in
             pass
         return roots[0].name if roots else "unknown"
 
-    by_path: "dict[Path, list[Path]]" = {}
+    by_repo: "dict[Path, list[Path]]" = {}
     for project_root in _capture_project_roots(root):
+        by_repo.setdefault(_canonical_checkout_for(project_root), []).append(project_root)
+
+    by_path: "dict[Path, list[Path]]" = {}
+    for config_root, project_roots in by_repo.items():
         try:
-            path = inbox_path(project_root=project_root).resolve()
+            path = inbox_path(project_root=config_root).resolve()
             if not path.exists():
                 continue
         except Exception:  # noqa: BLE001 - a bad path is one project less
             continue
-        by_path.setdefault(path, []).append(project_root)
+        by_path.setdefault(path, []).extend(project_roots)
 
     captures: "list[Capture]" = []
     seen_ids: "set[str]" = set()

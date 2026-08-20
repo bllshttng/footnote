@@ -8,6 +8,7 @@ predictable (0 ok / 1 read or write failure).
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from pathlib import Path
 from typing import List
@@ -28,19 +29,60 @@ outstanding_app = typer.Typer(
 
 def _storage_root() -> Path:
     """The canonical root that owns both stores (shared project state)."""
+    from fno.outstanding.core import _canonical_checkout_for
+
+    env_root = os.environ.get("FNO_REPO_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+
+    cwd = Path.cwd()
+    marker = cwd / ".git"
+    if marker.is_dir() or marker.is_file():
+        canonical = _canonical_checkout_for(cwd)
+        if canonical != cwd or marker.is_dir():
+            return canonical
+
+    from fno.paths import resolve_repo_root
+
+    root = resolve_repo_root()
+    canonical = _canonical_checkout_for(root)
+    if canonical != root or (root / ".git").is_dir():
+        return canonical
+
     from fno.carveout.core import resolve_carveout_root
 
     return resolve_carveout_root()
 
 
 def _session_id() -> "str | None":
-    from fno.carveout.core import resolve_session_id
     from fno.paths import resolve_repo_root
 
     try:
-        return resolve_session_id(resolve_repo_root())
+        lines = (resolve_repo_root() / ".fno" / "target-state.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
     except Exception:  # noqa: BLE001 - an unresolvable session is not an error here
-        return None
+        lines = []
+    fields: dict[str, str] = {}
+    if lines and lines[0].strip() == "---":
+        closed = False
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped == "---":
+                closed = True
+                break
+            for key in ("fno_id", "session_id"):
+                prefix = f"{key}:"
+                if stripped.startswith(prefix):
+                    value = stripped[len(prefix) :].strip().strip("\"'")
+                    if value and value != "null":
+                        fields.setdefault(key, value)
+        if closed:
+            session_id = fields.get("fno_id") or fields.get("session_id")
+            if session_id:
+                return session_id
+    env_session = os.environ.get("CLAUDECODE_SESSION_ID")
+    return env_session.strip() if env_session and env_session.strip() else None
 
 
 @outstanding_app.callback(invoke_without_command=True)
