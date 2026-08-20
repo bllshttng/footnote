@@ -890,7 +890,7 @@ def test_a_row_whose_process_is_gone_never_retires():
     """Retire exists to reclaim a LIVE slot. A stopped process holds none, so
     stopping it again frees nothing and the receipt's promised undo is false."""
     for state in sorted(watchdog._STOPPED_STATES):
-        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", True)
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
         [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
         assert v.verdict != watchdog.RETIRE, state
 
@@ -901,10 +901,56 @@ def test_a_live_pane_painting_done_still_retires():
     claude's own KNOWN_LIVE_STATUSES, so a pane wearing it is ALIVE - a worker
     that finished and parked, which is this lane's entire target population.
     Excluding it reads as caution and silently empties the lane."""
-    for state in ("done", "completed", "idle", "working"):
-        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", True)
+    for state in sorted(watchdog._RETIRABLE_STATES):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
         [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
         assert v.verdict == watchdog.RETIRE, state
+
+
+def test_an_unmeasurable_state_never_retires():
+    """The state guard is POSITIVE membership, and this is why. `_row_state`
+    returns "" for a row carrying no state under either alias, and returns an
+    unmapped new spelling verbatim. Neither is a stopped word, so a negative
+    test admits both - and claude has already renamed that field once, when
+    every row read "". Under a negative test the next rename turns one
+    --apply-all into a fleet-wide stop of every row whose tail carries a
+    promise, live workers included."""
+    for state in ("", "Some New Spelling", "compacting", "completed"):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, state
+
+
+def test_a_row_needing_input_never_retires():
+    """`blocked` is claude's `Needs input`, and a worker that has finished does
+    not need input - so the row is one a human owes something to, the opposite
+    of what this lane reclaims. `_question_pending` cannot cover it: that reads
+    the assistant's own text and a permission prompt is not assistant text.
+    Stopping such a session takes the prompt away from the operator."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_an_adopted_store_session_never_retires():
+    """The spawn marker must be MEASURED, not derived from a missing field.
+    `store_fallback` adopts any session it finds in the claude store - exactly
+    the shape of an operator's own session the SessionStart hook never
+    registered. Reading its origin as "worker" because the field is absent, or
+    because it merely is not `operator`, would let --apply-all stop the
+    operator's own terminal.
+
+    The positive control rides along on purpose: without it every assertion
+    here would still pass if the fixture stopped reaching the lane at all."""
+    facts = {"dddd4444-0000": _facts(FINISHED_TAIL, age_min=20)}
+    for origin in (None, "adopted"):
+        row = Row("dddd4444-0000", "adopted-session", "idle", None, "/tmp/bp", origin)
+        [v] = _retire_run([row], facts)
+        assert v.verdict != watchdog.RETIRE, origin
+
+    control = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([control], facts)
+    assert v.verdict == watchdog.RETIRE
 
 
 def test_arming_the_lane_never_demotes_the_stale_escalation():
@@ -913,7 +959,7 @@ def test_arming_the_lane_never_demotes_the_stale_escalation():
     on review: a spawned row owing the operator an answer and quiet 13h read
     `stale / needs a human` with the lane off, and `leave / none` with it armed.
     The verdict must not depend on whether the lane is armed."""
-    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", True)
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
     tail = f"{FINISHED_TAIL}\nShould the grace stay 900?"
     facts = {row.row_id: _facts(tail, age_min=13 * 60)}
 
@@ -930,7 +976,7 @@ def test_an_open_429_window_never_retires():
     sits above the reroute lane, so without this it stops exactly the rows
     reroute exists to move onto a fresh account, and stops them without
     rotating anything. `reap_decision` refuses on the same reading."""
-    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", True)
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
     tail = f"{FINISHED_TAIL}\n{RATE_LIMIT_TAIL}"
     [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
     assert v.verdict != watchdog.RETIRE

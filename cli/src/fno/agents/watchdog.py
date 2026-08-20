@@ -465,18 +465,15 @@ def retire_decision(
     # already running. Neither is evidence of a worker, so both decline here.
     if row.origin != "spawn":
         return False, ""
-    # A row whose PROCESS is gone holds no slot, so stopping it again frees
-    # nothing and the receipt would promise an undo for a session that is not
-    # running. Without this the same row draws the verdict on every sweep.
+    # The state must be one this lane recognises as holding a live slot. A row
+    # whose PROCESS is gone holds none, so stopping it frees nothing and the
+    # receipt would promise an undo for a session that is not running.
     #
-    # `_STOPPED_STATES`, never `_TERMINAL_STATES`: the latter carries `done` and
-    # `completed`, which are the roster's opinion about the WORK rather than
-    # about the process, and `Done` is a member of claude's own
-    # KNOWN_LIVE_STATUSES. A live pane painting `Done` is precisely this lane's
-    # target, so keying on that set excludes the population retire exists for.
-    # `_TERMINAL_STATES`' own comment records the 2026-08-15 case where the
-    # roster called a working session done; reusing it here re-adopts that lie.
-    if row.state in _STOPPED_STATES:
+    # Written as positive membership because an unreadable state (`_row_state`
+    # returns `""`) and an unmapped new spelling are both absences, and a
+    # negative test admits them. `_RETIRABLE_STATES` carries why it is not the
+    # complement of `_STOPPED_STATES`, and why `done` belongs in it.
+    if row.state not in _RETIRABLE_STATES:
         return False, ""
     # A session waiting out a rate limit is silent and is NOT finished. The
     # reap predicate refuses on the same reading, and retire sits ABOVE the
@@ -1362,9 +1359,12 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             # an older reader has no such attribute, and an AttributeError here
             # would take the whole sweep down.
             #
-            # The retire lane reads this same field. No second derived marker
-            # rides beside it: a `spawned` boolean computed here would be one
-            # more place for the answer to differ from what reap sees.
+            # The retire lane reads this same raw field, and no derived marker
+            # rides beside it. A `spawned` boolean computed here would be a
+            # second place for the answer to differ from what reap sees, and
+            # every population it had to special-case - a row the join did not
+            # answer for, an `orphaned` session `store_fallback` adopted with no
+            # `origin` - already answers None here, which retire declines on.
             origin=getattr(match, "origin", None),
             last_message_at=getattr(match, "last_message_at", None),
         ))
@@ -1406,6 +1406,30 @@ _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"
 #: Retire keys on this set for that reason; nothing may widen it back to
 #: `_TERMINAL_STATES` without re-adopting the 2026-08-15 lie named above.
 _STOPPED_STATES = frozenset({"stopped", "exited", "killed"})
+
+#: The states retire will act on, as a POSITIVE membership test. This is the
+#: fold of claude's own KNOWN_LIVE_STATUSES through `_CANONICAL_STATE`, so it
+#: tracks the harness rather than a hand-kept list.
+#:
+#: Positive, not "anything except `_STOPPED_STATES`", and the difference is the
+#: whole point. `_row_state` returns `""` for a row carrying no state under
+#: either alias, and returns an unmapped new spelling verbatim; neither is a
+#: stopped word, so a negative test admits both. Its own docstring records that
+#: claude has already renamed that field once and every row read `""`. Under a
+#: negative test the next rename turns one `--apply-all` into a fleet-wide stop
+#: of every row whose tail carries a promise. Unmeasurable must answer no.
+#:
+#: `completed` is deliberately absent: it is not in claude's live vocabulary, so
+#: whether it describes the work or the process is unknown, and unknown does not
+#: retire.
+#:
+#: `blocked` is absent for a stronger reason. It is claude's `Needs input`, and
+#: a worker that has finished does not need input - so a row wearing it is one a
+#: human owes something to, which is the opposite of the population this lane
+#: reclaims. `_question_pending` cannot cover it either: that reads the
+#: assistant's own text, and a permission prompt is not assistant text. This
+#: lane ships ARMED, so the ambiguous state stays out.
+_RETIRABLE_STATES = frozenset({"working", "idle", "done"})
 
 
 def _row_state(r: dict) -> tuple[str, str]:

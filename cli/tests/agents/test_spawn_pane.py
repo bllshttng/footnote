@@ -4358,11 +4358,12 @@ def test_a_submitted_seed_writes_one_row_and_submits_once(
 def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A pane that painted late is the common transient. One retry recovers it,
-    and it must not produce a second pane or a second row."""
+    """A pane that painted late is the common transient. It lands in
+    `unattempted` - nothing was sent - so one retry recovers it, and it must not
+    produce a second pane or a second row."""
     from fno.agents.registry import load_registry
 
-    calls = _seed_script(monkeypatch, "unconfirmed", "submitted")
+    calls = _seed_script(monkeypatch, "unattempted", "submitted")
 
     result, runner = _spawn(monkeypatch, tmp_path)
 
@@ -4372,16 +4373,33 @@ def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
     assert runner.kill_calls == []
 
 
+def test_an_unconfirmed_send_is_never_retried(tmp_path: Path, monkeypatch) -> None:
+    """`unconfirmed` means text was delivered and the submission was not
+    confirmed, so the pane's buffer may already hold the seed. A retry there
+    re-derives the payload from a frame containing a partial seed and submits
+    fragment+seed into a live pane. Failing the spawn is the safer answer."""
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unconfirmed")  # a second call raises StopIteration
+
+    with pytest.raises(DispatchAskError):
+        _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 1, "one attempt, then fail - never a second send"
+    assert load_registry() == []
+
+
 def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The measured failure: readiness reported live for a worker that never
-    started. Two unconfirmed submits is not slow, it is a pane that will not
-    accept the payload, so it takes the existing readiness-failure path."""
+    started. A retry that still cannot get the seed in means a pane that will
+    not accept the payload, so it takes the existing readiness-failure path."""
     from fno.agents.mux_spawn import DispatchAskError
     from fno.agents.registry import load_registry
 
-    calls = _seed_script(monkeypatch, "unconfirmed", "unconfirmed")
+    calls = _seed_script(monkeypatch, "unattempted", "unconfirmed")
 
     with pytest.raises(DispatchAskError) as exc:
         _spawn(monkeypatch, tmp_path)

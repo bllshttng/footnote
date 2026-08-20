@@ -2578,6 +2578,14 @@ def _send_permission_response(
         )
 
 
+#: Pause before the single seed retry. The retry exists for a TUI that had not
+#: painted when the readiness probe returned, and `_run_mux` has no poll or
+#: backoff of its own, so a retry with no delay re-reads the same blank frame
+#: and cannot recover the case it was written for. One spawn, once, so the cost
+#: is bounded and paid only on a pane that already failed to answer.
+_SEED_RETRY_DELAY_S = 1.0
+
+
 def _submit_spawn_seed(
     provider: str,
     session: str,
@@ -2596,7 +2604,9 @@ def _submit_spawn_seed(
                      That is a fact about the INSTRUMENT, not about the seed,
                      and an alive-but-unpainted child is still a live worker.
                      Folding it into ``unconfirmed`` would reap a healthy pane
-                     for the crime of not having painted yet.
+                     for the crime of not having painted yet. It is also the
+                     only state the caller retries, because it is the only one
+                     where nothing can already be sitting in the pane's buffer.
 
     The agy trust gate is ``unconfirmed`` on every arm, including the dialog
     still being on screen after the clearing submit. That last one reads like a
@@ -3154,11 +3164,20 @@ def dispatch_spawn_pane(
             seed_state, seed_detail, seed_source = _submit_spawn_seed(
                 provider, session, pane_id, message, runner
             )
-            if seed_state in ("unconfirmed", "unattempted"):
-                # One retry, on BOTH non-success states. A pane that painted
-                # late is the common case and it lands in `unattempted`, so a
-                # retry keyed on `unconfirmed` alone would never fire for the
-                # population it was written for.
+            if seed_state == "unattempted":
+                # One retry, and ONLY from `unattempted`. That state means no
+                # send was made, so a second attempt cannot double-type: the
+                # `unconfirmed` detail is literally "text delivered, submission
+                # unconfirmed", and re-deriving the payload from a frame holding
+                # a partial seed would submit fragment+seed into a live pane.
+                # Failing that spawn is the safer answer than typing twice.
+                #
+                # The sleep is load-bearing, not politeness. `unattempted` IS
+                # the late-paint state, and `_run_mux` neither polls nor backs
+                # off, so an immediate re-read lands milliseconds later on the
+                # same blank frame and the retry recovers nothing it was written
+                # to recover.
+                time.sleep(_SEED_RETRY_DELAY_S)
                 seed_state, seed_detail, seed_source = _submit_spawn_seed(
                     provider, session, pane_id, message, runner
                 )
