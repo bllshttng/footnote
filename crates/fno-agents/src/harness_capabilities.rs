@@ -276,7 +276,6 @@ impl HarnessContract {
             }
             if ![
                 "preassigned-or-session-start",
-                "rollout-fd",
                 "rollout-fd-or-daemon",
                 "preassigned",
                 "store-lookup",

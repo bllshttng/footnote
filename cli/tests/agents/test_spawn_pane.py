@@ -745,18 +745,24 @@ def test_codex_binding_expiry_runs_one_reconcile_backfill(
 def test_codex_binds_through_the_daemon_oracle_when_the_fd_probe_misses(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """x-e336: codex 0.148 no longer holds the rollout fd in the pane's own
-    process tree (the app-server daemon it delegates to does), so the fd probe
-    misses every time; the daemon oracle behind it must still bind the row."""
+    """Codex 0.148 no longer holds the rollout fd in the pane's own process
+    tree (the app-server daemon it delegates to does), so the fd probe misses
+    every time; the daemon oracle behind it must still bind the row.
+
+    Wired at ``_make_codex_bind_probe`` rather than the daemon-candidate
+    function it composes: that function's own stability gate needs two
+    probes spaced by ``_CODEX_DAEMON_PROBE_INTERVAL_S``, which this module's
+    collapsed ``FNO_PANE_BINDING_WINDOW_S`` window has no room for. The
+    gate's own timing is covered directly in
+    test_spawn_codex_session_capture.py; this test only checks the dispatch
+    wiring picks up whatever the probe returns.
+    """
     from fno.agents import mux_spawn
     from fno.agents.registry import load_registry
 
     session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
     monkeypatch.setattr(
-        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
-    )
-    monkeypatch.setattr(
-        mux_spawn, "_codex_daemon_bind", lambda *_args, **_kwargs: session_id
+        mux_spawn, "_make_codex_bind_probe", lambda **_kwargs: (lambda: session_id)
     )
 
     result, _ = _spawn(
@@ -780,13 +786,7 @@ def test_codex_daemon_ambiguity_still_reaps_rather_than_guessing(
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
-        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
-    )
-    monkeypatch.setattr(
-        mux_spawn, "_codex_daemon_bind", lambda *_args, **_kwargs: None
-    )
-    monkeypatch.setattr(
-        mux_spawn, "_codex_session_ids_loaded", lambda *_args, **_kwargs: set()
+        mux_spawn, "_make_codex_bind_probe", lambda **_kwargs: (lambda: None)
     )
 
     runner = FakeRunner()
@@ -1001,13 +1001,17 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
 
 
 def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch
 ) -> None:
-    """x-e336: codex 0.148 parks a fresh pane on a `Hooks need review` modal
-    that the approvals bypass alone does not clear, and `submit_keys` is
-    unsupported for codex so fno cannot answer it by keystroke - only
-    --dangerously-bypass-hook-trust does, and only on a bypass posture."""
+    """Codex 0.148 parks a fresh pane on a `Hooks need review` modal that the
+    approvals bypass alone does not clear, and `submit_keys` is unsupported
+    for codex so fno cannot answer it by keystroke - only
+    --dangerously-bypass-hook-trust does, and only on a bypass posture on a
+    codex new enough to support it."""
+    from fno.agents import mux_spawn
     from fno.agents.mux_spawn import build_pane_argv
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
 
     yolo_bool = build_pane_argv("codex", "", tmp_path, True, None)
     assert "--dangerously-bypass-hook-trust" in yolo_bool
@@ -1030,6 +1034,24 @@ def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
         permission_mode="workspace-write:on-request",
     )
     assert "--dangerously-bypass-hook-trust" not in explicit_sandbox
+
+
+def test_build_pane_argv_codex_hook_trust_omitted_on_older_or_unknown_codex(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An older codex's clap parser rejects an unrecognized flag outright, and
+    predates the hook-trust modal anyway - the flag must never be emitted
+    below the known-supporting version, nor when the version is unknown."""
+    from fno.agents import mux_spawn
+    from fno.agents.mux_spawn import build_pane_argv
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 147, 0))
+    older = build_pane_argv("codex", "", tmp_path, True, None)
+    assert "--dangerously-bypass-hook-trust" not in older
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: None)
+    unknown = build_pane_argv("codex", "", tmp_path, True, None)
+    assert "--dangerously-bypass-hook-trust" not in unknown
 
 
 def test_build_pane_argv_delegates_create_identity_to_capability_contract(

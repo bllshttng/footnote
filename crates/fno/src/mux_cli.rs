@@ -2130,7 +2130,7 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // placement directives unprefixed, and this arm's absence
                 // used to fall through to `_ => break`, folding "at" and
                 // everything after it into the spawned process's own argv
-                // instead of the placement it named (x-e336).
+                // instead of the placement it named.
                 "--at" | "at" => {
                     let v = flag_value(args, &mut i, "--at")?;
                     if v == "current" {
@@ -5527,10 +5527,10 @@ mod tests {
         assert!(parse_pane_args(&os(&["run", "--workspace", " ", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
-        // x-e336: bare "at" (mux_spawn.py's placement_args contract) used to
-        // have no alias, so the parser broke its loop on "at" and folded it
-        // plus everything after into argv instead of recognizing it as
-        // placement - here paired with bare "split", the combo that crashed.
+        // Bare "at" (mux_spawn.py's placement_args contract) used to have no
+        // alias, so the parser broke its loop on "at" and folded it plus
+        // everything after into argv instead of recognizing it as placement
+        // - here paired with bare "split", the combo that crashed.
         let bare_at = parse_pane_args(&os(&[
             "run", "split", "right", "at", "3", "--json", "--", "codex",
         ]))

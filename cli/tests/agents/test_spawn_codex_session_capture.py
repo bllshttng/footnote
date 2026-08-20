@@ -387,8 +387,8 @@ def test_rollout_scan_skips_files_older_than_since(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The app-server daemon oracle (x-e336): codex 0.148 hands session ownership
-# to a detached `codex app-server --remote-control` daemon, which holds the
+# The app-server daemon oracle: codex 0.148 hands session ownership to a
+# detached `codex app-server --remote-control` daemon, which holds the
 # rollout fd the process-tree probe above expects to find in the pane's own
 # tree - measured live at 0/20 binds. This oracle asks the daemon directly.
 # ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ def test_daemon_bind_accepts_the_one_new_id_for_this_cwd(monkeypatch) -> None:
         "_codex_session_ids_loaded",
         lambda cwd: {SID_A, SID_B},
     )
-    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), {SID_B}) == SID_A
+    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), {SID_B}) == SID_A
 
 
 def test_daemon_bind_refuses_two_new_ids_as_ambiguous(monkeypatch) -> None:
@@ -409,7 +409,7 @@ def test_daemon_bind_refuses_two_new_ids_as_ambiguous(monkeypatch) -> None:
         "_codex_session_ids_loaded",
         lambda cwd: {SID_A, SID_B},
     )
-    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), set()) is None
+    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), set()) is None
 
 
 def test_daemon_bind_returns_none_when_daemon_is_unavailable(monkeypatch) -> None:
@@ -417,7 +417,7 @@ def test_daemon_bind_returns_none_when_daemon_is_unavailable(monkeypatch) -> Non
     # oracle alone must decide - a false "nothing new" would be worse than no
     # answer at all.
     monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda cwd: None)
-    assert mux_spawn._codex_daemon_bind(Path("/w/proj"), set()) is None
+    assert mux_spawn._codex_daemon_candidate(Path("/w/proj"), set()) is None
 
 
 def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
@@ -439,3 +439,65 @@ def test_session_ids_loaded_filters_by_cwd_and_distinguishes_none_from_empty(
     assert mux_spawn._codex_session_ids_loaded(Path("/w/proj")) == {SID_A}
     assert mux_spawn._codex_session_ids_loaded(Path("/w/other")) == {SID_B}
     assert mux_spawn._codex_session_ids_loaded(Path("/w/nothing-here")) == set()
+
+
+# ---------------------------------------------------------------------------
+# _make_codex_bind_probe: the daemon oracle is stability-gated (the same
+# candidate must repeat across two consecutive probes) and liveness-checked
+# (a daemon-sourced id is not itself proof the pane is up) before it binds.
+# ---------------------------------------------------------------------------
+
+
+def _probe_kwargs(monkeypatch, **overrides):
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None
+    )
+    kwargs = dict(
+        cwd=Path("/w/proj"),
+        spawn_started_ms=0,
+        child_pid=4242,
+        codex_sessions_dir=None,
+        daemon_baseline_ids=set(),
+        mux={"session": "main", "pane_id": 7},
+        runner=lambda *a, **k: None,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_daemon_candidate_is_not_trusted_on_first_observation(monkeypatch) -> None:
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
+    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    assert probe() is None
+
+
+def test_daemon_candidate_binds_once_it_repeats_and_the_pane_is_alive(monkeypatch) -> None:
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
+    oracle_used: list = []
+    probe = mux_spawn._make_codex_bind_probe(
+        **_probe_kwargs(monkeypatch, oracle_used=oracle_used)
+    )
+    assert probe() is None
+    assert probe() == SID_A
+    assert oracle_used == ["daemon"]
+
+
+def test_daemon_candidate_changing_between_probes_never_binds(monkeypatch) -> None:
+    seen = iter([SID_A, SID_B, SID_B])
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: next(seen))
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: True)
+    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    assert probe() is None  # SID_A observed, nothing to compare yet
+    assert probe() is None  # SID_B != SID_A, restarts the stability count
+    assert probe() == SID_B  # SID_B repeats, pane alive -> trusted
+
+
+def test_a_repeated_daemon_candidate_refuses_to_bind_a_dead_pane(monkeypatch) -> None:
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID_A)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *a, **k: False)
+    probe = mux_spawn._make_codex_bind_probe(**_probe_kwargs(monkeypatch))
+    assert probe() is None
+    assert probe() is None

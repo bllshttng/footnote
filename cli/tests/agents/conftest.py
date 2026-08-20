@@ -76,6 +76,24 @@ def _force_python_runtime(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_codex_cli_version(monkeypatch):
+    """Never let a test's codex-argv build reach the real ``codex --version``.
+
+    ``_codex_cli_version`` shells out with a bare ``subprocess.run`` (not the
+    guarded ``_codex._subprocess_popen`` seam ``_block_live_provider_exec``
+    covers), and it is ``functools.lru_cache``-memoized per process - so an
+    unstubbed first call would both exec whatever real ``codex`` happens to be
+    on the developer's PATH and then pin that version's answer for the rest
+    of the pytest run, making --dangerously-bypass-hook-trust presence
+    host-dependent. Pin to a known-supporting version; a test that needs a
+    different answer overrides this per-test (monkeypatch order: test wins).
+    """
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_spawn_uuid_capture(monkeypatch):
     """Keep spawn-time full-UUID resolution instant + host-independent.
 

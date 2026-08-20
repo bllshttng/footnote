@@ -2106,22 +2106,27 @@ _CODEX_BIND_CANARY_WINDOW_S = 60.0
 def _codex_bind_report() -> dict[str, Any]:
     """Spawn one throwaway codex pane and time which oracle binds it.
 
-    The lane canary beside ``--codex-hooks`` (x-e336): the pane-binding
-    defect measured for that node was an upstream codex upgrade silently
-    breaking the fallback lane, invisible until a rate-limited primary made
-    it load-bearing. This reports a POSITIVE marker - a returned session id
-    and which oracle produced it - never the absence of an error line, so a
+    The lane canary beside ``--codex-hooks``: the pane-binding defect this
+    canary exists to catch was an upstream codex upgrade silently breaking
+    the fallback lane, invisible until a rate-limited primary made it
+    load-bearing. This reports a POSITIVE marker - a returned session id and
+    which oracle produced it - never the absence of an error line, so a
     future regression reads as a version change on a red canary rather than
     a mystery some weeks later.
+
+    Drives the exact production binding sequence (``_await_pane_binding`` +
+    ``_make_codex_bind_probe``) rather than a hand-rolled poll loop, so a
+    future regression in that sequence's probe order, deadline handling, or
+    pane-death detection shows up here too instead of passing silently.
     """
     import time
     import uuid as _uuid
 
     from fno.agents.mux_spawn import (
-        _backfill_codex_session_id,
-        _codex_daemon_bind,
+        _await_pane_binding,
         _codex_session_ids_loaded,
         _lookup_child_pid,
+        _make_codex_bind_probe,
         _reap_spawned_pane,
         _run_mux,
         build_pane_argv,
@@ -2133,7 +2138,9 @@ def _codex_bind_report() -> dict[str, Any]:
     session = resolve_mux_session()
     name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
     argv = build_pane_argv("codex", "", cwd, True, None, name=name)
-    baseline_ids = _codex_session_ids_loaded(cwd) or set()
+    # None (daemon unreachable at this instant) is passed through as-is; the
+    # probe below refuses to correlate against a fabricated empty baseline.
+    baseline_ids = _codex_session_ids_loaded(cwd)
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
         ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
@@ -2158,33 +2165,35 @@ def _codex_bind_report() -> dict[str, Any]:
             "error": f"unparseable pane run output {proc.stdout!r}",
         }
 
+    mux = {"session": session, "pane_id": pane_id}
     child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
     started = time.monotonic()
-    session_id: Optional[str] = None
-    oracle: Optional[str] = None
+    oracle_used: list = []
     if child_pid is not None:
-        window_s = _CODEX_BIND_CANARY_WINDOW_S
-        last_daemon_probe = 0.0
-        while time.monotonic() - started < window_s:
-            sid = _backfill_codex_session_id(
-                cwd, spawn_started_ms, child_pid=child_pid, attempts=1
-            )
-            if sid:
-                session_id, oracle = sid, "rollout-fd"
-                break
-            now_s = time.monotonic()
-            if now_s - last_daemon_probe >= 2.0:
-                last_daemon_probe = now_s
-                sid = _codex_daemon_bind(cwd, baseline_ids)
-                if sid:
-                    session_id, oracle = sid, "daemon"
-                    break
-            time.sleep(0.75)
+        binding = _await_pane_binding(
+            mux,
+            _make_codex_bind_probe(
+                cwd=cwd,
+                spawn_started_ms=spawn_started_ms,
+                child_pid=child_pid,
+                codex_sessions_dir=None,
+                daemon_baseline_ids=baseline_ids,
+                mux=mux,
+                runner=subprocess.run,
+                oracle_used=oracle_used,
+            ),
+            runner=subprocess.run,
+            window_s=_CODEX_BIND_CANARY_WINDOW_S,
+            label="codex-bind-canary",
+        )
+        session_id = binding.session_id
+    else:
+        session_id = None
     elapsed = time.monotonic() - started
     _reap_spawned_pane(session, pane_id, subprocess.run)
     return {
         "bound": session_id is not None,
-        "oracle": oracle,
+        "oracle": oracle_used[0] if oracle_used else None,
         "elapsed_s": round(elapsed, 2),
         "codex_version": version,
         "error": None if session_id else "neither oracle bound within the window",
