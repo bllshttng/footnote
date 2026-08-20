@@ -1618,3 +1618,18 @@ def test_config_pane_group_defers_to_a_valueless_trailing_tab(monkeypatch):
         profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
     )
     assert out.count("--tab") == 1
+
+
+def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
+    """click accepts `-xdown`. Missing that spelling let a real placement flag
+    read as absent, inject the group, and then hit the hard refusal on a value
+    the operator never typed."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "-xdown", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "-x" in err.getvalue()

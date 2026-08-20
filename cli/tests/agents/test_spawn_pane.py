@@ -4279,3 +4279,29 @@ def test_group_placement_failure_leaves_the_worker_alive(
     err = capsys.readouterr().err
     assert "left in its own tab" in err
     assert "codex" in err
+
+
+def test_pane_run_env_does_not_latch_the_writable_dir_grant(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The mux server latches this env at birth, so a grant left in it would pin
+    ONE spawn's directory list onto every later pane shell - including workers in
+    other projects. The pane lane carries its grant in the argv instead."""
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+
+    monkeypatch.setenv(WORKER_ADD_DIRS_ENV, "/some/other/project")
+    seen: dict[str, object] = {}
+    real = mux_spawn._run_mux
+
+    def spy(args, runner, **kw):
+        if list(args[:3]) == ["mux", "pane", "run"]:
+            seen["env"] = kw.get("env")
+        return real(args, runner, **kw)
+
+    monkeypatch.setattr(mux_spawn, "_run_mux", spy)
+    _spawn(monkeypatch, tmp_path)
+
+    env = seen["env"]
+    assert env is not None
+    assert WORKER_ADD_DIRS_ENV not in env

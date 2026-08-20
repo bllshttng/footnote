@@ -1400,12 +1400,24 @@ def inject_spawn_defaults(
         # --at 3` names a seed token, not an fno flag, and dropping the config's
         # pane_group over it would blame the caller for a flag they never passed.
         _placement_flags = ("--split", "-x", "--at", "--once", "-o")
+
+        def _names(tok: str) -> "Optional[str]":
+            for f in _placement_flags:
+                if tok == f or tok.startswith(f + "="):
+                    return f
+                # The glued short form click also accepts (`-xdown`), matched the
+                # same way _flag_value matches `-Pvalue`. Missing it let a real
+                # placement flag read as absent, inject the group, and then hit
+                # the hard refusal on a value the operator never typed.
+                if len(f) == 2 and f[1] != "-" and tok != f and tok.startswith(f):
+                    return f
+            return None
+
         conflicting = next(
             (
-                f
-                for f in _placement_flags
+                named
                 for _, tok in _spawn_tokens(out[1:])
-                if tok == f or tok.startswith(f + "=")
+                if (named := _names(tok)) is not None
             ),
             None,
         )

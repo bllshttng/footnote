@@ -222,7 +222,21 @@ def git_writable_config_args(cwd: Path) -> list[str]:
     """
     import json
 
-    roots = [root for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd)) if root]
+    # The state root rides here too, and it MUST: `writable_roots` is a
+    # whole-value override, so a roots list that omits ~/.fno leaves a resumed
+    # bounded worker unable to create its claim lockfile. It then holds no claim
+    # and the graph reads that node free while it runs. The create lane grants it
+    # through `--add-dir`; this is the same grant on the lane resume takes.
+    from fno.agents.writable_dirs import worker_writable_dirs
+
+    roots = [
+        root
+        for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd))
+        if root
+    ]
+    for extra in worker_writable_dirs(cwd):
+        if extra not in roots:
+            roots.append(extra)
     if not roots:
         return []
     return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"]

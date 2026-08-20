@@ -3010,11 +3010,20 @@ def dispatch_spawn_pane(
         # seeds the pane-run transport (and, at server birth, the mux server
         # that spawns pane shells) - popped after this snapshot is too late.
         spawn_trigger = _capture_spawn_trigger()
-        proc = _run_mux(
-            run_args,
-            runner,
-            env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
-        )
+        # The writable-dir grant must NOT ride this snapshot. The pane lane
+        # already carries it in the argv above, and the comment right here says
+        # the mux server latches this env at birth - so leaving it in would pin
+        # THIS spawn's directory list onto every later pane shell on the server,
+        # handing a worker in another project a grant computed for this one.
+        # The seam publishes it on os.environ for the Rust route, which is a
+        # different process; this is where the pane lane declines it.
+        from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+
+        pane_env = {
+            k: v for k, v in os.environ.items() if k != WORKER_ADD_DIRS_ENV
+        }
+        pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
+        proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
         if proc.returncode == _MUX_CONTROL_UNANSWERED:
