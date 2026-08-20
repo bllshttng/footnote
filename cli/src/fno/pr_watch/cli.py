@@ -631,14 +631,29 @@ def tick() -> None:
                 # never pushes or files - the same wake vs report split the
                 # fleet watchdog leg above draws at apply_verdict.
                 wake = settings.recovery.watchdog == "wake"
-                stranded_n = unknown_n = acted_n = failed_n = 0
+                stranded_n = unknown_n = acted_n = failed_n = roots_done = 0
                 for root in _catchup_roots():
+                    # Re-check per root, not just once before the loop: a
+                    # code-review finding caught that the floor above only
+                    # bounded the FIRST root - a multi-repo tick with several
+                    # catch-up roots could blow well past the shared tick
+                    # deadline after the first root's own check passed.
+                    left = deadline - (time.monotonic() - started)
+                    if left < _STRANDED_FLOOR_S:
+                        log.info(
+                            "pr-watch: stranded leg stopped after %d root(s), "
+                            "%.1fs left, under the %.0fs a sweep costs - "
+                            "remaining roots retry next tick",
+                            roots_done, left, _STRANDED_FLOOR_S,
+                        )
+                        break
                     rows = sweep(repo=root)
                     outcomes = apply_sweep(rows, wake=wake)
                     stranded_n += sum(1 for r in rows if r.klass == STRANDED)
                     unknown_n += sum(1 for r in rows if r.klass == UNKNOWN)
                     acted_n += len(outcomes)
                     failed_n += sum(1 for o in outcomes if o["stopped_at"])
+                    roots_done += 1
                 typer.echo(
                     f"stranded sweep: stranded={stranded_n} unknown={unknown_n} "
                     f"acted={acted_n} failed={failed_n}"
