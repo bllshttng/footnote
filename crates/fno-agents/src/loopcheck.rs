@@ -5186,7 +5186,9 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                 // (no `fno` on PATH there), so it must still name a producer -
                 // a bare "run the review verb" names none.
                 match self_review_hint {
-                    Some(hint) => format!("run the review verb at HEAD - `{hint}` - {REVIEW_ORDER}"),
+                    Some(hint) => {
+                        format!("run the review verb at HEAD - `{hint}` - {REVIEW_ORDER}")
+                    }
                     None => format!("run the review verb at HEAD - {REVIEW_ORDER}"),
                 }
             };
