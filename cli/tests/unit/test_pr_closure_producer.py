@@ -257,6 +257,35 @@ def test_hook_allows_a_literal_trailer_in_the_command(monkeypatch):
     ) is None
 
 
+def test_hook_reads_a_body_file_and_allows_a_real_trailer(monkeypatch, tmp_path):
+    # A --body-file names a real path, so this spelling is judged on the file
+    # rather than on a marker. Denying it would be the false DENY the docstring
+    # says cannot happen.
+    body = tmp_path / "pr-body.md"
+    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
+    assert _hook_decision(
+        f"gh pr create --title t --body-file {body}", "feature/x-49ec",
+        monkeypatch=monkeypatch,
+    ) is None
+
+
+def test_hook_denies_a_body_file_missing_the_claim(monkeypatch, tmp_path):
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary.\n\nBacklog-Closure: x-1111\n")
+    reason = _hook_decision(
+        f"gh pr create --title t --body-file {body}", "feature/x-49ec",
+        monkeypatch=monkeypatch,
+    )
+    assert reason is not None and "Backlog-Closure: x-49ec" in reason
+
+
+def test_hook_denies_an_unreadable_body_file(monkeypatch, tmp_path):
+    assert _hook_decision(
+        f"gh pr create --title t --body-file {tmp_path / 'gone.md'}", "feature/x-49ec",
+        monkeypatch=monkeypatch,
+    ) is not None
+
+
 def test_hook_escape_hatch_clears_the_gate(monkeypatch):
     assert _hook_decision(
         'gh pr create --title t --body "$BODY"',

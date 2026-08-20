@@ -1395,6 +1395,26 @@ def _branch_node_ids(head_ref):
     return ids
 
 
+def _file_trailer_claims(path, ids):
+    """True when the file at `path` has a last trailer line naming every id.
+
+    Reads the LAST `Backlog-Closure:` line only, and accepts whitespace or a
+    comma either side of an id, both mirroring check-pr-node-closure.sh. An
+    unreadable path is not a claim; the caller then falls through to deny.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    lines = re.findall(r"(?im)^Backlog-Closure:[ \t]*(.*)$", text)
+    if not lines:
+        return False
+    claimed = lines[-1]
+    return all(
+        re.search(rf"(^|[\s,]){re.escape(node_id)}($|[\s,])", claimed) for node_id in ids
+    )
+
+
 def _closure_trailer_refusal(command=""):
     """Deny reason for a `gh pr create` that shows no composed closure trailer.
 
@@ -1404,13 +1424,14 @@ def _closure_trailer_refusal(command=""):
     creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
     this covers the prose path, where an agent types the command.
 
-    The ceiling, stated because it decides what this can promise: the body
-    reaches gh as an unexpanded `"$BODY"`, so the hook cannot read the string
-    that will be sent. It asserts a POSITIVE marker that the composition STEP
-    ran - a literal trailer key, or the CLOSURE_TRAILER variable
-    skills/pr/references/create.md sets - and never an absence. The only
-    failure mode is therefore a false ALLOW, which CI still catches; a
-    correctly composed body is never denied.
+    The ceiling, stated because it decides what this can promise. A `--body`
+    reaches gh as an unexpanded `"$BODY"`, so on that spelling the hook cannot
+    read the string that will be sent; it asserts a POSITIVE marker that the
+    composition STEP ran - a literal trailer key, or the CLOSURE_TRAILER
+    variable skills/pr/references/create.md sets - and never an absence. A
+    `--body-file` names a real path, so that spelling is judged on the file's
+    own trailer instead of on a marker. Either way the only failure mode is a
+    false ALLOW, which CI still catches; a composed body is never denied.
     """
     if os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
         return None
@@ -1419,6 +1440,9 @@ def _closure_trailer_refusal(command=""):
         return None
     if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
         return None
+    for path in re.findall(r"--body-file(?:=|\s+)(\S+)", command):
+        if _file_trailer_claims(path.strip("'\""), ids):
+            return None
     return (
         f"[fno closure trailer] branch names {', '.join(ids)}, so "
         f"check-pr-node-closure reds this PR unless the body carries the exact "
