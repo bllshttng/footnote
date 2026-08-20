@@ -289,25 +289,52 @@ def test_lazy_group_list_commands_includes_lazy_keys():
 # Regression: group structure preserved for single-command sub-apps
 # ---------------------------------------------------------------------------
 
-def test_executor_resolve_group_shape_preserved():
+def test_single_command_subapp_group_shape_preserved(monkeypatch):
     """Single-command Typer sub-apps must NOT collapse to a TyperCommand.
 
-    Without `get_group_from_info`, `executor_app` (which has only one
-    command `resolve`) would collapse via `typer.main.get_command()` into
-    a bare TyperCommand, breaking `fno executor resolve <args>`.
+    Without `get_group_from_info`, a Typer app with exactly one registered
+    command would collapse via `typer.main.get_command()` into a bare
+    TyperCommand, turning `fno <group> <sub> <args>` into `fno <group>
+    <args>` and breaking every nested call.
 
-    Regression test for the fix in `_LazyStub._load_real`.
+    Regression test for the fix in `_LazyStub._load_real`. The scratch
+    module stands in for a real one-command sub-app registered through the
+    same lazy map the root app uses; `monkeypatch.setitem(sys.modules, ...)`
+    is what makes its fake import path resolvable.
     """
-    from fno.cli import app
+    import sys
+    import types
+
+    import typer
     from typer.testing import CliRunner
+
+    from fno._lazy_group import make_lazy_group_cls
+
+    scratch = types.ModuleType("_scratch_single_command_app")
+    single = typer.Typer()
+
+    @single.command("resolve")
+    def resolve(
+        plan_path: str = typer.Option(None, "--plan-path", help="design doc path"),
+    ) -> None:
+        typer.echo("resolved")
+
+    scratch.single_app = single
+    monkeypatch.setitem(sys.modules, scratch.__name__, scratch)
+
+    lazy_map = {"thing": ("_scratch_single_command_app:single_app", "scratch")}
+    test_app = typer.Typer(cls=make_lazy_group_cls(lazy_map))
+
+    @test_app.callback()
+    def _cb() -> None: ...
 
     runner = CliRunner()
     # Invoking the help for the sub-command proves the group structure is
     # intact: a collapsed app would not recognise 'resolve' as a subcommand.
-    result = runner.invoke(app, ["executor", "resolve", "--help"])
-    assert result.exit_code == 0, f"fno executor resolve --help failed: {result.output}"
+    result = runner.invoke(test_app, ["thing", "resolve", "--help"])
+    assert result.exit_code == 0, f"thing resolve --help failed: {result.output}"
     assert "--plan-path" in result.output, (
-        "Expected --plan-path option in `fno executor resolve --help`; "
+        "Expected --plan-path option in the single-command app's sub-help; "
         f"got: {result.output}"
     )
 

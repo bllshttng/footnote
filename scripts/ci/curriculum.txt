@@ -112,7 +112,6 @@ mux shell-init
 # L16 cost, providers, and what you left out
 config accounts
 cost
-tokens
 route ls
 route set
 carveout add

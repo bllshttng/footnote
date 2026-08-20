@@ -70,17 +70,9 @@ command set during `make_context`.
 
 ### 3. Single-command Typer apps need `get_group_from_info`
 
-`typer.main.get_command(typer_app)` collapses a Typer app with exactly
-one registered command into a bare `TyperCommand`. That changes the
-invocation shape from `fno executor resolve <args>` to
-`fno executor <args>` and breaks every nested call. The eager-load path
-used `app.add_typer()` which never collapses, so the refactor must
-preserve that shape.
+`typer.main.get_command(typer_app)` collapses a Typer app with exactly one registered command into a bare `TyperCommand`. That changes the invocation shape from `fno <group> <sub> <args>` to `fno <group> <args>` and breaks every nested call. The eager-load path used `app.add_typer()` which never collapses, so the refactor must preserve that shape.
 
-`_LazyStub._load_real()` uses `typer.main.get_group_from_info()` for
-Typer instances rather than `get_command()`. This keeps the group +
-subcommand shape regardless of how many commands the sub-app
-registered.
+`_LazyStub._load_real()` uses `typer.main.get_group_from_info()` for Typer instances rather than `get_command()`. This keeps the group + subcommand shape regardless of how many commands the sub-app registered.
 
 ### 4. Parent-side overrides flow through `info_overrides`
 
@@ -240,8 +232,8 @@ A future refactor must preserve:
 
 1. `fno --help` does not import sub-app bodies. Test: `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
 2. `fno paths state-dir` does not import the heavy sub-apps. Test: `test_fno_paths_does_not_import_heavy_subapps`.
-3. Single-command sub-apps keep their group shape. Test: `test_executor_resolve_group_shape_preserved`.
-4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_executor_resolve_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
+3. Single-command sub-apps keep their group shape. Test: `test_single_command_subapp_group_shape_preserved`.
+4. Parent-side `add_typer` overrides survive lazy loading (see `info_overrides` above). Test: `test_single_command_subapp_group_shape_preserved` covers the group shape. The overrides themselves are exercised by the `--help` tests.
 5. Misconfigured lazy entries fail loudly with the bad path in stderr. Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
 6. The error path never first-imports `typer.rich_utils` (see the reinstall-window hazard above). Tests: `test_error_path_never_first_imports_rich_utils`, `test_building_the_command_does_not_import_rich_utils`.
 7. A missing module under the `fno` package explains itself and names both causes. A missing third-party dependency collects no reinstall speculation. Tests: `test_fno_module_import_failure_names_reinstall_window`, `test_third_party_import_failure_has_no_reinstall_hint`.

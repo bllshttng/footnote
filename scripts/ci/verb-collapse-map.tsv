@@ -166,7 +166,6 @@ event emit	KEEP	event emit	40	deliberate readability slack for a high-traffic di
 event gc	T1	event gc	5
 event gate-escape	T1	event gate-escape	3
 event push-parent	T1	event push-parent	3
-executor	KEEP	executor	13	single-leaf group
 help	KEEP	help	37	single-leaf group
 lint	KEEP	lint	29	single-leaf group
 loops ls	T1	loops ls	1
@@ -244,7 +243,6 @@ plugins deactivate	T1	plugins deactivate	1
 plugins inspect	T1	plugins inspect	1
 plugins ls	T1	plugins ls	2
 plugins verify	T1	plugins verify	4
-posture apply	KEEP	posture apply	1	single-leaf group
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
 pr closure-trailer	T1	pr closure-trailer	0
@@ -325,9 +323,7 @@ target status	T1	target status	8
 test	KEEP	test	108	single-leaf group
 think dispatch	T1	think dispatch	4
 think inspect	T1	think inspect	7
-tokens	KEEP	tokens	4	single-leaf group
 update	KEEP	update	88	single-leaf group
-upgrade	KEEP	upgrade	1	single-leaf group
 version	KEEP	version	15	single-leaf group
 whoami	KEEP	whoami	45	single-leaf group
 worker blueprint	T1	worker blueprint	0

@@ -2105,7 +2105,20 @@ fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> 
     if success {
         return None;
     }
-    let detail = if stderr.is_empty() { stdout } else { stderr };
+    // A moved verb spelling prints one teaching line to stderr ("fno X is
+    // now fno Y"). It is not a refusal reason: kept, it would lead the
+    // operator message with noise and permanently mask the empty-output
+    // fallback below, because stderr would never be empty on this probe.
+    let stripped: String = String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| !(line.starts_with("fno ") && line.contains(" is now fno ")))
+        .collect::<Vec<&str>>()
+        .join("\n");
+    let detail = if stripped.trim().is_empty() {
+        stdout
+    } else {
+        stripped.as_bytes()
+    };
     let message = String::from_utf8_lossy(detail).trim().to_string();
     Some(if message.is_empty() {
         "dispatch hold state unreadable; refusing to assume unheld".to_string()
@@ -3239,6 +3252,30 @@ mod tests {
         );
         assert_eq!(
             classify_dispatch_hold_probe(false, b"", b""),
+            Some("dispatch hold state unreadable; refusing to assume unheld".to_string())
+        );
+    }
+
+    #[test]
+    fn dispatch_hold_probe_strips_the_move_teaching_line() {
+        // `fno pr hold-check` is a cold leaf of a moved spelling, so a failed
+        // probe carries the deprecation announce on stderr. The refusal
+        // reason must be the real error, and an announce-only stderr must
+        // fall back to the unreadable message rather than quote the announce.
+        assert_eq!(
+            classify_dispatch_hold_probe(
+                false,
+                b"",
+                b"fno pr hold-check is now fno do pr hold-check\ndispatch-hold:x-owner\n"
+            ),
+            Some("dispatch-hold:x-owner".to_string())
+        );
+        assert_eq!(
+            classify_dispatch_hold_probe(
+                false,
+                b"",
+                b"fno pr hold-check is now fno do pr hold-check\n"
+            ),
             Some("dispatch hold state unreadable; refusing to assume unheld".to_string())
         );
     }

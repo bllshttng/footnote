@@ -62,16 +62,6 @@ The `--db-schema` companion appends a `## Database Schema` section. It discovers
 
 For higher-level discovery analysis (stack detection, conventions, patterns), see the `map-codebase` skill available in the `engineering` plugin.
 
-## Tokens diagnostic (CLI verb)
-
-```
-fno tokens                           # diagnose current session token burn
-fno tokens --json                     # JSON output for further analysis
-fno tokens SESSION_ID                 # diagnose a specific session
-```
-
-Reports cache hit/miss patterns, idle gaps, resume-bug indicators, and cost attribution from your Claude Code transcript. Useful when a session feels expensive or when investigating cache breaks.
-
 ## Worktree lifecycle (CLI verb)
 
 ```

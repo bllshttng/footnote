@@ -384,8 +384,7 @@ def enumerate_python_leaves() -> list[str]:
     Dedup is by import target ONLY for Typer groups, where two names sharing one
     app would otherwise double-emit the whole subtree (the former ``graph`` ->
     ``backlog`` alias shape). A single command that shares its import target
-    with another name (``update`` / ``upgrade``) is two distinct invocable verbs
-    and both appear.
+    with another name is two distinct invocable verbs and both appear.
 
     Plain-function entries (``doctor``) and eager inline commands (``review``)
     are resolved to real Click commands, not bare names, so their hidden options

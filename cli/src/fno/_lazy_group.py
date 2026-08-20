@@ -33,6 +33,7 @@ Usage (via the factory)
 from __future__ import annotations
 
 import importlib
+import sys
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -257,7 +258,7 @@ class _LazyStub(click.Group):
             # Preserve group structure even for single-command apps.  Without
             # this, ``typer.main.get_command(attr)`` collapses a one-command
             # Typer app into a bare TyperCommand, which changes the invocation
-            # path from ``fno executor resolve <args>`` to ``fno executor <args>``.
+            # path from ``fno <group> <sub> <args>`` to ``fno <group> <args>``.
             # ``get_group_from_info`` keeps the group + subcommand shape that
             # ``app.add_typer`` produced under the eager-load model.
             from typer.models import TyperInfo
@@ -408,6 +409,29 @@ class LazyTypeGroup(typer.core.TyperGroup):
     def resolve_command(
         self, ctx: click.Context, args: list[str]
     ) -> tuple[str | None, click.Command | None, list[str]]:
+        # A moved top-level spelling forwards here, before any resolution:
+        # rewriting the argv and falling through to the normal path makes the
+        # destination parse its own arguments exactly as a direct invocation
+        # would, so stdout is byte-identical. The forward is gated on the
+        # destination root being registered, so a wave can seed VERB_MOVES
+        # before it mints the destination; until then the OLD registration
+        # serves the call, announced rather than silent (silent for a hot
+        # leaf, which is the point of ``silent_leaves``). The gate is a
+        # registry membership test, not get_command: a probe would import
+        # fno.tombstones and build a stub only to throw it away, on the hot
+        # leaf path, and would raise the tombstone refusal should a
+        # destination name ever be removed.
+        if args:
+            from fno.verb_moves import deprecation_line, move_for
+
+            move = move_for(args[0])
+            if move is not None:
+                line = deprecation_line(args[0], args[1:], move)
+                if line is not None:
+                    print(line, file=sys.stderr)
+                dest = move.to.split()
+                if dest[0] in self.commands or dest[0] in self._lazy:
+                    args = [*dest, *args[1:]]
         try:
             return super().resolve_command(ctx, args)
         except click.UsageError as exc:

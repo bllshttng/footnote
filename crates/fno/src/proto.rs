@@ -2175,7 +2175,7 @@ pub fn check_attach_version(client_proto: u32, client_build: &str) -> Result<(),
     Err(format!(
         "protocol version mismatch: client {client_build} speaks v{client_proto}, \
          server {BUILD_VERSION} speaks v{PROTO_VERSION}. The running server predates \
-         your fno upgrade - stop it (it keeps running across upgrades by design) \
+         your fno update - stop it (it keeps running across upgrades by design) \
          and re-run fno to start a fresh one."
     ))
 }

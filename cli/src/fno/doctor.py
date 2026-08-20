@@ -1072,11 +1072,10 @@ def _auto_merge_armed_manifests() -> dict[str, int]:
 
 
 def _read_posture_stamp() -> Optional[dict[str, Any]]:
-    """Advisory provenance written by ``fno posture apply``; None if absent.
-
-    Doctor may DISPLAY this; config resolution must never read it, or the
-    applied posture becomes a resolve-time layer (the trap ``fno posture`` was
-    designed to avoid)."""
+    """Advisory provenance written by the removed ``fno posture`` verb; None if
+    absent. Doctor may DISPLAY this; config resolution must never read it, or
+    an applied posture becomes a resolve-time layer. The same keys are now
+    written by ``fno config set``, which is what the verb's tombstone names."""
     try:
         from fno import paths as _paths
 

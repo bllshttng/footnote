@@ -50,10 +50,9 @@ Three invariants:
 | Exit codes propagate unchanged | Same tests assert `result.exit_code == returncode_returned_by_stub` for at least one non-zero value |
 | Signal-killed children produce shell-convention exit codes | `cli/src/fno/_subprocess_util.py::propagate_returncode` normalises `-9 -> 137`, `-15 -> 143` |
 
-Two non-trivial shapes deviate slightly:
+One non-trivial shape deviates slightly:
 
 - **`fno pr verify --kind merged|reviews`** uses a Python `enum.Enum` so Typer rejects unknown values at parse time. Dispatch on the enum picks the right script (`verify-pr-merged.sh` vs `verify-review-replies.sh`).
-- **`fno executor resolve`** chains `parse-locked-executor.sh` (stdin: design doc) then `infer-task-executor.sh` (stdin: file list) to implement the three-tier executor resolution chain. This is the one wrapper with non-trivial dispatch logic; both sub-scripts get the captured-output + check-returncode treatment so a failure surfaces as rc=2 rather than silent fall-through.
 
 Sourceable bash libraries (e.g., `notify.sh`, `phase-verifier.sh`) are called via:
 
@@ -69,7 +68,7 @@ cmd = [
 
 The wrapper validates `script_path.is_file()` before the subprocess so a missing canonical produces rc=2 with a clear stderr message instead of a bash-level "file not found" inside the subshell.
 
-## The 8 Verbs in PR 1
+## The Wrapper Verbs in PR 1
 
 | Verb | Wraps | Notes |
 |------|-------|-------|
@@ -78,10 +77,9 @@ The wrapper validates `script_path.is_file()` before the subprocess so a missing
 | `fno pr rebase` | `scripts/lib/rebase-resolve.sh` | conflict-delegation rebase protocol |
 | `fno phase verify PHASE_NAME [--session-id]` | `phase-verifier.sh::pv_run` (sourceable) | per-phase postcondition verifier |
 | `fno phase kill-check [PLAN_PATH]` | `fno-agents kill-check` (binary; logic folded out of the deleted `kill-criteria.sh` in US1) | plan kill-criteria evaluator |
-| `fno executor resolve [--plan-path] [--task-files] [--explain]` | `parse-locked-executor.sh` then `infer-task-executor.sh` | three-tier executor resolver |
 | `fno notify TITLE MESSAGE` | `notify.sh::notify` (sourceable) | OS notification helper |
 
-All eight verbs expose the same return-code contract as the underlying bash: rc=0 success, rc=1 logical failure, rc=2 substrate failure (or invalid args via Typer), other codes pass through with `propagate_returncode` applied to handle negative signal-derived values.
+Every wrapper verb exposes the same return-code contract as the underlying bash. rc=0 is success, rc=1 logical failure, and rc=2 substrate failure or invalid args via Typer. Other codes pass through with `propagate_returncode` applied, so negative signal-derived values land on their shell conventions.
 
 ## The Drift Lint
 
@@ -101,7 +99,7 @@ The wrapper pattern documented here is the migration target for PR 2's sweep. A 
 - **No path re-resolution in wrappers.** Each wrapper resolves the canonical via `resolve_repo_root() / "scripts/lib/X.sh"`. Callers do not pass the script path - they call `fno <verb>` and Typer dispatch handles the resolution.
 - **No argument re-validation.** When the bash script has its own enum check (e.g., `--invoked-by canonical-skill|inline-equivalent|substituted-executor`), the wrapper forwards the value verbatim and lets bash reject it. The exception is the dispatch case (`fno pr verify --kind`) where the enum picks the script; there the wrapper validates because the dispatch depends on it.
 - **No state changes outside the canonical.** Wrappers do not flip target-state.md booleans, write artifacts, or emit events. Those side effects live in the bash scripts (with their `mkdir`-mutex locks and atomic-rename writes); the wrapper is a transport layer.
-- **No buffering.** Wrappers pass `stdout`/`stderr` through to the parent process by default. The `fno executor resolve` exception uses `capture_output=True` because the chained scripts produce a single-token answer that the wrapper consumes; it surfaces stderr explicitly on rc!=0.
+- **No buffering.** Wrappers pass `stdout`/`stderr` through to the parent process by default. A wrapper that consumes its child's output (a single-token answer, say) captures it with `capture_output=True`. It surfaces stderr explicitly on rc!=0.
 
 ## Related Work
 
@@ -111,7 +109,7 @@ The wrapper pattern documented here is the migration target for PR 2's sweep. A 
 
 ## Files
 
-- `cli/src/fno/{gates,pr,events,phase,executor,notify}/cli.py` - wrapper modules
+- `cli/src/fno/{gates,pr,events,phase,notify}/cli.py` - wrapper modules
 - `cli/src/fno/_subprocess_util.py` - shared `propagate_returncode`
 - `cli/tests/unit/test_cli_wrappers_*.py` - per-verb tests (forwards-args-verbatim, missing-canonical-rc-2, etc.)
 - `cli/tests/unit/test_cli_wrappers.py` - cross-wrapper smoke (`--help` for every new verb)

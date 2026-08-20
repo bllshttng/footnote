@@ -77,7 +77,6 @@ done
 evals
 event
 event emit
-executor
 fno-agents
 help
 king board
@@ -99,7 +98,6 @@ paths
 phase
 plan
 plugins
-posture apply
 pr
 pr merge
 pr-watch
@@ -122,9 +120,7 @@ target
 target init !--provider
 test
 think
-tokens
 update
-upgrade
 version
 whoami
 worker

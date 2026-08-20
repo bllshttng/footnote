@@ -211,7 +211,7 @@ if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
 fi
 ```
 
-When `$NODE_ID` is empty or unresolvable, `fno pr closure-trailer` prints nothing (not an error), so `$CLOSURE_TRAILER` is safe to append unconditionally. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
+When `$NODE_ID` is empty or unresolvable, `fno pr closure-trailer` prints nothing on stdout (not an error), so `$CLOSURE_TRAILER` is safe to append unconditionally. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno pr closure-trailer "$NODE_ID" --extra <other-id>`.
 
 Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
 

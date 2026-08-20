@@ -180,6 +180,29 @@ TOMBSTONES: dict[str, str] = {
         "`fno target init` - it acquires the node claim against the live "
         "session pid, which is the rebinding this verb did separately"
     ),
+    # --- Top-level deletes from the verb-root audit. Each scored zero or
+    # near-zero lifetime calls with the capability already covered elsewhere,
+    # so the verb is gone (a TOMBSTONES entry, not a VERB_MOVES forward: the
+    # capability moved nowhere, it was already where the replacement names).
+    "executor": (
+        "`skills/do/scripts/resolve-executor.sh` - the live resolver on the "
+        "do path (TASK_EXEC, PLAN_EXEC, TASK_FILES env vars). The old flags "
+        "map to the in-package modules that stay: --plan-path -> "
+        "`python3 -m fno.executor._locked`, --task-files -> "
+        "`python3 -m fno.executor._surface`"
+    ),
+    "posture": (
+        "`fno config set` - it writes the same stance keys "
+        "(auto_merge.*, active_backlog.enabled) through the same atomic writer"
+    ),
+    "tokens": (
+        "`fno whoami context` and `fno whoami cost` - session context and "
+        "cost/usage already cover the token-burn diagnosis"
+    ),
+    "upgrade": (
+        "`fno update` - the identical command `upgrade` duplicated; every "
+        "`fno upgrade` call was a spelling of `fno update`"
+    ),
 }
 
 

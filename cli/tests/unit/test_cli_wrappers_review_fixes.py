@@ -2,8 +2,6 @@
 
 Covers:
 - ``propagate_returncode`` normalises negative codes (SIGKILL -> 137).
-- ``executor resolve`` surfaces fno.executor._locked failure instead of
-  silently falling through.
 - ``phase verify`` writes a parse-error diagnostic to stderr when the state
   file is corrupt (instead of silently swallowing every exception).
 - ``fno notify`` with no args produces a "Missing argument" typer error
@@ -74,30 +72,6 @@ def test_notify_bare_invocation_does_not_assertion_error() -> None:
 # best-effort (matching the former bash `|| true`) and returns only 0 (sent) or
 # 1 (no tool available, AC2-FR). The best-effort-swallow path is covered by
 # test_cli_wrappers_notify.py::test_notify_impl_darwin_dispatches_osascript.
-
-
-def test_executor_resolve_surfaces_parse_locked_failure(tmp_path, monkeypatch) -> None:
-    """If the fno.executor._locked subprocess exits non-zero, the wrapper must
-    NOT silently fall through. It must write the module's stderr to the parent
-    and exit rc=2.
-    """
-    from fno.executor import cli as exec_cli
-
-    plan = tmp_path / "design.md"
-    plan.write_text("# Plan\n## Locked Decisions\n**Executor routing**: do\n")
-
-    class _StubFail:
-        returncode = 7
-        stdout = ""
-        stderr = "fno.executor._locked tripped on a parse failure"
-
-    def _stub_run(cmd, **kwargs):
-        return _StubFail()
-
-    monkeypatch.setattr(exec_cli.subprocess, "run", _stub_run)
-    result = runner.invoke(app, ["executor", "resolve", "--plan-path", str(plan)])
-    assert result.exit_code == 2
-    assert "fno.executor._locked exited" in (result.stderr or result.output)
 
 
 def test_phase_verify_surfaces_state_parse_error(tmp_path, monkeypatch) -> None:
