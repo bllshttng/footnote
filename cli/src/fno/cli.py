@@ -392,12 +392,20 @@ class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[m
         from fno.verb_moves import move_for
 
         names = self.list_commands(ctx)
+        moved_names = {n for n in names if move_for(n) is not None}
+        # Moved spellings are excluded from BOTH counts, so the fraction
+        # stays possible even if a moved entry ever loses its hidden flag
+        # (the test suite pins that flag; this is the runtime backstop).
         visible = 0
         for n in names:
             cmd = self.get_command(ctx, n)
-            if cmd is not None and not getattr(cmd, "hidden", False):
+            if (
+                cmd is not None
+                and not getattr(cmd, "hidden", False)
+                and n not in moved_names
+            ):
                 visible += 1
-        moved = sum(1 for n in names if move_for(n) is not None)
+        moved = len(moved_names)
         moved_note = (
             f", plus {moved} moved spelling{'s' if moved != 1 else ''} that still work"
             if moved
@@ -560,14 +568,15 @@ def _render_full_menu() -> str:
     """
     from fno.verb_moves import move_for
 
-    rows = dict(_EAGER_COMMAND_HELP)
-    moved_rows: dict[str, str] = {}
+    # Eager inline commands classify too, not only lazy entries: a later
+    # wave moves `cost`, which is an eager @app.command, and a move on an
+    # eager name must render as a signpost exactly like a lazy one or the
+    # full menu and the --help count line disagree.
+    candidates: dict[str, str] = dict(_EAGER_COMMAND_HELP)
     for name, entry in LAZY_SUBCOMMANDS.items():
-        short = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
-        if move_for(name) is not None:
-            moved_rows[name] = short
-        else:
-            rows[name] = short
+        candidates[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
+    rows = {n: s for n, s in candidates.items() if move_for(n) is None}
+    moved_rows = {n: s for n, s in candidates.items() if move_for(n) is not None}
     width = max(len(n) for n in rows)
     lines = [
         "fno-py full top-level surface - every fno-py command, including hidden.",

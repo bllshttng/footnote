@@ -243,6 +243,25 @@ def test_help_all_lists_moved_spellings_under_their_own_heading():
         )
 
 
+def test_help_all_classifies_a_moved_eager_command_too(monkeypatch):
+    """An eager inline command must partition like a lazy entry.
+
+    A later wave moves `cost`, which is an eager @app.command rather than a
+    LAZY_SUBCOMMANDS row. If the full menu classified only lazy entries,
+    `cost` would render among the roots while the --help count line counted
+    it as moved - the two surfaces disagreeing about one name.
+    """
+    from fno.cli import app
+    from fno.verb_moves import Move
+
+    monkeypatch.setitem(VERB_MOVES, "cost", Move(kind="deprecated", to="whoami cost"))
+    result = runner.invoke(app, ["help", "--all"])
+    assert result.exit_code == 0, result.output
+    commands_part, moved_part = result.output.split("Moved spellings")
+    assert not re.search(r"^  cost\s", commands_part, re.MULTILINE)
+    assert re.search(r"^  cost\s+now fno whoami cost", moved_part, re.MULTILINE)
+
+
 # ---------------------------------------------------------------------------
 # The four deletes: tombstones that teach, not "No such command"
 # ---------------------------------------------------------------------------

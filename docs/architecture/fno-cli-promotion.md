@@ -79,7 +79,7 @@ The wrapper validates `script_path.is_file()` before the subprocess so a missing
 | `fno phase kill-check [PLAN_PATH]` | `fno-agents kill-check` (binary; logic folded out of the deleted `kill-criteria.sh` in US1) | plan kill-criteria evaluator |
 | `fno notify TITLE MESSAGE` | `notify.sh::notify` (sourceable) | OS notification helper |
 
-All eight verbs expose the same return-code contract as the underlying bash: rc=0 success, rc=1 logical failure, rc=2 substrate failure (or invalid args via Typer), other codes pass through with `propagate_returncode` applied to handle negative signal-derived values.
+Every wrapper verb exposes the same return-code contract as the underlying bash: rc=0 success, rc=1 logical failure, rc=2 substrate failure (or invalid args via Typer), other codes pass through with `propagate_returncode` applied to handle negative signal-derived values.
 
 ## The Drift Lint
 
