@@ -23,9 +23,21 @@ REPO_ROOT="${CI_GATE_LANES_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || 
 MANIFEST="$REPO_ROOT/scripts/ci/ci-gate-lanes.tsv"
 GATE_DIR="$REPO_ROOT/scripts/ci"
 
+# ONE pattern, used by both halves of this gate. That is deliberate: the
+# declared-invoker check and the undeclared-invoker scan must agree by
+# construction. When they drifted apart (the scan unanchored, the check
+# anchored), an `sh` inside an ordinary word matched for one and not the other,
+# and the two halves demanded contradictory rows that no manifest edit could
+# satisfy.
+#
+# Two invocation shapes are recognized. An interpreter word followed by a path
+# covers `bash scripts/ci/x.sh`, `. scripts/ci/x.sh` and `bash "$HERE/x.sh"`.
+# A leading `./` covers the direct-exec form, which matters because every gate
+# in scripts/ci is chmod +x, so `- run: ./scripts/ci/x.sh` is a real lane that
+# was previously unrecordable.
 SQ="'"
 LEAD="(^|[[:space:];&|(\"$SQ])"
-RUN="(bash|sh|source)[[:space:]]+([^[:space:];&|]*[/\"$SQ])?"
+RUN="((bash|sh|source|\\.)[[:space:]]+([^[:space:];&|]*[/\"$SQ])?|\\./([^[:space:];&|]*/)?)"
 
 FAIL=0
 note_fail() { echo "ci-gate-lanes: $*" >&2; FAIL=1; }
@@ -219,8 +231,8 @@ scan_surface() {
     [ -f "$REPO_ROOT/$surface" ] || return 0
     base="$(basename "$surface")"
     grep -v '^[[:space:]]*#' "$REPO_ROOT/$surface" 2>/dev/null \
-        | grep -Eo "${RUN}[A-Za-z0-9._-]+\.sh" \
-        | sed -E 's#.*/##' \
+        | grep -Eo "${LEAD}${RUN}[A-Za-z0-9._-]+\.sh" \
+        | sed -E "s#.*[/[:space:]\"$SQ]##" \
         | while IFS= read -r hit; do
             [ -n "$hit" ] || continue
             [ "$hit" = "$base" ] && continue

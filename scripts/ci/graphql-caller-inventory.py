@@ -37,6 +37,13 @@ def _disposition(relative: str, source: str, offset: int) -> str:
     line = source[source.rfind("\n", 0, offset) + 1 : source.find("\n", offset)]
     stripped = line.lstrip()
     suffix = Path(relative).suffix
+    # A markdown file cannot execute, so it can never be a caller. Saying so
+    # here rather than only at the count ceiling matters: everything under
+    # crates/ that is not one of the two named adapters falls through to
+    # "unclassified", which is a hard failure, so widening ROOTS to the whole
+    # crates tree turned every README naming `gh pr view` into a red gate.
+    if suffix == ".md":
+        return "documentation"
     if (suffix in {".py", ".sh", ".toml", ".yaml", ".yml"} and stripped.startswith("#")) or (
         suffix == ".rs" and stripped.startswith("//")
     ):
