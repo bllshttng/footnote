@@ -238,9 +238,19 @@ jobs:
                     echo "synchronize: head ${HEAD_SHA:0:8} already carries a publisher verdict - no change"
                     ;;
                   *)
-                    decision="$(bash scripts/ci/coverage-carry.sh \
-                      --repo "$GITHUB_REPOSITORY" --context "$ctx" \
-                      --before "$BEFORE_SHA" --head "$HEAD_SHA" --base "$BASE_REF")"
+                    # The base-ref checkout cannot find the carry script on
+                    # any PR that has not yet merged it to main (this one
+                    # included) - by design, since a PR must never be able to
+                    # edit its own gate script and self-green. That absence,
+                    # like any other failure to run the script, degrades to
+                    # no-carry rather than aborting the step under set -e.
+                    if [ -f scripts/ci/coverage-carry.sh ]; then
+                      decision="$(bash scripts/ci/coverage-carry.sh \
+                        --repo "$GITHUB_REPOSITORY" --context "$ctx" \
+                        --before "$BEFORE_SHA" --head "$HEAD_SHA" --base "$BASE_REF")" || decision="no-carry script-failed"
+                    else
+                      decision="no-carry script-missing"
+                    fi
                     case "$decision" in
                       carry\ *)
                         read -r _ origin pid desc <<<"$decision"
