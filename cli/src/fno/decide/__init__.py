@@ -530,20 +530,33 @@ def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
 
     One function, read by both the human block and ``--json``, so the two
     surfaces cannot drift into disagreeing about what nearly matched.
+
+    A subject the exact matcher already answered is NOT a near miss. The same
+    predicate decides both, so the two cannot disagree: `--subject f7b9`
+    resolves through the node tier to `x-f7b9`, prints that row, and must not
+    then report it as something it failed to reach.
+
+    Counted by distinct ``decision_id``, matching how ``list_decisions``
+    reports. The index is append-only and a reindex landing mid-write appends
+    one ruling twice, so a raw row count inflates the very number this message
+    exists to convey.
     """
     want = subject.strip().casefold()
     if not want:
         return []
+    matches = _subject_matcher(subject)
     rows, _ = _read_index(_index_path(), warn=False)
-    counts: "dict[str, int]" = {}
+    seen: "dict[str, set[str]]" = {}
     for row in rows:
         recorded = str(row.get("subject") or "")
         folded = recorded.strip().casefold()
-        if not folded or folded == want:
+        if not folded or folded == want or matches(recorded):
             continue
         if want in folded or folded in want:
-            counts[recorded] = counts.get(recorded, 0) + 1
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            seen.setdefault(recorded, set()).add(str(row.get("decision_id") or ""))
+    ranked = sorted(
+        ((s, len(ids)) for s, ids in seen.items()), key=lambda kv: (-kv[1], kv[0])
+    )
     return ranked[:10]
 
 
@@ -584,20 +597,29 @@ def list_decisions(
     # the key the tool just printed is the defect this verb polices, wearing
     # the verb's own name. Fall through to the subject match when nothing
     # carries the id, so a subject that merely looks like one still resolves.
-    by_id = None
-    if subject and looks_like_decision_id(subject):
-        want_id = subject.strip().casefold()
-        by_id = [
-            r for r in rows if str(r.get("decision_id") or "").casefold() == want_id
-        ]
-    if by_id:
-        rows, matches = by_id, None
-    else:
-        matches = _subject_matcher(subject) if subject else None
+    want_id = (
+        subject.strip().casefold()
+        if subject and looks_like_decision_id(subject)
+        else ""
+    )
+    by_subject = _subject_matcher(subject) if subject else None
+
+    def keep(row: dict) -> bool:
+        """Id OR subject, never id INSTEAD OF subject.
+
+        A ruling can be recorded ABOUT a decision id, so answering only the id
+        would hide whatever overturned or qualified it: the same disappearance
+        the id branch exists to end, one level down.
+        """
+        if subject is None:
+            return True
+        if want_id and str(row.get("decision_id") or "").casefold() == want_id:
+            return True
+        return by_subject is not None and by_subject(str(row.get("subject") or ""))
     out: "list[dict]" = []
     emitted: "set[str]" = set()
     for row in rows:
-        if matches is not None and not matches(str(row.get("subject") or "")):
+        if not keep(row):
             continue
         # One id, one row. reindex is read-then-write with no lock across the
         # fold, so a `fno decide` landing mid-backfill can be appended twice;

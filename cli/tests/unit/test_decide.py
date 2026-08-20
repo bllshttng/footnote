@@ -1343,6 +1343,109 @@ def test_operator_decision_retention_is_durable_by_an_explicit_key():
     assert entry.get("retention") == "durable", "explicit, not inherited from the default"
 
 
+def test_a_subject_the_exact_match_answered_is_not_reported_as_unreached(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`--subject fold-the-inbox` resolves through the node tier and prints that
+    row. Reporting it as a near miss tells the reader to go looking for a
+    ruling they were just shown."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-cccc0001",
+            "decision": "the wave plan",
+            "subject": "x-7d94",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "fold-the-inbox"])
+    assert res.exit_code == 0, res.output
+    assert "d-cccc0001" in res.output, "the node-tier match still answers"
+    assert "nearly match" not in res.output, "and is not also called a near miss"
+
+
+def test_a_lane_filtered_empty_answer_never_reads_as_an_empty_store(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The LANE emptied the answer, not the store. Only `law` had this branch,
+    so every other lane printed a claim about the world that was false."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-22T10:00:00Z",
+            "decision_id": "d-cccc0002",
+            "decision": "authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(
+        decide_app, ["list", "--subject", "force-push", "--lane", "coord"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "0 coord decisions" in res.output
+    assert "law" in res.output, "it names the lane the decision IS in"
+    assert "no decision is indexed" not in res.output
+
+
+def test_an_id_lookup_does_not_hide_rulings_recorded_about_that_id(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A ruling can be filed with a decision id as its SUBJECT. Answering only
+    the id drops whatever overturned or qualified it."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "force-push is authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+        {
+            "ts": "2026-08-19T10:00:00Z",
+            "decision_id": "d-cccc0003",
+            "decision": "that authorization is narrowed to feature branches",
+            "subject": "d-3b26c1c6",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "d-3b26c1c6", "--json"]).stdout
+    )
+    ids = {d["decision_id"] for d in payload["decisions"]}
+    assert ids == {"d-3b26c1c6", "d-cccc0003"}, "the id AND what was said about it"
+
+
+def test_near_miss_counts_are_deduped_the_way_the_listing_is(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The index is append-only and a reindex landing mid-write appends one
+    ruling twice. list_decisions dedupes by id, so a raw row count inflates the
+    number this message exists to convey."""
+    row = {
+        "decision_id": "d-cccc0004",
+        "decision": "freeze",
+        "subject": "release scope",
+        "decided_by": "operator",
+        "authority_source": "operator",
+    }
+    _write_decision_index(
+        index,
+        {**row, "ts": "2026-08-18T10:00:00Z"},
+        {**row, "ts": "2026-08-18T10:00:00Z"},
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "release", "--json"]).stdout
+    )
+    assert payload["near_misses"] == [{"subject": "release scope", "count": 1}]
+
+
 def test_every_projected_field_is_one_the_event_builder_accepts():
     """reindex rebuilds an event from a projection row by splatting
     PROJECTION_FIELDS into operator_decision. A field added to one and not the

@@ -284,6 +284,24 @@ def list_cmd(
                 )
                 return
 
+        if lane is not None and _index_path().exists():
+            # The LANE emptied the answer, not the store. Saying nothing is
+            # indexed under this subject would be false, and the reader acts on
+            # it. Only `law` had this branch; every other lane printed the lie.
+            _, unfiltered, _ = list_decisions(subject, limit=None)
+            if unfiltered:
+                noun = "decision" if len(unfiltered) == 1 else "decisions"
+                lanes = ", ".join(
+                    sorted({str(d.get("lane") or "unattributed") for d in unfiltered})
+                )
+                typer.echo(
+                    f"decide list: 0 {lane} decisions for '{label}', but "
+                    f"{len(unfiltered)} {noun} sit under it in: {lanes}. "
+                    "Drop --lane to read them.",
+                    err=True,
+                )
+                return
+
         hint = (
             "" if _index_path().exists()
             else " (no index yet on this machine - run `fno decide reindex` to "
@@ -357,10 +375,15 @@ def list_cmd(
         # An answer that arrived is not an answer that is whole. `--subject
         # x-f7b9` returned one wave plan while four rulings sat under
         # `x-f7b9 scope`, and nothing said so.
+        #
+        # It states the near misses and nothing else. `len(found)` is already
+        # lane-filtered, so calling it the count for this subject under-reports
+        # the record - a wrong number inside the message that exists to stop a
+        # reader trusting a short answer.
         listed = "; ".join(f"'{s}' ({n})" for s, n in near)
         typer.echo(
-            f"decide list: {len(found)} under the exact subject '{label}'. "
-            f"More sit under nearly matching subjects: {listed}",
+            f"decide list: decisions also sit under subjects that nearly match "
+            f"'{label}': {listed}",
             err=True,
         )
 
