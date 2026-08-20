@@ -8,7 +8,6 @@ that one drives a real temp git repo the same way test_worktree_reapable.py
 does, exercising the actual `wt_unpushed_count` shell function classify()'s
 git input comes from.
 """
-import json
 import subprocess
 from pathlib import Path
 

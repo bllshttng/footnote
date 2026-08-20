@@ -16,7 +16,6 @@ testable with a fixture table with no filesystem or subprocess involved.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import re
@@ -32,25 +31,8 @@ from fno.graph.store import (
     GraphUnreadableError,
     read_graph_strict,
 )
-
-
-def _load_worktree_status_module():
-    """``scripts/lib/worktree-status.py`` as a module, loaded once. It is a
-    standalone script (invoked by worktree-lifecycle.sh via subprocess), not
-    part of the installed package, so it needs ``spec_from_file_location``
-    rather than a normal import - the same porcelain parser and registry
-    reader this file reuses used to be copied verbatim into this file, and a
-    code review caught both copies going byte-for-byte/near-identical in
-    this same PR, exactly the "N implementations of one operation" trap."""
-    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-status.py"
-    spec = importlib.util.spec_from_file_location("_fno_worktree_status", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_worktree_status_module = _load_worktree_status_module()
-_worktrees = _worktree_status_module._worktrees
+from fno.worktree_status import _load_registry as _load_status_registry
+from fno.worktree_status import _worktrees
 
 _QUIET_TERMINAL_STATUSES = frozenset({"superseded", "deferred"})
 
@@ -244,12 +226,9 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
 def _load_registry() -> tuple[dict[str, str], bool]:
     """cwd -> status, plus an ok flag.
 
-    Delegates to ``scripts/lib/worktree-status.py``'s own ``_load_registry``
-    (loaded once as ``_worktree_status_module`` below) rather than a second
-    copy of the same best-row selection - the exact "N implementations of
-    one operation" trap ``_worktrees`` below was already fixed for. That
-    function returns cwd -> (name, status); this drops the name, which only
-    the display CLI needs.
+    Delegates to the packaged worktree-status module rather than a second copy
+    of the same best-row selection. That function returns cwd -> (name,
+    status); this drops the name, which only the display CLI needs.
 
     The ok flag matters here in a way it does not for a display tool: a
     missing registry is a legitimate empty fleet (nothing has ever
@@ -257,7 +236,7 @@ def _load_registry() -> tuple[dict[str, str], bool]:
     a genuine read failure - reading it as empty would silently read every
     live worker as absent, which is exactly the false STRANDED constraint 4
     forbids."""
-    by_cwd, ok = _worktree_status_module._load_registry()
+    by_cwd, ok = _load_status_registry()
     return {cwd: status for cwd, (_name, status) in by_cwd.items()}, ok
 
 
@@ -269,10 +248,10 @@ def sweep(repo: Path) -> list[Row]:
 
     ``repo`` resolution is the caller's job, not this module's: a module
     that calls the shared ``resolve_repo_root()`` itself would drag every
-    ``scripts/``-relative path in this file (the ``_unpushed_batch`` /
-    ``_worktrees`` script lookups, deliberately package-relative via
-    ``Path(__file__)`` rather than that same resolver - see their
-    docstrings) into `fno lint shellout-drift`'s scan scope for no reason;
+    ``scripts/``-relative path in this file (the ``_unpushed_batch`` lookup,
+    deliberately package-relative via ``Path(__file__)`` rather than that
+    same resolver - see its docstring) into `fno lint shellout-drift`'s scan
+    scope for no reason;
     that guard flags a module on the mere co-occurrence of a bash-exec and
     a resolver call, not on which one actually roots the script path.
     """
