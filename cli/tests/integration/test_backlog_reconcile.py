@@ -1164,6 +1164,84 @@ def test_reconcile_pr_number_never_closes_an_unrelated_merged_node(cli_env, monk
     assert {c["node_id"] for c in payload2["closed"]} == {"ab-500002"}
 
 
+def test_reconcile_pr_number_reverse_map_scoped_to_own_project(cli_env, monkeypatch, tmp_path):
+    """x-2f24: ``~/.fno/graph.json`` is a single store shared across every
+    project on the machine. A --pr-number call must not reverse-map another
+    project's ref-less nodes into a gh fan-out that has nothing to do with
+    the PR being closed - only this repo's own project."""
+    import fno.graph._intake as intake_mod
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    mine_cwd = tmp_path / "mine"
+    other_cwd = tmp_path / "other"
+    mine_cwd.mkdir()
+    other_cwd.mkdir()
+    _make_graph(graph_path, [
+        _node("ab-mine", cwd=str(mine_cwd)),
+        _node("ab-other", cwd=str(other_cwd)),
+    ])
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(mine_cwd))
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=810),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({810: "MERGED"}))
+
+    queried_cwds: list[str] = []
+
+    def _spy_list_merged(**kw):
+        queried_cwds.append(kw.get("cwd"))
+        return []
+
+    monkeypatch.setattr(rec, "list_merged_pr_branches", _spy_list_merged)
+
+    result = runner.invoke(app, [
+        "backlog", "reconcile", "--pr-number", "810",
+        "--repo", "test-owner/test-repo", "--json",
+    ])
+    assert result.exit_code == 0, result.output
+
+    assert str(mine_cwd) in queried_cwds
+    assert str(other_cwd) not in queried_cwds
+
+
+def test_reconcile_pr_number_still_reverse_maps_a_node_with_null_project(
+    cli_env, monkeypatch, tmp_path,
+):
+    """x-2f24 review fix: a node created via `fno backlog new`, not yet
+    claimed by a plan, legitimately carries `project: null`. Matching on cwd
+    (never on a resolved project-name string) means a null `project` field
+    on the one ref-less node that DOES belong to this repo must not be
+    misread as "no node here" - it still reverse-maps."""
+    import fno.graph._intake as intake_mod
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    _make_graph(graph_path, [
+        _node("ab-nullproj", cwd=str(tmp_path), project=None),
+    ])
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx("", number=811),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({811: "MERGED"}))
+    monkeypatch.setattr(
+        rec, "list_merged_pr_branches",
+        lambda **kw: [{
+            "number": 268, "url": "https://github.com/o/r/pull/268",
+            "headRefName": "feature/ab-nullproj", "mergedAt": "2026-07-08T00:00:00Z",
+        }],
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "811", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    closed_ids = {c["node_id"] for c in payload["closed"]}
+    assert closed_ids == {"ab-nullproj"}
+
+
 def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
     """AC3-HP + AC4-HP: one merged PR's trailer names two open nodes -> both
     refs bind and both nodes close in one invocation, even though only one
@@ -1311,8 +1389,13 @@ def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_pat
     """Round-7 review fix: a --pr-number call must still reach a node with NO
     PR ref at all (session died before the pr_number stamp landed) via the
     reverse branch-name map, exactly as _reconcile_merged_pr_node's own
-    docstring claims - not just the trailer-claimed node this PR names."""
+    docstring claims - not just the trailer-claimed node this PR names.
+    Its cwd must match this repo's own root (x-2f24 scopes the reverse-map
+    sweep by cwd, so a node from another repo would go dark)."""
+    import fno.graph._intake as intake_mod
     import fno.pr.closure as closure_mod
+
+    monkeypatch.setattr(intake_mod, "repo_root", lambda: str(tmp_path))
 
     graph_path, _ = cli_env
     _make_graph(graph_path, [
@@ -1342,6 +1425,23 @@ def test_reconcile_pr_number_still_reverse_maps_a_ref_less_node(cli_env, tmp_pat
 
     node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rmap2")
     assert node["pr_number"] == 268  # reverse-map backfilled its own recovered ref
+
+
+def test_node_cwd_in_repo_treats_a_missing_cwd_as_in_scope():
+    """Round-3 review fix: a no-cwd node can't be proven NOT this repo's, so
+    ``node_cwd_in_repo`` includes it rather than excluding it - the same
+    "no cost to including it" reasoning the round-2 fix already applied to
+    ``_pr_touch_ids``, now directly exercised on the extracted predicate
+    (moved module-level in ``_reconcile.py`` specifically so this branch is
+    unit-testable on its own, since ``reverse_map_unstamped`` independently
+    skips a missing cwd before ever making a gh call - no end-to-end
+    ``reconcile`` run can observe this branch's return value either way)."""
+    assert rec.node_cwd_in_repo({"id": "ab-nocwd"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-nullcwd", "cwd": None}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-emptycwd", "cwd": ""}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-here", "cwd": "/some/repo"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-nested", "cwd": "/some/repo/sub"}, "/some/repo") is True
+    assert rec.node_cwd_in_repo({"id": "ab-elsewhere", "cwd": "/other/repo"}, "/some/repo") is False
 
 
 def test_reconcile_pr_number_scan_scope_refuses_number_match_when_our_repo_is_unresolvable(

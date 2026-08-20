@@ -8684,9 +8684,8 @@ def cmd_reconcile(
     ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
         own claims, any node already carrying ``_pr_number`` as a ref
-        (stamped at creation, before this feature existed), plus every OPEN
-        node with NO PR ref at all. Pure in-memory walk - no I/O - so scoping
-        the scan to this set costs nothing extra.
+        (stamped at creation, before this feature existed), plus every OPEN,
+        ref-less node whose own ``cwd`` matches THIS repo's root.
 
         The last group exists because ``scan_merge_drift`` passes this exact
         scope straight through to ``reverse_map_unstamped`` (its reverse
@@ -8694,9 +8693,22 @@ def cmd_reconcile(
         died before the pr_number stamp landed. Omitting ref-less nodes here
         would silently zero out that entire pass on every ``--pr-number``
         call - the node's own branch names it, but a scope with nothing in
-        it matches nothing. Including them costs nothing extra either: that
-        pass makes its own gh call per node's cwd regardless of scope size,
-        and is already repo-scoped by construction (one cwd's repo per call).
+        it matches nothing. It is NOT free to include every such node
+        graph-wide, though: the graph is a single store shared across every
+        project on the machine, and ``reverse_map_unstamped`` fires one gh
+        call per DISTINCT node cwd in its scope (bounded by
+        ``REVERSE_MAP_BUDGET_S``) - an unscoped sweep pays a gh call for
+        every other project's ref-less nodes too, on every ordinary merge in
+        this repo. Scoped below by matching each candidate's own ``cwd``
+        against ``repo_root()`` (this checkout's own root, cheap and local -
+        no gh call) - never by comparing a resolved project-NAME string
+        against the node's stored ``project`` field: that field is written
+        by a completely different resolver (settings-based project
+        detection at intake) that can drift from an independently-derived
+        name, and a node created via ``fno backlog new`` before being
+        claimed by a plan legitimately carries ``project: null``, which a
+        name comparison would misread as "not this repo" even when its cwd
+        matches exactly.
 
         The graph is CROSS-PROJECT: a bare number match, scoped by nothing,
         would pull in a same-numbered PR belonging to a different repo's
@@ -8708,13 +8720,19 @@ def cmd_reconcile(
         when its own slug is unresolvable, rather than treating that as a
         pass for every candidate).
         """
-        from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+        from fno.graph._intake import repo_root
+        from fno.graph._reconcile import node_cwd_in_repo, node_pr_refs, repo_slug_from_url
+
+        _our_root = repo_root()
 
         ids = set(_claims)
         for _e in _entries:
             _rid = _e.get("id")
-            if isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e):
-                ids.add(_rid)
+            if not (isinstance(_rid, str) and node_is_open(_e) and not node_pr_refs(_e)):
+                continue
+            if not node_cwd_in_repo(_e, _our_root):
+                continue
+            ids.add(_rid)
         if _our_repo is None:
             return ids
         for _e in _entries:
