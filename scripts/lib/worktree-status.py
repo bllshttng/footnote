@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Non-terminal AgentStatus vocabulary (crates/fno-agents/src/lib.rs
 # `AgentStatus`), mirrored from `_OWNERSHIP_LIVE_STATUSES` in
@@ -30,14 +31,25 @@ from pathlib import Path
 _ALIVE_STATUSES = frozenset({"spawning", "ready", "idle", "busy", "live", "restarting"})
 
 
-def _load_registry() -> dict[str, tuple[str, str]]:
-    """cwd -> (name, status), preferring a live row, else the most recent."""
+def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
+    """cwd -> (name, status), preferring a live row, else the most recent.
+
+    Plus an ok flag: a missing registry is a legitimate empty fleet (nothing
+    has ever registered) and is ok; a registry that exists but fails to
+    parse is a genuine read failure. worktree_stranded.py's fail-open
+    classifier reuses this function (rather than a second copy of the same
+    best-row selection) and needs that distinction - reading a corrupt
+    registry as empty would silently read every live worker as absent."""
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
     path = Path(override) if override else Path(os.path.expanduser("~/.fno/agents/registry.json"))
+    if not path.exists():
+        return {}, True
     try:
         data = json.loads(path.read_text())
-    except Exception:
-        return {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, False
     best: dict[str, tuple[int, str, str, str]] = {}
     for a in data.get("agents", []):
         cwd = a.get("cwd") or ""
@@ -51,23 +63,51 @@ def _load_registry() -> dict[str, tuple[str, str]]:
         cur = best.get(cwd)
         if cur is None or (rank, ts) > (cur[0], cur[2]):
             best[cwd] = (rank, name, ts, status)
-    return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}
+    return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}, True
 
 
-def _worktrees(repo: Path) -> list[tuple[str, str]]:
-    """[(branch, path), ...] for every worktree registered to `repo`."""
+def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
+    """[(branch, path), ...] for every worktree registered to `repo`.
+
+    A row only appended on a `branch refs/heads/` line drops every detached
+    worktree from the output - three of the previously reported stranded
+    rows were detached, so the surface structurally could not show the
+    cases that matter most. Emit those too, with `branch: None`.
+
+    A `bare` entry (the main admin directory of a bare-repo-as-worktree-
+    container setup) carries neither a `branch` nor a `detached` line, so
+    without an explicit check it would fall through the same as a real
+    detached worktree and misreport as one. It has no working tree to
+    inspect, so it is excluded entirely - the same as the pre-fix behavior,
+    which also never appended a row for it (a `bare` entry has no `branch
+    refs/heads/` line either).
+    """
     out = subprocess.run(
         ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
         capture_output=True,
         text=True,
     )
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[Optional[str], str]] = []
     wt_path = ""
+    branch: Optional[str] = None
+    detached = False
+    bare = False
     for line in out.stdout.splitlines():
         if line.startswith("worktree "):
+            if wt_path and not bare:
+                rows.append((None if detached else branch, wt_path))
             wt_path = line[len("worktree ") :]
+            branch = None
+            detached = False
+            bare = False
         elif line.startswith("branch refs/heads/"):
-            rows.append((line[len("branch refs/heads/") :], wt_path))
+            branch = line[len("branch refs/heads/") :]
+        elif line == "detached":
+            detached = True
+        elif line == "bare":
+            bare = True
+    if wt_path and not bare:
+        rows.append((None if detached else branch, wt_path))
     return rows
 
 
@@ -86,7 +126,10 @@ def main(argv: list[str]) -> int:
     if "--repo" in argv:
         repo = Path(argv[argv.index("--repo") + 1])
 
-    registry = _load_registry()
+    registry, registry_ok = _load_registry()
+    if not registry_ok:
+        print("worktree-status: registry.json exists but could not be parsed; "
+              "every session reads as none until it is fixed", file=sys.stderr)
     rows = []
     total = live_n = dead_n = none_n = 0
     for branch, wt_path in _worktrees(repo):
@@ -130,8 +173,9 @@ def main(argv: list[str]) -> int:
 
     print("Worktrees:")
     for r in rows:
+        branch_label = r["branch"] or "(detached)"
         print(
-            f"  {r['branch']:<30} | {r['last_commit']:<15} | "
+            f"  {branch_label:<30} | {r['last_commit']:<15} | "
             f"target: {r['target']:<20} | {r['path']}"
         )
     return 0

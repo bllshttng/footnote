@@ -343,4 +343,5 @@ worktree overlaps	T1	worktree overlaps	5
 worktree policy	T1	worktree policy	9
 worktree reapable	T1	worktree reapable	4
 worktree status	T1	worktree status	1
+worktree stranded	T1	worktree stranded	1
 agents watchdog	T1	agents watchdog	4

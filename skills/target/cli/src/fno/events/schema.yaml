@@ -3347,6 +3347,38 @@ event_types:
         detail:
           type: string
           description: "The named reason the action was refused."
+
+  - name: stranded_sweep
+    description: "The three-way stranded-worktree classifier (git+graph+fleet join) recorded a STRANDED recovery act or a fail-open UNKNOWN row. STRANDED rows carry the push/backlog acts already taken; UNKNOWN rows carry only this event - report, never reap, and a row this cannot positively close is reported but never acted on."
+    sources: [daemon]
+    data:
+      required: [path, class, unpushed]
+      properties:
+        path:
+          type: string
+          description: "The worktree's absolute path."
+        branch:
+          type: [string, "null"]
+          description: "The worktree's branch, or the recovery branch a STRANDED push created; null for a detached UNKNOWN row."
+        class:
+          type: string
+          description: "STRANDED | UNKNOWN."
+        unpushed:
+          type: integer
+          description: "The unpushed commit count that drove the classification."
+        sha:
+          type: [string, "null"]
+          description: "The HEAD sha at classification time, when known."
+        acts:
+          type: array
+          description: "The acts already taken for this row (push, backlog_update), in order; empty for UNKNOWN."
+        node:
+          type: [string, "null"]
+          description: "The resolved backlog node id for this worktree, when one resolved; null for an UNKNOWN row whose node never resolved."
+        reason:
+          type: [string, "null"]
+          description: "Why an UNKNOWN row could not be positively classified; null for STRANDED."
+
   - name: worker_refused
     description: "A live worker's own last turn carries a provider refusal the taxonomy classifies as swap-class. Positive evidence that a worker cannot think, emitted once per (short_id, error_class) so silence is never the only signal. Fires on the FIRST tick after the refusal rather than after recovery.idle_threshold_seconds: a refusal is affirmative evidence and must not wait behind a timer built for silence, nor be suppressed by a stale promise reading done."
     sources: [daemon]

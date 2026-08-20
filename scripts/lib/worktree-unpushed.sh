@@ -53,12 +53,18 @@ wt_refresh_remote_refs() {
 
 wt_unpushed_count() {
     local path="${1:-}" out=""
-    [[ -n "$path" && -d "$path" ]] || { printf '1\n'; return; }
+    if [[ -z "$path" || ! -d "$path" ]]; then
+        echo "worktree-unpushed: path not verifiable (missing or not a directory); assuming unpushed" >&2
+        printf '1\n'; return
+    fi
     if ! wt_refresh_remote_refs "$path"; then
         echo "worktree-unpushed: remote refs not verifiable (fetch --all --prune failed); assuming unpushed" >&2
         printf '1\n'; return
     fi
     out="$(git -C "$path" rev-list --count HEAD --not --remotes 2>/dev/null)" || out=""
-    [[ "$out" =~ ^[0-9]+$ ]] || out=1
+    if [[ ! "$out" =~ ^[0-9]+$ ]]; then
+        echo "worktree-unpushed: rev-list not verifiable (git read failed); assuming unpushed" >&2
+        out=1
+    fi
     printf '%s\n' "$out"
 }
