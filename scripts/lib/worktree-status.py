@@ -62,6 +62,14 @@ def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
     worktree from the output - three of the previously reported stranded
     rows were detached, so the surface structurally could not show the
     cases that matter most (x-f4e9). Emit those too, with `branch: None`.
+
+    A `bare` entry (the main admin directory of a bare-repo-as-worktree-
+    container setup) carries neither a `branch` nor a `detached` line, so
+    without an explicit check it would fall through the same as a real
+    detached worktree and misreport as one. It has no working tree to
+    inspect, so it is excluded entirely - the same as the pre-fix behavior,
+    which also never appended a row for it (a `bare` entry has no `branch
+    refs/heads/` line either).
     """
     out = subprocess.run(
         ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
@@ -72,18 +80,22 @@ def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
     wt_path = ""
     branch: Optional[str] = None
     detached = False
+    bare = False
     for line in out.stdout.splitlines() + [""]:
         if line.startswith("worktree "):
-            if wt_path:
+            if wt_path and not bare:
                 rows.append((None if detached else branch, wt_path))
             wt_path = line[len("worktree ") :]
             branch = None
             detached = False
+            bare = False
         elif line.startswith("branch refs/heads/"):
             branch = line[len("branch refs/heads/") :]
         elif line == "detached":
             detached = True
-    if wt_path:
+        elif line == "bare":
+            bare = True
+    if wt_path and not bare:
         rows.append((None if detached else branch, wt_path))
     return rows
 

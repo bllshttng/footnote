@@ -24,6 +24,7 @@ from fno.worktree_stranded import (
     UNKNOWN,
     Row,
     _unpushed_batch,
+    _worktrees,
     act_on_stranded,
     apply_sweep,
     classify,
@@ -157,6 +158,29 @@ def test_resolve_nothing_matches():
     node, entry = resolve_node_id("/repo/nope", None, {"x-1": {"id": "x-1"}})
     assert node is None
     assert entry is None
+
+
+def test_worktrees_excludes_a_bare_entry(monkeypatch):
+    """A code-review finding: a `bare` porcelain entry (the main admin
+    directory of a bare-repo-as-worktree-container setup) carries neither a
+    `branch` nor a `detached` line, so without an explicit check it falls
+    through the same path as a real detached worktree and misreports as
+    one. It has no working tree to inspect and must not appear at all -
+    matching the pre-detached-fix behavior, which also never emitted a row
+    for it."""
+    porcelain = (
+        "worktree /repo/bare-admin\nbare\n\n"
+        "worktree /repo/normal\nHEAD abc123\nbranch refs/heads/main\n\n"
+        "worktree /repo/detached-wt\nHEAD def456\ndetached\n"
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout=porcelain, stderr="")
+
+    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
+
+    rows = _worktrees(Path("/repo"))
+    assert rows == [("main", "/repo/normal"), (None, "/repo/detached-wt")]
 
 
 # --- UNKNOWN never pushes -------------------------------------------------
