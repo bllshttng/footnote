@@ -595,9 +595,13 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     assert data["question"] == "fold or migrate?"
     assert data["subject"] == "x-7d94"
     assert data["decision_id"].startswith("d-")
-    assert data["authority_source"] == "operator"
     assert data["asked_at"], "asked_at must inherit the question's timestamp"
     assert data["decided_by"]
+    # NOT authority_source == "operator". This runs with no session identity
+    # and no terminal, which is the fail-closed third state: the answer is
+    # recorded and claims no authority, rather than inheriting law by silence.
+    # Answering a question does not by itself prove the operator answered it.
+    assert "authority_source" not in data
 
     # A withdrawal (no --answer) decides nothing: positive control is the
     # closed event itself, the decision count stays at one from the ask above.
@@ -610,6 +614,83 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     ]
     assert len([e for e in lines if e["type"] == "operator_decision"]) == 1
     assert len([e for e in lines if e["type"] == "operator_question_closed"]) == 2
+
+
+def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
+    root: Path, monkeypatch
+):
+    """The operator lane stays reachable on this path; only the silent default
+    closed. An agent clearing a question on the operator's behalf must not be
+    indistinguishable from the operator answering it."""
+    from fno import decide as decide_mod
+
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
+
+    asked = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(
+        outstanding_app,
+        ["clear", qid, "--answer", "fold", "--authority", "operator"],
+    )
+    assert cleared.exit_code == 0, cleared.output
+
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    data = [e for e in lines if e["type"] == "operator_decision"][0]["data"]
+    assert data["decided_by"] == "operator"
+    assert data["attested_by"] == "operator", "a person was at the terminal"
+    # The assertion the name promises. Without --authority on `clear`, this
+    # path could not produce law at all, and the operator answering a question
+    # they were formally asked filed into the same lane as the pre-cutover rows
+    # the cutover exists to quarantine.
+    assert data["authority_source"] == "operator"
+
+
+def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
+    """Closing on a refused answer would retire the question with nothing on
+    record, which is worse than refusing the close. The refusal covers both."""
+    from fno import decide as decide_mod
+
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: False)
+
+    asked = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    refused = runner.invoke(
+        outstanding_app,
+        ["clear", qid, "--answer", "fold", "--authority", "operator"],
+    )
+    assert refused.exit_code != 0, refused.output
+    assert "Nothing was closed" in refused.output
+
+    still_open = runner.invoke(outstanding_app, [])
+    assert still_open.exit_code == 0, still_open.output
+    assert qid in still_open.output, "the question must survive its refused close"
+
+    # A batch refuses whole, never halfway. The refusal turns on the ambient
+    # identity and the one --authority value, both invocation-wide, so it
+    # fires on the first id before anything closes. Asserted rather than
+    # reasoned, because a partial batch is a data-integrity bug and the
+    # argument for why it cannot happen is exactly the kind that stops being
+    # true when someone moves the record_decision call.
+    qid2 = runner.invoke(
+        outstanding_app, ["ask", "second question?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+    batch = runner.invoke(
+        outstanding_app,
+        ["clear", qid, qid2, "--answer", "fold", "--authority", "operator"],
+    )
+    assert batch.exit_code != 0, batch.output
+    after = runner.invoke(outstanding_app, [])
+    assert qid in after.output and qid2 in after.output, "neither may close"
 
 
 def test_clear_with_answer_projects_the_decision_onto_the_node(

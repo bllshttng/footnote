@@ -23,7 +23,49 @@ Both are explicit on purpose. Automatic classification of "was that a ruling?" i
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine. `operator` authority is `law`, `agent` authority is `coord`, and `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`. `agent` and `crown` authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+
+`--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
+
+The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno decide reindex` reject them, which drops recall for real rulings.
+
+## Which field a reader can trust
+
+A row is quoted far more often than it is read in the list, and a quoted row carries no lane column. So provenance has to survive on the row itself. Three fields, and only one of them is a fact about who ran the verb.
+
+| Field | Who writes it | What it means |
+|---|---|---|
+| `decided_by` | stamped from the ambient session, always, when one resolves | who recorded the ruling. This is the field to trust. It cannot be typed. |
+| `attested_by` | only a caller with no session identity AND a terminal on stdin | a name a person stood behind, rather than a handle a process stamped |
+| `relayed_by` | filled from `--decided-by` when the caller is not the decider | a name the caller supplied for someone else. A claim, not a stamp. |
+
+Three caller states decide which of those get written, and the third fails closed.
+
+1. A session identity resolves. The handle is stamped into `decided_by`, and the row reads as coordination.
+2. No identity, and a terminal on stdin. `attested_by` is written, and `--authority operator` is accepted.
+3. No identity, and no terminal. Operator authority is REFUSED. `decided_by` says `unattributed-caller`.
+
+Law is never DEFAULTED, in any state. A caller who wants the operator lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
+
+State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno decide --authority operator` was enough to forge an attested row in the law lane.
+
+Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging law THROUGH THIS VERB now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident.
+
+That claim is scoped to the verb on purpose. The index is an append-only file that nothing authenticates. One raw line written into `~/.fno/decisions.jsonl` reads as law, and `fno decide reindex` re-emits a forged journal row verbatim. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
+
+On 2026-08-19 an agent passed `--decided-by "J.N. Choi"`, and that name landed in `decided_by`. Five workers had been told to verify their orders by reading that field. Each did it correctly and got a fabricated yes.
+
+The split closes that without deleting the honest case. An agent relaying a real operator answer still records the name, in `relayed_by`, where a reader sees who typed it.
+
+## Looking one up
+
+A decision id is a lookup key. `fno decide list --subject d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
+
+Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
+
+Even where the exact subject DID answer, the scan still runs. The case that cost a reader four rulings returned one row, not zero. A scan gated on an empty answer stays silent on exactly that case.
+
+A miss never claims the store is empty. An argument shaped like a decision id that matches nothing is told it is shaped like one. Every miss is a statement about the query, never about the world.
 
 The fixed cutover is `2026-08-21T00:00:00Z`, chosen to safely postdate every row produced by the old deployed writer. Before that point the writer stamped agent coordination as `operator`, so every pre-cutover operator-shaped row renders as `unattributed`, including rows that answered a question. This deliberately creates a narrow transition window in which a genuine operator ruling is not called law. That under-claim is safer than fabricating authority, and the append-only index is never rewritten. After the cutover, the engine guard makes `operator` an earned value, so new operator rows are law even without a question.
 

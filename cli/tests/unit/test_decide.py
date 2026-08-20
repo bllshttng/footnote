@@ -135,7 +135,10 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     assert data["decision_id"] == did
     assert data["subject"] == "x-7d94"
     assert data["decision"] == "fold every project's inbox"
-    assert data["authority_source"]
+    # decided_by, not authority_source. Authority is legitimately ABSENT for a
+    # caller with no session identity and no terminal: that state refuses to
+    # claim one, and the reader's `unattributed` lane covers it.
+    assert data["decided_by"]
 
     entry = json.loads(tmp_graph.read_text())["entries"][0]
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
@@ -204,7 +207,10 @@ def test_list_of_a_subject_with_nothing_on_record_is_a_successful_read(
     not run is a failure, and the two must not share an exit code."""
     listed = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
     assert listed.exit_code == 0, listed.output
-    assert "no decisions recorded for 'x-nope'" in listed.output
+    # A statement about the QUERY, never about the world. The old wording
+    # ("no decisions recorded") read as a fact about the store, and a reader
+    # acted on it.
+    assert "no decision is indexed under the subject 'x-nope'" in listed.output
 
 
 def test_record_without_a_resolvable_subject_still_writes_the_event(
@@ -495,7 +501,11 @@ def test_legacy_operator_rows_stay_byte_identical_and_empty_law_is_positive(
     )
     assert law.exit_code == 0, law.output
     assert "0 law decisions" in law.output
-    assert "1 pre-cutover decision remains unattributed" in law.output
+    # The law-only branch was merged into the general lane one, so this now
+    # counts EVERY lane the subject holds rather than the pre-cutover rows
+    # alone. The more specific branch was giving the less complete answer.
+    assert "1 unattributed" in law.output
+    assert "pre-cutover" in law.output
     assert index.read_bytes() == before
 
 
@@ -1051,12 +1061,18 @@ def test_resolve_agent_identity_defaults_decider_and_authority(
     assert decision["authority_source"] == "agent"
 
 
-def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
+def test_no_identity_at_a_terminal_names_the_operator_but_claims_no_authority(
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Rewritten twice, not deleted. It first asserted that ANY caller with no
+    session identity is the operator, which made attendedness an absence:
+    scrubbing the environment reached it. A terminal is now required, and even
+    at one the law lane is never DEFAULTED, because a tty is obtainable
+    (`script -q /dev/null`) and law must never be inherited by silence."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
@@ -1064,6 +1080,7 @@ def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
         "resolve_harness_identity",
         lambda: harness_identity.HarnessIdentity(None, None),
     )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     payload = json.loads(
@@ -1071,25 +1088,76 @@ def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
     )
     decision = payload["decisions"][0]
     assert decision["decided_by"] == "operator"
-    assert decision["authority_source"] == "operator"
+    assert decision["attested_by"] == "operator", "a person was at the terminal"
+    assert "authority_source" not in decision, "law is never defaulted, only stated"
+    assert decision["lane"] == "unattributed"
 
 
-def test_decided_by_override_keeps_resolved_agent_authority(
+def test_no_identity_and_no_terminal_refuses_operator_authority(
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Reading --decided-by as a beastmode grant writes wrong provenance into
-    the field a reader months later trusts."""
+    """The forgery this closes: `env -u CLAUDE_CODE_SESSION_ID fno decide
+    --authority operator` resolved no identity, took the attended branch, and
+    landed a row in the law lane. Absence is not attendance."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
         harness_identity,
         "resolve_harness_identity",
-        lambda: harness_identity.HarnessIdentity(
-            "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
-        ),
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: False)
+
+    refused = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "law", "--authority", "operator"],
+    )
+    assert refused.exit_code != 0, refused.output
+    assert "no terminal" in refused.output
+    assert not index.exists(), "a refused write leaves no row behind"
+
+    # Without the flag it still records, because a read that cannot happen is
+    # worse than one that is honestly labelled. It claims no authority, so the
+    # reader's existing unattributed lane covers it.
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "a note", "--decided-by", "J.N. Choi"],
+    )
+    row = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )["decisions"][0]
+    assert row["decided_by"] == "unattributed-caller"
+    assert row["relayed_by"] == "J.N. Choi", "the stated name is a claim, kept as one"
+    assert "authority_source" not in row
+    assert "attested_by" not in row
+    assert row["lane"] == "unattributed"
+
+
+def test_an_agent_cannot_type_a_name_into_decided_by(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """decided_by is stamped, never stated, whenever a session resolves.
+
+    Five workers were told to verify their orders by reading this field. Each
+    did it correctly and got a fabricated yes, because an agent had typed a
+    human's name into it. The supplied name is kept - relaying a real operator
+    answer is an honest record - but it lands in its own column.
+    """
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
     )
 
     runner.invoke(
@@ -1099,8 +1167,11 @@ def test_decided_by_override_keeps_resolved_agent_authority(
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
     )
-    assert payload["decisions"][0]["decided_by"] == "J.N. Choi"
-    assert payload["decisions"][0]["authority_source"] == "agent"
+    row = payload["decisions"][0]
+    assert row["decided_by"] == handle, "the stamp wins over the stated name"
+    assert row["relayed_by"] == "J.N. Choi", "the claim is kept, not discarded"
+    assert row["authority_source"] == "agent"
+    assert "attested_by" not in row, "an agent row was never attended"
 
     runner.invoke(
         decide_app,
@@ -1225,6 +1296,9 @@ def test_no_identity_explicit_operator_authority_records(
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Kept, with the terminal now pinned. The operator lane stays open to a
+    person who states their authority; only the silent inheritance closed."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
@@ -1232,6 +1306,7 @@ def test_no_identity_explicit_operator_authority_records(
         "resolve_harness_identity",
         lambda: harness_identity.HarnessIdentity(None, None),
     )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
     recorded = runner.invoke(
         decide_app,
@@ -1330,3 +1405,444 @@ def test_operator_decision_retention_is_durable_by_an_explicit_key():
     assert retention_for("operator_decision") == "durable"
     entry = next(e for e in SCHEMA["event_types"] if e["name"] == "operator_decision")
     assert entry.get("retention") == "durable", "explicit, not inherited from the default"
+
+
+def test_a_subject_the_exact_match_answered_is_not_reported_as_unreached(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`--subject fold-the-inbox` resolves through the node tier and prints that
+    row. Reporting it as a near miss tells the reader to go looking for a
+    ruling they were just shown."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-cccc0001",
+            "decision": "the wave plan",
+            "subject": "x-7d94",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "fold-the-inbox"])
+    assert res.exit_code == 0, res.output
+    assert "d-cccc0001" in res.output, "the node-tier match still answers"
+    assert "nearly match" not in res.output, "and is not also called a near miss"
+
+
+def test_a_lane_filtered_empty_answer_never_reads_as_an_empty_store(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The LANE emptied the answer, not the store. Only `law` had this branch,
+    so every other lane printed a claim about the world that was false."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-22T10:00:00Z",
+            "decision_id": "d-cccc0002",
+            "decision": "authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(
+        decide_app, ["list", "--subject", "force-push", "--lane", "coord"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "0 coord decisions" in res.output
+    assert "law" in res.output, "it names the lane the decision IS in"
+    assert "no decision is indexed" not in res.output
+
+
+def test_an_id_lookup_does_not_hide_rulings_recorded_about_that_id(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A ruling can be filed with a decision id as its SUBJECT. Answering only
+    the id drops whatever overturned or qualified it."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "force-push is authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+        {
+            "ts": "2026-08-19T10:00:00Z",
+            "decision_id": "d-cccc0003",
+            "decision": "that authorization is narrowed to feature branches",
+            "subject": "d-3b26c1c6",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "d-3b26c1c6", "--json"]).stdout
+    )
+    ids = {d["decision_id"] for d in payload["decisions"]}
+    assert ids == {"d-3b26c1c6", "d-cccc0003"}, "the id AND what was said about it"
+    # A single value here would deny that the subject key answered, which is
+    # the confusion the field exists to prevent.
+    assert payload["matched_by"] == ["decision_id", "subject"]
+
+
+def test_a_lane_message_counts_every_lane_the_subject_holds(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The law-only branch named the pre-cutover rows and stopped, so a subject
+    with unattributed AND coord rulings heard about the first and never the
+    second: the more specific branch gave the less complete answer."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-dddd0001",
+            "decision": "pre-cutover",
+            "subject": "pr-923",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+        {
+            "ts": "2026-08-22T10:00:00Z",
+            "decision_id": "d-dddd0002",
+            "decision": "a peer ruling",
+            "subject": "pr-923",
+            "decided_by": "king-g4",
+            "authority_source": "crown",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "pr-923", "--lane", "law"])
+    assert res.exit_code == 0, res.output
+    assert "1 unattributed" in res.output
+    assert "1 coord" in res.output, "the lane the law branch used to hide"
+
+
+def test_near_miss_counts_are_deduped_the_way_the_listing_is(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The index is append-only and a reindex landing mid-write appends one
+    ruling twice. list_decisions dedupes by id, so a raw row count inflates the
+    number this message exists to convey."""
+    row = {
+        "decision_id": "d-cccc0004",
+        "decision": "freeze",
+        "subject": "release scope",
+        "decided_by": "operator",
+        "authority_source": "operator",
+    }
+    _write_decision_index(
+        index,
+        {**row, "ts": "2026-08-18T10:00:00Z"},
+        {**row, "ts": "2026-08-18T10:00:00Z"},
+    )
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "release", "--json"]).stdout
+    )
+    assert payload["near_misses"] == [{"subject": "release scope", "count": 1}]
+
+
+def test_every_projected_field_is_one_the_event_builder_accepts():
+    """reindex rebuilds an event from a projection row by splatting
+    PROJECTION_FIELDS into operator_decision. A field added to one and not the
+    other raises TypeError there, and the backfill drops every row carrying it -
+    silently, because that loop swallows a row it cannot rebuild."""
+    import inspect
+
+    from fno.decide import PROJECTION_FIELDS
+    from fno.events import operator_decision
+
+    accepted = set(inspect.signature(operator_decision).parameters)
+    assert not set(PROJECTION_FIELDS) - accepted
+
+
+def test_a_bad_authority_value_is_refused_before_anything_is_written(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """`--authority banana` recorded d-11eae39d on exit 0, and the reader then
+    filed that ruling under `unattributed` because it recognised no such lane."""
+    res = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "merged", "--authority", "banana"],
+    )
+    assert res.exit_code != 0, res.output
+    for value in ("operator", "crown", "agent", "beastmode"):
+        assert value in res.output, f"the message must name {value}"
+    assert not index.exists(), "a refused write leaves no row behind"
+
+
+def test_a_king_has_an_authority_value_to_pass_and_it_reads_as_coordination(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """Three rows on disk carry invented `crown-l2-<node>` spellings, written by
+    kings who had no correct value. A king ruling in its own scope is
+    coordination, so it needs the value, not a lane of its own."""
+    res = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "held", "--authority", "crown"],
+    )
+    assert res.exit_code == 0, res.output
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    assert payload["decisions"][0]["authority_source"] == "crown"
+    assert payload["decisions"][0]["lane"] == "coord"
+
+
+def test_a_legacy_invented_authority_row_survives_reindex(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The enum binds the write path only. Enforcing it on the read path would
+    make the backfill reject these rows and drop recall for real rulings."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-1eaced01",
+            "decision": "freeze the scope",
+            "subject": "x-f7b9 scope",
+            "decided_by": "king-g4",
+            "authority_source": "crown-l2-x-f3d0",
+        },
+    )
+    res = runner.invoke(decide_app, ["reindex"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(
+        runner.invoke(
+            decide_app, ["list", "--subject", "x-f7b9 scope", "--json"]
+        ).stdout
+    )
+    assert payload["decisions"][0]["decision_id"] == "d-1eaced01"
+
+
+def test_a_decision_id_is_a_lookup_key_whatever_subject_it_was_filed_under(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The id is the first column of the row's own output, so denying it exists
+    teaches a reader the key and then punishes the one who uses it."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "force-push is authorized on a feature branch",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "d-3b26c1c6"])
+    assert res.exit_code == 0, res.output
+    assert "force-push is authorized" in res.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "d-3b26c1c6", "--json"]).stdout
+    )
+    assert payload["matched_by"] == ["decision_id"]
+    assert payload["decisions"][0]["subject"] == "force-push"
+
+
+def test_an_unknown_decision_id_is_named_as_one_not_denied_as_a_ruling(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "d-deadbeef"])
+    assert res.exit_code == 0, res.output
+    assert "shaped like a decision id" in res.output
+    assert "fno decide list" in res.output
+
+
+def test_a_near_miss_subject_names_what_it_nearly_matched(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """A freeze filed under the free-text subject `x-f7b9 scope` was invisible
+    to `--subject x-f7b9`, and recovering it needed a raw grep of the index."""
+    _write_decision_index(
+        index,
+        *[
+            {
+                "ts": f"2026-08-18T10:0{n}:00Z",
+                "decision_id": f"d-aaaa000{n}",
+                "decision": f"ruling {n}",
+                "subject": "x-f7b9 scope",
+                "decided_by": "operator",
+                "authority_source": "operator",
+            }
+            for n in range(4)
+        ],
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "x-f7b9"])
+    assert res.exit_code == 0, res.output
+    assert "x-f7b9 scope" in res.output
+    assert "(4)" in res.output, "the count is what tells a reader it is worth a look"
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "x-f7b9", "--json"]).stdout
+    )
+    assert payload["near_misses"] == [{"subject": "x-f7b9 scope", "count": 4}]
+
+
+def test_a_partial_answer_still_names_the_subjects_it_did_not_reach(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The live specimen returns ONE row, not zero: `--subject x-f7b9` matched a
+    wave plan and hid four rulings filed under `x-f7b9 scope`. A near-miss scan
+    that only ran on an empty answer would stay silent on exactly that case."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T09:00:00Z",
+            "decision_id": "d-3d15461b",
+            "decision": "ten children go out as four waves",
+            "subject": "x-f7b9",
+            "decided_by": "king-g4",
+            "authority_source": "beastmode",
+        },
+        *[
+            {
+                "ts": f"2026-08-18T10:0{n}:00Z",
+                "decision_id": f"d-bbbb000{n}",
+                "decision": f"freeze {n}",
+                "subject": "x-f7b9 scope",
+                "decided_by": "operator",
+                "authority_source": "operator",
+            }
+            for n in range(4)
+        ],
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "x-f7b9"])
+    assert res.exit_code == 0, res.output
+    assert "d-3d15461b" in res.output, "the exact hit is still answered"
+    assert "'x-f7b9 scope' (4)" in res.output, "and the four it did not reach"
+
+
+def test_no_miss_branch_ever_denies_that_rulings_exist(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """"no decisions recorded" is a claim about the world where only a claim
+    about the query is true, and a reader cannot tell the two apart."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "authorized",
+            "subject": "force-push",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    for probe in ("definitely-not-a-subject", "d-deadbeef", "force"):
+        res = runner.invoke(decide_app, ["list", "--subject", probe])
+        assert res.exit_code == 0, res.output
+        assert "no decisions recorded" not in res.output, probe
+
+
+def test_every_printed_row_carries_the_provenance_a_citation_needs(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The lane column does not travel: a row quoted in mail carries only what
+    the row itself says."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-22T10:00:00Z",
+            "decision_id": "d-3b26c1c6",
+            "decision": "authorized",
+            "subject": "force-push",
+            "decided_by": "king-g4",
+            "authority_source": "crown",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "force-push"])
+    assert res.exit_code == 0, res.output
+    assert "king-g4" in res.output
+    assert "crown" in res.output
+
+
+def test_only_an_attended_caller_writes_attested_by(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The field that makes a genuine ruling checkable on the row itself."""
+    from fno import decide as decide_mod
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
+    )
+    attended = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )["decisions"][0]
+    assert attended["decided_by"] == "J.N. Choi"
+    assert attended["attested_by"] == "J.N. Choi"
+    assert "relayed_by" not in attended
+    assert (
+        "[attested]"
+        in runner.invoke(decide_app, ["list", "--subject", "pr-923"]).output
+    )
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(
+            "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
+        ),
+    )
+    runner.invoke(decide_app, ["--subject", "pr-921", "--decision", "held"])
+    stamped = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
+    )["decisions"][0]
+    assert "attested_by" not in stamped, "a process stamp is not an attestation"
+
+
+def test_relaying_nothing_records_no_relayed_by(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A caller passing its own handle relayed nothing, and a column that fills
+    itself on every row tells a reader nothing."""
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-921", "--decision", "held", "--decided-by", handle],
+    )
+    for subject in ("pr-923", "pr-921"):
+        row = json.loads(
+            runner.invoke(decide_app, ["list", "--subject", subject, "--json"]).stdout
+        )["decisions"][0]
+        assert row["decided_by"] == handle
+        assert "relayed_by" not in row, subject

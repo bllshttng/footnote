@@ -57,13 +57,16 @@ def record(
     decided_by: Optional[str] = typer.Option(
         None,
         "--decided-by",
-        help="Who decided. Omit to use the current agent handle, or the operator outside a session.",
+        help="A name to RELAY for someone else, when you are recording their "
+        "ruling rather than your own. Inside a session it lands in relayed_by; "
+        "decided_by is always stamped from the session itself. Outside one it "
+        "is the decider.",
     ),
     authority: Optional[str] = typer.Option(
         None,
         "--authority",
-        help="How the decider was entitled to decide: 'operator', 'agent', or "
-        "'beastmode'. Omit to resolve it from the current session.",
+        help="How the decider was entitled to decide: 'operator', 'crown', "
+        "'agent', or 'beastmode'. Omit to resolve it from the current session.",
     ),
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
@@ -75,7 +78,27 @@ def record(
         )
         raise typer.Exit(1)
 
-    from fno.decide import IndexWriteError, RefusedAuthorityError, record_decision
+    from fno.decide import (
+        AUTHORITY_SOURCES,
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+        record_decision,
+    )
+
+    # Validated here, on the write path, and deliberately NOT in schema.yaml:
+    # rows already on disk carry invented `crown-l2-<node>` spellings, and a
+    # schema enum would make `fno decide reindex` reject them and drop recall
+    # for real rulings.
+    if authority is not None and authority not in AUTHORITY_SOURCES:
+        typer.echo(
+            f"decide: --authority '{authority}' is not one of "
+            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was recorded. Use 'crown' "
+            "for a king ruling inside its own scope; omit the flag to resolve it "
+            "from this session.",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     try:
         result = record_decision(
@@ -83,9 +106,10 @@ def record(
             subject=subject,
             question_id=question_id,
             decided_by=decided_by,
-            # Stated, never inferred. Reading `--decided-by "J.N. Choi"` as a
-            # beastmode grant writes wrong provenance into the one field a
-            # reader months later trusts to say how a ruling was entitled.
+            # Stamped, never stated. `_resolve_decider` reads the ambient
+            # session and puts a supplied name in relayed_by, because a reader
+            # who quotes only decided_by must never be handed a name an agent
+            # typed. Authority stays stated, validated against the enum above.
             authority_source=authority,
             rationale=rationale,
             options=list(option) or None,
@@ -97,6 +121,16 @@ def record(
             "cannot record under operator authority. If only the operator can "
             "settle this, use `fno outstanding ask`. If ruling as an agent, "
             "drop --authority operator; it records agent coordination.",
+            err=True,
+        )
+        raise typer.Exit(3)
+    except UnattributedAuthorityError:
+        typer.echo(
+            "decide: refused. This process has no session identity and no "
+            "terminal, so nothing here shows the operator ruled. Operator "
+            "authority is never inherited by silence. Run it from a terminal, "
+            "join the session so a handle can be stamped, or drop --authority "
+            "operator to record it in the unattributed lane.",
             err=True,
         )
         raise typer.Exit(3)
@@ -172,7 +206,11 @@ def list_cmd(
     ),
 ) -> None:
     """Recover the decision history for a subject, newest first."""
-    from fno.decide import list_decisions
+    from fno.decide import (
+        list_decisions,
+        looks_like_decision_id,
+        near_miss_subjects,
+    )
     from fno.tracker.metadata import ExternalMetadataUnavailable
 
     if lane not in {None, "law", "coord", "grant", "unattributed"}:
@@ -198,8 +236,29 @@ def list_cmd(
 
     decisions = found[:limit] if limit > 0 else found
     truncated = len(decisions) < len(found)
+    # Computed for EVERY subject read, not only an empty one. The specimen this
+    # exists for returns one row: `--subject x-f7b9` matched a wave plan and hid
+    # four rulings filed under `x-f7b9 scope`. A near-miss scan that only runs
+    # when the answer is empty would have stayed silent on exactly that case,
+    # and a partial answer reads as a whole one.
+    near = near_miss_subjects(subject) if subject else []
 
     if as_json:
+        # matched_by tells a machine reader WHICH key answered, so an id lookup
+        # is never mistaken for a subject hit. A LIST, because the read is a
+        # union: `--subject d-XXXX` returns that decision AND any ruling filed
+        # about it, so a single value would deny that the subject key answered.
+        # Computed over `found`, never the --limit slice, or a cap silently
+        # drops one of the two keys from the answer.
+        matched: "list[str]" = []
+        if subject:
+            want = subject.strip().casefold()
+            if any(str(d.get("decision_id") or "").casefold() == want for d in found):
+                matched.append("decision_id")
+            if any(
+                str(d.get("decision_id") or "").casefold() != want for d in found
+            ):
+                matched.append("subject")
         typer.echo(
             json.dumps(
                 {
@@ -210,6 +269,8 @@ def list_cmd(
                     # This surface is machine-first, so an under-count that
                     # looks complete is the same lie "truncated" prevents.
                     "damaged": damaged,
+                    "matched_by": matched if subject else None,
+                    "near_misses": [{"subject": s, "count": n} for s, n in near],
                 },
                 separators=(",", ":"),
             )
@@ -227,14 +288,33 @@ def list_cmd(
         # empty answer names the backfill whenever the index is missing.
         from fno.decide import _index_path
 
-        if lane == "law" and _index_path().exists():
-            _, legacy, _ = list_decisions(subject, limit=None, lane="unattributed")
-            if legacy:
-                noun = "decision remains" if len(legacy) == 1 else "decisions remain"
+        if lane is not None and _index_path().exists():
+            # The LANE emptied the answer, not the store. Saying nothing is
+            # indexed under this subject would be false, and the reader acts on
+            # it.
+            #
+            # ONE branch for every lane. `law` used to have its own, naming
+            # only the pre-cutover rows, so a subject with 2 unattributed and 3
+            # coord rulings heard about the 2 and never the 3: the more
+            # specific branch gave the less complete answer.
+            _, unfiltered, _ = list_decisions(subject, limit=None)
+            if unfiltered:
+                noun = "decision" if len(unfiltered) == 1 else "decisions"
+                counts: "dict[str, int]" = {}
+                for d in unfiltered:
+                    key = str(d.get("lane") or "unattributed")
+                    counts[key] = counts.get(key, 0) + 1
+                lanes = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+                hint = ""
+                if lane == "law" and counts.get("unattributed"):
+                    hint = (
+                        " The unattributed ones are pre-cutover, recorded "
+                        "before authority was an earned value."
+                    )
                 typer.echo(
-                    f"decide list: 0 law decisions for '{label}'; "
-                    f"{len(legacy)} pre-cutover {noun} unattributed. "
-                    "Use --lane unattributed to inspect them.",
+                    f"decide list: 0 {lane} decisions for '{label}', but "
+                    f"{len(unfiltered)} {noun} sit under it: {lanes}."
+                    f"{hint} Drop --lane to read them.",
                     err=True,
                 )
                 return
@@ -244,7 +324,31 @@ def list_cmd(
             else " (no index yet on this machine - run `fno decide reindex` to "
             "backfill what is already on disk)"
         )
-        typer.echo(f"decide list: no decisions recorded for '{label}'{hint}", err=True)
+        # NEVER "no decisions recorded". That is a claim about the world, and
+        # only a claim about the QUERY is true here. Say what is not indexed,
+        # then name what is searchable.
+        if near:
+            listed = "; ".join(f"'{s}' ({n})" for s, n in near)
+            typer.echo(
+                f"decide list: nothing is indexed under the exact subject "
+                f"'{label}'{hint}. Nearly matching subjects: {listed}. Read one "
+                f"with: fno decide list --subject '{near[0][0]}'",
+                err=True,
+            )
+        elif subject and looks_like_decision_id(subject):
+            typer.echo(
+                f"decide list: '{label}' is shaped like a decision id, and no "
+                f"decision on this machine carries it{hint}. It is not indexed "
+                "as a subject either. Browse the store with: fno decide list",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"decide list: no decision is indexed under the subject "
+                f"'{label}'{hint}. Rulings on other subjects are unaffected; "
+                "browse them with: fno decide list",
+                err=True,
+            )
         return
 
     for d in decisions:
@@ -254,10 +358,26 @@ def list_cmd(
         # scoped to one it is the same word on every line.
         scope = "" if subject else f"{d.get('subject') or '(none)'}  "
         lane_marker = "LAW" if d.get("lane") == "law" else d.get("lane", "")
+        # Provenance travels ON the row. A citation is quoted without the lane
+        # column far more often than it is read here, so the authority and the
+        # attestation have to be part of what a reader copies.
+        attested = "  [attested]" if d.get("attested_by") else ""
+        # Parenthesised only when there IS one. Law is no longer defaulted, so
+        # most rows claim no authority, and `operator ()` on every line is
+        # noise on the one line added to carry provenance. `or ""` rather than
+        # a .get default: an explicit JSON null would otherwise print "None".
+        authority = str(d.get("authority_source") or "")
+        authority = f" ({authority})" if authority else ""
         typer.echo(
-            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts', '')}  {scope}"
-            f"{d.get('decided_by', '')}  {d.get('decision', '')}{marker}"
+            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts') or ''}  {scope}"
+            f"{d.get('decided_by') or ''}{authority}"
+            f"{attested}  {d.get('decision') or ''}{marker}"
         )
+        if d.get("relayed_by"):
+            typer.echo(
+                f"    relayed: {d['relayed_by']} (a name this caller supplied, "
+                "not a stamped one)"
+            )
         if d.get("rationale"):
             typer.echo(f"    rationale: {d['rationale']}")
         if d.get("question"):
@@ -271,6 +391,22 @@ def list_cmd(
         typer.echo(
             f"decide list: showing {len(decisions)} of {len(found)}; "
             f"--limit 0 for all.",
+            err=True,
+        )
+
+    if near:
+        # An answer that arrived is not an answer that is whole. `--subject
+        # x-f7b9` returned one wave plan while four rulings sat under
+        # `x-f7b9 scope`, and nothing said so.
+        #
+        # It states the near misses and nothing else. `len(found)` is already
+        # lane-filtered, so calling it the count for this subject under-reports
+        # the record - a wrong number inside the message that exists to stop a
+        # reader trusting a short answer.
+        listed = "; ".join(f"'{s}' ({n})" for s, n in near)
+        typer.echo(
+            f"decide list: decisions also sit under subjects that nearly match "
+            f"'{label}': {listed}",
             err=True,
         )
 

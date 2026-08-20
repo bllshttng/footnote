@@ -190,15 +190,38 @@ def clear(
     answer: str = typer.Option(
         None, "--answer", help="The answer, recorded so the decision outlives the session."
     ),
+    authority: str = typer.Option(
+        None,
+        "--authority",
+        help="How the answerer was entitled to answer: 'operator', 'crown', "
+        "'agent', or 'beastmode'. Omit to claim none.",
+    ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno.decide import IndexWriteError
+    from fno.decide import (
+        AUTHORITY_SOURCES,
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+    )
     from fno.events import operator_question_closed
     from fno.outstanding.core import (
         QuestionIndexWriteError,
         append_question_event,
         read_open_questions,
     )
+
+    # Answering a question the operator was formally asked is the canonical
+    # law-producing act in this system. Without this flag `clear` had nothing
+    # to say once law stopped being defaulted, so the one path that most
+    # deserves the operator lane could never reach it.
+    if authority is not None and authority not in AUTHORITY_SOURCES:
+        typer.echo(
+            f"outstanding: --authority '{authority}' is not one of "
+            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was closed.",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     root = _storage_root()
     try:
@@ -225,24 +248,43 @@ def clear(
             # Routed through record_decision so the decision gets both halves
             # a `fno decide` record has: the event AND the graph projection
             # onto the subject node, which is what `fno decide list` reads.
-            # The decider is the operator by definition on this path
-            # (closed_by records the typing session on the close event);
-            # decided_by must not depend on whether the closing session could
-            # be resolved.
+            # decided_by is left unset on purpose, so record_decision stamps
+            # whoever actually ran the verb. Naming the operator here would
+            # assert it, and an agent clearing a question on their behalf would
+            # then be indistinguishable from the operator answering it.
             recorded: "str | None" = None
             if answer is not None:
                 from fno.decide import record_decision
 
                 record = open_by_id[qid]
-                recorded = record_decision(
-                    decision=answer,
-                    subject=record.node,
-                    question_id=qid,
-                    question=record.question,
-                    asked_by=record.asker or record.session_id,
-                    asked_at=record.ts or None,
-                    events_root=root,
-                )["decision_id"]
+                try:
+                    recorded = record_decision(
+                        decision=answer,
+                        subject=record.node,
+                        question_id=qid,
+                        question=record.question,
+                        asked_by=record.asker or record.session_id,
+                        asked_at=record.ts or None,
+                        authority_source=authority,
+                        events_root=root,
+                    )["decision_id"]
+                except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+                    # Refuse the CLOSE too, never just the decision. Closing a
+                    # question whose answer was refused would retire it with
+                    # nothing on record, which is the worse of the two.
+                    #
+                    # Say NOTHING was closed, not that this id stayed open.
+                    # _resolve_decider is a pure function of the ambient
+                    # identity and the one --authority value, both invariant
+                    # across this loop, so the refusal fires on the first id or
+                    # never. Naming one id would be the partial statement this
+                    # verb's whole family of messages exists to stop.
+                    typer.echo(
+                        f"outstanding: refused: {exc}. Nothing was closed; "
+                        f"all {len(targets)} question(s) stay open.",
+                        err=True,
+                    )
+                    raise typer.Exit(3)
             try:
                 event = operator_question_closed(
                     question_id=qid, answer=answer, closed_by=closed_by
