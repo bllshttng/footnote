@@ -895,14 +895,15 @@ def cmd_crown(
         ),
     ),
 ) -> None:
-    """Crown an existing session from an attended shell.
+    """Crown an existing session from an attended shell, or from an agent whose
+    own crown strictly contains the requested scope.
 
     Run `fno agents register` inside the target session, then run this command
-    with its printed handle from another terminal. Agent-originated calls are
-    refused; subordinate grants and succession stay on `spawn --crown`. A row
-    already holding a crown is re-scoped rather than refused: the new territory
-    replaces the old in one atomic write, the level is derived from the new
-    scope, and the receipt reports what was vacated.
+    with its printed handle. Same-scope succession stays on `spawn --crown`. A
+    row already holding a crown is re-scoped rather than refused: the new
+    territory replaces the old in one atomic write, the level is derived from
+    the new scope, the registry records the actual grantor, and the receipt
+    reports what was vacated.
     """
     from fno.agents import events
     from fno.agents.crown import CrownPromotionError, promote_existing_session

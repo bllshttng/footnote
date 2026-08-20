@@ -415,13 +415,16 @@ def test_in_place_crown_preserves_every_non_crown_field(tmp_path: Path, monkeypa
     assert after == before
 
 
-def test_agent_originated_in_place_crown_is_refused_without_mutation(
+def test_uncrowned_agent_caller_is_refused_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """An agent caller holding no crown has nothing to hand down - grant_error's
+    uncrowned branch, reached now that identity alone no longer refuses first."""
     from fno.agents.registry import load_registry
 
     caller = _entry(
         "caller",
+        harness="codex",
         harness_session_id="caller-session",
         status="idle",
     )
@@ -437,7 +440,76 @@ def test_agent_originated_in_place_crown_is_refused_without_mutation(
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 2
-    assert "attended shell" in result.output.lower()
+    assert "holds none" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_agent_caller_whose_crown_strictly_contains_scope_is_accepted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: an L1-equivalent caller crowned over a portfolio may re-scope a
+    live subordinate into a project it strictly contains, and the registry
+    records the CALLER as grantor rather than the literal 'human'."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["grantor"] == "caller"
+    row = next(r for r in load_registry() if r.name == "worker")
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        1,
+        "alpha",
+        "caller",
+    )
+
+
+def test_agent_caller_whose_crown_does_not_contain_scope_is_refused_without_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-EDGE: a crown that neither contains nor equals the request is
+    refused, and the registry is not mutated."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=1,
+        crown_scope="beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "neither contains nor equals" in result.output.lower()
     assert [asdict(row) for row in load_registry()] == before
 
 
@@ -918,6 +990,39 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_succession_by_an_agent_caller_still_refuses_on_the_live_holder_scan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: grant_error's succession branch accepts an equal scope, but
+    the caller is itself a live holder of that scope, so the one-live-crown
+    scan still refuses - unchanged - naming its three ways out."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "already held" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_in_place_crown_canonicalizes_a_portfolio_and_derives_its_level(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -948,7 +1053,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert result.exit_code == 0, result.output
     assert "attended shell" in result.output.lower()
     assert "fno agents register" in result.output
-    assert "another terminal" in result.output.lower()
+    assert "strictly contains" in result.output.lower()
     assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output

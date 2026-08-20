@@ -384,29 +384,30 @@ class CrownPromotionError(RuntimeError):
 
 
 def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
-    """Grant a crown to one existing row from an attended human shell.
+    """Grant a crown to one existing row from an attended human shell, or from
+    an agent whose own crown strictly contains the requested scope.
 
-    This is deliberately not a general crown writer. Agent-to-agent grants and
-    same-scope succession stay on ``spawn --crown``; this function only closes
-    the human workflow where the useful target session already exists.
+    Same-scope succession stays on ``spawn --crown``; this function closes the
+    human workflow and the in-place re-scope of a live subordinate, where the
+    useful target session already exists.
 
     A row that already holds a crown is re-scoped, not refused: the new
     territory replaces the old in the one write below, and the receipt reports
     what was vacated. The live-holder check is the guard that matters here - it
     is what keeps two rows from ruling the same territory.
     """
-    caller = calling_agent_row()
-    if caller is not None:
-        raise CrownPromotionError(
-            "in-place coronation must run from an attended shell with no ambient "
-            "agent identity. Run `fno agents register` in the target session, "
-            "then run this crown command from another terminal."
-        )
-
     try:
         level, scope = resolve_crown(scopes)
     except CrownScopeError as exc:
         raise CrownPromotionError(str(exc)) from exc
+
+    # Resolved before update_registry, never inside _stamp: this reads the
+    # registry itself and the closure runs under its lock.
+    caller = calling_agent_row()
+    denial = grant_error(scope, caller)
+    if denial is not None:
+        raise CrownPromotionError(denial)
+    grantor = "human" if caller is None else caller.name
 
     from fno.agents.registry import (
         AgentResolutionError,
@@ -486,14 +487,14 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                     row,
                     crown_level=level,
                     crown_scope=scope,
-                    crown_grantor="human",
+                    crown_grantor=grantor,
                 )
                 break
         receipt.update(
             crowned=target.name,
             level=level,
             scope=scope,
-            grantor="human",
+            grantor=grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
         )
