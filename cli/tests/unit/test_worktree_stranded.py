@@ -130,6 +130,17 @@ def test_unresolved_node_is_unknown_not_stranded():
     assert row.klass == UNKNOWN
 
 
+def test_graph_read_failure_reason_outranks_node_unresolved():
+    """A code-review finding: sweep() always resolves node/node_entry to
+    (None, None) when graph_ok is False (an empty entries_by_id makes node
+    resolution fail too), so the two conditions co-occur in the one real
+    case that matters. Reporting "node unresolved" there would hide the
+    actual failed leg the stranded_sweep event exists to surface."""
+    row = classify(**_base_kwargs(node=None, node_entry=None, graph_ok=False))
+    assert row.klass == UNKNOWN
+    assert row.facts["reason"] == "read failed: graph"
+
+
 def test_resolved_id_with_no_graph_row_is_unknown():
     """A directory/branch shaped like a node id whose id no longer exists in
     the graph (deleted, archived) must not fall through to STRANDED."""

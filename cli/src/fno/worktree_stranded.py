@@ -95,16 +95,20 @@ def classify(
     if unpushed == 0:
         return Row(CLEAN, node, unpushed, age, facts)
 
-    if node is None or node_entry is None:
-        return Row(UNKNOWN, node, unpushed, age, {**facts, "reason": "node unresolved"})
-
     if not (unpushed_ok and graph_ok and registry_ok):
+        # Checked before "node unresolved": a graph read failure also empties
+        # entries_by_id, so resolve_node_id necessarily returns (None, None)
+        # too - reporting "node unresolved" in that case would hide the real,
+        # more specific failure this event exists to surface.
         failed = [
             name
             for name, ok in (("git", unpushed_ok), ("graph", graph_ok), ("fleet", registry_ok))
             if not ok
         ]
         return Row(UNKNOWN, node, unpushed, age, {**facts, "reason": f"read failed: {','.join(failed)}"})
+
+    if node is None or node_entry is None:
+        return Row(UNKNOWN, node, unpushed, age, {**facts, "reason": "node unresolved"})
 
     # LIVE outranks every node-status read below it, not just PR_OPEN: a
     # code-review finding caught that a node auto-transitioning to "done" or
@@ -183,7 +187,7 @@ def resolve_node_id(
 # --- git input: one verified fetch per process, then per-path rev-list -
 
 
-def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool]]:
+def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
     """path -> (unpushed_count, ok, age). Shells to the shared
     ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh) rather than a
     second implementation of its fail-toward-keep contract. All paths run in
