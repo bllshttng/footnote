@@ -57,6 +57,11 @@ name: review-coverage-gate
 # `fno-agents review-coverage` verb, and `fno pr merge` - are what post
 # success. This workflow is the half they cannot do: reacting to pushes made
 # from somewhere other than the reviewing machine.
+#
+# The status is a projection of the local computed verdict, never a latch.
+# `fno pr status` corrects an existing status when the two disagree; a green
+# with zero reviewed evidence or a red with fresh covered evidence is a bug in
+# a local publisher path, not accepted skew for this workflow to preserve.
 
 on:
   pull_request:
