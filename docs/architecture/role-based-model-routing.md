@@ -124,18 +124,33 @@ The stage table reaches **every** spawn that carries a slash-verb seed, includin
 `skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile.
 An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
 
-```yaml
-config:
-  agents:
-    profiles:
-      blueprint:
-        model: opus               # the think/blueprint stage on the primary model
-      target:
-        route: "zai/glm-5.3[1m]"  # the delivery stage on the routed vendor
-        effort: high
+```toml
+[agents]
+pane_group_max = 4
+
+[agents.profiles.blueprint]
+model = "opus"
+
+[[agents.profiles.target.lanes]]
+provider = "codex"
+effort = "high"
+substrate = "pane"
+permission_mode = "yolo"
+pane_group = "codex"
+
+[[agents.profiles.target.lanes]]
+provider = "claude"
+route = "zai/glm-5.3[1m]"
+substrate = "bg"
 ```
 
+When a profile has `lanes`, the live-worker count chooses the round-robin start. Selection then skips forward past a routed vendor already at `agents.max_lanes`. If every lane is capped, or the provider count is incomplete, the spawn refuses rather than billing an unintended lane. Two escapes narrow that refusal, and neither weakens the skip. A command line can name its own lane with `--harness`, `-P` or `--route`. That spawn is not spending a capped vendor's budget, so it continues with no lane applied. `FNO_SPAWN_GATE=0`, the admission bypass, never blocks a spawn either. Substrate and `permission_mode` ride the lane, not the profile. The Claude/GLM lane can use `bg`, and the Codex lane needs a pane.
+
+`pane_group` is injected as `fno agents spawn --tab <group>` on pane lanes. Placement happens AFTER the spawn, never before it. The pane reports its own squad, and the tab list is read scoped to that squad. The pane's own tab then joins the first `<group>`, `<group>-2`, ... tab below `pane_group_max`. If none has room, its tab takes the next sibling name instead. A group cannot combine with `--split`/`--at`. The pane then sits in a tab it does not own. The move takes that tab's other panes with it. The read-then-act is deliberately not globally serialized, so concurrent spawns can briefly overfill a tab. Placement never changes the worker route.
+
 The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
+
+`fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 
 ## `fno route` - legibility + on-the-fly switching
 

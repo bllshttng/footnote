@@ -46,6 +46,7 @@ from fno.agents.dispatch import (
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
+from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.registry import (
@@ -474,6 +475,7 @@ def tier3_pane_tokens(
     provider: str,
     *,
     add_dir: Optional[str] = None,
+    computed_dirs: Sequence[str] = (),
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
@@ -483,7 +485,10 @@ def tier3_pane_tokens(
     disallowedTools). Fail-closed per cell: a set flag with no equivalent for
     ``provider`` raises before spawn - never a silent drop. An empty/None value
     is unset (no token). Mirrors the Rust HarnessFlags mapping + the client.rs
-    guard, so pane and bg/headless agree on which cells exist."""
+    guard, so pane and bg/headless agree on which cells exist.
+
+    ``computed_dirs`` is fno's own writable-directory set and is the one cell
+    that degrades instead of raising; see :func:`add_dir_tokens`."""
 
     def unsupported(flag: str) -> "list[str]":
         raise DispatchAskError(
@@ -495,11 +500,7 @@ def tier3_pane_tokens(
     out: list[str] = []
     # --add-dir: claude/codex/agy grant extra write access. opencode --dir SETS
     # cwd (not additive) and gemini is unverified, so both fail closed.
-    if add_dir:
-        if provider in ("claude", "codex", "agy"):
-            out += ["--add-dir", add_dir]
-        else:
-            unsupported("--add-dir")
+    out += add_dir_tokens(provider, add_dir, computed_dirs, unsupported=unsupported)
     # --agent: claude and opencode select a sub-agent by name.
     if agent:
         if provider in ("claude", "opencode"):
@@ -1140,7 +1141,16 @@ def build_pane_argv(
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
     tier3 = tier3_pane_tokens(
-        provider, add_dir=add_dir, agent=agent, tools=tools, deny_tools=deny_tools
+        provider,
+        add_dir=add_dir,
+        # fno's own state directories. Computed here, at the ONE pane funnel, so
+        # the claude/codex/agy arms below cannot disagree about which spawn gets
+        # the grant. Without it a bounded worker cannot write ~/.fno/claims, so
+        # it holds no claim and the graph reads free while it works.
+        computed_dirs=worker_writable_dirs(cwd),
+        agent=agent,
+        tools=tools,
+        deny_tools=deny_tools,
     )
     if provider == "claude":
         # `claude --session-id <uuid> [message]`: the pinned session id makes
@@ -1181,9 +1191,11 @@ def build_pane_argv(
         if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
             # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
             # whenever a hook is new or changed, and the approvals bypass
-            # above does not clear it. `submit_keys` is unsupported for
-            # codex, so fno cannot answer the modal by keystroke - this flag
-            # is the only lever. Sandboxed postures never opt in. Gated on
+            # above does not clear it. Answering it by keystroke would need a
+            # modal-specific response mapping, which no harness declares - the
+            # `submit_keys` contract submits a composed turn and says nothing
+            # about a modal. So this flag is the only lever. Sandboxed
+            # postures never opt in. Gated on
             # the installed version: an older codex's clap parser rejects an
             # unrecognized flag outright, and an older codex predates the
             # modal anyway, so omitting the flag there costs nothing.
@@ -1529,13 +1541,217 @@ def _run_mux(
         ) from exc
     except subprocess.TimeoutExpired as exc:
         # The EFFECTIVE timeout, not the module default: the binding-loop probes
-        # pass a 2s bound, so naming 30s here would be a diagnostics lie in the
-        # one subsystem this change exists to make truthful.
+        # pass a 2s bound, so naming 30s here would be a diagnostics lie.
         effective = _MUX_SUBPROCESS_TIMEOUT_S if timeout is None else timeout
         raise DispatchAskError(
             f"fno mux did not answer within {effective}s ({' '.join(args[:3])}...)",
             exit_code=1,
         ) from exc
+
+
+def _pane_group_max() -> int:
+    try:
+        from fno.config import load_settings
+
+        return max(1, int(load_settings().agents.pane_group_max))
+    except Exception:
+        return 4
+
+
+def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
+    """Split a ``--tab`` value into a placement selector and a pane-group name.
+
+    An explicit selector the operator typed (``active``/``new``/``id:``/``name:``
+    /an ordinal) rides the placement path untouched: they named a target, and fno
+    has nothing to resolve. A bare name is a GROUP, and a group is placed after
+    the spawn rather than before it - see :func:`place_pane_in_group_tab`.
+    """
+    if (
+        requested in {"active", "new"}
+        or requested.startswith(("id:", "name:"))
+        or requested.isdigit()
+    ):
+        return requested, None
+    return None, requested
+
+
+def _pane_own_squad_and_tab(
+    session: str,
+    pane_id: int,
+    group: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[int, int]:
+    """The squad and tab the spawned pane ACTUALLY landed in, read from itself.
+
+    ``PaneInfo`` carries both, so the pane names its own squad and there is
+    nothing to predict.
+    """
+    panes = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
+    try:
+        rows = json.loads(panes.stdout or "[]") if panes.returncode == 0 else []
+        row = next(
+            item
+            for item in rows
+            if isinstance(item, dict) and item.get("pane_id") == pane_id
+        )
+        return int(row["squad_id"]), int(row["tab_id"])
+    except (StopIteration, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(
+            f"pane group {group!r}: pane {pane_id} was created but reports no "
+            f"resolvable squad/tab id",
+            exit_code=1,
+        ) from exc
+
+
+def _group_tab_rows(
+    session: str,
+    squad_id: int,
+    group: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> dict[str, dict]:
+    """Tabs in the squad the pane landed in, keyed by name.
+
+    Scoped with ``--workspace id:<squad_id>`` and never unscoped. An unscoped
+    ``tab ls`` resolves ``CurrentRoute``, which on the tab verbs means the squad
+    the operator happens to be LOOKING at - while the pane run resolved the same
+    token by CWD. Two defaults for one token is what put panes at one squad and
+    the tabs read for them at another.
+    """
+    listed = _run_mux(
+        [
+            "mux", "tab", "ls",
+            "--session", session,
+            "--workspace", f"id:{squad_id}",
+            "--json",
+        ],
+        runner,
+    )
+    if listed.returncode != 0:
+        detail = (listed.stderr or listed.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"cannot resolve pane group {group!r}: mux tab ls failed: {detail}",
+            exit_code=1,
+        )
+    try:
+        rows = json.loads(listed.stdout or "[]")
+        if not isinstance(rows, list):
+            raise ValueError("tab list is not an array")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(
+            f"cannot resolve pane group {group!r}: unparseable tab list",
+            exit_code=1,
+        ) from exc
+    by_name: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        # Bound once and checked once: the comprehension form called .get twice
+        # and left the key typed `Any | None`, so nothing tied the isinstance
+        # guard to the value actually used as the key.
+        if isinstance(name, str):
+            by_name[name] = row
+    return by_name
+
+
+def place_pane_in_group_tab(
+    session: str,
+    pane_id: int,
+    group: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    """Put a freshly spawned pane into its group tab. Act, then place.
+
+    The old shape pre-read ``tab ls`` to PREDICT where the pane would land, then
+    placed it with ``--tab``. The prediction was the wrong half: the pane run
+    resolves its squad from the spawn's cwd and the tab verbs resolve theirs from
+    the operator's gaze, so three panes asking for one tab landed on three.
+
+    Here every read is keyed on a pane that already exists. The pane names its own
+    squad; the tab read is scoped to that squad; and ``tab join`` derives its
+    squad from the anchor pane, so the join is scope-correct by construction
+    rather than by guessing correctly. Prefer construction over prediction.
+
+    Cost, stated rather than hidden: the pane is visible in its own tab for the
+    moment between the spawn and the join, and two concurrent spawns can both see
+    room and land one pane over ``pane_group_max``. An over-full tab is cosmetic;
+    a global spawn lock costs more than it buys.
+    """
+    squad_id, own_tab = _pane_own_squad_and_tab(session, pane_id, group, runner)
+    by_name = _group_tab_rows(session, squad_id, group, runner)
+    max_panes = _pane_group_max()
+    suffix = 1
+    while True:
+        name = group if suffix == 1 else f"{group}-{suffix}"
+        row = by_name.get(name)
+        if row is None:
+            _rename_own_tab(session, squad_id, own_tab, name, runner)
+            return
+        if row.get("tab_id") == own_tab:
+            return
+        pane_ids = row.get("pane_ids")
+        # A join needs an ANCHOR pane inside the group tab, so a row with no
+        # usable pane list cannot be a target whatever its count says. `TabInfo`
+        # always serializes `pane_ids`, so the empty case is defensive against a
+        # malformed row rather than a shape the server produces - advancing to
+        # the next sibling is the safe read, not a claim the tab is full.
+        if isinstance(pane_ids, list) and 0 < len(pane_ids) < max_panes:
+            _join_own_tab(session, own_tab, int(pane_ids[0]), name, runner)
+            return
+        suffix += 1
+
+
+def _join_own_tab(
+    session: str,
+    own_tab: int,
+    anchor_pane: int,
+    name: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    """Fold the pane's own tab into the group tab, anchored on a pane inside it.
+
+    No squad argument: ``tab_join`` reads the anchor pane's squad itself, which is
+    the whole reason this path cannot land in the wrong one.
+    """
+    joined = _run_mux(
+        [
+            "mux", "tab", "join",
+            "--session", session,
+            "--src", f"id:{own_tab}",
+            "--at", str(anchor_pane),
+            "--dir", "right",
+        ],
+        runner,
+    )
+    if joined.returncode != 0:
+        detail = (joined.stderr or joined.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"pane group tab join into {name!r} failed: {detail}", exit_code=1
+        )
+
+
+def _rename_own_tab(
+    session: str,
+    squad_id: int,
+    own_tab: int,
+    name: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    renamed = _run_mux(
+        [
+            "mux", "tab", "rename",
+            "--session", session,
+            "--workspace", f"id:{squad_id}",
+            "--tab", f"id:{own_tab}",
+            "--name", name,
+        ],
+        runner,
+    )
+    if renamed.returncode != 0:
+        detail = (renamed.stderr or renamed.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"pane group tab rename to {name!r} failed: {detail}", exit_code=1
+        )
 
 
 def _reap_spawned_pane(
@@ -2437,6 +2653,7 @@ def dispatch_spawn_pane(
     squad: Optional[str] = None,
     split: Optional[str] = None,
     at: Optional[str] = None,
+    tab: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     provenance: Optional[dict[str, str]] = None,
@@ -2611,6 +2828,26 @@ def dispatch_spawn_pane(
         effective_message = message
 
     session = resolve_mux_session(session)
+    tab_selector: Optional[str] = None
+    pane_group: Optional[str] = None
+    if tab:
+        tab_selector, pane_group = _resolve_group_tab(tab)
+        if pane_group and (split or at):
+            # Act-then-place moves the pane's OWN tab into the group. With
+            # --split or --at the pane lands inside a tab it does not own, so
+            # that move would drag the operator's unrelated panes into the
+            # delivery group and inflate the pane_group_max count against them.
+            # An explicit selector still composes: it places before the spawn
+            # and never moves a tab.
+            raise DispatchAskError(
+                f"--tab {tab!r} is a pane GROUP, which is placed by moving the "
+                "pane's own tab. It cannot combine with --split/--at, which put "
+                "the pane in a tab it does not own; the move would take that "
+                "tab's other panes with it. Pass an explicit --tab "
+                "active|new|id:<n>|name:<s> to place into a specific tab, or "
+                "drop --split/--at to use the group.",
+                exit_code=2,
+            )
     # Resolve the monitor BEFORE the argv build. happy OWNS the claude session
     # id: claudeLocal() extracts `--session-id` out of the caller's argv and only
     # re-adds it on its `!hookSettingsPath` branch, which a normal `happy` launch
@@ -2731,6 +2968,8 @@ def dispatch_spawn_pane(
             placement_args += ["squad", squad]
         if split:
             placement_args += ["split", split]
+        if tab_selector:
+            placement_args += ["--tab", tab_selector]
         if at:
             # `--at current` (or a numeric anchor) rides the outer pane-run
             # transport before the `--` fence. Python forwards the token
@@ -2777,11 +3016,20 @@ def dispatch_spawn_pane(
         # seeds the pane-run transport (and, at server birth, the mux server
         # that spawns pane shells) - popped after this snapshot is too late.
         spawn_trigger = _capture_spawn_trigger()
-        proc = _run_mux(
-            run_args,
-            runner,
-            env={**os.environ, "FNO_MUX_SHELL_INTEGRATION": _shell_integration()},
-        )
+        # The writable-dir grant must NOT ride this snapshot. The pane lane
+        # already carries it in the argv above, and the comment right here says
+        # the mux server latches this env at birth - so leaving it in would pin
+        # THIS spawn's directory list onto every later pane shell on the server,
+        # handing a worker in another project a grant computed for this one.
+        # The seam publishes it on os.environ for the Rust route, which is a
+        # different process; this is where the pane lane declines it.
+        from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+
+        pane_env = {
+            k: v for k, v in os.environ.items() if k != WORKER_ADD_DIRS_ENV
+        }
+        pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
+        proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
         if proc.returncode == _MUX_CONTROL_UNANSWERED:
@@ -2837,6 +3085,29 @@ def dispatch_spawn_pane(
                     f"{session}'",
                     exit_code=1,
                 ) from exc
+
+        if pane_group is not None:
+            try:
+                place_pane_in_group_tab(session, pane_id, pane_group, runner)
+            except (DispatchAskError, TypeError, ValueError) as exc:
+                # TypeError/ValueError are in the net because `int(pane_ids[0])`
+                # sits inside this call: a malformed row - the exact case the
+                # guard there calls itself defensive against - would otherwise
+                # escape as an unhandled exception and take down the receipt and
+                # the registry row for a cosmetic placement step.
+                #
+                # Do NOT reap. The pane was created with the seed already in its
+                # argv, so by this point the worker is live and may have started
+                # work. Grouping is cosmetic by this function's own account (it
+                # accepts an over-full tab rather than serialize spawns), and a
+                # transient `tab ls` non-zero or a `tab join` race is not worth
+                # killing a running worker over. The pane stays in its own tab
+                # and the operator gets a named line.
+                print(
+                    f"fno agents spawn: pane {pane_id} left in its own tab; "
+                    f"grouping into {pane_group!r} failed: {exc}",
+                    file=sys.stderr,
+                )
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
         from fno.agents.spawn_gate import _process_start_time

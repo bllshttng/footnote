@@ -74,8 +74,11 @@ def test_claude_pane_permission_mode_passthrough():
     assert "--dangerously-skip-permissions" not in argv
 
 
-def test_claude_pane_yolo_maps_to_bypass_permissions():
+def test_claude_pane_yolo_maps_to_bypass_permissions(monkeypatch):
     """AC4-HP: claude --yolo now means bypassPermissions (was a no-op)."""
+    # About the PERMISSION axis; the writable-dir grant is neutralized here and
+    # asserted by name in test_writable_dirs.py.
+    monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
     argv = build_pane_argv("claude", "hi", CWD, True, "uuid", None)
     assert argv[-4:] == ["--permission-mode", "bypassPermissions", "--", "hi"]
 

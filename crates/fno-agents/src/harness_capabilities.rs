@@ -233,11 +233,19 @@ impl HarnessContract {
             {
                 return Err(field_error(harness, "submit_keys", "invalid key token"));
             }
-            if caps.send_keys_enter_delay_ms == 0 && caps.submit_keys != ["unsupported"] {
+            // A lane that never submits must not carry a delay: the number
+            // would describe a wait nothing performs. The CONVERSE does not
+            // hold and was asserted here until codex disproved it. A supported
+            // contract may legitimately need no wait - measured against codex
+            // 0.148.0, a carriage return sent immediately after the text
+            // submits correctly, while claude needs 800ms. Kept identical to
+            // the Python validator in cli/src/fno/agents/harness_map.py so the
+            // two runtimes cannot disagree about which contracts are legal.
+            if caps.submit_keys == ["unsupported"] && caps.send_keys_enter_delay_ms != 0 {
                 return Err(field_error(
                     harness,
                     "send_keys_enter_delay_ms",
-                    "zero requires an unsupported submit contract",
+                    "an unsupported submit contract cannot carry a nonzero delay",
                 ));
             }
             let lanes: BTreeSet<&str> = caps
@@ -457,7 +465,11 @@ mod tests {
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);
-        assert_eq!(codex.submit_keys, ["unsupported"]);
+        // codex submits on a carriage return like claude, with no wait after
+        // the text (measured against codex 0.148.0). claude's 800ms is a claude
+        // measurement and is not inherited.
+        assert_eq!(codex.submit_keys, ["enter"]);
+        assert_eq!(codex.send_keys_enter_delay_ms, 0);
         assert_eq!(
             opencode.permission_response["deny"].keys,
             ["right", "right", "enter"]
@@ -507,6 +519,14 @@ mod tests {
             (
                 "send_keys_enter_delay_ms = 800",
                 "send_keys_enter_delay_ms = -1",
+                "send_keys_enter_delay_ms",
+            ),
+            // An unsupported submit contract carrying a delay: a number
+            // describing a wait nothing performs. gemini is the first
+            // `unsupported` block in the file, so replacen hits it.
+            (
+                "send_keys_enter_delay_ms = 0\nsubmit_keys = [\"unsupported\"]",
+                "send_keys_enter_delay_ms = 42\nsubmit_keys = [\"unsupported\"]",
                 "send_keys_enter_delay_ms",
             ),
             (

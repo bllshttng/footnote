@@ -211,6 +211,149 @@ def check_worktree_policy() -> list[str]:
     return problems
 
 
+def _detected_harness() -> str:
+    """Best-effort name of the harness running this shell, for the remedy line.
+
+    Delegates to the canonical tables in :mod:`fno.harness_identity` rather than
+    listing markers here. A second copy drifted immediately: the first version of
+    this function checked ``CLAUDE_SESSION_ID``, which is the LEGACY marker, and
+    never ``CLAUDE_CODE_SESSION_ID``, which is what a live claude session
+    actually sets. A real claude session therefore fell through to the ambient
+    tier, where a ``CODEX_HOME`` exported in the shell profile - ordinary on a
+    machine that runs both - answered "codex" and pointed the remedy at the wrong
+    settings file.
+
+    Session-scoped markers are consulted first, then the legacy spellings, then
+    ambient vars that merely survive a fork. Only the ambient tier is local: it
+    is a remedy-line nicety, not an identity decision, so it does not belong in
+    the resolver's own precedence.
+    """
+    import os
+
+    from fno.harness_identity import (
+        HARNESS_SESSION_MARKERS,
+        LEGACY_HARNESS_SESSION_MARKERS,
+    )
+
+    ambient = (
+        ("CLAUDECODE", "claude"),
+        ("CLAUDE_CONFIG_DIR", "claude"),
+        ("CODEX_HOME", "codex"),
+    )
+    for env, name in (
+        *HARNESS_SESSION_MARKERS,
+        *LEGACY_HARNESS_SESSION_MARKERS,
+        *ambient,
+    ):
+        if os.environ.get(env):
+            return name
+    return ""
+
+
+_REMEDY = {
+    "claude": (
+        "add the state root to permissions.additionalDirectories in your "
+        "~/.claude/settings.json"
+    ),
+    "codex": (
+        "add the state root to sandbox_workspace_write.writable_roots in your "
+        "~/.codex/config.toml, or run this session on a bypass posture"
+    ),
+    "agy": "grant the state root write access in your agy settings",
+    "opencode": (
+        "opencode's --dir SETS the working directory rather than adding one, so "
+        "launch this session from a root that contains the state directory"
+    ),
+}
+
+
+def check_state_root_writable() -> list[str]:
+    """Probe whether THIS session can write the claim store, by writing to it.
+
+    A per-spawn ``--add-dir`` grant (:mod:`fno.agents.writable_dirs`) cannot reach
+    a session the operator started by hand, or one that joined by ``/fno-me``: the
+    first session on any machine does not come from ``fno agents spawn``. So the
+    grant needs an advisory half, and this is it.
+
+    Do NOT infer the answer by parsing each harness's settings file. Doctor runs
+    INSIDE the hand-started session, so it IS the sample: create a real file in
+    the claim store and remove it. That is a positive marker rather than an
+    absence, and an absence has two explanations - unwritable, and the probe
+    never ran. It costs one temp file.
+
+    Advises and never writes to any settings file (operator ruling d-926a2b90).
+    """
+    import os
+    import tempfile
+
+    # A diagnostic must not create the state it reports on. FNO_TEST_MODE runs
+    # in sandboxes with no writable $HOME, where this probe would fail doctor
+    # for a reason unrelated to the user's config.
+    if os.environ.get("FNO_TEST_MODE") == "1":
+        return []
+    try:
+        from fno.claims.io import claims_dir, global_claims_root
+
+        store = claims_dir(global_claims_root())
+    except Exception as exc:
+        return [f"could not resolve the claim store: {exc}"]
+    # Probe the STORE, creating it if absent. An earlier version walked up to the
+    # nearest existing ancestor to avoid creating state from a diagnostic, and
+    # that answered about the wrong directory: a session sandboxed to its cwd but
+    # able to write $HOME passed, while the message still named the store. The
+    # creation is what a worker does on its first claim anyway, it is idempotent,
+    # and a mkdir that fails is itself the answer.
+    try:
+        store.mkdir(parents=True, exist_ok=True)
+        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(store))
+        os.close(fd)
+        os.unlink(probe_path)
+    except OSError as exc:
+        harness = _detected_harness()
+        remedy = _REMEDY.get(harness, "grant this session write access to the state root")
+        who = f" (detected harness: {harness})" if harness else ""
+        return [
+            f"the claim store at {store} is not writable by this session{who}: "
+            f"{exc.strerror or exc}. A worker here takes no node claim, so "
+            f"`fno claim status` reports free while it works and a second worker "
+            f"can be dispatched onto the same node. Remedy: {remedy}."
+        ]
+    return []
+
+
+def check_agent_profiles(settings: object) -> list[str]:
+    """Report stage lanes that cannot launch with their resolved posture."""
+    from fno.agents.spawn_defaults import _substrate_compatible
+
+    agents = getattr(settings, "agents", None)
+    if agents is None:
+        return []
+    defaults = getattr(agents, "defaults", None)
+    profiles = getattr(agents, "profiles", {}) or {}
+
+    def value(obj: object, key: str) -> str:
+        raw = obj.get(key, "") if isinstance(obj, dict) else getattr(obj, key, "")
+        return raw.strip() if isinstance(raw, str) else ""
+
+    problems: list[str] = []
+    for verb, profile in profiles.items():
+        lanes = getattr(profile, "lanes", [])
+        targets = (
+            [(lane, f"agents.profiles.{verb}.lanes[{index}]") for index, lane in enumerate(lanes)]
+            if isinstance(lanes, list) and lanes
+            else [(profile, f"agents.profiles.{verb}")]
+        )
+        for target, path in targets:
+            provider = value(target, "provider") or value(profile, "provider") or value(defaults, "provider")
+            substrate = value(target, "substrate") or value(profile, "substrate") or value(defaults, "substrate")
+            if provider and substrate and not _substrate_compatible(substrate, provider):
+                problems.append(
+                    f"{path}.substrate = {substrate!r} is incompatible with "
+                    f"resolved provider {provider!r}"
+                )
+    return problems
+
+
 def run_doctor() -> int:
     """Run the doctor diagnostic. Returns 0 if clean, non-zero on errors or suspicious paths."""
     import os
@@ -311,7 +454,24 @@ def run_doctor() -> int:
             print(f"  - {reason}")
         print("\nValid policy values: never | harness-native | external.")
 
-    if errors or issues or cap_problems or wt_problems:
+    profile_problems = check_agent_profiles(s)
+    if profile_problems:
+        print(f"\n[doctor] {len(profile_problems)} agent-profile issue(s):")
+        for reason in profile_problems:
+            print(f"  - {reason}")
+        print("\nSet a substrate each lane's resolved provider can actually launch.")
+
+    store_problems = check_state_root_writable()
+    if store_problems:
+        print(f"\n[doctor] {len(store_problems)} state-root write issue(s):")
+        for reason in store_problems:
+            print(f"  - {reason}")
+        print(
+            "\nfno prints this line and never edits a harness settings file; the "
+            "grant is yours to make."
+        )
+
+    if errors or issues or cap_problems or wt_problems or profile_problems or store_problems:
         return 1
 
     print("\n[doctor] OK; no suspicious paths detected.")

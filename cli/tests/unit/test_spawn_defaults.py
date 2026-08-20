@@ -15,7 +15,7 @@ from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 class _Defaults:
     def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
-                 route="", account=""):
+                 route="", account="", pane_group="", lanes=None):
         self.provider = provider
         self.model = model
         self.effort = effort
@@ -23,15 +23,39 @@ class _Defaults:
         self.permission_mode = permission_mode
         self.route = route
         self.account = account
+        self.pane_group = pane_group
+        self.lanes = [
+            _Defaults(**lane) if isinstance(lane, dict) else lane
+            for lane in (lanes or [])
+        ]
 
 
 class _Settings:
-    def __init__(self, profiles=None, model_routing=None, **kw):
+    def __init__(self, profiles=None, model_routing=None, max_lanes=None, **kw):
         # profiles: {verb: {field: value}} -> {verb: _Defaults}
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
-        self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
+        self.agents = type(
+            "A",
+            (),
+            {
+                "defaults": _Defaults(**kw),
+                "profiles": prof,
+                "max_lanes": max_lanes or {},
+            },
+        )()
         # a real ModelRoutingBlock so resolve_route can resolve a lane.
         self.model_routing = model_routing
+
+
+def _lane(harness: str, **fields: object) -> dict:
+    """A lanes[] entry keyed by the AXIS the value actually is.
+
+    The schema spells the harness axis ``provider``, matching its
+    ``agents.defaults``/``agents.profiles`` siblings, but the value is a
+    HARNESS and not a vendor. One adapter keeps every lane in this file reading
+    in the right vocabulary.
+    """
+    return {"provider": harness, **fields}
 
 
 def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
@@ -344,6 +368,154 @@ def test_ac3_hp_namespace_stripped_key():
         assert out[out.index("--model") + 1] == "fable", seed
 
 
+def test_profile_lanes_round_robin_from_live_row_count(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    lanes = [
+        _lane("codex", effort="high", substrate="pane", permission_mode="yolo"),
+        _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+    ]
+    for live_count, expected_harness, expected_rung in (
+        (0, "codex", "lanes[0]"),
+        (1, "claude", "lanes[1]"),
+        (2, "codex", "lanes[0]"),
+        (3, "claude", "lanes[1]"),
+    ):
+        monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda n=live_count: [object()] * n)
+        err = io.StringIO()
+        out = _inject(
+            ["spawn", "--name", f"w{live_count}", "/fno:target x-1"],
+            err=err,
+            profiles={"target": {"lanes": lanes}},
+        )
+        assert out[out.index("--harness") + 1] == expected_harness
+        assert expected_rung in err.getvalue()
+
+
+def test_profile_lanes_skip_capped_vendor(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [object()])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            _lane("codex", permission_mode="yolo"),
+            _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "zai lane skipped at 2 of 2" in err.getvalue()
+    assert "agents.profiles.target.lanes[0]" in err.getvalue()
+
+
+def test_profile_only_lane_at_cap_refuses(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
+    # contract is that it never BLOCKS a spawn - so it disables exactly the
+    # refusal under test here. Opt back in, or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            max_lanes={"zai": 2},
+            profiles={"target": {"lanes": [
+                _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+            ]}},
+        )
+    assert exc.value.code == 2
+    assert "zai" in err.getvalue() and "2 of 2" in err.getvalue()
+
+
+def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
+    # contract is that it never BLOCKS a spawn - so it disables exactly the
+    # refusal under test here. Opt back in, or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(
+        spawn_gate,
+        "provider_live_count",
+        lambda vendor: (_ for _ in ()).throw(spawn_gate.ProviderCountUnavailable("registry incomplete")),
+    )
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            max_lanes={"zai": 2},
+            profiles={"target": {"lanes": [
+                _lane("claude", route="zai/glm-5.3[1m]"),
+            ]}},
+        )
+    assert exc.value.code == 2
+    assert "registry incomplete" in err.getvalue()
+
+
+def test_profile_lane_unknown_harness_refuses(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "/fno:target x-1"],
+            err=err,
+            profiles={"target": {"lanes": [_lane("banana")]}},
+        )
+    assert exc.value.code == 2
+    assert "agents.profiles.target.lanes[0].provider" in err.getvalue()
+
+
+def test_profile_lane_injects_pane_group(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {"lanes": [{
+            "provider": "codex",
+            "substrate": "pane",
+            "permission_mode": "yolo",
+            "pane_group": "codex",
+        }]}},
+    )
+    assert out[out.index("--tab") + 1] == "codex"
+    assert "agents.profiles.target.lanes[0].pane_group" in err.getvalue()
+
+
+def test_explicit_tab_wins_over_profile_pane_group(monkeypatch):
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    out = _inject(
+        ["spawn", "--name", "w", "--tab", "name:manual", "/fno:target x-1"],
+        profiles={"target": {"lanes": [{
+            "provider": "codex",
+            "substrate": "pane",
+            "permission_mode": "yolo",
+            "pane_group": "codex",
+        }]}},
+    )
+    assert out.count("--tab") == 1
+    assert out[out.index("--tab") + 1] == "name:manual"
+
+
 def test_ac4_err_incompatible_config_substrate_degrades_open():
     # bg on a codex-resolved spawn: no --substrate injected, warning names it.
     err = io.StringIO()
@@ -364,7 +536,7 @@ def test_ac5_err_unknown_profile_provider_fails_closed():
     with pytest.raises(SystemExit) as exc:
         _inject(
             ["spawn", "--name", "w", "/target x-1"], err=err,
-            profiles={"target": {"provider": "banana"}},
+            profiles={"target": _lane("banana")},
         )
     assert exc.value.code == 2
     assert "agents.profiles.target.provider" in err.getvalue()
@@ -374,7 +546,7 @@ def test_ac5_err_nonmatching_seed_spawns_normally_under_bad_profile():
     # The same bad-provider profile does NOT fire for a /think seed.
     out = _inject(
         ["spawn", "--name", "w", "/think x"],
-        profiles={"target": {"provider": "banana"}},
+        profiles={"target": _lane("banana")},
     )
     assert out == ["spawn", "--name", "w", "/think x"]
 
@@ -827,7 +999,7 @@ def test_ac1_hp_receipt_names_harness_axis_not_provider_field():
     err = io.StringIO()
     _inject(
         ["spawn", "--name", "w", "/fno:target x-1"], err=err,
-        profiles={"target": {"provider": "codex", "effort": "high"}},
+        profiles={"target": _lane("codex", effort="high")},
     )
     msg = err.getvalue()
     assert "harness=codex (agents.profiles.target.provider)" in msg
@@ -843,7 +1015,7 @@ def test_ac2_hp_route_collision_refused_before_injection_dash_p_form():
         _inject(
             ["spawn", "--name", "t-x3ab0", "-P", "zai", "--model", "glm-5.3",
              "--substrate", "bg", "/fno:target x-1"],
-            err=err, profiles={"target": {"provider": "codex"}},
+            err=err, profiles={"target": _lane("codex")},
         )
     assert exc.value.code == 2
     msg = err.getvalue()
@@ -861,7 +1033,7 @@ def test_ac2_hp_route_collision_names_explicit_route_flag_not_dash_p():
     with pytest.raises(SystemExit) as exc:
         _inject(
             ["spawn", "--name", "w", "--route", "zai/glm-5.3", "/fno:target x-1"],
-            err=err, profiles={"target": {"provider": "codex"}},
+            err=err, profiles={"target": _lane("codex")},
         )
     assert exc.value.code == 2
     msg = err.getvalue()
@@ -873,7 +1045,7 @@ def test_ac4_edge_bare_vendor_no_model_is_not_route_shaped():
     # AC4-EDGE: -P with no --model is not yet a route; no collision refusal.
     out = _inject(
         ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],
-        profiles={"target": {"provider": "codex"}},
+        profiles={"target": _lane("codex")},
     )
     assert "--harness" in out and out[out.index("--harness") + 1] == "codex"
 
@@ -882,7 +1054,7 @@ def test_ac2_hp_route_shaped_but_profile_harness_is_claude_no_refusal():
     # The profile's harness CAN carry the route: no cross-axis collision.
     out = _inject(
         ["spawn", "--name", "w", "-P", "zai", "--model", "glm-5.3", "/fno:target x-1"],
-        profiles={"target": {"provider": "claude"}},
+        profiles={"target": _lane("claude")},
     )
     assert "--harness" in out and out[out.index("--harness") + 1] == "claude"
 
@@ -891,7 +1063,7 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
     # Per-field explicit-wins matrix: an explicit flag survives, the differing
     # profile value appears nowhere in the final argv, for every field.
     cases = [
-        (["--harness", "codex"], {"provider": "claude"}, "claude"),
+        (["--harness", "codex"], _lane("claude"), "claude"),
         (["--model", "explicit-model"], {"model": "profile-model"}, "profile-model"),
         (["--harness", "claude", "--effort", "high"], {"effort": "low"}, "low"),
         (["--substrate", "pane"], {"substrate": "bg"}, "bg"),
@@ -1280,3 +1452,224 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
             },
         )
     ]
+
+
+def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch):
+    """A cap names a VENDOR's concurrency. A caller who typed --harness codex is
+    not spending the capped zai lane's budget, so refusing that spawn stops work
+    the cap was never about."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--harness", "codex", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            _lane("claude", route="zai/glm-5.3[1m]", substrate="bg"),
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "already names the lane" in err.getvalue()
+    # The lane's other fields must not ride in either: no lane was applied.
+    assert "--substrate" not in out or out[out.index("--substrate") + 1] != "bg"
+
+
+def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
+    """FNO_SPAWN_GATE=0 is the admission escape and its contract is that it never
+    blocks a spawn. Cap-SKIPPING still runs: steering onto a free lane blocks
+    nothing, and dropping it would send every bypassed spawn at a saturated
+    vendor."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+
+    # Two lanes, one capped: the free lane is still chosen rather than refused.
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            _lane("claude", route="zai/glm-5.3[1m]"),
+            _lane("codex"),
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "zai lane skipped at 2 of 2" in err.getvalue()
+
+    # Only lane capped: no refusal under the bypass.
+    err2 = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err2,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            _lane("claude", route="zai/glm-5.3[1m]"),
+        ]}},
+    )
+    assert "FNO_SPAWN_GATE=0" in err2.getvalue()
+
+
+def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
+    """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
+    test builds objects, which take the getattr branch, so the Mapping-only
+    unknown-field and non-string refusals were never executed."""
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        spawn_defaults._validated_lanes(
+            [_lane("claude", nonsense="x")], "agents.profiles.target.lanes", err
+        )
+    assert exc.value.code == 2
+    assert "unknown field 'nonsense'" in err.getvalue()
+
+    err2 = io.StringIO()
+    with pytest.raises(SystemExit) as exc2:
+        spawn_defaults._validated_lanes(
+            [{"provider": 7}], "agents.profiles.target.lanes", err2
+        )
+    assert exc2.value.code == 2
+    assert "must be a string" in err2.getvalue()
+
+    err3 = io.StringIO()
+    with pytest.raises(SystemExit) as exc3:
+        spawn_defaults._validated_lanes([{}], "agents.profiles.target.lanes", err3)
+    assert exc3.value.code == 2
+    assert "is empty" in err3.getvalue()
+
+
+def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
+    """dispatch hard-refuses a pane group beside --split/--at. That refusal is
+    right for a group the operator TYPED and wrong for one config injected: it
+    would fail-close a spawn on a value the caller never asked for."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--split", "right", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "--split" in err.getvalue()
+    # The rest of the lane still applies; only the group was dropped.
+    assert out[out.index("--harness") + 1] == "codex"
+
+
+def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch):
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out[out.index("--tab") + 1] == "codex"
+
+
+def test_config_pane_group_degrades_open_beside_once(monkeypatch):
+    """cli.py refuses placement on `substrate != "pane" OR once`, so a one-shot
+    spawn has no pane geometry even though its substrate resolves to pane. The
+    injected group must skip there too, or it fail-closes a spawn on a value the
+    caller never typed."""
+    err = io.StringIO()
+    # --once alone resolves the substrate to headless, which the substrate
+    # branch already catches. The gap is an EXPLICIT --substrate pane beside it:
+    # eff_substrate is then "pane" and only the --once scan can skip the group.
+    out = _inject(
+        ["spawn", "--name", "w", "--substrate", "pane", "--once", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "--once" in err.getvalue()
+
+
+def test_config_pane_group_survives_a_fenced_provider_argv(monkeypatch):
+    """`spawn ... -- claude --at 3` names a SEED token, not an fno flag. Scanning
+    raw argv would drop the config's pane_group and blame a flag the caller never
+    passed to fno."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1", "--", "claude", "--at", "3"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out[out.index("--tab") + 1] == "codex"
+    assert "pane group skipped" not in err.getvalue()
+
+
+def test_config_pane_group_defers_to_a_valueless_trailing_tab(monkeypatch):
+    """A value read answers None for a trailing bare `--tab`, so injecting beside
+    it puts TWO --tab tokens in the argv and click fails the spawn on the
+    operator's own flag."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1", "--tab"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out.count("--tab") == 1
+
+
+def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
+    """click accepts `-xdown`. Missing that spelling let a real placement flag
+    read as absent, inject the group, and then hit the hard refusal on a value
+    the operator never typed."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "-xdown", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "-x" in err.getvalue()
+
+
+def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
+    """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
+    not spending a capped lane's budget. Both this function's docstring and the
+    shipped routing doc promise -P alongside --harness."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            _lane("claude", route="zai/glm-5.3[1m]"),
+        ]}},
+    )
+    assert "already names the lane" in err.getvalue()
+    assert out  # the spawn continues rather than exiting 2
+
+
+def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
+    """A lane is a COMPLETE routing coordinate. Per-field fallback let a codex
+    lane inherit the profile's zai route, producing `--harness codex --route
+    zai/...` in one argv, which cli.py refuses outright."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {
+            "route": "zai/glm-5.3[1m]",
+            "lanes": [_lane("codex")],
+        }},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "--route" not in out

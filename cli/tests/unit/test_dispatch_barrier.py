@@ -10,6 +10,7 @@ worker launches.
 from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
+import os
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
@@ -96,7 +97,7 @@ def test_barrier_catches_peer_after_acquire(monkeypatch, tmp_path):
         return {"key": key, "state": "live", "holder": "target-session:PEER"}
 
     monkeypatch.setattr("fno.claims.core.claim_status", status)
-    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: SimpleNamespace(holder="ME"))
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: SimpleNamespace(holder="ME", pid=os.getpid()))
     r = runner.invoke(agents_app, ["spawn-guard", "N", "--holder", "ME", "--ttl", "3m", "--json"])
     v = _last_json(r.output)
     assert v["verdict"] == "already-running"
@@ -114,7 +115,7 @@ def test_barrier_passes_when_holder_is_ours(monkeypatch, tmp_path):
             else {"key": key, "state": "live", "holder": "ME"}
         ),
     )
-    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: SimpleNamespace(holder="ME"))
+    monkeypatch.setattr("fno.claims.core.acquire_claim", lambda *a, **k: SimpleNamespace(holder="ME", pid=os.getpid()))
     r = runner.invoke(agents_app, ["spawn-guard", "N", "--holder", "ME", "--ttl", "3m", "--json"])
     assert _last_json(r.output)["verdict"] == "dispatchable"
 
@@ -146,7 +147,7 @@ def test_reservation_precedes_dispatchable(monkeypatch, tmp_path):
 
     def acq(*a, **k):
         order.append(("acquire", a[0] if a else k.get("key")))
-        return SimpleNamespace(holder="ME")
+        return SimpleNamespace(holder="ME", pid=os.getpid())
 
     monkeypatch.setattr("fno.claims.core.claim_status", status)
     monkeypatch.setattr("fno.claims.core.acquire_claim", acq)

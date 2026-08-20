@@ -367,6 +367,36 @@ def rust_runtime_enabled() -> bool:
     return runtime_mode() == "rust"
 
 
+
+#: Verbs other than `spawn` that build a worker argv and therefore need the
+#: writable-dir grant published before the route/fork.
+_WORKER_DIR_VERBS = ("resume", "ask", "revive", "wake")
+
+
+def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
+    """Publish fno's computed writable-dir set for the Rust spawn route.
+
+    Best-effort: a failure here must never break a spawn, and the worst case is
+    the pre-existing behavior (no grant), not a broken launch.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.agents.writable_dirs import export_worker_writable_dirs
+
+        from fno.agents.spawn_defaults import _flag_value
+
+        # `_flag_value` stops at the `--argv` payload and the bare `--` seed
+        # fence, and knows the `-c` short spelling plus the glued `-c<value>`
+        # form click accepts. A hand-rolled scan missed both: it read `--cwd`
+        # only, so `spawn -c /other/repo` computed the grant for the CALLER's
+        # directory, and it ran past the fence, so `spawn w -- codex --cwd /x`
+        # read a provider token as fno's flag.
+        cwd = _flag_value(list(args), "--cwd", "-c")
+        export_worker_writable_dirs(Path(cwd) if cwd else Path.cwd(), os.environ)
+    except Exception:
+        pass  # ponytail: a grant we cannot compute must never block the spawn
+
 def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` targeting the ``pane`` substrate (4a-G2).
 
@@ -1014,6 +1044,22 @@ def make_agents_group_cls() -> type:
                     from fno.agents.spawn_defaults import inject_spawn_defaults
 
                     args = inject_spawn_defaults(args)
+                    # Same seam, same reason as the account handling below: the
+                    # writable-dir grant must cover BOTH runtimes. The Python
+                    # token builders only ever see the pane substrate, because
+                    # the carve-out above keeps just that lane in Python; every
+                    # other spawn execs the Rust binary, which builds the
+                    # harness argv itself. Publishing on the env is what reaches
+                    # that binary (os.execv inherits it).
+                    _export_worker_dirs_at_seam(args)
+                elif verb in _WORKER_DIR_VERBS:
+                    # resume/ask reach the SAME argv builders as spawn on the
+                    # bounded codex lane, where `writable_roots` is a whole-value
+                    # override. Publishing only for `spawn` left the resume grant
+                    # inert: the readers run in this process, and the variable was
+                    # never set here. One seam, every verb that can launch a
+                    # worker.
+                    _export_worker_dirs_at_seam(args)
                     # Same seam, same reason: these must see the post-defaults
                     # args and must cover BOTH runtimes, so they run here rather
                     # than in either spawn implementation. The pick runs FIRST so

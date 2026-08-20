@@ -222,7 +222,26 @@ def git_writable_config_args(cwd: Path) -> list[str]:
     """
     import json
 
-    roots = [root for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd)) if root]
+    # The state root rides here too, and it MUST: `writable_roots` is a
+    # whole-value override, so a roots list that omits ~/.fno leaves a resumed
+    # bounded worker unable to create its claim lockfile. It then holds no claim
+    # and the graph reads that node free while it runs. The create lane grants it
+    # through `--add-dir`; this is the same grant on the lane resume takes.
+    #
+    # READ the seam-published value rather than recomputing: the Rust mirror of
+    # this builder cannot run the resolver, so it reads the env. Computing here
+    # would emit a different roots list from the same inputs whenever the
+    # variable is unset, and the argv-parity tests would (correctly) fail.
+    from fno.agents.writable_dirs import published_worker_writable_dirs
+
+    roots = [
+        root
+        for root in (_git_common_dir(cwd), _resolve_plan_dir(cwd))
+        if root
+    ]
+    for extra in published_worker_writable_dirs():
+        if extra not in roots:
+            roots.append(extra)
     if not roots:
         return []
     return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"]
@@ -769,7 +788,23 @@ def create(
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
     # x-b6e2: a user --add-dir grants extra write access on `codex exec`
     # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
-    add_dir_args = ["--add-dir", add_dir] if add_dir else []
+    # The computed set rides the same cell through the shared decision, so the
+    # headless lane grants the state root exactly as the pane lane does. It is
+    # emitted on EVERY posture, bypass included: codex accepts --add-dir
+    # alongside --dangerously-bypass-approvals-and-sandbox (verified against
+    # codex 0.148.0), and one unconditional rule cannot be wrong about a posture
+    # the way a per-posture matrix can.
+    from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+
+    def _unreachable(flag: str) -> object:  # pragma: no cover - codex maps --add-dir
+        raise AssertionError(f"codex has no {flag} mapping")
+
+    add_dir_args = add_dir_tokens(
+        "codex",
+        add_dir,
+        worker_writable_dirs(cwd),
+        unsupported=_unreachable,
+    )
     # The bounded sandbox refuses git metadata writes; grant the git common dir
     # so the worker can actually commit. Full yolo is already unsandboxed.
     git_args = [] if eff_yolo else git_writable_args(cwd)

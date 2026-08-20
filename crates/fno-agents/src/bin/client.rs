@@ -1062,9 +1062,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             return Some(2);
         }
     }
+    // fno's computed writable-dir set, published by the Python spawn seam. A
+    // worker that cannot write ~/.fno takes no node claim, and the graph then
+    // reads that node free while it works. Read once here so every lane below
+    // carries it.
+    let state_dirs = fno_agents::claude_ask::state_dirs_from_env();
     // The claude-only bundle, resolved once for both claude lanes.
     let claude_flags = fno_agents::claude_ask::HarnessFlags {
         add_dir,
+        state_dirs: &state_dirs,
         agent,
         allowed_tools: tools,
         disallowed_tools: deny_tools,

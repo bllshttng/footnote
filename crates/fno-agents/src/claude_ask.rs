@@ -791,6 +791,12 @@ fn head_chars(s: &str, n: usize) -> String {
 #[derive(Clone, Copy, Default)]
 pub struct HarnessFlags<'a> {
     pub add_dir: Option<&'a str>,
+    /// fno's own computed writable-directory set, published by the Python spawn
+    /// seam on `FNO_WORKER_ADD_DIRS` (see `fno.agents.writable_dirs`). Emitted
+    /// as one repeated `--add-dir` per entry, AFTER the operator's own grant so
+    /// theirs leads. Empty on every lane whose provider has no additive cell,
+    /// and on any spawn the seam could not compute a set for.
+    pub state_dirs: &'a [String],
     pub agent: Option<&'a str>,
     pub allowed_tools: Option<&'a str>,
     pub disallowed_tools: Option<&'a str>,
@@ -812,7 +818,25 @@ impl<'a> HarnessFlags<'a> {
                 argv.push(v.to_string());
             }
         }
+        for dir in self.state_dirs.iter().filter(|d| !d.is_empty()) {
+            argv.push("--add-dir".to_string());
+            argv.push(dir.clone());
+        }
     }
+}
+
+/// Read the seam-published writable-dir set. Empty when unset, so a spawn that
+/// did not pass through the Python seam builds today's argv byte-for-byte.
+pub fn state_dirs_from_env() -> Vec<String> {
+    std::env::var("FNO_WORKER_ADD_DIRS")
+        .ok()
+        .map(|raw| {
+            raw.split(if cfg!(windows) { ';' } else { ':' })
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Render the argv for `claude --bg` (`_build_argv`). When `use_stdin`, the
@@ -3461,9 +3485,46 @@ mod tests {
     // fixed order (--add-dir, --agent, --allowedTools, --disallowedTools), riding
     // after --effort and before the message. Empty/None fields are omitted. This
     // token order must match the Python _build_argv (AC2-EDGE parity).
+
+    // The seam-published set rides the SAME repeatable flag, after the
+    // operator's own grant. Without this the bg lane - the substrate the shipped
+    // stage table uses for its own delivery lane - launches a worker that cannot
+    // write the claim store, so the graph reads that node free while
+    // it works.
+    #[test]
+    fn build_argv_appends_the_seam_published_state_dirs() {
+        let dirs = vec!["/home/u/.fno".to_string(), "/vault/plans".to_string()];
+        let flags = HarnessFlags {
+            state_dirs: &dirs,
+            add_dir: Some("/work"),
+            ..Default::default()
+        };
+        let argv = build_argv("a", "hi", false, None, None, None, flags);
+        let pairs: Vec<(&String, &String)> = argv
+            .iter()
+            .zip(argv.iter().skip(1))
+            .filter(|(f, _)| f.as_str() == "--add-dir")
+            .collect();
+        let granted: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
+        // The operator's grant leads; it composes rather than being replaced.
+        assert_eq!(granted, vec!["/work", "/home/u/.fno", "/vault/plans"]);
+    }
+
+    // An unset env is today's argv byte-for-byte, so a spawn that never passed
+    // through the Python seam is unchanged.
+    #[test]
+    fn state_dirs_from_env_is_empty_when_unset() {
+        // Not asserted against the live env (a parallel test could set it);
+        // the empty-slice path is what every other test here already exercises.
+        let flags = HarnessFlags::default();
+        let argv = build_argv("a", "hi", false, None, None, None, flags);
+        assert!(!argv.iter().any(|t| t == "--add-dir"));
+    }
+
     #[test]
     fn build_argv_appends_harness_flags() {
         let flags = HarnessFlags {
+            state_dirs: &[],
             add_dir: Some("/work"),
             agent: Some("reviewer"),
             allowed_tools: Some("Read,Edit"),
@@ -3490,6 +3551,7 @@ mod tests {
         );
         // A partially-filled bundle emits only the set fields (empty == unset).
         let only_dir = HarnessFlags {
+            state_dirs: &[],
             add_dir: Some("/work"),
             allowed_tools: Some(""),
             ..Default::default()

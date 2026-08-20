@@ -39,7 +39,7 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 from fno.agents.harnesses._claude_session_registry import (
     TERMINAL_STATES,
@@ -52,6 +52,7 @@ from fno.agents.harnesses._claude_session_registry import (
     roster_live,
 )
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
+from fno.agents.writable_dirs import worker_writable_dirs
 from fno.claims import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.io import global_claims_root
 
@@ -159,20 +160,41 @@ def _tier3_tokens(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    computed_dirs: "Sequence[str]" = (),
 ) -> list[str]:
     """x-b6e2: claude's own spellings for the Tier-3 passthrough flags, in a fixed
     order (--add-dir/--agent/--allowedTools/--disallowedTools), skipping empty.
     claude-only (the fail-closed for other providers lives at the CLI/client
-    guard); kept identical to the Rust HarnessFlags::push_onto for argv parity."""
-    out: list[str] = []
+    guard); kept identical to the Rust HarnessFlags::push_onto for argv parity.
+
+    ``computed_dirs`` is fno's own writable-directory set. It rides the SAME
+    decision the pane funnel uses (:func:`fno.agents.writable_dirs.add_dir_tokens`)
+    rather than a second copy of it here: a claude worker with no grant for the
+    state root fails to write the claim store exactly as a codex one does. The
+    repository ships no ``.claude/settings.json``, so a fresh user's claude
+    worker has no ``permissions.additionalDirectories`` to mask it."""
+    from fno.agents.writable_dirs import add_dir_tokens
+
+    def _unreachable(flag: str) -> object:  # pragma: no cover - claude maps every cell
+        raise AssertionError(f"claude has no {flag} mapping")
+
+    # Order matches the Rust HarnessFlags::push_onto exactly: the operator's
+    # own --add-dir, then --agent/--allowedTools/--disallowedTools, then the
+    # computed set last. The parity claim in this docstring is only true if the
+    # INTERLEAVING matches too, and nothing catches a drift here - the Rust test
+    # filters to --add-dir pairs and the Python parity assertions pass cwd=None,
+    # so the computed half is empty on both sides of every existing comparison.
+    out: list[str] = add_dir_tokens(
+        "claude", add_dir, (), unsupported=_unreachable
+    )
     for flag, value in (
-        ("--add-dir", add_dir),
         ("--agent", agent),
         ("--allowedTools", tools),
         ("--disallowedTools", deny_tools),
     ):
         if value:
             out += [flag, value]
+    out += add_dir_tokens("claude", None, computed_dirs, unsupported=_unreachable)
     return out
 
 
@@ -189,6 +211,7 @@ def _build_argv(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     settings_path: Optional[str] = None,
+    cwd: Optional[Path] = None,
 ) -> list[str]:
     """Render the argv list for ``claude --bg``.
 
@@ -211,6 +234,10 @@ def _build_argv(
     of starting fresh. Spawn-only: the Rust ask-hop ``build_argv`` never resumes,
     so this flag is deliberately outside the parity set; unset means today's argv
     byte-for-byte.
+
+    ``cwd`` is what computes fno's writable-directory grant; ``bg_create`` always
+    passes it. It stays optional so the argv-parity assertions above can compare
+    model/resume spellings without a machine-dependent grant in every expectation.
     """
     from fno.agents.harness_map import render_session_argv
 
@@ -230,7 +257,13 @@ def _build_argv(
     if effort:
         argv += ["--effort", effort]
     # x-b6e2: Tier-3 passthrough, same order as the Rust build_argv (parity).
-    argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
+    argv += _tier3_tokens(
+        add_dir,
+        agent,
+        tools,
+        deny_tools,
+        computed_dirs=worker_writable_dirs(cwd) if cwd else (),
+    )
     if model:
         argv += ["--model", model]
     argv += identity[1:]
@@ -370,7 +403,9 @@ def headless_create(
     if effort:
         argv += ["--effort", effort]
     # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
-    argv += _tier3_tokens(add_dir, agent, tools, deny_tools)
+    argv += _tier3_tokens(
+        add_dir, agent, tools, deny_tools, computed_dirs=worker_writable_dirs(cwd)
+    )
     if output_format:
         argv += ["--output-format", output_format]
     # Behind `--` like every other claude seed: a leading-flag seed must be
@@ -563,6 +598,7 @@ def bg_create(
         tools=tools,
         deny_tools=deny_tools,
         settings_path=settings_path,
+        cwd=cwd,
     )
 
     # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls

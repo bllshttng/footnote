@@ -153,13 +153,42 @@ def test_mux_pane_send_uses_the_target_harness_submit_delay(monkeypatch) -> None
     assert fake.calls[1][0][fake.calls[1][0].index("--text") + 1] == "\r"
 
 
-def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(monkeypatch) -> None:
+@pytest.mark.parametrize("harness", ["gemini", "agy", "opencode"])
+def test_mux_pane_send_refuses_unpinned_submit_contract_without_writing(
+    harness: str, monkeypatch
+) -> None:
+    """A harness with no pinned submit contract is refused BEFORE any pane bytes.
+
+    codex used to stand in for "unpinned" here and no longer can: its contract is
+    pinned to ["enter"], measured against 0.148.0. The three that remain are
+    unpinned because nothing has been measured for them, not because their panes
+    are known to be unreachable.
+    """
     from fno.agents.dispatch import _mux_pane_send
 
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
-    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi") is False
+    assert _mux_pane_send(_mux_entry("muxed", harness), "hi") is False
     assert fake.calls == []
+
+
+def test_mux_pane_send_delivers_to_a_codex_pane(monkeypatch, capsys) -> None:
+    """The correction this node exists for: mail REACHES a codex pane. It landed
+    in the composer and was never submitted, because a capability table refused
+    the lane before the transport was tried. With submit_keys pinned, the text
+    and the carriage return both go."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    assert _mux_pane_send(_mux_entry("muxed", "codex"), "hi") is True
+
+    verbs = [call[0][3] for call in fake.calls]
+    assert "send" in verbs
+    # The carriage return actually rides: without it the message renders under
+    # "tab to queue message" and sits there unsent.
+    written = "".join((call[1] or "") + " ".join(call[0]) for call in fake.calls)
+    assert "\r" in written
 
 
 def test_control_socket_inject_passes_the_same_contract_delay(monkeypatch) -> None:
@@ -372,14 +401,17 @@ def test_ask_mux_dead_pane_raises_transport_error(
 def test_ask_mux_codex_row_also_rides_pane_send(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """An unpinned Codex submit contract refuses before any pane bytes."""
+    """A codex mux row rides pane send, as the name always said it should.
+
+    It previously refused, because [harness.codex] declared
+    submit_keys = ["unsupported"]. That was a declaration, not a measurement.
+    """
     use_tmpdir(monkeypatch, tmp_path)
     _seed(_mux_entry(name="cmux", provider="codex"))
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
 
-    from fno.agents.dispatch import DispatchAskError, dispatch_ask
+    from fno.agents.dispatch import dispatch_ask
 
-    with pytest.raises(DispatchAskError, match="mux pane send"):
-        dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
-    assert fake.calls == []
+    dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
+    assert [call[0][3] for call in fake.calls], "the pane lane must be tried"

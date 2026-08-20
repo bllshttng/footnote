@@ -94,6 +94,17 @@ pub fn build_argv_once(
         argv.push("--add-dir".to_string());
         argv.push(d.to_string());
     }
+    // fno's computed writable-dir set, published by the Python spawn seam.
+    // Without it a worker on this lane cannot write ~/.fno/claims, so it takes
+    // no node claim and the graph reads free while it works. Emitted after the
+    // operator's own grant so theirs leads; empty when the seam published none.
+    for dir in crate::claude_ask::state_dirs_from_env() {
+        if dir.is_empty() {
+            continue;
+        }
+        argv.push("--add-dir".to_string());
+        argv.push(dir);
+    }
     argv.extend(agy_yolo_flags());
     if let Some(m) = model {
         if !m.is_empty() {

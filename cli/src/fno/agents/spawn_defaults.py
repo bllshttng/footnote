@@ -39,7 +39,7 @@ _VALUE_FLAGS = frozenset(
         "--from", "--cwd", "-c",
         "--message", "--session-id", "--cc-session-id", "--channel-id", "--status",
         "--from-name", "--timeout", "-t", "--mode", "--substrate", "--permission-mode",
-        "--output-format", "--monitor",
+        "--output-format", "--monitor", "--tab",
     }
 )
 
@@ -102,7 +102,7 @@ _SUBSTRATES = ("pane", "bg", "headless")
 _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
     {
         "--role", "--resume", "-r", "--add-dir", "--agent", "--tools",
-        "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x",
+        "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--node", "--slug", "--plan", "--name",
         # x-6de8: --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
@@ -324,14 +324,14 @@ def _mint_node_name(
     return name
 
 
-def _read_registry_names() -> Set[str]:
-    """Live worker names for the autogen pre-check. Best-effort: {} on any error."""
+def _read_registry_rows() -> list[object]:
+    """Registry rows shared by name minting and profile-lane selection."""
     try:
         from fno.agents.registry import load_registry
 
-        return {e.name for e in load_registry()}
+        return list(load_registry())
     except Exception:
-        return set()
+        return []
 
 
 def normalize_spawn_args(
@@ -483,7 +483,11 @@ def normalize_spawn_args(
     # session display name) and must not suppress fno's own name mint (x-1caa).
     head = toks if fence is None else toks[:fence]
     if not any(t == "--name" or t.startswith("--name=") for t in head):
-        names = existing_names if existing_names is not None else _read_registry_names()
+        names = (
+            existing_names
+            if existing_names is not None
+            else {str(getattr(e, "name", "")) for e in _read_registry_rows()}
+        )
         # x-b80d: a node-driven spawn carries what an operator remembers. The
         # name is the registry row's ONLY node carrier, so a nodeless mint makes
         # the row unfindable by node or slug. Mint ``t-<node>-<slug>-<model>``
@@ -712,6 +716,151 @@ def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> 
         return False
 
 
+_LANE_FIELDS = frozenset(
+    {"provider", "model", "effort", "substrate", "permission_mode", "route", "account", "pane_group"}
+)
+
+
+def _lane_value(lane: object, name: str) -> str:
+    value = lane.get(name, "") if isinstance(lane, Mapping) else getattr(lane, name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _validated_lanes(raw: object, path: str, err: IO[str]) -> list[object]:
+    if raw in (None, []):
+        return []
+    if not isinstance(raw, list) or not raw:
+        print(f"fno agents spawn: config.{path} must be a non-empty list", file=err)
+        raise SystemExit(2)
+    for index, lane in enumerate(raw):
+        lane_path = f"{path}[{index}]"
+        if not isinstance(lane, Mapping) and not hasattr(lane, "provider"):
+            print(f"fno agents spawn: config.{lane_path} must be a table", file=err)
+            raise SystemExit(2)
+        if isinstance(lane, Mapping):
+            unknown = sorted(set(lane) - _LANE_FIELDS)
+            if unknown:
+                print(
+                    f"fno agents spawn: config.{lane_path} has unknown field {unknown[0]!r}",
+                    file=err,
+                )
+                raise SystemExit(2)
+            for key, value in lane.items():
+                if not isinstance(value, str):
+                    print(
+                        f"fno agents spawn: config.{lane_path}.{key} must be a string; got {value!r}",
+                        file=err,
+                    )
+                    raise SystemExit(2)
+        if not any(_lane_value(lane, key) for key in _LANE_FIELDS):
+            print(f"fno agents spawn: config.{lane_path} is empty", file=err)
+            raise SystemExit(2)
+    return list(raw)
+
+
+def _lane_vendor(lane: object) -> Optional[str]:
+    route = _lane_value(lane, "route")
+    if not route:
+        return None
+    normalized = route.replace(",", "/")
+    vendor, sep, _model = normalized.partition("/")
+    return vendor.strip() if sep and vendor.strip() else None
+
+
+def _select_profile_lane(
+    profile: object,
+    verb: str,
+    agents: object,
+    err: IO[str],
+    *,
+    explicit_lane: bool = False,
+) -> tuple[Optional[object], Optional[int]]:
+    """Pick the delivery lane for ``verb`` by round-robin, skipping a capped vendor.
+
+    ``explicit_lane`` says the caller already named the lane on the command line
+    (``--harness``/``-P``/``--route``). It changes ONLY the all-capped terminal.
+    A cap names a VENDOR's concurrency, and a caller who typed
+    ``--harness codex`` is not spending a capped zai lane's budget, so refusing
+    that spawn stops work the cap was never about. With a lane named, the
+    all-capped case degrades to no-lane and the profile/defaults rungs answer.
+    With no lane named, the refusal stands: that terminal is the operator ruling
+    this function exists to carry.
+    """
+    import os
+
+    path = f"agents.profiles.{verb}.lanes"
+    lanes = _validated_lanes(getattr(profile, "lanes", []), path, err)
+    if not lanes:
+        return None, None
+
+    from fno.agents.registry import TERMINAL_STATUSES
+    from fno.agents.spawn_gate import ProviderCountUnavailable, provider_live_count
+
+    live_rows = [
+        row
+        for row in _read_registry_rows()
+        if getattr(row, "status", "live") not in TERMINAL_STATUSES
+    ]
+    start = len(live_rows) % len(lanes)
+    caps = dict(getattr(agents, "max_lanes", {}) or {})
+    # FNO_SPAWN_GATE=0 is the documented operator/test bypass for live-slot
+    # admission (spawn_gate.run_gate), and its contract is that it never BLOCKS
+    # a spawn. This seam counts the same live rows, so it honors the same
+    # escape - but only on the refusing terminals below. Cap-SKIPPING still
+    # runs: steering a spawn onto a free lane blocks nothing, and dropping it
+    # under the bypass would send every test spawn at a saturated vendor.
+    gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
+    blocked: list[tuple[str, int, int]] = []
+    for offset in range(len(lanes)):
+        index = (start + offset) % len(lanes)
+        lane = lanes[index]
+        vendor = _lane_vendor(lane)
+        cap = caps.get(vendor) if vendor else None
+        if vendor is None or cap is None:
+            # A lane with no routed vendor has no cap to be at. The `vendor is
+            # None` arm is what the guard below actually relies on: it was
+            # implied by `cap is None` and invisible to the type checker, which
+            # is how `provider_live_count(vendor)` came to take a `str | None`.
+            return lane, index
+        try:
+            current = provider_live_count(vendor)
+        except ProviderCountUnavailable as exc:
+            if gate_bypassed:
+                print(
+                    f"fno agents spawn: config.{path}[{index}] provider count "
+                    f"unavailable for {vendor}: {exc}; FNO_SPAWN_GATE=0, so the "
+                    "lane is taken uncapped",
+                    file=err,
+                )
+                return lane, index
+            print(
+                f"fno agents spawn: config.{path}[{index}] provider count unavailable "
+                f"for {vendor}: {exc}; refusing; no worker launched",
+                file=err,
+            )
+            raise SystemExit(2) from exc
+        if current < cap:
+            return lane, index
+        blocked.append((vendor, current, cap))
+        print(f"fno agents spawn: {vendor} lane skipped at {current} of {cap}", file=err)
+
+    details = ", ".join(f"{vendor} {current} of {cap}" for vendor, current, cap in blocked)
+    if explicit_lane or gate_bypassed:
+        why = (
+            "the command line already names the lane"
+            if explicit_lane
+            else "FNO_SPAWN_GATE=0"
+        )
+        print(
+            f"fno agents spawn: every configured lane is at cap ({details}); "
+            f"{why}, so no lane value is applied and the spawn continues",
+            file=err,
+        )
+        return None, None
+    print(f"fno agents spawn: every configured lane is at cap ({details}); refusing; no worker launched", file=err)
+    raise SystemExit(2)
+
+
 # A model string's implied vendor, by prefix or tier word. A pure string
 # opinion and never a routing input: the warning it drives is advisory, because
 # the pairing is legal and --model is deliberate passthrough (cli.py).
@@ -879,9 +1028,46 @@ def inject_spawn_defaults(
     # unknown-provider refusal all run once, on the merged fields.
     verb = _profile_key(_seed_of(out[1:]))
     profile = (getattr(agents, "profiles", None) or {}).get(verb) if verb else None
+    lane: Optional[object] = None
+    lane_index: Optional[int] = None
+    if profile is not None and verb is not None:
+        # Scanned BEFORE lane selection: an all-capped refusal must know whether
+        # the caller named the lane themselves, and that fact lives in the argv.
+        # -P/--provider counts: it names the VENDOR, which is the axis a cap is
+        # about, so a caller who typed it is not spending a capped lane's budget
+        # either. `_scan`'s provider slot only reads --harness/-H, and both this
+        # function's docstring and the shipped routing doc promise -P as well.
+        _explicit_lane = bool(
+            _scan(out[1:])[0]
+            or _flag_value(list(out[1:]), "--route") is not None
+            or _flag_value(list(out[1:]), "--provider", "-P") is not None
+        )
+        lane, lane_index = _select_profile_lane(
+            profile, verb, agents, err, explicit_lane=_explicit_lane
+        )
+
+    # A lane is a COMPLETE routing coordinate, so the two fields that select
+    # where a worker bills do not fall through to a lower rung when a lane was
+    # chosen. Per-field fallback let a codex-harness lane inherit
+    # `agents.profiles.<verb>.route = "zai/..."`, putting `--harness codex` and
+    # `--route zai/...` in one argv - which cli.py then refuses outright with
+    # "requires the claude harness". That is the exact migration the routing doc
+    # describes: an existing profile-level route plus newly added lanes. The
+    # other fields still fall through, because substrate/permission/account are
+    # postures a lane can legitimately leave to the profile.
+    _LANE_EXCLUSIVE = ("route", "model")
 
     def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung for a field: profile > defaults."""
+        """Effective value + source rung: lane > profile > defaults.
+
+        ``route`` and ``model`` stop at the lane when one was selected; see
+        ``_LANE_EXCLUSIVE`` above."""
+        if lane is not None and lane_index is not None:
+            lv = _lane_value(lane, name)
+            if lv:
+                return lv, f"agents.profiles.{verb}.lanes[{lane_index}]"
+            if name in _LANE_EXCLUSIVE:
+                return "", None
         if profile is not None:
             pv = (getattr(profile, name, "") or "").strip()
             if pv:
@@ -898,9 +1084,10 @@ def inject_spawn_defaults(
     cfg_permission, permission_rung = field("permission_mode")
     cfg_route, route_rung = field("route")
     cfg_account, account_rung = field("account")
+    cfg_pane_group, pane_group_rung = field("pane_group")
     if not (
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
-        or cfg_route or cfg_account
+        or cfg_route or cfg_account or cfg_pane_group
     ):
         _warn_model_vendor_mismatch(out, err, env)
         return out
@@ -1212,6 +1399,71 @@ def inject_spawn_defaults(
                 f"{permission_rung}.permission_mode = {cfg_permission!r} ignored",
                 file=err,
             )
+
+    # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
+    # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
+    # the argv, so click fails the spawn on the operator's own flag. This is the
+    # same presence-not-value rule the conflict scan below states, applied to the
+    # flag the block is actually guarding on.
+    if cfg_pane_group and not _flag_present(out[1:], "--tab"):
+        eff_substrate = explicit_substrate or injected_substrate or "pane"
+        # A pane group places the pane by moving its OWN tab, so dispatch
+        # hard-refuses a group beside --split/--at (the pane then sits in a tab
+        # it does not own). That refusal is right for a group the operator
+        # TYPED and wrong for one this config injected: it would fail-close a
+        # spawn on a value the caller never asked for. Every other
+        # config-sourced field here degrades open with a named line, so this
+        # one does too.
+        # --once/-o is in this list because cli.py refuses placement on
+        # `substrate != "pane" OR once`, so a one-shot spawn has no pane
+        # geometry either even though its substrate resolves to "pane".
+        # PRESENCE, not value: `_flag_value` answers None for a valueless
+        # trailing `--at`, which read as "no conflict" and injected the group,
+        # so dispatch then hard-refused on a flag the caller never typed. A
+        # `--flag=value` spelling has to be matched on its prefix.
+        # Scanned through _spawn_tokens like every other flag read here, so a
+        # fenced provider argv cannot suppress the group: `spawn ... -- claude
+        # --at 3` names a seed token, not an fno flag, and dropping the config's
+        # pane_group over it would blame the caller for a flag they never passed.
+        _placement_flags = ("--split", "-x", "--at", "--once", "-o")
+
+        def _names(tok: str) -> "Optional[str]":
+            for f in _placement_flags:
+                if tok == f or tok.startswith(f + "="):
+                    return f
+                # The glued short form click also accepts (`-xdown`), matched the
+                # same way _flag_value matches `-Pvalue`. Missing it let a real
+                # placement flag read as absent, inject the group, and then hit
+                # the hard refusal on a value the operator never typed.
+                if len(f) == 2 and f[1] != "-" and tok != f and tok.startswith(f):
+                    return f
+            return None
+
+        conflicting = next(
+            (
+                named
+                for _, tok in _spawn_tokens(out[1:])
+                if (named := _names(tok)) is not None
+            ),
+            None,
+        )
+        if eff_substrate != "pane":
+            print(
+                f"fno agents spawn: pane group skipped (resolved substrate "
+                f"{eff_substrate!r} has no pane geometry); "
+                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
+                file=err,
+            )
+        elif conflicting:
+            print(
+                f"fno agents spawn: pane group skipped ({conflicting} places this "
+                f"pane in a tab it does not own, which a group cannot move); "
+                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
+                file=err,
+            )
+        else:
+            inject += ["--tab", cfg_pane_group]
+            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
 
     if from_config:
         # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the

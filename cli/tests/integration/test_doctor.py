@@ -235,6 +235,75 @@ def test_check_worktree_policy_clean(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert check_worktree_policy() == []
 
 
+def test_check_agent_profiles_flags_incompatible_substrate() -> None:
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": _lane("codex", substrate="bg", permission_mode="yolo")}}
+    )
+    problems = check_agent_profiles(settings)
+    assert len(problems) == 1
+    assert "agents.profiles.target.substrate" in problems[0]
+    assert "bg" in problems[0] and "codex" in problems[0]
+
+
+def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            _lane("claude", substrate="bg", route="zai/glm-5.3[1m]"),
+        ]}}}
+    )
+    assert check_agent_profiles(settings) == []
+
+
+def _lane(harness: str, **fields: object) -> dict:
+    """A lanes[] entry, keyed by the AXIS the value actually is.
+
+    The schema spells the harness axis ``provider`` (it matches its
+    ``agents.defaults``/``agents.profiles`` siblings), but the value is a
+    HARNESS, not a vendor. Building it through one adapter keeps the test
+    reading in the right vocabulary, instead of scattering harness literals
+    under a vendor-named key across the file.
+    """
+    return {"provider": harness, **fields}
+
+
+def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
+    """The codex-empty-permission_mode note is gone. Its premise was that the
+    workspace-write sandbox cannot reach ~/.fno, which is exactly what the
+    computed --add-dir grant fixed. A warning that turns doctor red for a
+    working config is worse than no warning."""
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            _lane("codex", substrate="pane"),
+        ]}}}
+    )
+    assert check_agent_profiles(settings) == []
+
+
+def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
+    """The substrate/provider compatibility half stays: bg is claude-only, so a
+    codex lane asking for it cannot launch and doctor should say so."""
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            _lane("codex", substrate="bg"),
+        ]}}}
+    )
+    problems = check_agent_profiles(settings)
+    assert len(problems) == 1
+    assert "substrate" in problems[0] and "codex" in problems[0]
+
+
 def test_check_worktree_policy_flags_out_of_enum(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -315,3 +384,51 @@ def test_check_wip_caps_non_dict_top_level(tmp_path: Path, monkeypatch: pytest.M
     f.write_text("- just\n- a\n- list\n")
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(f))
     assert check_wip_caps() == []
+
+
+def test_state_root_probe_is_quiet_when_the_claim_store_is_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe WRITES to answer, so a pass is a positive marker rather than
+    the absence of an error."""
+    from fno.setup.doctor import check_state_root_writable
+
+    store = tmp_path / ".fno" / "claims"
+    store.mkdir(parents=True)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path)
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: store)
+
+    assert check_state_root_writable() == []
+    # And it cleaned up after itself.
+    assert list(store.iterdir()) == []
+
+
+def test_state_root_probe_names_the_remedy_and_writes_no_settings_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator ruling d-926a2b90: fno advises, it does not edit a harness
+    settings file. The message must name the consequence (a claim that silently
+    never happens) rather than only the errno."""
+    from fno.setup.doctor import check_state_root_writable
+
+    store = tmp_path / "locked" / ".fno" / "claims"
+    store.mkdir(parents=True)
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"untouched": true}')
+    store.chmod(0o500)
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "s-1")
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "locked")
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: store)
+    try:
+        problems = check_state_root_writable()
+    finally:
+        store.chmod(0o700)
+
+    assert len(problems) == 1
+    message = problems[0]
+    assert str(store) in message
+    assert "claude" in message
+    assert "additionalDirectories" in message
+    assert "reports free while it works" in message
+    assert settings.read_text() == '{"untouched": true}'

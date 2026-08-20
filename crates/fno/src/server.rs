@@ -2596,6 +2596,10 @@ impl Core {
                 }
             }
             _ => {
+                // `CurrentRoute` here defaults to the squad owning the spawn's
+                // CWD, not the active/gazed-at squad that `resolve_squad`
+                // (the tab and layout verbs) passes for the same token. Both
+                // defaults are deliberate; the pair is not interchangeable.
                 let current = self.session.find_by_cwd(&squad_key);
                 let dest = self
                     .resolve_placement_target(&placement.target, current)
@@ -4170,6 +4174,15 @@ impl Core {
 
     /// Resolve a [`PaneTarget`] to a squad id, defaulting `CurrentRoute` to the
     /// active squad, for the tab/layout verbs.
+    ///
+    /// The pane-run path passes a DIFFERENT default for the same token: the
+    /// squad owning the spawn's cwd (`find_by_cwd`). So `CurrentRoute` means
+    /// "where the operator is looking" here and "where the work is" there. That
+    /// divergence is intended - a tab verb typed by hand should act on the
+    /// visible squad - but it means a caller who spawns a pane and then reads
+    /// tabs unscoped gets two different squads. Scope such a read with
+    /// `--workspace id:<n>` from the pane's own `squad_id` rather than relying
+    /// on the default.
     fn resolve_squad(&self, target: &PaneTarget) -> Result<u64, (u32, String)> {
         self.resolve_placement_target(target, self.session.active_squad)
             .map_err(|e| (err_code::BAD_REQUEST, e))?

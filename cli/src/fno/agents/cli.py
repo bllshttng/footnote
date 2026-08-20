@@ -1129,6 +1129,15 @@ def cmd_spawn(
             "and --substrate pane."
         ),
     ),
+    tab: str | None = typer.Option(
+        None,
+        "--tab",
+        help=(
+            "Place a pane in a mux tab selector. A bare name is a pane group: "
+            "reuse the first numbered group tab with room, or create the next. "
+            "--substrate pane only."
+        ),
+    ),
     crown: list[str] = typer.Option(
         [],
         "--crown",
@@ -1407,13 +1416,15 @@ def cmd_spawn(
     # x-3e38 pane placement: squad/split name mux geometry, which only the
     # pane substrate has. bg/headless have no pane tree, so the controls are
     # refused fail-closed before any spawn (mirrors the tier-3 guard shape above).
-    placement_requested = squad is not None or split is not None or at is not None
+    placement_requested = (
+        squad is not None or split is not None or at is not None or tab is not None
+    )
     if squad is not None and not squad.strip():
         print("--workspace/-s needs a nonblank workspace name", file=sys.stderr)
         raise typer.Exit(code=2)
     if placement_requested and (substrate != "pane" or once):
         print(
-            "--workspace/-s, --split/-x, and --at apply only to --substrate pane "
+            "--workspace/-s, --split/-x, --at, and --tab apply only to --substrate pane "
             "(bg/headless have no pane geometry)",
             file=sys.stderr,
         )
@@ -1423,6 +1434,9 @@ def cmd_spawn(
             f"--split/-x must be left, right, up, or down (got {split!r})",
             file=sys.stderr,
         )
+        raise typer.Exit(code=2)
+    if tab is not None and not tab.strip():
+        print("--tab needs a nonblank selector or pane-group name", file=sys.stderr)
         raise typer.Exit(code=2)
     if at is not None:
         # `--at current` is the exact-anchor spelling: the mux CLI resolves the
@@ -1888,6 +1902,7 @@ def cmd_spawn(
                     squad=squad,
                     split=split,
                     at=at,
+                    tab=tab,
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     provenance=prov_env,

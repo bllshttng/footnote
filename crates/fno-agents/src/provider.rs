@@ -501,10 +501,20 @@ pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<Str
 /// lanes that must grant roots without also changing the operator's sandbox
 /// mode.
 pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
-    let roots: Vec<String> = [git_common_dir(cwd), plan_content_dir(cwd)]
+    let mut roots: Vec<String> = [git_common_dir(cwd), plan_content_dir(cwd)]
         .into_iter()
         .flatten()
         .collect();
+    // The state root rides here too, and it MUST: `writable_roots` is a
+    // whole-value override, so a list that omits ~/.fno leaves a resumed bounded
+    // worker unable to create its claim lockfile. It then holds no claim and the
+    // graph reads that node free while it runs. The create lane grants the same
+    // set through `--add-dir`.
+    for extra in crate::claude_ask::state_dirs_from_env() {
+        if !extra.is_empty() && !roots.contains(&extra) {
+            roots.push(extra);
+        }
+    }
     if roots.is_empty() {
         return vec![];
     }

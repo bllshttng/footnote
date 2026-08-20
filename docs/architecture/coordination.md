@@ -329,6 +329,28 @@ fno claim status node:ab-thisnode
 # to dispatch. Inspect the holder PID and walker state.
 ```
 
+## The worker must be able to write the claim store
+
+If the worker cannot create the lockfile, the claim is not mutual exclusion. Every harness sandboxes writes to the launch cwd by default. fno's state lives outside it. So a spawned worker on a bounded posture writes nothing and holds no claim. `fno claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any king reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
+
+This is not one harness's problem. codex `workspace-write` is the visible case. A claude worker fails the same way. When a personal `~/.claude/settings.json` grants `permissions.additionalDirectories`, it looks fine on that maintainer's machine. The repository ships no such file, so a fresh clone reproduces it.
+
+**How the grant reaches the worker.** `fno.agents.writable_dirs.worker_writable_dirs()` computes the set per spawn. It passes through the `--add-dir` cell, which already maps natively for claude, codex and agy. fno never writes into a harness settings file (operator ruling `d-926a2b90`). The set is by need, never blanket, because `--add-dir` is a WRITE grant:
+
+| Directory | When |
+|---|---|
+| The state root (`fno.paths.state_dir()`, plus the config-free claims root when an override splits them) | Always. No worker functions without the claim store, the graph and the ledger. |
+| The plan directory | The directory holding this spawn's plan, never the vault above it. A worker writes its plan, not the operator's notes. |
+| Sibling project roots | Only for a multi-repo wave, passed by the caller. |
+
+Four funnels carry it and each is tested on its own lane. Three are Python token builders: the pane builder, claude's bg/headless builder, and codex's headless builder. The fourth is the spawn seam, and it is the one that matters most. `rust_runtime` keeps only the PANE substrate in Python. Every other spawn execs the `fno-agents` binary, which builds the harness argv itself and forwards only the operator's own `--add-dir`. So the three Python builders cover exactly one reachable lane. A `--substrate bg` spawn launched a worker with no write access to the claim store. That is the substrate the shipped stage table uses for its own delivery lane.
+
+The seam publishes the computed set on `FNO_WORKER_ADD_DIRS`, which `os.execv` carries into the binary. An env var carries it rather than a repeated flag. `--add-dir` is scalar in both runtimes: typer types it `str | None`, and the Rust arg parser's `params.insert` overwrites. Widening it on both sides plus its parity mirror buys nothing the env channel does not, and the resolver stays in one language either way. A grant on one of several reachable paths is decorative.
+
+**The provider with no additive grant.** opencode's `--dir` sets the working directory rather than adding one, so there is no cell to carry the set. An explicit operator `--add-dir` keeps its hard refusal there. The computed set is skipped with one named line on stderr instead. Fail-closed is right for something a human typed. For a default the caller never asked for, it is wrong: it refuses every opencode spawn.
+
+**The half a spawn cannot reach.** A per-spawn grant says nothing about a session the operator started by hand, or one that joined by `/fno-me`. The first session on any machine cannot come from `fno agents spawn`. So `fno doctor` probes it. It writes a real file into the claim store and removes it. On failure it prints the remedy for the detected harness and exits nonzero. It advises and never writes. The probe writes rather than parsing settings files. Doctor runs inside the session being asked about, so it is the sample. An absence has two explanations. A completed write has one.
+
 ## Reference implementation
 
 PID-liveness + `O_CREAT|O_EXCL` + idempotent re-acquire is a standard
