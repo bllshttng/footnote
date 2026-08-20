@@ -4246,6 +4246,26 @@ event_types:
           description: "The codex rollout session id the late bind resolved."
     consumers: [operator]
 
+  - name: agent_late_bind_failed
+    description: "Emitted by the daemon reconcile tick when a late-bind's registry write fails, most often a collision with a session id another row already claims. Distinct from a probe miss, which emits nothing, and from `agent_late_bind`, where the write succeeded."
+    sources: [daemon]
+    data:
+      required: [name, pid, harness_session_id, error]
+      properties:
+        name:
+          type: string
+          description: "The registry row's name."
+        pid:
+          type: integer
+          description: "The pane's process id the session id was resolved from."
+        harness_session_id:
+          type: string
+          description: "The codex rollout session id the late bind tried to write."
+        error:
+          type: string
+          description: "The registry write failure, verbatim."
+    consumers: [operator]
+
   - name: king_action
     description: "A king shrank one of its own board queues: dispatched an undispatched node, woke a stalled claim holder, reaped a stale claim, or merged a green PR. This is the king loop's PROGRESS MARKER, and it is a positive marker on purpose. Board size cannot serve, because a king's board refills while it works: dispatching and merging both create future work. Progress is therefore a target_id this run has not acted on before; re-emitting the same target_id is not progress and does not reset the dry-fire counter, which is what keeps a stalled_holder row that survives its only available action from holding the loop open forever."
     sources: [target]
