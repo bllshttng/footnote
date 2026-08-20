@@ -270,31 +270,132 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
 
 
 def test_live_is_computed_for_json_and_missing_asker_is_stale(
-    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
 ):
-    seen: list[str] = []
+    from fno.outstanding.core import read_open_questions
 
     def resolve(asker: str):
-        seen.append(asker)
         return (object(), []) if asker == "live-ask" else (None, [])
 
-    monkeypatch.setattr("fno.agents.discover.resolve_reachable", resolve)
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-live", "2026-08-19T00:00:00Z", asker="live-ask", blocks=[]
+            ),
+            _indexed_question(
+                "q-stale", "2026-08-18T00:00:00Z", asker="gone-ask", blocks=[]
+            ),
+            {
+                "ts": "2026-08-17T00:00:00Z",
+                "type": "operator_question",
+                "source": "test",
+                "data": {"question_id": "q-legacy", "question": "legacy?"},
+            },
+        ],
+    )
+    questions = read_open_questions(
+        root,
+        liveness_budget_seconds=1.0,
+        clock=lambda: 0.0,
+        resolver=resolve,
+    )
     report = Outstanding(
         carveout_total=0,
         carveout_by_kind={},
         carveout_oldest_ts=None,
-        questions=[
-            Question("q-live", "2026-08-19T00:00:00Z", "live?", asker="live-ask"),
-            Question("q-stale", "2026-08-18T00:00:00Z", "stale?", asker="gone-ask"),
-            Question("q-legacy", "2026-08-17T00:00:00Z", "legacy?"),
-        ],
+        questions=questions,
         captures=[],
     )
 
     payload = report.as_dict()["questions"]
 
-    assert [row["live"] for row in payload] == [True, False, False]
-    assert seen == ["live-ask", "gone-ask"]
+    assert {row["id"]: row["live"] for row in payload} == {
+        "q-live": True,
+        "q-stale": False,
+        "q-legacy": False,
+    }
+
+
+def test_liveness_budget_expiry_is_unknown_and_does_not_block_report(
+    root: Path,
+):
+    """AC-ERR: a blocked durable-store scan expires as explicit unknown."""
+    import multiprocessing
+    import threading
+
+    from fno.outstanding.core import read_open_questions
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-slow", "2026-08-19T00:00:00Z", asker="slow-ask", blocks=[]
+            )
+        ],
+    )
+    process_context = multiprocessing.get_context("fork")
+    started = process_context.Event()
+
+    def slow_resolver(_asker):
+        started.set()
+        time.sleep(1)
+        return object(), []
+
+    began = time.perf_counter()
+    questions = read_open_questions(
+        root, liveness_budget_seconds=0.1, resolver=slow_resolver
+    )
+    elapsed = time.perf_counter() - began
+    lingering = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name == "fno-question-liveness" and thread.is_alive()
+    ]
+
+    assert started.is_set()
+    assert elapsed < 0.4
+    assert lingering == []
+    assert questions[0].as_dict()["live"] is None
+    output = render(
+        Outstanding(0, {}, None, questions, [])
+    )
+    assert "Questions with unknown liveness" in output
+    assert "Stale questions" not in output
+
+
+def test_liveness_within_budget_keeps_resolver_fidelity_and_live_first(
+    root: Path,
+):
+    """AC-HP: completed reachable and stale answers retain exact semantics."""
+    from fno.outstanding.core import read_open_questions
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-stale", "2026-08-19T00:00:00Z", asker="stale", blocks=[]
+            ),
+            _indexed_question(
+                "q-live", "2026-08-19T01:00:00Z", asker="live", blocks=[]
+            ),
+        ],
+    )
+
+    def resolver(asker):
+        return (object(), []) if asker == "live" else (None, [])
+
+    questions = read_open_questions(
+        root,
+        liveness_budget_seconds=1.0,
+        clock=lambda: 0.0,
+        resolver=resolver,
+    )
+
+    assert [(q.id, q.live) for q in questions] == [
+        ("q-live", True),
+        ("q-stale", False),
+    ]
 
 
 def _write_indexed_questions(root: Path, rows: list[dict]) -> None:
@@ -400,9 +501,7 @@ def test_question_render_cap_shows_ten_and_names_true_total(
 
 
 def test_stale_questions_render_under_visible_heading_with_age(
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr("fno.agents.discover.resolve_reachable", lambda _asker: (None, []))
     stale_ts = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     report = Outstanding(
         carveout_total=0,
@@ -415,6 +514,7 @@ def test_stale_questions_render_under_visible_heading_with_age(
                 "which lane?",
                 asker="gone-ask",
                 ask="pick a lane",
+                live=False,
             )
         ],
         captures=[],
@@ -425,6 +525,25 @@ def test_stale_questions_render_under_visible_heading_with_age(
     assert "Stale questions" in output
     assert "2 days old" in output
     assert "records the decision but reaches nobody" in output
+
+
+def test_manual_question_liveness_tristate_renders_and_serializes_explicitly():
+    questions = [
+        Question("q-live", "2026-08-19T00:00:00Z", "live?", live=True),
+        Question("q-stale", "2026-08-19T00:00:01Z", "stale?", live=False),
+        Question("q-unknown", "2026-08-19T00:00:02Z", "unknown?", live=None),
+    ]
+    report = Outstanding(0, {}, None, questions, [])
+
+    assert [row["live"] for row in report.as_dict()["questions"]] == [
+        True,
+        False,
+        None,
+    ]
+    output = render(report)
+    assert "Live open questions" in output
+    assert "Stale questions" in output
+    assert "Questions with unknown liveness" in output
 
 
 def test_clear_preserves_asker_as_the_best_answer_provenance(

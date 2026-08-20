@@ -16,10 +16,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 # Rows rendered before the footer takes over. A growing pile should read as a
 # number, not as a wall - a block that scrolls the operator's screen gets
@@ -35,6 +36,10 @@ QUESTION_CLOSED_EVENT = "operator_question_closed"
 # Both question types share this prefix, so a raw line without it cannot be
 # one of ours. See the substring prefilter in read_open_questions.
 QUESTION_MARKER = "operator_question"
+# SessionStart has a 1.5s hook budget. Reachability may scan multi-gigabyte
+# harness stores, so the report gives it one bounded slice and renders an
+# explicit unknown for anything that cannot finish in time.
+LIVENESS_BUDGET_SECONDS = 0.05
 
 
 class OutstandingError(Exception):
@@ -67,18 +72,7 @@ class Question:
     ask: Optional[str] = None
     options: tuple[str, ...] = ()
     blocks: tuple[str, ...] = ()
-
-    @property
-    def live(self) -> bool:
-        if not self.asker:
-            return False
-        try:
-            from fno.agents.discover import resolve_reachable
-
-            reachable, ambiguous = resolve_reachable(self.asker)
-        except Exception:  # noqa: BLE001 - unreadable discovery is stale, never live
-            return False
-        return reachable is not None and not ambiguous
+    live: Optional[bool] = None
 
     def as_dict(self, *, rank: Optional[int] = None) -> "dict[str, Any]":
         return {
@@ -251,7 +245,83 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
     return events
 
 
-def read_open_questions(root: Path) -> "list[Question]":
+def _resolve_question_liveness(
+    askers: "list[str]",
+    *,
+    budget_seconds: float,
+    clock: "Callable[[], float]",
+    resolver: "Callable[[str], tuple[Any, list[str]]] | None",
+) -> "dict[str, bool]":
+    """Resolve unique askers within one wall-clock slice.
+
+    The resolver runs in a child process that is terminated and reaped at the
+    deadline, so a store scan cannot survive until interpreter shutdown. Only
+    answers completed by the deadline land in the result; every absent key is
+    explicitly unknown, never guessed stale.
+    """
+    import multiprocessing
+
+    if not askers or budget_seconds <= 0:
+        return {}
+    if resolver is None:
+        from fno.agents.discover import resolve_reachable
+
+        resolver = resolve_reachable
+    context = multiprocessing.get_context("fork")
+    receive, send = context.Pipe(duplex=False)
+    deadline = clock() + budget_seconds
+
+    def resolve_all() -> None:
+        answers: "dict[str, bool]" = {}
+        try:
+            for asker in dict.fromkeys(askers):
+                if clock() >= deadline:
+                    break
+                try:
+                    reachable, ambiguous = resolver(asker)
+                    answer = reachable is not None and not ambiguous
+                except Exception:  # noqa: BLE001 - a completed refusal is stale
+                    answer = False
+                if clock() <= deadline:
+                    answers[asker] = answer
+        finally:
+            try:
+                send.send(answers)
+            except (BrokenPipeError, OSError):
+                pass
+            send.close()
+
+    process = context.Process(
+        target=resolve_all, name="fno-question-liveness", daemon=True
+    )
+    process.start()
+    send.close()
+    answers: "dict[str, bool]" = {}
+    try:
+        if receive.poll(budget_seconds):
+            payload = receive.recv()
+            if isinstance(payload, dict):
+                answers = payload
+    except (EOFError, OSError):
+        pass
+    finally:
+        receive.close()
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=budget_seconds)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    return answers
+
+
+def read_open_questions(
+    root: Path,
+    *,
+    liveness_budget_seconds: float = LIVENESS_BUDGET_SECONDS,
+    clock: "Callable[[], float]" = time.monotonic,
+    resolver: "Callable[[str], tuple[Any, list[str]]] | None" = None,
+) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
     Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
@@ -285,13 +355,22 @@ def read_open_questions(root: Path) -> "list[Question]":
                 closed.add(str(qid))
 
     open_qs = [q for qid, q in asked.items() if qid not in closed]
+    resolved = _resolve_question_liveness(
+        [q.asker for q in open_qs if q.asker],
+        budget_seconds=liveness_budget_seconds,
+        clock=clock,
+        resolver=resolver,
+    )
+    open_qs = [
+        replace(q, live=False if not q.asker else resolved.get(q.asker))
+        for q in open_qs
+    ]
     # A stale asker never outranks a reachable one, even when it blocks more.
     # Within each liveness lane, unblock the most nodes first, then honor the
     # questions that have waited longest. No auto-expiry: age only ranks.
-    live = {q.id: q.live for q in open_qs}
     open_qs.sort(
         key=lambda q: (
-            not live[q.id],
+            q.live is not True,
             -len(q.blocks),
             not bool(q.ts),
             q.ts,
@@ -685,17 +764,29 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
             if q.ask:
                 lines.append(f"    Action: {q.ask}")
 
-        last_live: Optional[bool] = None
+        last_live: "bool | None | object" = object()
         has_stale = False
+        has_unknown = False
         for q in shown:
             is_live = q.live
             if is_live != last_live:
-                lines.append("  Live open questions:" if is_live else "  Stale questions:")
+                if is_live is True:
+                    lines.append("  Live open questions:")
+                elif is_live is False:
+                    lines.append("  Stale questions:")
+                else:
+                    lines.append("  Questions with unknown liveness:")
                 last_live = is_live
-            append_question(q, stale_row=not is_live)
-            has_stale = has_stale or not is_live
+            append_question(q, stale_row=is_live is False)
+            has_stale = has_stale or is_live is False
+            has_unknown = has_unknown or is_live is None
         if has_stale:
             lines.append("  Answering a stale question records the decision but reaches nobody.")
+        if has_unknown:
+            lines.append(
+                "  Unknown means reachability did not finish inside the report budget; "
+                "answering still records the decision."
+            )
         if len(outstanding.questions) > QUESTION_RENDER_CAP:
             lines.append(
                 f"  Showing {len(shown)} of {len(outstanding.questions)} open questions."
