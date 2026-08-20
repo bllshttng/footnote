@@ -18740,7 +18740,7 @@ mod tests {
     async fn clicking_the_footer_esc_close_dismisses_the_modal() {
         // AC10-HP: the chrome footer's `esc close` words are a mouse target
         // stamped by chrome::frame, so clicking them closes the modal without
-        // touching a key. Verified THROUGH the mouse router (footer_close_hit
+        // touching a key. Verified THROUGH the mouse router (chrome_close_hit
         // feeding aux_mouse) on the settings modal, whose footer reads
         // `tab switches section · esc close`, on the real rendered geometry.
         use crate::mouse::MouseReport;
