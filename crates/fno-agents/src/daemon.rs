@@ -5524,8 +5524,8 @@ fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
     let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
+            Ok(Some(exit)) => {
+                if exit.success() {
                     return PaneProbe::Present;
                 }
                 let output = child.wait_with_output().ok();
@@ -8071,8 +8071,8 @@ mod tests {
 
     #[tokio::test]
     async fn rm_clears_a_stored_live_pane_row_whose_pane_is_provably_absent() {
-        // The fleet-reap deadlock: the row's status still reads live while the
-        // pane it names is gone. The gate must test the referent, so the probe's
+        // The fleet-reap deadlock: the row still reads live while the pane it
+        // names is gone. The gate must test the referent, so the probe's
         // Absent verdict clears the row without --force.
         let home = short_home("rmpanegone");
         let mut row = ask_row("dead-pane-worker", Some("2020-01-01T00:00:00Z"));
