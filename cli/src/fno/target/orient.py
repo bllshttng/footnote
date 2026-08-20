@@ -18,7 +18,6 @@ This is the introspection family (``fno whoami`` / ``fno status``), reusing
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,16 +34,10 @@ class OrientLine:
 # --- git helpers (self-contained so orient never imports target_cli; that
 #     module imports orient for the `status` command + init print) -----------
 
-def _git_out(cwd: Path, *args: str) -> Optional[str]:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(cwd), *args], capture_output=True, text=True
-        )
-    except (OSError, ValueError):
-        return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    return proc.stdout.strip()
+# The one git-out helper lives in review_capability (moved there with the
+# diff-sizing path); importing it keeps this module's callers (and the tests
+# that patch `orient._git_out`) on the same name while deleting the copy.
+from fno.review_capability import _git_out  # noqa: E402  (re-export seam)
 
 
 def _is_linked_worktree(cwd: Path) -> bool:

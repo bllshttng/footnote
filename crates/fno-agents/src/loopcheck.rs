@@ -8365,8 +8365,12 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
             let s = String::from_utf8_lossy(&out).trim().to_string();
             // One sane line only: a wrapper's chatter or an error page must
             // never end up embedded in a held reason as if it were an
-            // invocation. Empty means the render itself gave up.
-            if s.is_empty() || s.contains('\n') || s.len() > 80 {
+            // invocation. Empty means the render itself gave up. An unsized
+            // render (a repo whose default branch is neither main nor master)
+            // returns the `<level>` placeholder form - a non-runnable string
+            // in a copy-me slot, so it reads as no hint and the levelless
+            // line stands.
+            if s.is_empty() || s.contains('\n') || s.len() > 80 || s.contains("<level>") {
                 None
             } else {
                 Some(s)
@@ -9031,6 +9035,16 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             // rather than threaded through every caller, so the 20+ build_block_reason
             // call sites stay single-arg.
             let author_harness = crate::claims::resolve_harness();
+            // The sized render for the code-review verb, resolved once for the
+            // whole list. The map value carries a `<level>` placeholder this
+            // surface's reader has no renderer for; the bridge substitutes the
+            // diff-sized level. None keeps the placeholder form (fail-open,
+            // same as every other hint consumer).
+            let sized = sized_self_review_hint(
+                &std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".into()),
+                &std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
+                author_harness.as_deref(),
+            );
             let items: Vec<String> = pr
                 .unattested_reviewers
                 .iter()
@@ -9062,6 +9076,14 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                                 " [self-cert: asserts no review evidence]"
                             } else {
                                 ""
+                            };
+                            // The sized render replaces the placeholder-carrying
+                            // map value verbatim: it IS the same invocation with
+                            // the level substituted by the Python single source.
+                            let inv = if r.name == "code-review" {
+                                sized.as_deref().unwrap_or(inv)
+                            } else {
+                                inv
                             };
                             // code-review is a native harness verb that emits
                             // no attestation on its own; the session must also
@@ -10855,6 +10877,15 @@ mod tests {
         let chatty = stub("#!/bin/sh\nprintf 'line one\\nline two\\n'\n");
         assert_eq!(
             sized_self_review_hint(chatty.to_str().unwrap(), dir, None),
+            None
+        );
+
+        // An unsized render keeps its `<level>` placeholder; embedding that in
+        // a copy-me slot hands the reader a string it cannot run, so the
+        // filter reads it as no hint at all.
+        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment --fix\\n'\n");
+        assert_eq!(
+            sized_self_review_hint(placeholder.to_str().unwrap(), dir, None),
             None
         );
 
@@ -13210,10 +13241,45 @@ mod tests {
     fn self_review_gate_held_reason_names_code_review_and_its_verb() {
         // AC1-HP: a code payload that reaches the stop gate with no head-pinned
         // code-review attestation is held, and the reason names the reviewer
-        // and the verb served by the ambient harness.
+        // and the verb served by the ambient harness. Both render branches are
+        // pinned here, sequentially (one env write per branch, no thread race):
+        // a working bridge substitutes the sized render for the map value's
+        // `<level>` placeholder, and a missing binary keeps the placeholder.
+        // Without the pin the expectation would depend on whatever fno the
+        // host has installed.
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
         let mut pr = reviewers_gate_pr();
         pr.unattested_reviewers[0].name = "code-review".to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("fno-stub");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n",
+        )
+        .unwrap();
+        #[allow(clippy::permissions_set_readonly_false)]
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var(var, stub.to_str().unwrap());
+        let sized_reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            sized_reason.contains("`/code-review from-stub --comment --fix`"),
+            "got: {sized_reason}"
+        );
+        assert!(
+            !sized_reason.contains("<level>"),
+            "the placeholder must not survive a working bridge: {sized_reason}"
+        );
+
+        std::env::set_var(var, "/nonexistent-fno-for-this-test");
         let reason = build_block_reason(&pr, "abc", true);
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
         let harness = crate::claims::resolve_harness();
         let expected = reviewer_invocation_for("code-review", harness.as_deref())
             .expect("code-review descriptor")

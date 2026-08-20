@@ -191,7 +191,11 @@ def coverage_verdict(
         from fno.review_capability import render_self_review_invocation
 
         root = Path(_merge._repo_state_dir(repo)).parent
-        hint = render_self_review_invocation(project_root=root)
+        rendered = render_self_review_invocation(project_root=root)
+        # An unsized render (no merge-base against main/master) keeps its
+        # `<level>` placeholder - teachable on the orienter surface, but a
+        # non-runnable string in a copy-me slot here. No hint, levelless line.
+        hint = None if "<level>" in rendered else rendered
     except Exception:  # noqa: BLE001 - advisory text; the refusal still stands
         hint = None
     if code_review_required and not _merge._coverage_has_local_pass(cov, "code-review"):
