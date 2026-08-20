@@ -57,8 +57,8 @@ _PREFLIGHT_BASE_SCOPE = frozenset(
 #
 # It used to be one set compared with `in {BASE, GATE}`, i.e. exact equality
 # against two spellings. Every optional leg added since then silently
-# invalidated the receipt it appeared in: `tracker-gates:fno` broke it when it
-# landed, and `structural-gates:fno` widened the same break. The failure is
+# invalidated the receipt it appeared in: `tracker-gates:fno` broke it the day
+# it landed, and any future optional leg would break it again. The failure is
 # quiet - `_trusted_preflight_producer` returns False, the receipt is discarded
 # rather than rejected loudly, and a green preflight can never clear
 # `check_verification_evidence` on an install with preflight.required = true.
@@ -68,7 +68,6 @@ _PREFLIGHT_OPTIONAL_SCOPE = frozenset(
     {
         "squads-leak-guard:fno",
         "tracker-gates:fno",
-        "structural-gates:fno",
     }
 )
 _PREFLIGHT_GATE_SCOPE = _PREFLIGHT_BASE_SCOPE | _PREFLIGHT_OPTIONAL_SCOPE

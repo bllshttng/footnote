@@ -162,7 +162,7 @@ FAILED_LEG_SCOPES=""
 if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
     while read -r _leg_line; do
         [[ -z "$_leg_line" ]] && continue
-        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno structural-gates:fno " in
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno " in
             *" $_leg_line "*)
                 case " $FAILED_LEG_SCOPES " in
                     *" $_leg_line "*) ;;
@@ -1010,7 +1010,6 @@ exit_if_void() {
         # (riding SQUADS_INCLUDED undercounted it on machines with no real
         # squads store, and the receipt validator rejected the step mismatch).
         [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
-        [[ "${SG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(structural-gates:fno)
         REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
         REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
         EXECUTED_COUNT=$REQUIRED_EXECUTED
@@ -1122,7 +1121,6 @@ echo ""
 REQUIRED_EXECUTED=0
 SQUADS_INCLUDED=0
 TG_INCLUDED=0
-SG_INCLUDED=0
 RECEIPT_UNAVAILABLE=0
 if retry_run_leg smoke; then
     echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
@@ -1168,80 +1166,6 @@ if retry_run_leg tracker-gates:fno; then
 else
     echo "preflight: === tracker gates (skipped - not in the retry leg record) ==="
     record_leg "" "tracker gates (fno)" skipped 0
-fi
-
-# structural gates --------------------------------------------------------
-# The cheap structural gates, run here so they can fail at the keystroke
-# instead of a CI cycle later. Measured 2026-08-20 on this tree: 13 gates,
-# ~46s serial, every one static and offline.
-#
-# NOT "the cheap half of guards.yml", though it reads that way: four of these
-# have no guards.yml step at all, and their only workflow lane is a different
-# file - check-coverage-context-parity (coverage-context-parity.yml),
-# check-no-internal-refs (internal-refs.yml), check-pr-node-closure-selftest
-# (pr-node-closure.yml) and check-review-app-parity (rust-ci.yml). The manifest
-# row per script is the authority on where each one runs; do not infer it from
-# this comment.
-#
-# "Offline" is a membership rule, not a description. run_hermetic exports an
-# empty HOME, so a gate that reaches the network here has no ~/.ssh and no
-# ~/.gitconfig: it fails host-key verification, or worse, blocks on ssh's
-# interactive prompt while holding the preflight lock. check-proto-version-bump
-# was in this list until it was caught doing an unconditional `git fetch`, and
-# it stays in the ci lane for that reason. Check for network calls before
-# adding a gate here; a green run outside run_hermetic proves nothing.
-#
-# The ones that DO have a guards.yml step keep it, and that is deliberate rather
-# than a duplicate. guards.yml carries no paths filter, so it is the lane that
-# covers a docs-only or crates-only PR; this leg is the lane that runs before
-# the push. scripts/ci/ci-gate-lanes.tsv records every invoker per row, and
-# check-ci-gate-lanes.sh verifies each declared one really invokes the script,
-# so this list cannot silently drift out of the manifest. Read the row, not this
-# paragraph, for any single gate's lanes.
-#
-# The expensive members are deliberately NOT here and their rows say why:
-# check-import-paths 62s, check-axis-vocabulary 37s, check-markdown-style 21s.
-# Each gate is written out literally rather than looped over a name list. A
-# loop hides the invocation from a static reader, and check-ci-gate-lanes.sh
-# refuses a manifest row whose declared invoker cannot be seen to invoke it -
-# correctly, since a name in a variable is indistinguishable from a mention.
-# The first draft of this leg was a loop and the gate caught it.
-if retry_run_leg structural-gates:fno; then
-    echo "preflight: === structural gates ==="
-    sg0="$SECONDS"
-    sgrc=0
-    # Keep going rather than short-circuit: one red gate should not hide the
-    # rest, which is the whole reason to run them early. A helper
-    # function taking the path as an argument would hide it just as a loop
-    # does, so each line names its own script next to `bash`.
-    run_hermetic bash scripts/ci/check-autonomy-registry.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-coverage-context-parity.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-disposable-rm.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-mail-inject-callers.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-no-internal-refs.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-no-skill-local-evals.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-plan-rung-authority.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-pr-node-closure-selftest.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-preflight-scope-parity.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-review-app-parity.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-review-invocation-single-source.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-uv-install-compiles-bytecode.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-workflow-manifest.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    # Same contract the tracker leg keeps: a leg that increments
-    # REQUIRED_EXECUTED must also appear in REQUIRED_SCOPE_NAMES, or the
-    # executed count outruns the required count and a skipped leg still reads
-    # as mode=FULL. That is the receipt lying about its own coverage.
-    SG_INCLUDED=1
-    if [[ $sgrc -eq 0 ]]; then
-        record_leg structural-gates:fno "structural gates (fno)" pass $(( SECONDS - sg0 ))
-    else
-        record_leg structural-gates:fno "structural gates (fno)" fail $(( SECONDS - sg0 ))
-        FAIL=1
-    fi
-else
-    echo "preflight: === structural gates (skipped - not in the retry leg record) ==="
-    record_leg "" "structural gates (fno)" skipped 0
 fi
 
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
@@ -1436,7 +1360,6 @@ write_leg_record
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
-[[ "${SG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(structural-gates:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether

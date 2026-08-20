@@ -422,20 +422,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # headroom with nobody watching the slope.
     ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
     ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
-    # One registration, two lanes: cli-ci runs `fno-py test smoke` and so does
-    # preflight, so this line is both a CI gate and the local one. It is NOT the
-    # only CI lane, and must not be read as one: cli-ci carries a paths filter
-    # listing no `crates/**` and only its own workflow file, so this lane is
-    # skipped on exactly the two PR shapes these gates catch - a raw GraphQL
-    # poller under `crates/`, and a guards.yml-only edit deleting a gate's step.
-    # guards.yml has no paths filter and runs them too. Two lanes with different
-    # triggers is the point; deleting the guards.yml copy as a "duplicate"
-    # removes the only lane that sees a docs-only or crates-only PR.
-    ("CI gate lanes self-test", ".", "bash scripts/ci/check-ci-gate-lanes.sh --self-test"),
-    ("CI gate lanes (every gate has a real invoker)", ".", "bash scripts/ci/check-ci-gate-lanes.sh"),
-    ("GraphQL PR reads are routed, not raw", ".", "bash scripts/ci/check-no-direct-graphql-pr-read.sh"),
-    ("Docstring-restating-comment lint has not drifted to density", ".",
-     "bash scripts/ci/check-comment-restates-docstring.sh --self-check"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
     ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),

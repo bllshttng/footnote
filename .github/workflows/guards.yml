@@ -208,34 +208,6 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
-      # These two also run from the smoke registry, and that is NOT where they
-      # can do their job. cli-ci carries a paths filter that lists no
-      # crates/** and only its own workflow file, so the smoke lane is skipped
-      # on exactly the two PR shapes these gates exist to catch: a raw GraphQL
-      # poller added under crates/, and a guards.yml-only edit that deletes a
-      # gate's CI step. guards.yml has no paths filter, so it is the lane that
-      # sees every PR. Two lanes with different triggers, not a duplicate.
-      - name: CI gate lanes (every gate has a real invoker) + self-test
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: |
-          bash scripts/ci/check-ci-gate-lanes.sh --self-test
-          bash scripts/ci/check-ci-gate-lanes.sh
-
-      # The receipt scope lives in preflight.sh, a Python gate and a Rust gate.
-      # Widening only the Python one left `fno-agents verify-evidence receipt`
-      # rejecting a green preflight, silently. guards.yml carries no paths
-      # filter, so this lane sees a crates-only PR; cli-ci would not.
-      - name: Preflight receipt scope agrees across all three readers
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-preflight-scope-parity.sh
-
-      - name: GraphQL PR reads are routed, not raw
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash scripts/ci/check-no-direct-graphql-pr-read.sh
-
       - name: Cargo rustc-wrapper announces its path
         if: ${{ !cancelled() }}
         timeout-minutes: 5

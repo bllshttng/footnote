@@ -162,26 +162,6 @@ cat > "$FIX/scripts/ci/check-tracker-consumers.sh" <<'EOF'
 echo "check-tracker-consumers: OK - verbs classified, reads attributed, self-test green (stub)"
 EOF
 chmod +x "$FIX/scripts/ci/check-tracker-partition.sh" "$FIX/scripts/ci/check-tracker-consumers.sh"
-# Structural gate stubs, same reasoning as the tracker gates above: the real
-# ones need the full repo (workflows, cli sources, baselines) and this fixture
-# exercises preflight's ORCHESTRATION, not the gates' own verdicts. Without
-# stubs each `bash scripts/ci/check-*.sh` exits 127 in the fixture, the leg
-# goes red, and every green assertion in this harness fails. Keep this list in
-# step with the structural-gates leg in scripts/ci/preflight.sh.
-for _sg in check-autonomy-registry check-coverage-context-parity \
-           check-disposable-rm check-mail-inject-callers check-no-internal-refs \
-           check-no-skill-local-evals check-plan-rung-authority \
-           check-pr-node-closure-selftest check-preflight-scope-parity \
-           check-review-app-parity \
-           check-review-invocation-single-source \
-           check-uv-install-compiles-bytecode check-workflow-manifest; do
-    cat > "$FIX/scripts/ci/$_sg.sh" <<EOF
-#!/usr/bin/env bash
-[[ -f POISON ]] && { echo "$_sg: POISON step failed"; exit 1; }
-echo "$_sg: OK (stub)"
-EOF
-    chmod +x "$FIX/scripts/ci/$_sg.sh"
-done
 echo '.fno/' > "$FIX/.gitignore"
 # crate dirs so preflight's `cd crates/fno*` legs run (cargo is stubbed).
 mkdir -p "$FIX/crates/fno-agents" "$FIX/crates/fno"

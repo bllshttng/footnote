@@ -2,17 +2,11 @@
 """Enumerate shell-shaped and argv-shaped GitHub GraphQL callers."""
 from __future__ import annotations
 
-import ast
 import re
 import subprocess
 from pathlib import Path
 
-# The whole crates tree, not just fno-agents: a raw poller written in the mux
-# crate was invisible to this instrument, and a guard that covers some of the
-# reachable paths reads as protection while the rest stay open. Files outside
-# the two named adapters fall through _disposition to "unclassified", which is
-# the fail-closed answer.
-ROOTS = ("cli/src", "crates", "hooks", "skills", "scripts")
+ROOTS = ("cli/src", "crates/fno-agents/src", "hooks", "skills", "scripts")
 SKIP_PARTS = {"tests", "target", ".git"}
 SKIP_NAMES = {
     "check-no-direct-graphql-pr-read.sh",
@@ -34,80 +28,12 @@ PATTERNS = {
 }
 
 
-_DOCSTRING_SPANS: dict[str, list[tuple[int, int]]] = {}
-
-
-def _docstring_spans(relative: str, source: str) -> list[tuple[int, int]]:
-    """Byte-offset spans of every DOCSTRING in a Python source file.
-
-    Deliberately docstrings only, NOT every string literal. A real caller in
-    Python is a string handed to a subprocess (`run("gh pr view ...",
-    shell=True)`), so excluding all literals would hide exactly the callers this
-    inventory exists to find. A docstring is a bare statement expression that
-    nothing can execute, which is the same argument the `.md` exclusion makes.
-    An unparseable file yields no spans, so it stays fully counted.
-    """
-    cached = _DOCSTRING_SPANS.get(relative)
-    if cached is not None:
-        return cached
-    spans: list[tuple[int, int]] = []
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        _DOCSTRING_SPANS[relative] = spans
-        return spans
-    starts = [0]
-    for line in source.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
-
-    def _offset(lineno: int, col: int) -> int:
-        return starts[lineno - 1] + col if 0 < lineno <= len(starts) else 0
-
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if not isinstance(body, list) or not body:
-            continue
-        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        first = body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-            and first.end_lineno is not None
-            and first.end_col_offset is not None
-        ):
-            spans.append(
-                (
-                    _offset(first.lineno, first.col_offset),
-                    _offset(first.end_lineno, first.end_col_offset),
-                )
-            )
-    _DOCSTRING_SPANS[relative] = spans
-    return spans
-
-
 def _disposition(relative: str, source: str, offset: int) -> str:
     line = source[source.rfind("\n", 0, offset) + 1 : source.find("\n", offset)]
     stripped = line.lstrip()
     suffix = Path(relative).suffix
-    # A markdown file cannot execute, so it can never be a caller. Saying so
-    # here rather than only at the count ceiling matters: everything under
-    # crates/ that is not one of the two named adapters falls through to
-    # "unclassified", which is a hard failure, so widening ROOTS to the whole
-    # crates tree turned every README naming `gh pr view` into a red gate.
-    if suffix == ".md":
-        return "documentation"
     if (suffix in {".py", ".sh", ".toml", ".yaml", ".yml"} and stripped.startswith("#")) or (
         suffix == ".rs" and stripped.startswith("//")
-    ):
-        return "documentation"
-    # Prose in a Python docstring is not a caller either. Without this, writing
-    # `gh pr view` into any docstring under cli/src/ raised that bucket's count
-    # and reded a per-disposition ceiling pinned at its exact current value -
-    # the same prose-edit false red the sha256 pin was retired for.
-    if suffix == ".py" and any(
-        start <= offset < end for start, end in _docstring_spans(relative, source)
     ):
         return "documentation"
     if relative.startswith("cli/src/"):

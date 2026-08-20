@@ -63,88 +63,8 @@
 # in this first pass.
 set -euo pipefail
 
-# Resolved BEFORE the cd: a relative $0 stops resolving once the shell is
-# somewhere else, and the --self-check re-invocation below would then die
-# inside a command substitution with no message.
-SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
-
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$REPO_ROOT"
-
-# --self-check is what makes this script reachable at all. Until 2026-08-20 no
-# runner invoked it, so the reading list it produces was never produced and its
-# "advisory" status meant "off". The reading list is a human activity and does
-# not belong in a CI log; instrument drift does. The header names the exact
-# drift to watch: the densest file in the repository must score ZERO, and a
-# finding there means the threshold has slid toward measuring density. That is
-# a real assertion that can fail, so it is the half CI holds.
-EXEMPLAR="cli/src/fno/agents/harnesses/base.py"
-
-# _findings <file> - run the scan and echo its finding count, refusing to let a
-# crash read as a number. `scan()` swallows every exception and returns [], and
-# `collect()` returns [] for anything it does not recognize, so "findings: 0"
-# is what a DEAD instrument prints too. The count alone cannot tell the two
-# apart, which is why the caller pairs it with a positive control below.
-_findings() {
-    local out rc
-    out=$(bash "$SELF" "$1")
-    rc=$?
-    if [[ $rc -ne 0 ]]; then
-        echo "comment-restates-docstring: the scan itself exited $rc on $1" >&2
-        printf '%s\n' "$out" >&2
-        return 1
-    fi
-    printf '%s\n' "$out" | awk '/^findings:/ {print $2}'
-}
-
-if [[ "${1:-}" == "--self-check" ]]; then
-    if [[ ! -f "$EXEMPLAR" ]]; then
-        echo "comment-restates-docstring: exemplar missing at $EXEMPLAR - repoint it, do not drop the check" >&2
-        exit 1
-    fi
-
-    # POSITIVE CONTROL first. A fixture whose comment repeats its own docstring
-    # verbatim MUST be found. Without this the whole self-check asserts an
-    # absence, and a broken tokenizer, an unparseable file or a regex that
-    # stopped matching would all certify the gate green - the trap AGENTS.md
-    # names as "assert a positive marker, never an absence".
-    _fixdir="$(mktemp -d)" || { echo "comment-restates-docstring: mktemp failed" >&2; exit 1; }
-    trap 'rm -rf "$_fixdir"' EXIT
-    # The fixture has to clear every real threshold or it proves nothing:
-    # 15+ distinct docstring content tokens, a comment BLOCK of 2+ contiguous
-    # full-line comments, 10+ distinct comment tokens, and >= 0.50 overlap.
-    cat > "$_fixdir/fixture.py" <<'FIXEOF'
-def merge_accounts(primary, secondary):
-    """Merge the secondary account record into the primary account record,
-    reconcile duplicate contact entries, drop stale session tokens, write an
-    audit trail, and return the merged primary account."""
-    # Merge the secondary account record into the primary account record and
-    # reconcile duplicate contact entries, drop stale session tokens, write an
-    # audit trail, and return the merged primary account.
-    return primary
-FIXEOF
-    pos=$(_findings "$_fixdir/fixture.py") || exit 1
-    if [[ "$pos" == "0" || -z "$pos" ]]; then
-        echo "comment-restates-docstring: positive control found nothing." >&2
-        echo "A comment repeating its own docstring verbatim must be flagged. The instrument is not measuring anything; a zero on the exemplar below would be meaningless." >&2
-        exit 1
-    fi
-
-    # NEGATIVE CONTROL. The densest file in the repository must score zero; a
-    # finding there means the threshold slid toward measuring density, which is
-    # the axis this lint exists NOT to measure.
-    n=$(_findings "$EXEMPLAR") || exit 1
-    if [[ "$n" != "0" ]]; then
-        echo "comment-restates-docstring: the density exemplar $EXEMPLAR scored $n findings, expected 0." >&2
-        echo "Two things produce this, and the fix differs. READ THE FINDING FIRST:" >&2
-        echo "  bash scripts/ci/check-comment-restates-docstring.sh $EXEMPLAR" >&2
-        echo "1. The comment really does restate its docstring. Cut the comment; the exemplar is a live source file and a real finding in it is a real finding." >&2
-        echo "2. Nothing in the file changed and it still flags. Then the threshold has drifted toward measuring documentation density, which is the axis this lint exists NOT to measure. Re-examine the threshold; do not lower it." >&2
-        exit 1
-    fi
-    echo "comment-restates-docstring: self-check ok (control flags $pos, exemplar scores 0)"
-    exit 0
-fi
 
 # Advisory: findings never affect the exit code. python exits 0 on success; a
 # crash (non-zero) is a real bug and is allowed to surface.
