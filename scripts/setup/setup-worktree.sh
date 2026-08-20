@@ -1370,7 +1370,7 @@ if [[ -n "$toplevel" ]]; then
   _fno_salvage_script="$toplevel/hooks/'"$_salvage_marker"'"
   [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"
 fi'
-_common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)"
+_common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || _common_hooks_dir=""
 if [[ -n "$_common_hooks_dir" ]]; then
   [[ "$_common_hooks_dir" = /* ]] || _common_hooks_dir="$WORKTREE/$_common_hooks_dir"
   _common_hooks_dir="$_common_hooks_dir/hooks"
