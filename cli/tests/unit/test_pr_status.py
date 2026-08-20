@@ -28,7 +28,15 @@ def test_all_pass_is_green():
     verdict, code, counts = _status.verdict_for(rollup)
     assert verdict == "green"
     assert code == 0
-    assert counts == {"total": 2, "pass": 2, "fail": 0, "pending": 0, "unsettled": 0}
+    assert counts == {
+        "total": 2,
+        "check_runs": 1,
+        "statuses": 1,
+        "pass": 2,
+        "fail": 0,
+        "pending": 0,
+        "unsettled": 0,
+    }
 
 
 def test_any_failure_is_red():
@@ -529,7 +537,15 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "green": True,
         "pr_state": "OPEN",
         "mergeable": None,
-        "checks": {"total": 1, "pass": 1, "fail": 0, "pending": 0, "unsettled": 0},
+        "checks": {
+            "total": 1,
+            "check_runs": 1,
+            "statuses": 0,
+            "pass": 1,
+            "fail": 0,
+            "pending": 0,
+            "unsettled": 0,
+        },
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
         "review_coverage": {"coverage": "covered", "reviewed_count": 2},
