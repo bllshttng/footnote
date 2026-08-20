@@ -145,7 +145,13 @@ def known_node_ids() -> frozenset:
     try:
         from fno.graph.store import read_graph
         from fno.paths import graph_json
+        from fno.tracker import active_backend_name
 
+        if active_backend_name() != "graph":
+            # graph.json is not the delivery record of truth under an external
+            # tracker, which is the same posture `fno pr closure-trailer` takes
+            # there. Nothing to verify against, so nothing is claimed.
+            return frozenset()
         return frozenset(
             e["id"]
             for e in read_graph(graph_json())
