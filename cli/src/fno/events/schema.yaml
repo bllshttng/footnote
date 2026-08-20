@@ -3759,7 +3759,7 @@ event_types:
     consumers: [fno retro run]
 
   - name: executor_resolved
-    description: "The /do three-tier executor resolver (skills/do/scripts/resolve-executor.sh) decided a task's executor. Best-effort telemetry: routing is byte-identical whether or not this emits (x-64cb). Folded into `fno backlog triage health` as tier distribution + inference share + warn-fallback count + override-after-inference rate."
+    description: "The /execute three-tier executor resolver (skills/execute/scripts/resolve-executor.sh) decided a task's executor. Best-effort telemetry: routing is byte-identical whether or not this emits (x-64cb). Folded into `fno backlog triage health` as tier distribution + inference share + warn-fallback count + override-after-inference rate."
     sources: [target, test]
     data:
       required: [resolved, tier]

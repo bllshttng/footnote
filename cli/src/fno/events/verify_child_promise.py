@@ -133,7 +133,7 @@ def verify_child_promise(
 # purpose - the caller classifies each worker return (via the canonical
 # ``parse_task_result``) into ``completed`` / ``failed`` / malformed and hands
 # the classified pairs here, so the single source of the status enum stays in
-# ``skills/do/orchestrator.py`` and this module does pure set math.
+# ``skills/execute/orchestrator.py`` and this module does pure set math.
 
 FanInKind: TypeAlias = Literal["completed", "failed"]
 

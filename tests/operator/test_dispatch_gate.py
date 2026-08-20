@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-# The functions we are testing live in skills/do/orchestrator.py.
+# The functions we are testing live in skills/execute/orchestrator.py.
 # Import it relative to the repo root.
 REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(REPO_ROOT / "skills" / "do"))
+sys.path.insert(0, str(REPO_ROOT / "skills" / "execute"))
 
 from orchestrator import (  # noqa: E402
     check_product_md_for_dispatch,

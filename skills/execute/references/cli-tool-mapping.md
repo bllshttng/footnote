@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Cross-CLI Tool Mapping
 
 When this skill references Claude Code tools, use the equivalent on your platform:
@@ -50,4 +51,4 @@ When this skill references Claude Code tools, use the equivalent on your platfor
 If a tool isn't available on your platform:
 - **No configured custom agents**: Hooks handle multi-CLI agent adaptation automatically. Execute the wave sequentially if agent dispatch is unavailable.
 - **No `Skill` tool**: Read the skill file directly with your file read tool, then follow its instructions.
-- **No stop hook**: The autonomous loop won't work. Use `/think` → `/blueprint` → `/do` as a manual 3-step workflow instead.
+- **No stop hook**: The autonomous loop won't work. Use `/think` → `/blueprint` → `/execute` as a manual 3-step workflow instead.

@@ -210,7 +210,7 @@ If ARGUMENTS carry a `--reconcile <manifest-path>` token, this is a **G4 de-stub
 The full initialization sequence (load workspace config, codemap, project config, size profile, init state, detect input type, cross-project, Linear, plan validation, domain resolution, discovery gate, checkpoint, kill criteria) lives in [references/init-state.md](references/init-state.md).
 
 Quick summary:
-- **HARD-GATE (location), with attended offer:** Before invoking `init-target-state.sh`, consult the shared location verdict (the SAME one `/do`, `/fix`, and the SessionStart heads-up use, so there is no per-skill drift):
+- **HARD-GATE (location), with attended offer:** Before invoking `init-target-state.sh`, consult the shared location verdict (the SAME one `/execute`, `/fix`, and the SessionStart heads-up use, so there is no per-skill drift):
 
   ```bash
   PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
@@ -287,7 +287,7 @@ fi
 After completing each phase:
 1. **INVOKE the next skill immediately** - do NOT stop between phases
 
-The delivery pipeline runs in order (blueprint/plan -> do -> review -> validate -> docs -> ship -> external review). `/think` is a research verb outside this path (x-42c5). It never runs automatically as a pipeline phase. When deeper investigation is warranted, run it as a deliberate choice before `/blueprint`. The review phase is an advisory self-review by default. Config can name sigma instead (see above). Phases are not enforced by gates. Completion proof is the world itself: PR green and reviewed. The acceptance-criteria check that runs before `/do waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
+The delivery pipeline runs in order (blueprint/plan -> do -> review -> validate -> docs -> ship -> external review). `/think` is a research verb outside this path (x-42c5). It never runs automatically as a pipeline phase. When deeper investigation is warranted, run it as a deliberate choice before `/blueprint`. The review phase is an advisory self-review by default. Config can name sigma instead (see above). Phases are not enforced by gates. Completion proof is the world itself: PR green and reviewed. The acceptance-criteria check that runs before `/execute waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
 
 The phase-routing table, invocation logic, scratchpad writes (after think and after spec), confirmation check (for `confirm: true` skills), Linear status sync, and the validate-phase artifact write live in [references/phase-invocations.md](references/phase-invocations.md) and [references/scratchpad-writes.md](references/scratchpad-writes.md).
 
@@ -301,7 +301,7 @@ For Medium and Large size profiles, each completed task or wave MUST produce an 
 
 **Rules:**
 
-1. After completing each task in `fno:do waves`, create a commit scoped to that task's files with a conventional commit message referencing the task
+1. After completing each task in `fno:execute waves`, create a commit scoped to that task's files with a conventional commit message referencing the task
 2. If a wave has multiple sequential tasks, commit after each task
 3. If a wave has parallel tasks (subagent mode), each agent commits its own work
 4. Commit messages follow the project's `commit_style` from config.toml
@@ -327,7 +327,7 @@ The clean phase (3.5), review phase (4) deferred-gate semantics, and direction-a
 
 #### Failure Recovery
 
-When validation fails or the same error fires repeatedly, target has structured recovery: validation-failure recovery (rollback to checkpoint after 3 same-phase failures), circuit breaker (rotate approach after 3 same-error failures), and standard error responses for /do waves and review failures. See [references/failure-recovery.md](references/failure-recovery.md).
+When validation fails or the same error fires repeatedly, target has structured recovery: validation-failure recovery (rollback to checkpoint after 3 same-phase failures), circuit breaker (rotate approach after 3 same-error failures), and standard error responses for /execute waves and review failures. See [references/failure-recovery.md](references/failure-recovery.md).
 
 #### Secondary Repo Inline Commit
 
@@ -354,7 +354,7 @@ The cross-project completion-gate variant (all projects must have status COMPLET
 | File | Purpose | Owner |
 |------|---------|-------|
 | `.fno/target-state.md` | Immutable session manifest (written once by `fno target init`) | target |
-| `.fno/STATE.md` | Wave/task progress | /do waves |
+| `.fno/STATE.md` | Wave/task progress | /execute waves |
 | `.fno/SUMMARY.md` | Task completion notes | archer |
 | `.fno/ledger.json` | Feature metrics | target |
 | `.fno/events.jsonl` | Loop-check events (loop_check, termination, etc.) | fno-agents loop-check |
@@ -395,7 +395,7 @@ Loaded by state — the "read X when Y" load conditions are inline above; this i
 - [references/init-state.md](references/init-state.md) - Steps 1-3f initialization sequence
 - [references/boundary-reconcile.md](references/boundary-reconcile.md) - STALE boundary reconcile procedure
 - [references/reconcile-mode.md](references/reconcile-mode.md) - `--reconcile` de-stub pass contract
-- [references/phase-transition-guards.md](references/phase-transition-guards.md) - Acceptance criteria gate before /do waves
+- [references/phase-transition-guards.md](references/phase-transition-guards.md) - Acceptance criteria gate before /execute waves
 - [references/phase-invocations.md](references/phase-invocations.md) - Phase routing + invocation logic + Linear sync + validate artifact
 - [references/scratchpad-writes.md](references/scratchpad-writes.md) - Cross-phase state files (think findings, plan summary)
 - [references/phase-bodies.md](references/phase-bodies.md) - Clean, review, direction-alignment phases

@@ -1,27 +1,28 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Do — Waves Mode (Wave Orchestration)
 
 > **Multi-CLI:** If not on Claude Code, see [cli-tool-mapping.md](cli-tool-mapping.md) for tool equivalents.
 
-Interactive orchestrator for multi-phase implementation plans. Research, waves, verification - stops and asks when things go wrong. This is the `waves` mode of `/do`; the router has already resolved the mode and is running this body inline.
+Interactive orchestrator for multi-phase implementation plans. Research, waves, verification - stops and asks when things go wrong. This is the `waves` mode of `/execute`; the router has already resolved the mode and is running this body inline.
 
 Provider-aware execution is hook-driven. A parallel wave downgrades to sequential only when tasks share explicit files or hidden shared outputs; the downgrade always carries an explicit reason.
 
 ## Usage
 
 ```
-/do waves                        # Execute plan in current directory
-/do waves path/to/plan           # Execute specific plan
-/do waves frontend               # Execute with frontend expertise
-/do waves backend path/to/plan   # Execute specific plan with backend expertise
-/do waves adversarial            # Enable adversarial challenge after verification
-/do waves research               # Force research phase even when conditions not fully met
-/do waves adversarial research path/to/plan   # Combinable positional modifiers
-/do waves resume                  # Resume from last checkpoint
-/do waves continue                # Continue from STATE.md
-/do waves retry                   # Retry failed task
+/execute waves                        # Execute plan in current directory
+/execute waves path/to/plan           # Execute specific plan
+/execute waves frontend               # Execute with frontend expertise
+/execute waves backend path/to/plan   # Execute specific plan with backend expertise
+/execute waves adversarial            # Enable adversarial challenge after verification
+/execute waves research               # Force research phase even when conditions not fully met
+/execute waves adversarial research path/to/plan   # Combinable positional modifiers
+/execute waves resume                  # Resume from last checkpoint
+/execute waves continue                # Continue from STATE.md
+/execute waves retry                   # Retry failed task
 ```
 
-`operator` is a one-release alias for `waves` (`/do operator ...` == `/do waves ...`).
+`operator` is a one-release alias for `waves` (`/execute operator ...` == `/execute waves ...`).
 
 **Available expertise:** frontend, backend, architect, fullstack, devops, qa
 
@@ -80,7 +81,7 @@ The plan summary supplements but never replaces the plan.
 #### Foreign-wave handling (spawn-into-project)
 
 The `scope: cross-project` parallel-worktree pipeline has been removed;
-`/do waves` no longer delegates to it. Instead, resolve each wave's project
+`/execute waves` no longer delegates to it. Instead, resolve each wave's project
 (from its `project:` field / node) against the workspace map and, when a wave
 belongs to a project OTHER than the session's:
 
@@ -169,7 +170,7 @@ unparseable criterion).
 #### Session-Project Invariant (per wave, MANDATORY)
 
 **Before executing any wave, check whether it belongs to this session's
-project.** A `/do` session operates only in its own project; a wave whose
+project.** A `/execute` session operates only in its own project; a wave whose
 `project:` differs from the session project is **foreign** and must NOT be
 executed here. Resolve the session project (plan frontmatter `project:`, or the
 target-state node's `project`) and compare it to each `wave.project`:
@@ -227,7 +228,7 @@ inference → `do`):
 TASK_EXECUTOR=$(TASK_EXEC="$task_executor_field" \
                 PLAN_EXEC="$plan_executor_field" \
                 TASK_FILES="$task_file_list" \
-                bash skills/do/scripts/resolve-executor.sh)
+                bash skills/execute/scripts/resolve-executor.sh)
 
 case "$TASK_EXECUTOR" in
     impeccable) SUBAGENT_TYPE="frontend-executor" ;;
@@ -307,10 +308,10 @@ not re-check or block on it.
 
 See `agents/archer.md` and `agents/frontend-executor.md` for full
 protocols. Domain-specific checklists are in
-`skills/do/references/domain-checklists.md` - the orchestrator injects
+`skills/execute/references/domain-checklists.md` - the orchestrator injects
 the appropriate one into `.fno/CONTEXT.md` before spawning the agent.
 
-If expertise was specified (e.g., `/do waves frontend`), inject expertise content into each agent prompt. Load [expertise-injection.md](expertise-injection.md) for the injection protocol.
+If expertise was specified (e.g., `/execute waves frontend`), inject expertise content into each agent prompt. Load [expertise-injection.md](expertise-injection.md) for the injection protocol.
 
 ### 3a. Synthesis Protocol (MANDATORY - Before Every Dispatch)
 
@@ -382,10 +383,10 @@ already fired from `resolve-executor.sh` at dispatch; `run_summary` fires from
 
 ```bash
 # task_done with the parsed outcome (SUCCESS | DONE_WITH_CONCERNS | FAILED):
-python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary task_done \
+python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary task_done \
   --task "{N.M}" --outcome "{status}" --data '{"commit":"{sha}","concerns":{k}}'
 # blocked on a RESULT: BLOCKED return (or a <help> distress emission):
-python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary blocked \
+python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
   --task "{N.M}" --data '{"reason":"{why}"}'
 ```
 
@@ -526,9 +527,9 @@ If the linear plugin is installed and the plan has a Linear ticket (check the pl
 
 | Command | Behavior |
 |---------|----------|
-| `/do waves` | Start fresh execution from wave 1 |
-| `/do waves resume` | Continue from STATE.md |
-| `/do waves retry <task>` | Re-run specific failed task |
-| `/do waves continue` | Skip failures, continue next wave |
-| `/do waves adversarial` | Enable adversarial challenge after verification |
-| `/do waves research` | Force research phase before execution |
+| `/execute waves` | Start fresh execution from wave 1 |
+| `/execute waves resume` | Continue from STATE.md |
+| `/execute waves retry <task>` | Re-run specific failed task |
+| `/execute waves continue` | Skip failures, continue next wave |
+| `/execute waves adversarial` | Enable adversarial challenge after verification |
+| `/execute waves research` | Force research phase before execution |

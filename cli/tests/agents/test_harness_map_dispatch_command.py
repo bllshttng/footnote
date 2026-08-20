@@ -49,20 +49,20 @@ def test_config_command_overrides_the_per_harness_builtin():
     out = resolve_dispatch(
         harness="codex",
         node_id="x-abcd",
-        dispatch_cfg={"command": "$fno:do {id}"},
+        dispatch_cfg={"command": "$fno:execute {id}"},
     )
-    assert out["command"] == "$fno:do x-abcd"
+    assert out["command"] == "$fno:execute x-abcd"
 
 
 def test_explicit_command_wins_over_config_and_builtin():
     # The explicit slash template is canonical claude syntax, normalized on the
     # chosen harness (x-f0e2): `/custom` -> `$fno:custom` on codex. Precedence is
-    # unchanged - explicit still beats the config `$fno:do`.
+    # unchanged - explicit still beats the config `$fno:execute`.
     out = resolve_dispatch(
         harness="codex",
         node_id="x-abcd",
         command="/custom {id}",
-        dispatch_cfg={"command": "$fno:do {id}"},
+        dispatch_cfg={"command": "$fno:execute {id}"},
     )
     assert out["command"] == "$fno:custom x-abcd"
 

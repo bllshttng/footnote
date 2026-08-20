@@ -96,10 +96,10 @@ bundles:
       - source: skills/target/references/verification-patterns.md
         dest: references/verification-patterns.md
 
-  # Cluster router: /do. Mode bodies (references/flat.md, references/waves.md), orchestrator.py,
+  # Cluster router: /execute. Mode bodies (references/flat.md, references/waves.md), orchestrator.py,
   # scripts/, and the wave-orchestration references are canonical in the folder.
   # Only the shared Multi-CLI tool mapping comes from /target.
-  - skill: do
+  - skill: execute
     files:
       - source: skills/target/references/cli-tool-mapping.md
         dest: references/cli-tool-mapping.md

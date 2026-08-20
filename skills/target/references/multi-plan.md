@@ -137,7 +137,7 @@ For EACH plan (01-*, 02-*, ...):
      Scan for: migration, api endpoint, database, schema, rpc
      If detected → create backend worktree → spawn backend agent
 
-  3. EXECUTION (/do)
+  3. EXECUTION (/execute)
      Frontend: builds against mocks if backend needed
      Backend: runs in parallel
      Both use TDD discipline

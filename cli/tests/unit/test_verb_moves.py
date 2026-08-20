@@ -270,7 +270,7 @@ def test_help_all_classifies_a_moved_eager_command_too(monkeypatch):
 @pytest.mark.parametrize(
     ("verb", "needle"),
     [
-        ("executor", "skills/do/scripts/resolve-executor.sh"),
+        ("executor", "skills/execute/scripts/resolve-executor.sh"),
         ("posture", "`fno config set`"),
         ("tokens", "`fno whoami context`"),
         ("upgrade", "`fno update`"),

@@ -15,7 +15,7 @@ from textwrap import dedent
 import pytest
 
 # Add the orchestrator's parent to path so we can import it directly.
-_ORCHESTRATOR_DIR = Path(__file__).resolve().parents[3] / "skills" / "do"
+_ORCHESTRATOR_DIR = Path(__file__).resolve().parents[3] / "skills" / "execute"
 sys.path.insert(0, str(_ORCHESTRATOR_DIR))
 
 # Add the fno package to path

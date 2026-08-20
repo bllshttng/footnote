@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Do Target Setup Script
+# Execute Target Setup Script
 # Minimal setup - delegates execution to /target skill
 
 set -euo pipefail
@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     -h|--help)
       cat << 'EOF'
-Do Target - Iterative development loop using /do orchestration
+Execute Target - Iterative development loop using /execute orchestration
 
 USAGE:
   /target [expertise] <plan-path> [OPTIONS]
@@ -127,4 +127,4 @@ echo "└───────────────────────�
 echo ""
 echo "State: $STATE_FILE"
 echo ""
-echo "🚀 Skill will orchestrate: /do → /review → /pr create"
+echo "🚀 Skill will orchestrate: /execute → /review → /pr create"

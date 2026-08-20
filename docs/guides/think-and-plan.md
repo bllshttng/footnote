@@ -82,7 +82,7 @@ plans/notification-system/
 | **Full** (default) | `/fno:blueprint "feature"` | Multi-phase folder with waves, BDD criteria |
 | **Quick** | `/fno:blueprint quick "feature"` | Single plan file, lightweight |
 
-Quick plans work with `/fno:do`. Full plans work with `/fno:do waves` or `/fno:target`.
+Quick plans work with `/fno:execute`. Full plans work with `/fno:execute waves` or `/fno:target`.
 
 ### Refusal when a design doc is missing Failure Modes
 
@@ -169,7 +169,7 @@ Or skip think if you already know what you want:
 
 ```
 /fno:blueprint "add retry logic to API calls"
-/fno:do path/to/plan.md
+/fno:execute path/to/plan.md
 ```
 
 ## Panel: Multi-Persona Debate

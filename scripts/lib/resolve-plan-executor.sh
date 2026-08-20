@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # resolve-plan-executor.sh - resolve the executor for a FLAT plan (the
-# inline /do path), mirroring /do waves's per-task resolution at the
-# whole-plan granularity that /do works at.
+# inline /execute path), mirroring /execute waves's per-task resolution at the
+# whole-plan granularity that /execute works at.
 #
-# /do waves consults skills/do/scripts/resolve-executor.sh per task
+# /execute waves consults skills/execute/scripts/resolve-executor.sh per task
 # block, so frontend tasks route to the `impeccable` executor
-# (frontend-executor subagent). The inline /do path had no equivalent, so
+# (frontend-executor subagent). The inline /execute path had no equivalent, so
 # frontend-only plans silently ran as plain `do`. This script closes that
 # gap: it extracts the plan's declared file list plus any plan-level
 # `executor:` and runs the SAME locked surface inference, so a frontend
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESOLVER="$SCRIPT_DIR/../../skills/do/scripts/resolve-executor.sh"
+RESOLVER="$SCRIPT_DIR/../../skills/execute/scripts/resolve-executor.sh"
 
 # Surface inference lives in the in-package module fno.executor._surface
 # (the SINGLE source of truth, ported from the retired infer-task-executor.sh).
@@ -84,7 +84,7 @@ plan_files="$(printf '%s\n' "$plan_content" \
 #
 # Fallback when the operator resolver is absent (Codex P2 / Gemini MEDIUM on
 # PR #385): this lib lives in scripts/lib, but RESOLVER points into
-# skills/do/scripts, which may not co-exist in a lightweight or
+# skills/execute/scripts, which may not co-exist in a lightweight or
 # partially-bundled install. Rather than fail silently to an empty string,
 # fall back to the in-package locked matcher (fno.executor._surface, always
 # importable) honoring the plan-level executor first.

@@ -161,7 +161,7 @@
   },
   {
    "tool": "Bash",
-   "target": "fno agents spawn --name node-x-9963 \"/fno:target x-9963\n\nWave 3: harness-agnostic ceremony. Plan is linked at ~/c3po/internal/fno/plans/20260805-wave-3-harness-agnostic-ceremony-x-9963.md - read it first.\n\nScope: AC11 through AC15 only. Make harness-native review the default and sigma opt-in; make sigma dispatch instrumentation truthful or delete the unused instrumentation; resolve PR creation from a declared model-routing role instead of hardcoded Haiku; make /fno:do accept an explicit harness with environment sniffing only as fallback.\n\nDo NOT begin Wave 4. Do NOT change worktree-policy resolution (owned by x-b28b). Do NOT reopen x-62b4. One node equals one PR.\" --harness claude --substrate bg -P zai --model \"glm-5.2[1m]\" --permission-mode bypassPermissions --cwd ~/co",
+   "target": "fno agents spawn --name node-x-9963 \"/fno:target x-9963\n\nWave 3: harness-agnostic ceremony. Plan is linked at ~/c3po/internal/fno/plans/20260805-wave-3-harness-agnostic-ceremony-x-9963.md - read it first.\n\nScope: AC11 through AC15 only. Make harness-native review the default and sigma opt-in; make sigma dispatch instrumentation truthful or delete the unused instrumentation; resolve PR creation from a declared model-routing role instead of hardcoded Haiku; make /fno:execute accept an explicit harness with environment sniffing only as fallback.\n\nDo NOT begin Wave 4. Do NOT change worktree-policy resolution (owned by x-b28b). Do NOT reopen x-62b4. One node equals one PR.\" --harness claude --substrate bg -P zai --model \"glm-5.2[1m]\" --permission-mode bypassPermissions --cwd ~/co",
    "index": 28,
    "kind": "tool_use"
   },

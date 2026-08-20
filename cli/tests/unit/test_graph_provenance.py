@@ -1624,7 +1624,7 @@ def test_guard_plan_agreement_stamps(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("plan_arg", ["missing.md", "no-claims"])
 def test_guard_plan_absent_evidence_is_agreement(tmp_path, monkeypatch, plan_arg):
-    """Mirror of /do Step 1.5: an unreadable plan or an absent `claims:` is
+    """Mirror of /execute Step 1.5: an unreadable plan or an absent `claims:` is
     agreement-unknown, and absent evidence of conflict is not conflict."""
     from typer.testing import CliRunner
     import fno.graph.cli as C

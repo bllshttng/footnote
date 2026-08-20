@@ -761,7 +761,7 @@ check_consolidation_file() {
     if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
             | grep -E '^consolidation:' >/dev/null; then
         # Grandfather: the gate governs plans written AFTER it shipped. Every
-        # pre-existing plan would otherwise halt /do and /target on work
+        # pre-existing plan would otherwise halt /execute and /target on work
         # already in flight, so they WARN until backfilled. The boundary is
         # strictly-after: a plan created ON the gate date predates the gate
         # reaching its author, and nine live plans carry that date.
@@ -1052,7 +1052,7 @@ validate_wave_section_headers() {
     # a bare non-zero exit from validate-plan.sh.
     # Capture the RAW list (no `sort -un`) so duplicate wave IDs surface
     # as their own diagnostic. Two `- wave: 1` blocks in YAML is malformed
-    # input that `/do waves`'s scheduler can't sensibly act on; collapsing
+    # input that `/execute waves`'s scheduler can't sensibly act on; collapsing
     # them silently would let that error reach merge.
     local yaml_waves_raw
     yaml_waves_raw=$( { awk '

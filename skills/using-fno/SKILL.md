@@ -3,6 +3,7 @@ name: using-fno
 description: Loaded at every SessionStart so the agent knows the two footnote surfaces (slash-command workflows + fno CLI primitives) exist from turn one. Mirrors the using-superpowers pattern.
 ---
 
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # You are in a footnote-enabled project
 
 This workspace has the `footnote` plugin installed. Two surfaces compose: skills call CLI verbs internally. Knowing both keeps you from hand-editing state files the CLI manages.
@@ -21,7 +22,7 @@ Invoke via `/fno:<verb>`. Front door:
 | `/fno:pr` | PR lifecycle. Routes: `create` (Haiku worker), `check`, `merged`. |
 | `/fno:fix` | Repair. Routes: `fix` (default), `investigate`. |
 
-Everything else stays invocable by full name: `/fno:blueprint`, `/fno:do` (`do waves` for orchestration), `/fno:ship` (`ship pr` = `/fno:pr`, `ship doc`), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`. The session skill list enumerates all of them; this curated set is the entry point, not an access boundary.
+Everything else stays invocable by full name: `/fno:blueprint`, `/fno:execute` (`execute waves` for orchestration), `/fno:ship` (`ship pr` = `/fno:pr`, `ship doc`), `/fno:setup`, `/fno:triage`, `/fno:agent`, `/fno:mail`, `/fno:ship-docs`, `/fno:audit`, `/fno:speculate`. The session skill list enumerates all of them; this curated set is the entry point, not an access boundary.
 
 ## 2. CLI primitives (`fno <verb>`, mechanical, fast)
 

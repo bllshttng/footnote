@@ -22,7 +22,7 @@ its blocker landed before writing code. The two never touch each other's state.
 
 ## Scope
 
-- **`/target` only.** A bare `/do <plan-path>` or `/fix` has no node context to
+- **`/target` only.** A bare `/execute <plan-path>` or `/fix` has no node context to
   compute blockers from - out of scope. `/megawalk` dispatches via `/target`, so
   it inherits Step 0 for free.
 - **No enforcement.** The orienter line is advisory; this step is a spine

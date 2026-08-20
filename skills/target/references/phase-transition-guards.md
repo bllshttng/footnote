@@ -1,4 +1,5 @@
-> **SUPERSEDED (2026-06-05, ab-d0337fbc):** the gate boolean transition matrix in this file (Completion Gates section) was deleted by the control-plane collapse wedge. The acceptance criteria gate before /do waves remains active. Kept for historical context; see docs/architecture/control-plane-loop.md.
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
+> **SUPERSEDED (2026-06-05, ab-d0337fbc):** the gate boolean transition matrix in this file (Completion Gates section) was deleted by the control-plane collapse wedge. The acceptance criteria gate before /execute waves remains active. Kept for historical context; see docs/architecture/control-plane-loop.md.
 
 # Phase Transition Guards
 
@@ -9,7 +10,7 @@ After completing each phase:
 
 ## Pre-Execution: Acceptance Criteria Gate (MANDATORY)
 
-Before `/do waves`, verify plan has testable acceptance criteria (BDD Given/When/Then, AC1-/AC2- style, or `acceptance-criteria.md`). If none found, use the tdd skill's BDD criteria generation (`references/bdd-acceptance-criteria.md`) to generate them before proceeding. TDD requires criteria to write meaningful failing tests.
+Before `/execute waves`, verify plan has testable acceptance criteria (BDD Given/When/Then, AC1-/AC2- style, or `acceptance-criteria.md`). If none found, use the tdd skill's BDD criteria generation (`references/bdd-acceptance-criteria.md`) to generate them before proceeding. TDD requires criteria to write meaningful failing tests.
 
 ## Ordering invariants
 

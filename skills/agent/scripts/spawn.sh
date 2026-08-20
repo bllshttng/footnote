@@ -257,7 +257,7 @@ case "$existing_status" in
 esac
 
 # ---- Auto-worktree for code-implementing payloads (x-9c4c) --------------
-# A bg /target|/do|/fix launched into a repo's MAIN checkout lands on the
+# A bg /target|/execute|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
 # "a bg /target self-creates its worktree before building." Do it
 # deterministically here instead: `fno worktree ensure` (policy-resolved base,
@@ -273,13 +273,13 @@ esac
 # than colliding (failure mode 3).
 AUTO_WT=""
 # A payload writes code (and so wants isolation) when it is a node-id build
-# dispatch OR an explicit /target|/do|/fix passthrough. Keying off PAYLOAD_MODE --
+# dispatch OR an explicit /target|/execute|/fix passthrough. Keying off PAYLOAD_MODE --
 # not only the message prefix -- is load-bearing: an opencode/codex node build
 # reaches here as `/fno:target ab-xxxx` / `$fno:target ab-xxxx`, not a literal
 # /target, and those workers have NO location gate, so a prefix-only check would
 # leave them editing a protected main checkout -- the exact harm this guards
 # against. The passthrough arm matches the SAME per-harness namespacing: an
-# explicit `/target`|`/do`|`/fix` reaches here verbatim on claude/agy but as
+# explicit `/target`|`/execute`|`/fix` reaches here verbatim on claude/agy but as
 # `/fno:target` (opencode) / `$fno:target` (codex), so all three renderings must
 # isolate. seed (verbatim conversational pane) and handoff (a doc continuation)
 # and a non-code claude slash command (/think writes a design doc) are NOT code
@@ -289,9 +289,9 @@ is_code_payload() {
     build) return 0 ;;  # node-id dispatch: /target|/fno:target|$fno:target <id>
     passthrough)        # explicit slash command; isolate only code verbs
       case "$MESSAGE" in
-        /target|/target\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
-        /fno:target|/fno:target\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
-        '$fno:target'|'$fno:target '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
+        /target|/target\ *|/execute|/execute\ *|/fix|/fix\ *) return 0 ;;
+        /fno:target|/fno:target\ *|/fno:execute|/fno:execute\ *|/fno:fix|/fno:fix\ *) return 0 ;;
+        '$fno:target'|'$fno:target '*|'$fno:execute'|'$fno:execute '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
         *) return 1 ;;
       esac ;;
     *) return 1 ;;      # seed | handoff
@@ -310,7 +310,7 @@ is_code_payload() {
 # Gated on claude because `EnterWorktree` is a Claude Code harness tool: a
 # codex/opencode worker can run `fno target start` but cannot move its session
 # into the result (a `cd` dies with the shell), so it still needs pre-creation --
-# and its transcripts never land in ~/.claude/projects/ anyway. `/do` and `/fix`
+# and its transcripts never land in ~/.claude/projects/ anyway. `/execute` and `/fix`
 # refuse on a protected branch rather than isolating, so they keep it everywhere.
 #
 # Both a NODE and a literal `/target` message are required, and neither is

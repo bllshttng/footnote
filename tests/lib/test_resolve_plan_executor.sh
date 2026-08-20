@@ -4,7 +4,7 @@
 # "Done when": a fixture changeset touching components/**/*.tsx resolves the
 # impeccable executor on the INLINE path (resolve-plan-executor.sh), and a
 # backend-only plan resolves `do`. Mirrors /operator's resolution at the
-# flat-plan granularity /do works at.
+# flat-plan granularity /execute works at.
 
 set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

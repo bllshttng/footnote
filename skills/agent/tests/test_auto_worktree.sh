@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_auto_worktree.sh - the /agent spawn auto-worktree path (x-9c4c).
 #
-# When spawn.sh launches a code-implementing payload (/target | /do | /fix) into
+# When spawn.sh launches a code-implementing payload (/target | /execute | /fix) into
 # a repo's MAIN checkout, it deterministically creates a conductor worktree and
 # launches THERE (worker born isolated). ONE case is delegated instead (x-6c22):
 # a claude, node-backed `/target` isolates itself at cold-start, so spawn.sh
@@ -101,7 +101,7 @@ git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 run_spawn() { # <msg> [extra args...]: HOME-pinned, stubbed-fno spawn.sh run
   local msg="$1"; shift
   # claude /fix passthrough = payload_mode passthrough (msg leads with `/`).
-  # /fix (like /do) refuses on a protected branch rather than isolating itself,
+  # /fix (like /execute) refuses on a protected branch rather than isolating itself,
   # so it is the code payload that still needs spawn-side pre-creation -- and so
   # exercises the worktree mechanics below. A claude /target DELEGATES instead
   # (tests 13-15); this helper deliberately does not use one.
@@ -144,7 +144,7 @@ no   "think no cwd field" "$out3" "cwd="
 # 4. already a linked worktree -> not re-isolated (launch in place, no nesting).
 WT="$TMP/conductor/workspaces/myrepo/spawn-x-9c4c-demo"  # the worktree from test 1
 out4="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-nested-demo" \
-  --provider claude --payload-mode passthrough --message "/do task 1.1" --node "x-other" \
+  --provider claude --payload-mode passthrough --message "/execute task 1.1" --node "x-other" \
   --cwd "$WT" 2>"$TMP/err4")"
 err4="$(cat "$TMP/err4")"
 has  "linked-wt launched" "$out4" "result=launched"
@@ -170,7 +170,7 @@ no   "fail-safe no cwd field" "$out5" "cwd="
 #    pwd -P canonicalization must still resolve it to the repo root).
 mkdir -p "$REPO/src/deep"
 out6="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-subdir-demo" \
-  --provider claude --payload-mode passthrough --message "/do x-sub" --node "x-sub" \
+  --provider claude --payload-mode passthrough --message "/execute x-sub" --node "x-sub" \
   --cwd "$REPO/src/deep" 2>"$TMP/err6")"
 err6="$(cat "$TMP/err6")"
 has  "subdir worktree'd" "$err6" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-subdir-demo"
@@ -229,7 +229,7 @@ touch "${WORKTREE:-$PWD}/.setup-ran"
 S
 chmod +x "$NEVREPO/scripts/setup/setup-worktree.sh"
 out11="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-never-demo" \
-  --provider claude --payload-mode passthrough --message "/do x-nev" --node "x-nev" \
+  --provider claude --payload-mode passthrough --message "/execute x-nev" --node "x-nev" \
   --cwd "$NEVREPO" 2>"$TMP/err11")"
 err11="$(cat "$TMP/err11")"
 has  "never launched in place note" "$err11" "policy=never, launching in place"

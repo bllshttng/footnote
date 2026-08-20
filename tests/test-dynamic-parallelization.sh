@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Test dynamic parallelization: file ownership map parsing + set intersection
-# Tests the algorithm described in skills/do/references/dynamic-parallelization.md
+# Tests the algorithm described in skills/execute/references/dynamic-parallelization.md
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"

@@ -27,7 +27,15 @@ _LOG = logging.getLogger(__name__)
 # fable = judgment-about-judgment tier.
 SYNTH_MODEL = "claude-fable-5"
 
-_DRIVER_SKILLS = {"fno:think", "fno:target", "fno:megawalk", "fno:do", "fno:blueprint"}
+# Both spellings remain drivers during the one-release compatibility window.
+_DRIVER_SKILLS = {
+    "fno:think",
+    "fno:target",
+    "fno:megawalk",
+    "fno:do",
+    "fno:execute",
+    "fno:blueprint",
+}
 
 
 @dataclass

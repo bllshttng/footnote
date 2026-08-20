@@ -928,7 +928,7 @@ def mutate(
 
     # --- Validate the proposed frontmatter against the canonical schema ---
     # Refuse to write a plan whose PROPOSED frontmatter fails PlanFrontmatter,
-    # naming each bad field, so /do's read weeks later never trips on it (US1).
+    # naming each bad field, so /execute's read weeks later never trips on it (US1).
     # Only present-but-invalid fields block (a bad `size`, a malformed
     # timestamp, an off-vocabulary status); MISSING required fields are NOT
     # enforced here - a design doc legitimately carries no `node` until it binds

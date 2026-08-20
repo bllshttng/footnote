@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Phase Invocations
 
 **Load when:** dispatching a phase. Covers the phase routing table, invocation logic, scratchpad writes, confirmation check, Linear status sync, and the validate-phase artifact write.
@@ -31,7 +32,7 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 | Phase | Condition | Skill |
 |-------|-----------|-------|
 | 1. Plan | idea OR no 00-INDEX.md | `fno:plan` |
-| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:do waves`) |
+| 2. Do | `cross_project: false` (all new plans) | `domain_phases.execute` (default: `fno:execute waves`) |
 | 2. Do | `cross_project: true` (legacy only) | Migration shim — the cross-project pipeline was removed. WARN + route to spawn-into-project (see SKILL.md "CROSS-PROJECT IS RETIRED"); then run `domain_phases.execute` for this session's own project. Do NOT invoke a cross-project pipeline skill. |
 | 2.5 Clean | Only with `clean` modifier | `/simplify` on changed files |
 | 3. Review | Always (BEFORE PUSH) | `preship_review_plan` decides (see [phase-bodies.md](phase-bodies.md)): advisory self-review by default; `domain_phases.review`/`fno:review` sigma only when `config.review.reviewers` names `sigma` |
@@ -58,12 +59,12 @@ Before invoking any resolved skill, check for `confirm: true` in its frontmatter
 
 2. If the resolved phase value is a bash command: no confirm check (commands are always safe because the user defined them in their config)
 
-This check applies to the review, validate, ship, external, and docs phases — any phase that uses a domain-resolved skill. The execute phase uses `/do waves` which doesn't need confirmation.
+This check applies to the review, validate, ship, external, and docs phases — any phase that uses a domain-resolved skill. The execute phase uses `/execute waves` which doesn't need confirmation.
 
 ## Linear Status Sync (optional - requires linear plugin)
 
 If the linear plugin is installed and the plan has a `linear:` field in 00-INDEX.md, sync status at phase transitions:
-- `/do waves` start sets "In Progress"
+- `/execute waves` start sets "In Progress"
 - After `/review` syncs progress
 - After `/pr create` adds PR link comment
 - After docs sets "Done"

@@ -51,7 +51,7 @@ arms regardless of directory.
 | `do` | `archer` | Default. TDD-disciplined task implementation. |
 | `tdd` | `archer` | Alias for `do`. |
 | `impeccable` | `frontend-executor` | `/impeccable craft + critique` loop with score-based convergence. |
-| `research` | `scout` | Retrieve + store: ddgs backbone -> self-fetch -> `sources.jsonl`. Reached via `fno research "X"` (a research-pipeline alias over `target`), NOT via `/do waves` surface inference - the surface resolver below only emits `do`/`impeccable`. The `doc` deliverable terminal + verify profile + eval are Group 2. |
+| `research` | `scout` | Retrieve + store: ddgs backbone -> self-fetch -> `sources.jsonl`. Reached via `fno research "X"` (a research-pipeline alias over `target`), NOT via `/execute waves` surface inference - the surface resolver below only emits `do`/`impeccable`. The `doc` deliverable terminal + verify profile + eval are Group 2. |
 
 ## Override paths
 
@@ -99,22 +99,22 @@ of their file paths.
 ```bash
 # AC1.1-HP: explicit task wins
 PLAN_EXEC="do" TASK_EXEC="impeccable" \
-    bash skills/do/scripts/resolve-executor.sh
+    bash skills/execute/scripts/resolve-executor.sh
 # -> impeccable
 
 # AC1.1-FR: plan wins over inference
 PLAN_EXEC="impeccable" TASK_EXEC="" TASK_FILES="src/foo.py" \
-    bash skills/do/scripts/resolve-executor.sh
+    bash skills/execute/scripts/resolve-executor.sh
 # -> impeccable
 
 # AC1.1-EDGE: inference fires when nothing explicit
 PLAN_EXEC="" TASK_EXEC="" TASK_FILES="src/components/Foo.tsx" \
-    bash skills/do/scripts/resolve-executor.sh
+    bash skills/execute/scripts/resolve-executor.sh
 # -> impeccable
 
 # AC1.5-FR: unknown falls closed
 PLAN_EXEC="" TASK_EXEC="nonsense" \
-    bash skills/do/scripts/resolve-executor.sh
+    bash skills/execute/scripts/resolve-executor.sh
 # -> do (with WARN on stderr)
 ```
 
@@ -126,7 +126,7 @@ PLAN_EXEC="" TASK_EXEC="nonsense" \
 NOT per-stage. The budget is total, not multiplied across stages.
 
 Concretely:
-- `/do waves` passes one `max_iterations_per_task` value to `frontend-executor`
+- `/execute waves` passes one `max_iterations_per_task` value to `frontend-executor`
   at dispatch.
 - `frontend-executor` maintains a single `iterations_used` counter that
   increments on every stage invocation (not per-attempt within a stage).

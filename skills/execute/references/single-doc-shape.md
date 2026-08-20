@@ -1,12 +1,12 @@
 # Single-Doc Plan Detection and Dispatch
 
-Reference for how `/do waves` reads plans. Architectural overview: `docs/architecture/lean-blueprint.md`.
+Reference for how `/execute waves` reads plans. Architectural overview: `docs/architecture/lean-blueprint.md`.
 
 A plan is always a single `.md` file (G1 blocks authoring new folder plans; G3 removed folder-plan *reading* entirely). There is no shape detection step anymore - callers pass a file path directly.
 
 ## `load_plan_strategy(plan_input: str)` API
 
-`skills/do/orchestrator.py`'s `load_plan_strategy` is the dispatcher `/do waves` calls. It:
+`skills/execute/orchestrator.py`'s `load_plan_strategy` is the dispatcher `/execute waves` calls. It:
 
 1. Calls `fno.plan._doc.load_plan(Path(plan_input))` to parse frontmatter and sections.
 2. Extracts the `## Execution Strategy` section via `doc.get_section("Execution Strategy")`.
@@ -37,5 +37,5 @@ Every failure mode returns `None` and prints a diagnostic to stderr - never rais
 
 - `cli/src/fno/plan/_doc.py` - `load_plan`, `PlanDoc`
 - `cli/src/fno/plan/brief.py` - `parse_execution_strategy` (the canonical Execution Strategy YAML parser)
-- `skills/do/orchestrator.py` - `load_plan_strategy`, `parse_execution_strategy`, `get_task_file_targets`
+- `skills/execute/orchestrator.py` - `load_plan_strategy`, `parse_execution_strategy`, `get_task_file_targets`
 - `skills/blueprint/references/single-doc-spec.md` - mutation contract and section ownership

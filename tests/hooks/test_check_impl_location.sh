@@ -3,7 +3,7 @@
 #
 # Unit tests for the shared location verdict helper
 # (hooks/helpers/check-impl-location.sh), the single source of truth consumed
-# by /target, /do, /fix, init-target-state.sh, and the SessionStart heads-up
+# by /target, /execute, /fix, init-target-state.sh, and the SessionStart heads-up
 # (design: Worktree Scope Hygiene).
 #
 # Verifies the verdict scalars (verdict / is_canonical / branch / is_unborn)

@@ -3,8 +3,8 @@
 footnote has several ways to execute work. Pick the one that matches your situation.
 
 **Size profiles** affect which executor target uses:
-- `-S` (small) uses `/do` for lightweight single-session execution
-- `-M` and `-L` use `/do waves` for wave orchestration with verification
+- `-S` (small) uses `/execute` for lightweight single-session execution
+- `-M` and `-L` use `/execute waves` for wave orchestration with verification
 
 Size profiles are independent of execution modes (main, agent, fork). You can combine them: `/target -L --agent "feature"` runs large ceremony with subagent dispatch.
 
@@ -14,14 +14,14 @@ Size profiles are independent of execution modes (main, agent, fork). You can co
 |------|---------|----------|
 | **Target** | `/fno:target "feature"` | You want a full PR from an idea |
 | **Target + plan** | `/fno:target path/to/plan/` | You already have a plan |
-| **Operator** | `/fno:do waves` | Complex multi-wave plan with parallel tasks |
-| **Do** | `/fno:do path/to/plan.md` | Quick focused task, no ceremony |
+| **Operator** | `/fno:execute waves` | Complex multi-wave plan with parallel tasks |
+| **Execute** | `/fno:execute path/to/plan.md` | Quick focused task, no ceremony |
 | **Cross-project** | `/fno:target --cross-project` | Feature spans multiple repos |
 
 ## Do - lightweight execution
 
 ```
-/fno:do path/to/plan.md
+/fno:execute path/to/plan.md
 ```
 
 Read the plan, make the changes, verify, done. No state machine, no quality gates, no PR creation. Just execute.
@@ -36,7 +36,7 @@ Do expects a single plan file (not a directory). If you point it at a directory,
 ## Operator - wave orchestration
 
 ```
-/fno:do waves
+/fno:execute waves
 ```
 
 Operator reads a plan directory with 00-INDEX.md and executes waves. It dispatches subagents for parallel tasks, tracks progress in STATE.md, and coordinates multi-phase work.
@@ -71,9 +71,9 @@ Requires `~/.fno/config.toml` with workspace configuration. Run `/fno:setup` to 
 ## How to choose
 
 ```
-Simple bug fix?                  -> /fno:do
-Quick feature, I'll review it?   -> /fno:do
-Feature needs a plan?            -> /fno:blueprint, then /fno:do
+Simple bug fix?                  -> /fno:execute
+Quick feature, I'll review it?   -> /fno:execute
+Feature needs a plan?            -> /fno:blueprint, then /fno:execute
 Complex multi-phase feature?     -> /fno:target path/to/plan/
 Starting from an idea?           -> /fno:target "the idea"
 Touches multiple repos?          -> /fno:target --cross-project

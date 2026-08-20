@@ -88,7 +88,7 @@ footnote/
 
 ## Commands
 
-Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (table below). Everything else stays invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
+Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (table below). Everything else stays invocable by full name. The advertised set lives in `skills/using-fno/SKILL.md`. Always write verbs plugin-qualified (`/fno:...`) - a bare `/execute` can resolve to another plugin.
 
 | Command | Purpose |
 |---------|---------|
@@ -97,7 +97,7 @@ Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/
 | `/fno:target L "feature"` | Large size: full ceremony including adversarial |
 | `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
 | `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
-| `/fno:do` | Execute a plan: `flat` (default) or `waves` |
+| `/fno:execute` | Execute a plan: `flat` (default) or `waves` |
 | `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Research / review / fix-loop / TDD / spec-ordering / config wizard |
 | `/fno:pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
 | `/fno:growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
@@ -117,7 +117,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 ## Execution & looping
 
-**Waves + executors.** Plans declare waves in `00-INDEX.md`; `skills/do/orchestrator.py` routes tasks to agents by keyword. Executor resolves via task block -> plan frontmatter -> surface inference: `do`/`tdd` (archer, default) or `impeccable` (frontend-executor). [executor-resolution](skills/do/references/executor-resolution.md).
+**Waves + executors.** Plans declare waves in `00-INDEX.md`; `skills/execute/orchestrator.py` routes tasks to agents by keyword. Executor resolves via task block -> plan frontmatter -> surface inference: `do`/`tdd` (archer, default) or `impeccable` (frontend-executor). [executor-resolution](skills/execute/references/executor-resolution.md).
 
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
@@ -137,7 +137,7 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `.fno/target-state.md` | project-relative | Immutable session manifest | target |
-| `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /do, operator, /blueprint |
+| `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /execute, operator, /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | Quick-plan sidecar | target stop hook |
 
 Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno config doctor`. [path-config](docs/path-config.md). A state-root TOP-LEVEL write needs an owner + lifetime in [state-root-inventory](docs/state-root-inventory.md); session-keyed files go in a subfolder.
@@ -152,7 +152,7 @@ At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `s
 
 ### Multi-repo features
 
-A session works only in its own project. A multi-repo feature is one node per project linked by `blocked_by`, each shipping its own PR: `/blueprint` decomposes, `/do` spawns foreign unblocked waves via `fno agents spawn --cwd <root>`, `fno backlog advance` dispatches dependents on merge.
+A session works only in its own project. A multi-repo feature is one node per project linked by `blocked_by`, each shipping its own PR: `/blueprint` decomposes, `/execute` spawns foreign unblocked waves via `fno agents spawn --cwd <root>`, `fno backlog advance` dispatches dependents on merge.
 
 ### Return contract for execution agents
 
@@ -162,7 +162,7 @@ Preferred (claude): a JSON object in a fenced ```json block (or `<result>{...}</
 {"result": "SUCCESS", "task": "2.1", "commit": "abc123", "summary": "..."}
 ```
 
-`result` ∈ `SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`; `task` required. Fallback (codex/gemini): the `RESULT:`/`TASK:`/... line grammar, fail-closed. Parser: `parse_task_result` in `skills/do/orchestrator.py`.
+`result` ∈ `SUCCESS | DONE_WITH_CONCERNS | FAILED | BLOCKED`; `task` required. Fallback (codex/gemini): the `RESULT:`/`TASK:`/... line grammar, fail-closed. Parser: `parse_task_result` in `skills/execute/orchestrator.py`.
 
 ### Deviation rules
 
@@ -191,7 +191,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **Skill:** `skills/<name>/SKILL.md` (+ optional `references/`, `scripts/`). **Agent:** `agents/<name>.md` with frontmatter.
 - **Self-containment (CI-enforced):** driver skills (`/target`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse is build-time via `skill-bundles.yaml` + `fno bundle` (`bundle check` gates freshness).
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
-- **Testing:** `python skills/do/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
+- **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 
 ## Plugin installation
 

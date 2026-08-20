@@ -1,6 +1,6 @@
 # Dynamic Expertise Injection
 
-If expertise was specified (e.g., `/do waves frontend`), inject the corresponding skill into each archer prompt:
+If expertise was specified (e.g., `/execute waves frontend`), inject the corresponding skill into each archer prompt:
 
 ```bash
 # Determine expertise from $ARGUMENTS (first word if it matches known types)

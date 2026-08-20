@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Resume Execution Protocol
 
 Two resume layers compose: the lightweight STATE.md wave/task trail (below) and
@@ -86,7 +87,7 @@ cat .fno/STATE.md 2>/dev/null || echo "No state found"
 From STATE.md, extract completed waves (lines with `[x]`), completed tasks
 within each wave, and the last wave in progress. Skip completed waves; for a
 partially complete wave, continue from the next task (sequential) or re-run only
-failed tasks (parallel). `/do waves --resume` reads STATE.md and continues from
+failed tasks (parallel). `/execute waves --resume` reads STATE.md and continues from
 the next incomplete wave/task.
 
 This trail is per-session context; the durable receipt above is the

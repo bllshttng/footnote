@@ -84,7 +84,7 @@ write_receipt() {
   FNO_CLAIMS_ROOT="$CLAIMS_HOME" FNO resume receipt write \
     --node "$NODE" --session s1 --phase do --generation 2 \
     --repo testrepo --worktree "$TMP" --branch feature/x-test \
-    --head "$head" --next-verb "/fno:do waves" --next-target "$NODE" \
+    --head "$head" --next-verb "/fno:execute waves" --next-target "$NODE" \
     --idempotency-keys "pr_create:${HEAD1:0:7}" $extra >/dev/null
 }
 

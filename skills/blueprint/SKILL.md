@@ -4,6 +4,7 @@ description: "Create an implementation plan as a single .md doc that is a contra
 argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <design-doc-path | feature-description> [--no-linear]"
 ---
 
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Abilities Plan
 
 When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
@@ -332,7 +333,7 @@ Each change must include:
 ### Handoff
 
 > "Plan saved to `{path}` and adopted to the backlog as `ab-xxxxxxxx`.
-> Run `/do {path}` to execute, `/target {path}` for the full pipeline, or
+> Run `/execute {path}` to execute, `/target {path}` for the full pipeline, or
 > review first. Use `/blueprint quick no-adopt` next time to skip auto-adopt."
 
 Include the adopted ID only when adopt succeeded. On failure, omit the
@@ -375,7 +376,7 @@ Cost is automatically registered by the stop hook when the session exits. The st
 
 ## Single-doc mutation (design-doc input)
 
-When the input to `/blueprint` is a path to an existing design doc (produced by `/think`), the skill mutates that doc in place rather than creating a folder plan. The doc grows through /think -> /blueprint -> /do -> /review -> /ship; the single file is the canonical artifact.
+When the input to `/blueprint` is a path to an existing design doc (produced by `/think`), the skill mutates that doc in place rather than creating a folder plan. The doc grows through /think -> /blueprint -> /execute -> /review -> /ship; the single file is the canonical artifact.
 
 ### How it works
 

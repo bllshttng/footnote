@@ -136,12 +136,12 @@ In v1 an unattended / headless session never runs the honor sequence itself. On 
 
 ## Standard Error Responses
 
-### /do waves Returns FAILED
+### /execute waves Returns FAILED
 
 ```markdown
 ## Iteration N - Blocked
 
-/do waves reported failure:
+/execute waves reported failure:
 - Task: 2.2
 - Error: {error_details}
 

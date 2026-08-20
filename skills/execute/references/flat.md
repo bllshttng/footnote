@@ -21,7 +21,7 @@ Before editing, validate the resolved single-file plan through the bundled compa
 
 ```bash
 PLAN_PATH="$1"
-bash "${SKILL_DIR:-skills/do}/scripts/validate-plan.sh" "$PLAN_PATH"
+bash "${SKILL_DIR:-skills/execute}/scripts/validate-plan.sh" "$PLAN_PATH"
 ```
 
 On any nonzero exit, stop. Exit 1 reports field-level errors to fix in the plan; exit 2 means the validator itself could not run, so the plan was never judged and the tooling is what needs fixing.
@@ -48,13 +48,13 @@ fenced YAML block (if present). If a predicate fires, stop, emit
 NOT make further changes:
 
 ```bash
-PLAN_PATH="$1"   # the .md file path passed to /do
+PLAN_PATH="$1"   # the .md file path passed to /execute
 # kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63).
 # `fno phase kill-check` prints `KILL_CRITERIA_FIRED <name>|<reason>` and exits
 # 1 when a predicate fires, exits 0 (empty) when none fire, and exits 2 when the
 # fno-agents binary is unavailable. Branch on the exit code: only rc 1 WITH the
 # marker aborts; rc 2 (or any other non-zero) is an infra failure that warns and
-# skips, never aborting /do with an empty kill reason (codex PR #515 P2).
+# skips, never aborting /execute with an empty kill reason (codex PR #515 P2).
 if [[ -n "$PLAN_PATH" ]] && command -v fno >/dev/null 2>&1; then
     KC_OUT=$(fno phase kill-check "$PLAN_PATH" 2>/dev/null); KC_RC=$?
     if [[ $KC_RC -eq 1 && "$KC_OUT" == KILL_CRITERIA_FIRED* ]]; then
@@ -105,10 +105,10 @@ After each change lands (or blocks), emit the task-boundary event so observers c
 
 ```bash
 # SUCCESS / DONE_WITH_CONCERNS after a change commits:
-python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary task_done \
+python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary task_done \
   --task "<n>" --outcome SUCCESS --data '{"commit":"<sha>","concerns":0}'
 # BLOCKED when a change cannot proceed (also the <help> path):
-python3 "${SKILL_DIR:-skills/do}/orchestrator.py" --emit-boundary blocked \
+python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
   --task "<n>" --data '{"reason":"<why>"}'
 ```
 
@@ -147,7 +147,7 @@ Summarize what was done:
 - Enforce BDD acceptance criteria
 - Handle parallel execution
 
-If you need any of the above, use `/do waves` instead.
+If you need any of the above, use `/execute waves` instead.
 
 ## TDD Behavior
 

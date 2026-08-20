@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Phase Bodies
 
 **Load when:** about to execute the clean, review, or direction-alignment phase. Each phase has a small body of rules around when it runs and what counts as success.
@@ -44,12 +45,12 @@ While the PR's CI is still polling, read posted optional bot reviews at first-po
 
 There is no promise-time self-grade phase (control-plane step 6, ab-f8e5f214).
 Intent is checked through CI, not an agent grading its own homework: the BDD
-acceptance criteria that matter become tests during `/do` (TDD) and run in CI,
+acceptance criteria that matter become tests during `/execute` (TDD) and run in CI,
 which `fno-agents loop-check`'s CI read already covers. A genuinely missing test
 is a `/blueprint`-quality problem, not a completion gate. There is no self-grade
 PASS/FAIL line and no phase 4.5.
 
-**Do phase mode dispatch:** Main thread uses `fno:do waves` directly. Subagent mode dispatches via Task tool per wave. Worktree mode creates separate worktrees per plan (see [multi-plan.md](multi-plan.md)).
+**Do phase mode dispatch:** Main thread uses `fno:execute waves` directly. Subagent mode dispatches via Task tool per wave. Worktree mode creates separate worktrees per plan (see [multi-plan.md](multi-plan.md)).
 
 ## Direction Alignment Check (every 2 phases)
 

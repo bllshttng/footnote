@@ -155,7 +155,7 @@ def build_corpus(
 
 # -- Structural checks (blueprint dimension), reused-in-spirit from
 # skills/blueprint/mutate_doc.py's hard-refuse check and
-# skills/do/orchestrator.py's detect_hidden_output_conflicts. Reimplemented
+# skills/execute/orchestrator.py's detect_hidden_output_conflicts. Reimplemented
 # in pure Python rather than imported: cli/src/fno lint (shellout-drift)
 # forbids a packaged verb shelling to a repo-root script, and those two
 # checks live in skill scripts outside the installable package.

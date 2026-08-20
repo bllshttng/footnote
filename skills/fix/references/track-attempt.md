@@ -133,7 +133,7 @@ This skill is used by:
 |-------------|---------------------------|
 | `debug` | Reads prior attempts before starting |
 | `tournament-debugger` | Records each agent's attempt and outcome |
-| `/fno:do waves` | References attempt log in STATE.md |
+| `/fno:execute waves` | References attempt log in STATE.md |
 
 ## Example Session
 

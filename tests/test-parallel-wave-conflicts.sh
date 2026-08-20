@@ -56,7 +56,7 @@ import sys
 
 tmp_dir = Path(sys.argv[1])
 root = Path(".")
-orchestrator_path = root / "skills/do/orchestrator.py"
+orchestrator_path = root / "skills/execute/orchestrator.py"
 spec = importlib.util.spec_from_file_location("fno_orchestrator", orchestrator_path)
 module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader

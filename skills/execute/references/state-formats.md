@@ -1,6 +1,6 @@
 # State File Formats
 
-Reference for STATE.md structure used by /fno:do waves.
+Reference for STATE.md structure used by /fno:execute waves.
 
 ## STATE.md Schema
 
@@ -57,7 +57,7 @@ Completed: 2026-01-24T14:15:00Z
 ### Wave 2: Core Rewrite (IN_PROGRESS)
 Started: 2026-01-24T14:16:00Z
 
-- [x] 2.1: Rewrite /do core - SUCCESS
+- [x] 2.1: Rewrite /execute core - SUCCESS
 - [ ] 2.2: Add error handling - IN_PROGRESS
 
 ### Wave 3: References (PENDING)
@@ -89,10 +89,10 @@ Status: NOT_RUN
 
 ```markdown
 # Before
-- [ ] 2.1: Rewrite /do core - PENDING
+- [ ] 2.1: Rewrite /execute core - PENDING
 
 # After
-- [x] 2.1: Rewrite /do core - SUCCESS
+- [x] 2.1: Rewrite /execute core - SUCCESS
 ```
 
 ### After Wave Completion
@@ -198,7 +198,7 @@ EOF
 fi
 ```
 
-This is fire-and-forget. If the scratchpad does not exist (manual /do waves
+This is fire-and-forget. If the scratchpad does not exist (manual /execute waves
 invocation outside archer), skip silently.
 
 ## Best Practices

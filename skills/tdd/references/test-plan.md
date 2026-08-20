@@ -22,7 +22,7 @@ Load references as needed during test planning:
 
 ## When to Use
 
-- After `/do` completes and Playwright tests pass
+- After `/execute` completes and Playwright tests pass
 - Before `/pr create` for significant features
 - When feature involves complex UX flows
 - When feature has many edge cases

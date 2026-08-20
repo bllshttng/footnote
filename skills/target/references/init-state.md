@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Initialize State (Steps 1-3f)
 
 **Load when:** starting a fresh target run (Step 1 onwards). All steps run sequentially before pipeline execution.
@@ -44,9 +45,9 @@ After loading config, resolve the size profile:
 
 The size profile sets the base values for all toggles. Individual flags then override specific toggles on top. For example, `M adversarial` starts with the Medium profile and adds adversarial.
 
-**Executor resolution:** If the resolved profile sets `executor: do`, invoke `/do` instead of `/do waves` for the execute phase. This is the key behavioral difference between Small and Medium/Large.
+**Executor resolution:** If the resolved profile sets `executor: do`, invoke `/execute` instead of `/execute waves` for the execute phase. This is the key behavioral difference between Small and Medium/Large.
 
-**Plan resolution:** If the resolved size is Small and `input_type == idea`, invoke `/blueprint quick` instead of `/blueprint` for the plan phase. Small features get a single-file plan that feeds into `/do`. Medium and Large get the full folder plan.
+**Plan resolution:** If the resolved size is Small and `input_type == idea`, invoke `/blueprint quick` instead of `/blueprint` for the plan phase. Small features get a single-file plan that feeds into `/execute`. Medium and Large get the full folder plan.
 
 **Skip flag provenance (ENFORCED):** Flags are set by (in priority order):
 1. CLI flags (`--no-external`, `--no-docs`) and positional modifiers (`adversarial`, `clean`)
@@ -158,11 +159,11 @@ If `input_type == plan`, run the plan validator before spending tokens on execut
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/validate-plan.sh" "$PLAN_DIR"
 ```
 
-**On ERROR:** STOP. Report the validation errors. Do NOT proceed to /do. The plan needs fixes first.
+**On ERROR:** STOP. Report the validation errors. Do NOT proceed to /execute. The plan needs fixes first.
 
 **On WARN:** Log warnings in target-state.md under `## Plan Validation Warnings`, then proceed.
 
-**On PASS:** Proceed to /do.
+**On PASS:** Proceed to /execute.
 
 **Why here and not just in /blueprint?** Plans can be:
 1. Created by `/blueprint` (validated at creation)
@@ -192,7 +193,7 @@ Write resolved domain and phase mapping to target-state.md:
 ```yaml
 domain: research
 domain_phases:
-  execute: fno:do waves
+  execute: fno:execute waves
   review: fno:fact-check
   validate: "python3 scripts/verify-citations.py"
   ship: fno:publish-to-obsidian
@@ -244,7 +245,7 @@ discovery:
 
 ## Step 3e: Create Pre-Execute Checkpoint
 
-Before invoking `/do waves`, create a git checkpoint so we can rollback if execution fails repeatedly:
+Before invoking `/execute waves`, create a git checkpoint so we can rollback if execution fails repeatedly:
 
 ```bash
 source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/checkpoint.sh"

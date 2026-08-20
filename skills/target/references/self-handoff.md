@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Self-Handoff at Pipeline Boundaries (ab-534bcc55)
 
 Read this at a pipeline boundary (blueprint->do, or a wave boundary during do/review) when deciding whether to hand the rest of the run to a fresh-context successor. Never invoke mid-wave or mid-task.
@@ -32,6 +33,6 @@ The `scope: cross-project` parallel-worktree pipeline has been removed. A sessio
 
 1. **WARN** the user: "scope: cross-project is deprecated and the parallel pipeline was removed. Model multi-repo work as one backlog node per project (linked by blocked_by); each ships its own PR. Use `fno backlog decompose` to split a legacy plan."
 2. **Do NOT** invoke any cross-project pipeline (removed) and **do NOT** `cd` into other repos to write code.
-3. **Route to spawn-into-project:** continue THIS session in its own project only. Foreign waves are handled by `/do` (auto-spawn when the foreign node is unblocked; defer + carveout when it is blocked); cross-project dependents are dispatched on merge by `fno backlog advance`.
+3. **Route to spawn-into-project:** continue THIS session in its own project only. Foreign waves are handled by `/execute` (auto-spawn when the foreign node is unblocked; defer + carveout when it is blocked); cross-project dependents are dispatched on merge by `fno backlog advance`.
 
 `cross_project: true` no longer forks the pipeline; it only triggers this deprecation warning + the spawn-into-project routing above. The manifest field and the plan-graduation timing in `fno-agents finalize` are retained so an already-stamped legacy plan still parses and graduates correctly.

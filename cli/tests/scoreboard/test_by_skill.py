@@ -11,6 +11,8 @@ AC-EDGE a skill file with no git history at the timestamp -> version "unknown",
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 import typer
@@ -82,8 +84,6 @@ def test_hp_transcript_attribution_prints_runs_and_coverage():
         {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-2",
          "cost_usd": 2.0, "sessions": [UUID_B]},
     ]
-    from datetime import datetime, timedelta, timezone
-
     sb = build_skill_scoreboard(
         rows, [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}], [],
         since_days=28, now=datetime(2026, 7, 3, 20, 0, 0),
@@ -164,7 +164,7 @@ def test_default_hooks_real_path_never_crashes(tmp_path, monkeypatch):
     sb = build_skill_scoreboard(rows, [], [], since_days=28, now=datetime(2026, 7, 3, 20, 0, 0))
     assert sb["state"] == "ok"
     assert sb["rows"][0]["skill"] == "fno:do"  # no transcript found -> phase-proxy fallback
-    assert sb["rows"][0]["version"] == "unknown"  # no skills/do/SKILL.md under the fake repo root
+    assert sb["rows"][0]["version"] == "unknown"  # no skills/execute/SKILL.md under the fake repo root
 
 
 def test_hp_cli_renders_coverage_and_table(tmp_path, monkeypatch):
@@ -299,6 +299,57 @@ def test_default_skill_version_missing_file_is_unknown(tmp_path, monkeypatch):
 
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: tmp_path)
     assert _default_skill_version("fno:no-such-skill", "2026-07-03T10:00:00") == "unknown"
+
+
+def test_default_skill_version_maps_do_phase_to_execute_skill(tmp_path, monkeypatch):
+    from fno.scoreboard import fold
+
+    skill = tmp_path / "skills" / "execute" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: execute\n---\n")
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fold,
+        "_skill_commit_history",
+        lambda root, rel: [(datetime(2026, 7, 1), "abc123")],
+    )
+
+    assert fold._default_skill_version("do", "2026-07-03T10:00:00") == "abc123"
+    assert fold._default_skill_version("execute", "2026-07-03T10:00:00") == "abc123"
+
+
+def test_default_skill_version_follows_skill_directory_rename(tmp_path, monkeypatch):
+    from fno.scoreboard import fold
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    skill = tmp_path / "skills" / "do" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: do\n---\n")
+    subprocess.run(["git", "add", "skills/do/SKILL.md"], cwd=tmp_path, check=True)
+    commit_env = os.environ | {
+        "GIT_AUTHOR_DATE": "2026-07-01T10:00:00-07:00",
+        "GIT_COMMITTER_DATE": "2026-07-01T10:00:00-07:00",
+    }
+    subprocess.run(["git", "commit", "-qm", "add do skill"], cwd=tmp_path, check=True, env=commit_env)
+    old_hash = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "mv", "skills/do", "skills/execute"], cwd=tmp_path, check=True)
+    commit_env = os.environ | {
+        "GIT_AUTHOR_DATE": "2026-07-10T10:00:00-07:00",
+        "GIT_COMMITTER_DATE": "2026-07-10T10:00:00-07:00",
+    }
+    subprocess.run(["git", "commit", "-qam", "rename skill"], cwd=tmp_path, check=True, env=commit_env)
+
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: tmp_path)
+    fold._SKILL_COMMIT_HISTORY_CACHE.clear()
+    assert fold._default_skill_version("do", "2026-07-03T12:00:00") == old_hash
 
 
 # --- reverted attribution (mirrors calibration's outcome join) ---------------

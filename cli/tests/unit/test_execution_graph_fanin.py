@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 def _load_orch():
     spec = importlib.util.spec_from_file_location(
-        "do_orchestrator", REPO / "skills/do/orchestrator.py"
+        "do_orchestrator", REPO / "skills/execute/orchestrator.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

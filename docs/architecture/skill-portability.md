@@ -13,7 +13,7 @@ Skills originally required the footnote plugin because they referenced shared sc
 Skills that need shared scripts (config.sh, validate-plan.sh, checkpoint.sh, etc.) get copies in their own `scripts/` directory. Paths use `${SKILL_DIR}` instead of `${CLAUDE_PLUGIN_ROOT}`:
 
 ```
-skills/do/
+skills/execute/
   SKILL.md              # references ${SKILL_DIR}/scripts/config.sh
   scripts/
     config.sh           # vendored copy

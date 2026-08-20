@@ -213,6 +213,22 @@ def test_profile_seed_survives_a_passthrough_fence():
     assert out[out.index("--model") + 1] == "m2"
 
 
+def test_execute_seed_accepts_legacy_do_profile():
+    out = _inject(
+        ["spawn", "/fno:execute plan.md"],
+        profiles={"do": {"model": "legacy-model"}},
+    )
+    assert out[out.index("--model") + 1] == "legacy-model"
+
+
+def test_do_shim_seed_uses_execute_profile():
+    out = _inject(
+        ["spawn", "/fno:do plan.md"],
+        profiles={"execute": {"model": "execute-model"}},
+    )
+    assert out[out.index("--model") + 1] == "execute-model"
+
+
 def test_config_default_substrate_refuses_passthrough_after_injection():
     # x-1caa AC7: a substrate that arrives by CONFIG default reroutes to the
     # Rust lane before the Python CLI's own refusal can run, so the gate

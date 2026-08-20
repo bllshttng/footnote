@@ -62,7 +62,7 @@ _is_valid_product_md() {
     # Each "[TODO]" token is 6 bytes; if tokens occupy more than 25% of the
     # file content (todo_count * 6 > size / 4), treat as a placeholder stub.
     # Without this check the /blueprint gate would silently pass a stub that
-    # /do waves's dispatch gate then hard-blocks on - the two layers must
+    # /execute waves's dispatch gate then hard-blocks on - the two layers must
     # agree on staleness or defense-in-depth degenerates into surprise.
     # Use grep -o ... | wc -l (not grep -c) so multiple [TODO] on one line
     # are counted individually, matching Python's content.count("[TODO]").
@@ -98,7 +98,7 @@ fi
 
 # Print warning to stderr
 echo "warning: this plan locks executor: impeccable but no PRODUCT.md was found." >&2
-echo "Run /impeccable teach before /target dispatch, or /do waves will hard-block." >&2
+echo "Run /impeccable teach before /target dispatch, or /execute waves will hard-block." >&2
 
 # Write prerequisites: block to the plan doc's frontmatter
 # We inject it after the first --- line (opening fence), before the closing ---.

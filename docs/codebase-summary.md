@@ -194,7 +194,7 @@ Users interact with footnote through slash commands:
 |---------|-------|---------|
 | `/fno:target "feature"` | target | Full autonomous delivery pipeline |
 | `/fno:blueprint "feature"` | blueprint | Create implementation plan |
-| `/fno:do` | do | Lightweight single-session execution |
+| `/fno:execute` | execute | Lightweight single-session execution |
 | `/fno:operator` | operator | Heavy wave orchestration |
 | `/fno:think "feature"` | think | Design exploration |
 | `/fno:sigma-review` | sigma-review | Multi-agent code review |
@@ -259,7 +259,7 @@ The plugin includes test scripts but no formal test framework:
 ./scripts/scan-antipatterns.sh
 
 # Run orchestrator CLI
-python skills/do/orchestrator.py --help
+python skills/execute/orchestrator.py --help
 
 # Test hook behavior
 ./scripts/test_stop_hook_events.sh

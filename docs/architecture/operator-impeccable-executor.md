@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Operator-managed `/impeccable` executor
 
 This document covers the per-task executor mechanism that operator gained on
@@ -8,7 +9,7 @@ the trust boundary sits between operator (which we own) and `/impeccable`
 
 ## The problem
 
-`/impeccable craft` produces measurably better frontend output than `/do`
+`/impeccable craft` produces measurably better frontend output than `/execute`
 or `/tdd`. It applies design-system awareness, banned-pattern detection,
 and visual judgment that the generic TDD agent does not. But invoking
 `/impeccable` directly in place of canonical owner skills broke target's
@@ -22,13 +23,13 @@ its output format or its execution shape.
 
 ## The design
 
-`/do waves` gains a per-task executor resolver. Frontend-tagged tasks
+`/execute waves` gains a per-task executor resolver. Frontend-tagged tasks
 dispatch a new sonnet subagent (`frontend-executor`) that drives the
 `/impeccable craft` + `/impeccable critique` loop with score-based
 convergence. Backend and infra tasks continue to use archer. The change
 is purely additive on the dispatch path.
 
-`/do waves` writes the canonical `do-{sid}.md` gate artifact at wave end,
+`/execute waves` writes the canonical `do-{sid}.md` gate artifact at wave end,
 aggregating per-task scratchpad notes from the inner loop. `/review sigma`
 remains the canonical owner of `quality_check_passed`. Critique findings
 flow to sigma's input scratchpad as advisory data, never as gate-passing
@@ -43,7 +44,7 @@ Each task is routed via a resolver chain (highest to lowest priority):
 3. Surface inference from the task's file list.
 4. `do` (default - dispatches archer).
 
-The implementation is `skills/do/scripts/resolve-executor.sh`, an
+The implementation is `skills/execute/scripts/resolve-executor.sh`, an
 env-var-driven shim that operator calls once per task. The shim normalizes
 aliases (`tdd` -> `do`) before validating against `KNOWN_EXECUTORS`, so
 adding a new alias only requires updating `normalize_alias` - the validator
@@ -104,7 +105,7 @@ Parser fallbacks:
 - Next-subcommand regex no match: log `WARN`, default to `craft`.
 
 The agent prompt lives at `agents/frontend-executor.md`. A mechanical
-shell port (`skills/do/scripts/run-critique-loop.sh`) is the
+shell port (`skills/execute/scripts/run-critique-loop.sh`) is the
 testable reference implementation; tests in
 `tests/operator/test_critique_loop.sh` exercise it. Drift between the
 agent prompt and the shell port is detected by grep-based contract
@@ -165,10 +166,10 @@ booleans inconsistently.
 
 | Path | Owner | Purpose |
 |------|-------|---------|
-| `skills/do/references/waves.md` | this plan | Section 3 dispatcher + section 3c gate-artifact write |
-| `skills/do/references/executor-resolution.md` | this plan | Resolver chain reference |
-| `skills/do/scripts/resolve-executor.sh` | this plan | env-var-driven resolver shim |
-| `skills/do/scripts/run-critique-loop.sh` | this plan | testable shell port of agent loop |
+| `skills/execute/references/waves.md` | this plan | Section 3 dispatcher + section 3c gate-artifact write |
+| `skills/execute/references/executor-resolution.md` | this plan | Resolver chain reference |
+| `skills/execute/scripts/resolve-executor.sh` | this plan | env-var-driven resolver shim |
+| `skills/execute/scripts/run-critique-loop.sh` | this plan | testable shell port of agent loop |
 | `agents/frontend-executor.md` | this plan | sonnet subagent definition |
 | `scripts/lib/infer-task-executor.sh` | this plan | surface inference helper |
 | `tests/operator/test_executor_resolution.sh` | this plan | three-tier resolver tests |

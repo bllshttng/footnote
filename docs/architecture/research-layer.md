@@ -21,7 +21,7 @@ Because the backbone **self-fetches**, provenance is clean from round one: the a
 | `fno research "X"` | `cli/src/fno/research/cli.py` | CLI entry point. Validates the topic, runs one retrieve+store round, prints a summary. |
 | retrieval engine | `cli/src/fno/research/core.py` | ddgs search, SSRF-guarded self-fetch, `sources.jsonl` read/write, per-topic claim. stdlib-only. |
 | `scout` | `agents/scout.md` | The `research` executor subagent. Retrieves through the deterministic backbone (not WebSearch/WebFetch) and treats fetched content as data. |
-| `research` executor | `skills/do/references/executor-resolution.md` | Registry row. Reached via `fno research`, **not** `/do waves` surface inference. |
+| `research` executor | `skills/execute/references/executor-resolution.md` | Registry row. Reached via `fno research`, **not** `/execute waves` surface inference. |
 
 ## The evidence store: `sources.jsonl`
 

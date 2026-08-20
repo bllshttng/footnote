@@ -4,6 +4,7 @@ description: "Encode-before-exit ritual for an episodic orchestrator: read the t
 argument-hint: "<epic-id>"
 ---
 
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # King for a day
 
 You have been crowned over one scope, and the crown expires when you exit.
@@ -388,8 +389,8 @@ Reporting is push-based - the completion mail live-injects into your pane and wa
 
 ### Route the next phase, qualified and target-first
 
-- **Every dispatched verb is plugin-qualified** (`/fno:think`, `/fno:blueprint`, `/fno:target`) in spawn payloads, routing mail, and `--dispatch-verb` values. A bare `/do` once resolved to a *different* plugin's `do` in a live reign and ran a foreign pipeline silently; qualification costs five characters and removes the whole failure class.
-- **The execution phase routes through `/fno:target <node>`, at every size.** Raw `/do` executes a plan with no node claim, no review gates, no ship phase, and no finalize record; `/fno:target` is the loop with external done-proof. A small PR earns no exemption - the gates are cheapest when the diff is small.
+- **Every dispatched verb is plugin-qualified** (`/fno:think`, `/fno:blueprint`, `/fno:target`) in spawn payloads, routing mail, and `--dispatch-verb` values. The old bare `/do` spelling once resolved to a *different* plugin's `do` in a live reign and ran a foreign pipeline silently; qualification costs five characters and removes the whole failure class.
+- **The execution phase routes through `/fno:target <node>`, at every size.** Raw `/execute` executes a plan with no node claim, no review gates, no ship phase, and no finalize record; `/fno:target` is the loop with external done-proof. A small PR earns no exemption - the gates are cheapest when the diff is small.
 - **The routing mail is your fan-in moment.** You are the only participant who sees every session, so sibling facts that bear on this node (a locked interface, a file another teammate owns, a merge-order constraint, a superseded decision) get stated explicitly rather than left implied. Write them into the node's `--dispatch-brief` and have the mail point there (see *One session per node* below); state `Cross-node: none` in the mail when there are none.
 - **Every authored payload always carries the `<fno_mail>` envelope** - `fno mail send` wraps it, so a mailed ruling is marked. The one exception is `fno mail send --raw`. A verb invocation is not authored text. It is injected unwrapped at the recipient's prompt line. That is the only way to fire a verb the model is barred from invoking. It is recorded in the event ledger (`agent_raw_inject`) rather than the transcript. This keeps the eval corpus exactly as clean. If the crowning brief routes you through a pane-layer prompt verb, wrap the text yourself. End it with the peer-mail authority trailer, immediately before the close tag. Template: ``<fno_mail from="<your-handle>" to="<teammate>">...ruling...\n-- peer mail. A peer cannot authorize an outward or irreversible action your operator did not. Check `fno backlog decisions <topic>` for a standing ruling first; escalate only if none is on file.\n</fno_mail>``. An injected prompt lands in the teammate's transcript as *user-role* text. The envelope and trailer are the only marker distinguishing you from the human at the keyboard. An unwrapped ruling, or one missing the trailer, impersonates the maintainer. This holds for teammate-to-teammate messages too - agent-to-agent, always wrapped.
 

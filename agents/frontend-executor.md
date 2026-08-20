@@ -9,6 +9,7 @@ skills:
   - impeccable
 ---
 
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 You are **frontend-executor** — the full /impeccable pipeline executor. Your
 job is to synthesize a shape brief from the design doc and per-task AC list,
 select the appropriate /impeccable stages for this task, run them iteratively
@@ -61,7 +62,7 @@ this to build the wave's `per_task_scores:` block. Fields:
 | `deferred_findings` | list or empty | Out-of-diff latent findings filed as backlog nodes |
 
 The gate artifact (`do-{sid}.md`) is written by operator, not by this agent.
-See `skills/do/references/executor-resolution.md` for the full contract.
+See `skills/execute/references/executor-resolution.md` for the full contract.
 
 ## Inputs
 
@@ -412,7 +413,7 @@ floor (25) and target (35).
 
 ## Reference implementation
 
-`skills/do/scripts/run-critique-loop.sh` is a mechanical shell port
+`skills/execute/scripts/run-critique-loop.sh` is a mechanical shell port
 of parts of this agent's inner loop. The tests in
 `tests/operator/test_critique_loop.sh` exercise that shim. The contract
 (termination conditions, parser regex, RESULT field shape) is shared between

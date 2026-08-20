@@ -130,7 +130,7 @@ def test_absorb_with_empty_absorbed_list_errors(tmp_path):
 def test_plan_created_on_the_gate_date_is_grandfathered(tmp_path):
     # Strictly-after boundary: a plan created ON the gate date predates the
     # gate reaching its author. Nine live plans carry that date, and erroring
-    # on them would refuse every one at /do time.
+    # on them would refuse every one at /execute time.
     plan = tmp_path / "on-gate.md"
     plan.write_text(_plan("title: T\nstatus: ready\nkind: quick-plan\ncreated: 2026-08-17\n"))
     result = _run(plan)

@@ -2282,8 +2282,8 @@ fn is_do_stamp_terminal(reason: &str) -> bool {
     )
 }
 
-/// Guarded `do` lifecycle stamp (x-0469). `/do` Step 1.5 is the earlier truthful
-/// stamp, but most `/target` runs implement inline and never invoke `/do`, so the
+/// Guarded `do` lifecycle stamp (x-0469). `/execute` Step 1.5 is the earlier truthful
+/// stamp, but most `/target` runs implement inline and never invoke `/execute`, so the
 /// phase was recorded twice across ~2800 nodes. This is the backstop: one record
 /// per implementing session, at its own finish line.
 ///
@@ -2295,7 +2295,7 @@ fn is_do_stamp_terminal(reason: &str) -> bool {
 /// precedence.
 ///
 /// G1, G2 and G4 fail closed. G3 is the deliberate exception: an unreadable plan
-/// or an absent `claims:` counts as agreement (mirroring `/do` Step 1.5, since
+/// or an absent `claims:` counts as agreement (mirroring `/execute` Step 1.5, since
 /// absent evidence of conflict is not conflict), and only a positive
 /// disagreement skips. The primitive says so on stderr when it could not
 /// evaluate, so that leniency is never silent.

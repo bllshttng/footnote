@@ -9,7 +9,7 @@ archiving (remove directory, keep branch).
 `ensure` is the mechanical dispatch-time primitive (node x-73ca): the
 deterministic-isolation behaviour PR #29 gave the bash spawn path, exposed as
 a CLI verb so the two Rust-intercepted code-dispatch callers (`dispatch-node.sh`
-and `/do`'s foreign-wave prose) can shell it. It lives here, NOT under
+and `/execute`'s foreign-wave prose) can shell it. It lives here, NOT under
 `fno agents` (Rust-intercepted runtime), so the default install can reach it.
 """
 import subprocess
@@ -346,7 +346,7 @@ def _worktree_ensure(
     # repo-root scripts, so a shell-out here trips the shellout-drift gate
     # (and forcing it to fail-on-bare-install would break the "best-effort,
     # never fail the ensure" contract). The in-repo skill callers
-    # (dispatch-node.sh, spawn.sh, /do) run setup-worktree.sh after ensure.
+    # (dispatch-node.sh, spawn.sh, /execute) run setup-worktree.sh after ensure.
     # One stderr receipt naming the resolved mode + path (AC: every spawn names its
     # location, incl. a harness-native->external degradation - the resolver already
     # collapsed a non-native harness to `external`, so pol.policy is the true mode).

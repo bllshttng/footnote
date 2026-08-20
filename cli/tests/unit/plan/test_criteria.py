@@ -95,7 +95,7 @@ class TestLegacyBold:
         # A letter-suffixed number (AC3b, AC3b-HP) is a valid sub-criterion
         # spelling. It used to match neither AC regex and compile to nothing -
         # silently dropped from the contract with no error - so a design could
-        # lose an acceptance criterion between /think and /do. It now compiles,
+        # lose an acceptance criterion between /think and /execute. It now compiles,
         # and a typed AC3b-HP does not collide with a sibling AC3-HP.
         body = (
             "**AC3-HP:** Base criterion.\n\n"
