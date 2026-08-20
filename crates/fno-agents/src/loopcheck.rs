@@ -3240,9 +3240,9 @@ fn publish_coverage_status(
             ),
         )
     } else {
-        // The sized invocation rides along when it fits: a commit status
-        // description is capped at 140 chars by the API, and a description
-        // that overflows is rejected whole - losing the status, not the hint.
+        // The sized invocation rides along when it fits: GitHub caps this
+        // description at 140 chars and rejects an overflow whole, which would
+        // lose the entire marker, not just the hint.
         let base = format!(
             "no covered review at {}; run the review verb at HEAD",
             short_sha(pr_head_oid)
