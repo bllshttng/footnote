@@ -2209,9 +2209,8 @@ struct AuxPopup {
 }
 
 /// What a MENU / settings-modal / mini-kanban row does. Menu entries open a
-/// surface or detach; settings entries flip a session-local view toggle; a
-/// kanban entry names a card. Not `Copy` since x-1d91 - a card action carries
-/// its node id.
+/// surface or detach; settings entries change a live setting; a kanban entry
+/// names a card. Not `Copy` since x-1d91 - a card action carries its node id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuxAction {
     OpenKeybinds,
@@ -2237,17 +2236,42 @@ enum AuxAction {
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
+    /// Apply a validated mux prefix now, then persist it through the CLI.
+    ApplyPrefix(String),
     /// (x-1d91) Jump the sideline selector to this Backlog card and close the
     /// mini-kanban - the overlay is a scanning surface, so acting on a card
     /// hands you back to the row where its full menu lives.
     BacklogGoto(String),
 }
 
-/// (x-f75e) The settings modal's two tabs.
+/// The settings modal's tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
     Theme,
+    Keys,
+}
+
+const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
+
+fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxAction>) {
+    let mut rows = vec![PopupRow::Header(format!("prefix: {live_prefix}"))];
+    let mut actions = Vec::new();
+    for spec in PREFIX_PICKS {
+        let active = live_prefix == spec;
+        rows.push(PopupRow::Entry {
+            glyph: if active { "●".into() } else { "○".into() },
+            label: spec.into(),
+            hint: if active {
+                "active".into()
+            } else {
+                String::new()
+            },
+            enabled: true,
+        });
+        actions.push(AuxAction::ApplyPrefix(spec.into()));
+    }
+    (rows, actions)
 }
 
 /// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
@@ -3858,12 +3882,7 @@ impl View {
         self.aux = Some(menu);
     }
 
-    /// Build the settings modal (x-8ccf US5, x-f75e theme picker): a `general`
-    /// tab of session-only toggles and a `theme` tab of the shipped palettes.
-    /// This is the first real consumer of `Chrome::tabs`. The toggles live-apply
-    /// to this session and are honestly labeled "session only" (persistence to
-    /// config.toml is out of scope for them); the theme picker persists via
-    /// `fno config set` on apply.
+    /// Build the settings modal: general toggles plus theme and prefix pickers.
     fn build_settings_modal(&self) -> AuxPopup {
         let tab = self.settings_tab;
         let mut rows = Vec::new();
@@ -3899,12 +3918,16 @@ impl View {
                     actions.push(AuxAction::ApplyTheme(name.into()));
                 }
             }
+            SettingsTab::Keys => {
+                (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
+            }
         }
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
             .tabs(vec![
                 ("general".to_string(), tab == SettingsTab::General),
                 ("theme".to_string(), tab == SettingsTab::Theme),
+                ("keys".to_string(), tab == SettingsTab::Keys),
             ])
             .footer("tab switches section · esc close");
         AuxPopup { popup, actions }
@@ -14162,6 +14185,20 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::ApplyPrefix(spec) => {
+            let notice = match crate::keys::resolve_prefix_change(&spec) {
+                Err(refusal) => refusal,
+                Ok(map) => {
+                    crate::keys::reinstall(map);
+                    match spawn_config_set("mux.prefix", &spec).await {
+                        Ok(()) => format!("prefix: {spec}"),
+                        Err(_) => format!("prefix {spec} applied this session; save failed"),
+                    }
+                }
+            };
+            view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
     }
     Ok(DispatchFlow::Continue)
 }
@@ -14276,7 +14313,7 @@ async fn aux_keys(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            // Tab switches the settings modal's section (general/theme). Other aux
+            // Tab switches the settings modal's section. Other aux
             // popups have no tab strip, so Tab dismisses as every unbound key does.
             ModalKey::Byte(b'\t') => {
                 let has_tabs = view
@@ -14287,7 +14324,8 @@ async fn aux_keys(
                 if has_tabs {
                     view.settings_tab = match view.settings_tab {
                         SettingsTab::General => SettingsTab::Theme,
-                        SettingsTab::Theme => SettingsTab::General,
+                        SettingsTab::Theme => SettingsTab::Keys,
+                        SettingsTab::Keys => SettingsTab::General,
                     };
                     view.reopen_settings_keeping_sel();
                 } else {
@@ -24997,8 +25035,68 @@ mod tests {
                 .any(|r| matches!(r, PopupRow::Entry { glyph, .. } if glyph == "●")),
             "active theme is marked"
         );
-        // The chrome carries the two section tabs (positive marker it framed).
-        assert_eq!(modal.popup.chrome.tabs.len(), 2);
+        // The chrome carries all section tabs (positive marker it framed).
+        assert_eq!(modal.popup.chrome.tabs.len(), 3);
+    }
+
+    #[test]
+    fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
+        let (rows, actions) = build_prefix_settings_rows("C-b");
+        assert!(matches!(
+            rows.first(),
+            Some(PopupRow::Header(header)) if header == "prefix: C-b"
+        ));
+        let specs: Vec<String> = actions
+            .iter()
+            .filter_map(|action| match action {
+                AuxAction::ApplyPrefix(spec) => Some(spec.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(specs, PREFIX_PICKS.map(String::from));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
+        )));
+
+        let (custom_rows, _) = build_prefix_settings_rows("C-q");
+        assert!(matches!(
+            custom_rows.first(),
+            Some(PopupRow::Header(header)) if header == "prefix: C-q"
+        ));
+        assert!(!custom_rows
+            .iter()
+            .any(|row| matches!(row, PopupRow::Entry { glyph, .. } if glyph == "●")));
+    }
+
+    #[tokio::test]
+    async fn settings_tabs_cycle_through_keys() {
+        let mut v = two_pane_view();
+        v.aux = Some(v.build_settings_modal());
+        let mut buf: Vec<u8> = Vec::new();
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::Theme);
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::Keys);
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::General);
+    }
+
+    #[tokio::test]
+    async fn refused_prefix_pick_changes_nothing_and_shows_the_validator_reason() {
+        let before = crate::keys::prefix();
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Keys;
+        v.aux = Some(v.build_settings_modal());
+        let mut buf: Vec<u8> = Vec::new();
+        execute_aux_action(&mut v, AuxAction::ApplyPrefix("3".into()), &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(crate::keys::prefix(), before);
+        assert!(v
+            .notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("1-9 select tabs")));
     }
 
     #[test]
