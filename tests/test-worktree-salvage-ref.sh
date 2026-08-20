@@ -95,9 +95,31 @@ ref_out="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$wt_name")"
 echo "$ref_out" | grep -q "$sha_attached" || fail "salvage ref does not point at the commit"
 
 remote_ref_out="$(git --git-dir="$remote" for-each-ref "refs/fno/salvage/$wt_name")"
-[[ -n "$remote_ref_out" ]] || fail "salvage ref did not mirror to origin"
+[[ -z "$remote_ref_out" ]] || fail "default commit uploaded a salvage ref without opt-in"
 
-echo "PASS: commit lands a local salvage ref, mirrored to origin"
+echo "PASS: commit lands a local salvage ref without uploading WIP by default"
+
+# --- AC1b: repository opt-in enables the best-effort remote mirror --------
+
+git -C "$canonical" config --local fno.salvageRemoteMirror true
+opted_in="$SCRATCH/opted-in-wt"
+git -C "$canonical" worktree add -q -b opted-in-branch "$opted_in" >/dev/null
+link_real_hook "$opted_in"
+git -C "$opted_in" config user.email t@t.co
+git -C "$opted_in" config user.name t
+echo mirror > "$opted_in/mirror.txt"
+git -C "$opted_in" add mirror.txt
+git -C "$opted_in" commit -q -m "opted-in mirror commit"
+sha_opted_in="$(git -C "$opted_in" rev-parse HEAD)"
+sleep 1
+
+opted_in_name="$(basename "$opted_in")"
+opted_in_remote_ref="$(git --git-dir="$remote" for-each-ref "refs/fno/salvage/$opted_in_name")"
+[[ -n "$opted_in_remote_ref" ]] || fail "explicit mirror opt-in did not write the remote salvage ref"
+echo "$opted_in_remote_ref" | grep -q "$sha_opted_in" \
+  || fail "opted-in remote salvage ref does not point at the commit"
+
+echo "PASS: repository opt-in mirrors the salvage ref to origin"
 
 # --- AC2: a DETACHED worktree's commit survives its own removal ---------
 
