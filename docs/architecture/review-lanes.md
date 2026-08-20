@@ -63,7 +63,7 @@ fno mail send <peer> '/code-review <level> --comment --fix' --raw
 fno mail send '/code-review <level> --comment --fix' --to-self --raw
 ```
 
-`<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation: `fno target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that same render.
+`<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
 
 ## A reply does not resolve a thread
 
