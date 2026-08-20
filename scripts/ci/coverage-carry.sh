@@ -93,14 +93,26 @@ esac
 # repository being compared. Three-dot compare semantics mean the answer
 # does not move when the base ref moves under it.
 patch_id() { # <sha>
-  # `|| true`: a failed compare call must degrade to an empty identity, not
-  # crash the script - the caller's `set -e` treats a failing command
-  # substitution assignment as fatal, and pipefail would otherwise carry a
-  # failed `gh api` through the pipe's exit status. An empty identity falls
-  # through to the existing no-diff-identity check below either way.
-  gh api "repos/${repo}/compare/${base}...${1}" \
-    -H 'Accept: application/vnd.github.v3.diff' 2>/dev/null \
-    | git patch-id --stable 2>/dev/null | cut -d' ' -f1 || true
+  # Same 3x/5s-backoff retry as status_read above, so a transient 5xx on the
+  # compare call does not read as "the diff really is empty" (a real gap a
+  # local /code-review pass caught: every sibling gh-api call in this file
+  # retries, this one did not).
+  local attempt out
+  for attempt in 1 2 3; do
+    if out="$(gh api "repos/${repo}/compare/${base}...${1}" \
+      -H 'Accept: application/vnd.github.v3.diff' 2>/dev/null \
+      | git patch-id --stable 2>/dev/null | cut -d' ' -f1)"; then
+      printf '%s' "$out"
+      return 0
+    fi
+    echo "coverage-carry: compare read attempt ${attempt} for ${1:0:8} failed; retrying after a backoff" >&2
+    sleep 5
+  done
+  # Exhausted retries: fall through to an empty identity rather than abort -
+  # the caller's `set -e` treats a failing command-substitution assignment as
+  # fatal, and the no-diff-identity check below already treats an empty
+  # identity as a safe no-carry.
+  true
 }
 
 before_pid="$(patch_id "$before")"
