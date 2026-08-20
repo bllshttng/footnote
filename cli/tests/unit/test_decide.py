@@ -1343,6 +1343,20 @@ def test_operator_decision_retention_is_durable_by_an_explicit_key():
     assert entry.get("retention") == "durable", "explicit, not inherited from the default"
 
 
+def test_every_projected_field_is_one_the_event_builder_accepts():
+    """reindex rebuilds an event from a projection row by splatting
+    PROJECTION_FIELDS into operator_decision. A field added to one and not the
+    other raises TypeError there, and the backfill drops every row carrying it -
+    silently, because that loop swallows a row it cannot rebuild."""
+    import inspect
+
+    from fno.decide import PROJECTION_FIELDS
+    from fno.events import operator_decision
+
+    accepted = set(inspect.signature(operator_decision).parameters)
+    assert not set(PROJECTION_FIELDS) - accepted
+
+
 def test_a_bad_authority_value_is_refused_before_anything_is_written(
     root: Path, tmp_graph: Path, index: Path
 ):
