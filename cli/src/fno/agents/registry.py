@@ -1418,7 +1418,15 @@ def register_existing_session(
                 # Only restamp origin when the caller passed one: the harness-store
                 # healer refreshes rows without it, and a blind `entry.origin = None`
                 # would clobber an operator stamp a re-firing hook must preserve.
-                if origin is not None:
+                # `adopted` is the WEAKEST origin and never downgrades a
+                # stronger one. The healer infers it from a store hit; every
+                # other value was asserted by the session itself. Without this,
+                # healing a hand-registered session by a token that misses the
+                # registry restamps `operator` as `adopted`, and the
+                # attended-miss escalation stops firing for it forever - the
+                # same clobber the comment above was written against, arriving
+                # through the one caller that does pass an origin.
+                if origin is not None and not (origin == "adopted" and entry.origin):
                     entry.origin = origin
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg

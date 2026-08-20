@@ -356,3 +356,45 @@ def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, c
     out = capsys.readouterr().out
     assert "queued (durable)" in out
     assert "codex app-server daemon start" not in out
+
+
+def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
+    """`adopted` is the weakest origin and must not overwrite a stronger one.
+
+    `register_existing_session`'s refresh branch restamps `origin` whenever the
+    caller passes one, and the store healer now passes `origin="adopted"`. So
+    healing a hand-registered session by a token that missed the registry
+    restamped `operator` as `adopted`, and `_recipient_is_attended` then read
+    False forever - attended-miss escalation silently stopped firing for that
+    session. The comment above that branch was written against exactly this
+    clobber; the healer became the caller that delivers it.
+    """
+    from fno.agents.registry import register_existing_session, resolve_agent_in, load_registry
+
+    sid = "3f2b71c0-11aa-4bb2-9cc3-5d6e7f809a1b"
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+
+    # The healer refreshing the same row, as it does on a store hit.
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin == "operator", "a store heal must not demote an operator session"
+
+
+def test_store_healing_still_stamps_a_row_with_no_origin(mailbox):
+    """The counterweight: the marker must still land where there is nothing to
+    protect, or adopted rows stay indistinguishable from spawned ones."""
+    from fno.agents.registry import register_existing_session, load_registry
+
+    sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
+    register_existing_session(provider="claude", session_id=sid, cwd=str(mailbox))
+    register_existing_session(
+        provider="claude", session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin == "adopted"

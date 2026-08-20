@@ -114,11 +114,17 @@ RETIRE_GRACE_S = 900
 #: question pending" for a turn that ended on one - the exact stranding this
 #: whole check exists to prevent. A self-closing tag is last and takes itself.
 #:
-#: KNOWN GAP, accepted: prose that writes a bare `<promise>` and then really
-#: promises loses the text between the two. Every other reader of that text has
-#: the same ambiguity - the loop's own `_PROMISE_RE` already reads the prose
-#: mention as a promise - so resolving it here alone would not make the fleet
-#: agree, and the shape is not one a worker produces in practice.
+#: KNOWN GAP, accepted, and wider than it first reads: ANY bare `<promise>` or
+#: `<watching>` mention swallows everything after it, whether or not a real
+#: promise follows. So a turn ending "the loop keys on <promise> here. Should I
+#: widen it?" strips to "the loop keys on" and answers no-question-pending, and
+#: that row retires with the operator's question unanswered. For that one shape
+#: this is a regression against a raw `endswith("?")`, traded for the modal
+#: promise-last shape, which is the trade worth making. Agents working on THIS
+#: repo write the tag in prose routinely, so the gap is not hypothetical here.
+#: Not resolved locally because every other reader shares the ambiguity - the
+#: loop's own `_PROMISE_RE` already reads a prose mention as a promise - and
+#: fixing it in one place would make the fleet disagree with itself.
 _TERMINAL_TAG_RE = re.compile(
     r"<(promise|watching)\b[^>]*>.*?</\1>"
     r"|<(?:promise|watching)\b[^>]*(?<!/)>.*"
