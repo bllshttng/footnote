@@ -14152,7 +14152,7 @@ async fn execute_aux_action(
             // never claiming a persistence it did not achieve.
             let (theme, warn) = Theme::from_name(&name);
             view.theme = theme;
-            let notice = match spawn_set_theme(&name).await {
+            let notice = match spawn_config_set("mux.theme", &name).await {
                 Ok(()) => match warn {
                     None => format!("theme: {name}"),
                     Some(w) => w.0,
@@ -14166,11 +14166,11 @@ async fn execute_aux_action(
     Ok(DispatchFlow::Continue)
 }
 
-/// Run `fno config set mux.theme <name>`, bounded. The mux shells the CLI rather
+/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
 /// than writing config itself (the graph-write rule applied to config). Returns
 /// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory theme either way and reports honestly.
-async fn spawn_set_theme(name: &str) -> Result<(), String> {
+/// in-memory value either way and reports honestly.
+async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
     // spawn + wait rather than .output(): the exit check reads `.success()` on
     // the child's ExitStatus directly, so the word the plan-readiness ratchet
     // (check-plan-rung-authority) watches for never appears here. That ratchet
@@ -14183,7 +14183,7 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
     // digest_overlay, and connections_view set it for the same shell-out shape.
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
     command
-        .args(["config", "set", "mux.theme", name])
+        .args(["config", "set", key, value])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -14192,7 +14192,7 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
         .map_err(|e| format!("fno config set spawn failed: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
         Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set mux.theme {name} failed")),
+        Ok(_) => Err(format!("fno config set {key} {value} failed")),
         Err(_) => Err("fno config set timed out".into()),
     }
 }
