@@ -9,7 +9,7 @@
 # Tests:
 #   T1  no state file -> exit 0, no unavailable counter written
 #   T2  binary missing (active session) -> exit 2 bounded-block + event + counter=1
-#   T3  block decision -> exit 2, message on stderr
+#   T3  block decision (non-claude env) -> exit 2, message on stderr
 #   T4  allow decision with TerminationReason -> exit 0
 #   T5  read-only invariant: state file unchanged across a block fire
 #   T6  foreign transcript -> exit 0 without invoking the binary
@@ -26,6 +26,9 @@
 #   T13  codex-authored manifest + a CLAUDE stop -> exit 0, binary not called
 #   T14  codex-authored manifest + that codex session's own stop -> binary called
 #   T15  canonical fno_id keys the unavailable retry counter
+#
+# x-154c block-as-JSON on the claude harness:
+#   T16  block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -138,9 +141,12 @@ run_hook() {
 
     HOOK_RC=0
     HOOK_STDERR=""
+    # x-154c: default the claude markers off so a block reads as exit 2 even
+    # when the suite itself runs inside a claude session (its env exports
+    # CLAUDECODE=1); a test opts back in by passing its own assignment after.
     HOOK_STDERR=$(
         cd "$cwd" || exit 1
-        env "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
+        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
     ) || HOOK_RC=$?
 }
 
@@ -223,9 +229,9 @@ log "T2: binary missing (active session) -> exit 2 bounded-block + event + count
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T3: block decision -> exit 2, message on stderr
+# T3: block decision (non-claude env) -> exit 2, message on stderr
 # ─────────────────────────────────────────────────────────────────────────────
-log "T3: block decision -> exit 2 + message on stderr"
+log "T3: block decision (non-claude env) -> exit 2 + message on stderr"
 {
     setup_env "cccc-0003"
 
@@ -239,7 +245,9 @@ STUB
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" \
         "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
+        "FNO_AGENTS_BIN=${STUB}" \
+        "CLAUDECODE=0" \
+        "CLAUDE_PLUGIN_ROOT="
 
     t3_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -496,7 +504,8 @@ exit 0
 STUB
 
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+        "CLAUDECODE=0" "CLAUDE_PLUGIN_ROOT="
 
     t12_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -613,6 +622,43 @@ STATE
         fail "T15: legacy session_id incorrectly keyed the retry counter"; t15_ok=false
     }
     [[ "$t15_ok" == "true" ]] && pass "T15: canonical fno_id wins for retry identity"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T16: block decision on the claude harness -> stdout JSON + exit 0
+# ─────────────────────────────────────────────────────────────────────────────
+log "T16: claude block -> stdout JSON decision + exit 0"
+{
+    setup_env "eeee-0016"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_STDOUT=$(
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
+            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+
+    t16_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T16: expected exit 0 (structured block), got $HOOK_RC"; t16_ok=false
+    fi
+    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "keep going"' >/dev/null 2>&1; then
+        fail "T16: stdout is not a block decision JSON; got: ${HOOK_STDOUT}"; t16_ok=false
+    fi
+    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
+        fail "T16: a clean block must not write an unavailable counter"; t16_ok=false
+    fi
+    [[ "$t16_ok" == "true" ]] && pass "T16: claude block -> stdout JSON + exit 0, no counter"
     cleanup
 }
 
