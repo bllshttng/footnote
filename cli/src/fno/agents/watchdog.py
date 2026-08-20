@@ -128,6 +128,16 @@ _TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
 #: unclosed tag means a turn cut off mid-promise, which is not a worker calmly
 #: declaring itself finished. Refusing there costs a slot that stays held; the
 #: other direction stops a session that never said it was done.
+#: Trailing decoration a question mark can hide behind. A worker closing on
+#: `**Do you want me to cover the migration path too?**` ends on `*`, and a bare
+#: `endswith("?")` answered no-question-pending for it. Agents write bold,
+#: quoted and parenthesised closing questions constantly, and this predicate
+#: gates a lane that stops sessions.
+#:
+#: Stripped from the END only, so a `?` anywhere else is still not a question at
+#: the end of the turn. Over-stripping can only ever DECLINE to retire.
+_QUESTION_TRAILERS = "*_~`'\"\u2019\u201d)]}>"
+
 _CLOSED_PROMISE_RE = re.compile(
     r"<promise\b[^>]*>.*?</promise\s*>|<promise\b[^>]*/>",
     re.DOTALL | re.IGNORECASE,
@@ -440,9 +450,14 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
     text = (facts.last_text or "").rstrip()
     if _HELP_RE.search(text) is not None:
         return True
+
+    def _asks(chunk: str) -> bool:
+        """Does this chunk end on a question, decoration and all?"""
+        return chunk.rstrip().rstrip(_QUESTION_TRAILERS).rstrip().endswith("?")
+
     # Where the turn actually ends. The plain reading, and the only one needed
     # when the worker asked its question last.
-    if text.endswith("?"):
+    if _asks(text):
         return True
     # The worker is instructed to emit its promise LAST (skills/target/
     # references/pre-promise.md), so the modal shape of the case this function
@@ -456,10 +471,7 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
     # covers both shapes without ordering the two readings against each other.
     # The failure direction is over-detection: a question mark that happens to
     # sit before some marker declines to retire, and never stops a row.
-    return any(
-        text[: m.start()].rstrip().endswith("?")
-        for m in _TERMINAL_TAG_START_RE.finditer(text)
-    )
+    return any(_asks(text[: m.start()]) for m in _TERMINAL_TAG_START_RE.finditer(text))
 
 
 def retire_decision(

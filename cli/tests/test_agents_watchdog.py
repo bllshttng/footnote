@@ -1155,6 +1155,24 @@ def test_arming_the_lane_replaces_the_stale_escalation_with_an_action():
     assert armed.action == "stop", "an escalation may become an action, never silence"
 
 
+def test_a_decorated_question_still_holds_the_row():
+    """A closing question is rarely bare. Agents write it bold, quoted or
+    parenthesised, and `endswith("?")` answered no for every one of those - so
+    the row retired with the operator's question stranded, which is the single
+    outcome this predicate exists to prevent."""
+    for closing in (
+        "**Do you want me to cover the migration path too?**",
+        '"Should the grace stay 900?"',
+        "(shall I widen it?)",
+        "Should the grace stay 900?",
+    ):
+        text = f"Plan delivered.\n{closing}\n{FINISHED_TAIL}"
+        assert watchdog._question_pending(_facts(text, age_min=20)) is True, closing
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+        [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, closing
+
+
 def test_a_prose_mention_of_the_tag_never_retires():
     """`classify_tail` answers `done` on any `<promise` in the last turn, prose
     mention included, and agents working on this repo write the tag in prose

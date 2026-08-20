@@ -2633,7 +2633,9 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+            # mux did not ANSWER; it may still have delivered the keystroke.
+            # Not a rejection, so it must not reap a pane that may be running.
+            return "unknown", "mux did not answer the agy trust submit", "trust-cleared"
         if cleared.returncode != 0:
             return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
         try:
@@ -2642,7 +2644,9 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
+            # The clearing submit went through and only the READ-BACK timed out,
+            # so whether the modal cleared is unknown. Refuse to reap on it.
+            return "unknown", "mux did not answer the agy trust read-back", "trust-cleared"
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
             return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
@@ -2662,7 +2666,12 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+        # The RPC did not answer. The text was already delivered and the submit
+        # may have landed too, so this is neither "nothing was sent"
+        # (`unattempted`, which retries and would double-type here) nor a
+        # refusal (`unconfirmed`, which reaps). A non-zero return code below IS
+        # a refusal, and that is the one that fails the spawn.
+        return "unknown", "mux did not answer the submit; the keystroke may have landed", trust_source or "delivered"
     if submitted.returncode != 0:
         return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
     return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
@@ -3185,8 +3194,11 @@ def dispatch_spawn_pane(
                     provider, session, pane_id, message, runner
                 )
             if seed_state == "unconfirmed":
-                # A pane that takes the payload and drops it twice is not slow,
-                # it is a worker that will never start. Rewriting the detail
+                # A pane that REFUSED the payload is a worker that will never
+                # start. There is no retry budget on this path - the retry above
+                # fires only from `unattempted` - so this is a first-attempt
+                # refusal, and mux said so with a non-zero return code.
+                # Rewriting the detail
                 # string and carrying on used to leave readiness at `ready`, and
                 # spawn_gate.LIVE_STATUSES counts `ready` as live - so the pane
                 # held a slot against max_live while sitting at an empty prompt
@@ -3199,6 +3211,12 @@ def dispatch_spawn_pane(
                 # unpainted child keeps its row exactly as before.
                 readiness = "failed"
                 readiness_detail = seed_detail or "spawn seed never submitted"
+            elif seed_state == "unknown":
+                # mux did not answer. The keystroke may have landed, so reaping
+                # would kill a worker that is already running its task, and
+                # retrying would type the seed twice. Keep the row and say so;
+                # the receipt carries the uncertainty to whoever reads it.
+                readiness_detail = seed_detail or readiness_detail
             elif seed_state == "unattempted":
                 readiness_detail = seed_detail or readiness_detail
         if readiness == "failed" or (recovered and readiness != "ready"):

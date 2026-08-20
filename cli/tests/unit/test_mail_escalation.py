@@ -393,26 +393,36 @@ def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
     assert row.origin == "operator", "a store heal must not demote an operator session"
 
 
-def test_store_healing_never_stamps_adopted_onto_an_existing_row(mailbox):
-    """`adopted` is a BIRTH fact, so a refresh never applies it - not even to a
-    row with no origin at all.
+def test_store_healing_never_changes_an_origin_a_row_already_has(mailbox):
+    """A refresh may FILL an empty origin and may never CHANGE one.
 
-    A genuine spawn row carries `origin=None`, and the healer upserts on
-    (provider, session_id). So a resolution that misses by name while a row with
-    that session id exists would stamp a real worker `adopted`, and nothing ever
-    clears it: `_row_spawned` then answers unknown for that worker forever and it
-    is permanently exempt from the retire lane. Silent and irreversible.
+    The earlier rule here was "`adopted` never lands on a refresh, not even on a
+    row with no origin", which protected a spawn row by refusing every restamp.
+    That protection was aimed at a spawn row carrying `origin=None`, and spawn
+    rows now state `spawned` at birth. Carrying the marker is the stronger
+    guard: refusing every restamp still let `origin="operator"` land on a
+    worker, which took it out of the retire lane for good and into the attended
+    mail escalation. Write-once refuses both.
+
+    A row that never made a claim is a different case. Nothing is lost by giving
+    it the only claim anyone has made, and `_row_spawned` reads `None` and
+    `adopted` identically, so filling one cannot change a lane verdict.
     """
     from fno.agents.registry import register_existing_session, load_registry
 
     sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
-    register_existing_session(provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox))
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="spawned"
+    )
     register_existing_session(
         provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
     )
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="operator"
+    )
 
     row = next(r for r in load_registry() if r.harness_session_id == sid)
-    assert row.origin is None, "a heal must not exempt a spawned worker from the lane"
+    assert row.origin == "spawned", "a heal must not exempt a spawned worker from the lane"
 
 
 def test_a_genuinely_new_adoption_still_carries_the_marker(mailbox):

@@ -4315,14 +4315,22 @@ def test_pane_run_env_does_not_latch_the_writable_dir_grant(
 # at an empty prompt having executed nothing. That is a slot held by a worker
 # that never started.
 #
-# Those five now split on one question: was a send attempted? An unreadable
-# frame and a blank frame answer no and return `unattempted`, because an alive
-# unpainted child is still a live worker. The two send failures and both agy
-# trust-gate arms answer yes and stay `unconfirmed`.
+# Those five split on two questions, which is three answers plus the happy path.
 #
-# Only `unattempted` is retried, because it is the only state where nothing can
-# already be sitting in the pane's buffer. `unconfirmed` fails the spawn on its
-# first answer.
+#   unattempted  nothing was sent - an unreadable or blank frame. An alive
+#                unpainted child is still a live worker, so keep the row. This
+#                is the ONLY retryable state, because it is the only one where
+#                nothing can already be sitting in the pane's buffer.
+#   unconfirmed  the send was REFUSED - a non-zero return code, or a trust
+#                modal still on screen after the clearing submit. Positive
+#                evidence the worker will never start, so fail the spawn on the
+#                first answer.
+#   unknown      mux did not ANSWER - the RPC timed out. The keystroke may have
+#                landed, so reaping would kill a worker already running and a
+#                retry would type the seed twice. Keep the row, say so.
+#
+# The distinction between the last two is the whole point: a timeout is not a
+# rejection, and folding it into one reaped live panes.
 
 
 def _seed_script(monkeypatch, *states: str) -> list[tuple]:
@@ -4340,7 +4348,10 @@ def _seed_script(monkeypatch, *states: str) -> list[tuple]:
     def fake_submit(provider, session, pane_id, seed, runner):
         calls.append((provider, session, pane_id, seed))
         state = next(seq)
-        detail = "" if state == "submitted" else "text delivered, submission unconfirmed"
+        detail = {
+            "submitted": "",
+            "unknown": "mux did not answer the submit; the keystroke may have landed",
+        }.get(state, "text delivered, submission unconfirmed")
         return state, detail, "delivered"
 
     monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
@@ -4417,6 +4428,28 @@ def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
     assert "submission unconfirmed" in message
     assert "reaped" in message
     assert load_registry() == [], "an unstarted worker must not hold a live row"
+
+
+def test_a_timed_out_submit_keeps_the_row_and_never_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A mux RPC timeout says the instrument did not answer, never that the
+    keystroke failed to land. `mux pane send --submit` can deliver the Enter and
+    then miss its own reply, so the worker is already running its task.
+
+    Reaping there kills a live worker and leaves no row saying it existed.
+    Retrying there types the seed a second time into a pane that already has it.
+    So this state does neither: the row survives, one send was made, and the
+    receipt carries the uncertainty."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unknown")  # a retry would raise StopIteration
+
+    _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 1, "an unanswered submit must not be re-sent"
+    rows = load_registry()
+    assert len(rows) == 1, "a worker that may be running must keep its row"
 
 
 def test_a_failed_readiness_never_reaches_the_seed(tmp_path: Path, monkeypatch) -> None:

@@ -1424,20 +1424,24 @@ def register_existing_session(
                             ambiguous=True,
                         )
                     entry.short_id = short_id
-                # Only restamp origin when the caller passed one: the harness-store
-                # healer refreshes rows without it, and a blind `entry.origin = None`
-                # would clobber an operator stamp a re-firing hook must preserve.
-                # `adopted` is a BIRTH fact and never lands on a refresh. The
-                # healer infers it from a store hit, so it describes how a row
-                # came to exist, not what the session is now. Applying it here
-                # overwrote two different things: an `operator` stamp, which
-                # silently stopped attended-miss escalation for that session
-                # (the very clobber the comment above was written against), and
-                # a spawn row's ABSENT origin, which permanently and invisibly
-                # exempted a real worker from the lanes that read this field.
-                # Neither is recoverable, because nothing ever clears it. The
-                # create path stamps it, which is the only place it is true.
-                if origin is not None and origin != "adopted":
+                # WRITE-ONCE. A refresh may FILL an empty origin and may never
+                # change one, because this field is a birth fact and nothing on
+                # this path can observe a birth. Every weaker rule tried here
+                # lost a row to a later refresh, and none of the losses is
+                # recoverable because nothing ever clears the field:
+                #
+                #  - blind assignment let the healer, which refreshes without an
+                #    origin, erase an operator stamp with None;
+                #  - excluding only `adopted` still let `operator` land on a
+                #    worker row. An operator resuming a spawned worker in a
+                #    fresh terminal fires the SessionStart register branch, and
+                #    that row leaves the retire lane for good while joining the
+                #    attended mail escalation.
+                #
+                # Filling an empty one is safe and is what the healer needs: a
+                # row that never stated its origin gains the only claim anyone
+                # has made about it.
+                if origin is not None and entry.origin is None:
                     entry.origin = origin
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg
