@@ -25,6 +25,12 @@
 # Exit codes forwarded from the JSON decision:
 #   0  allow  (includes all TerminationReason variants: DonePRGreen, NoWork, etc.)
 #   2  block  (keep the session running; message echoed to stderr)
+#
+# On the claude harness a block is instead emitted as stdout JSON
+# {"decision":"block","reason":...} at exit 0: Claude Code's structured Stop
+# decision. Claude Code ignores JSON on a non-zero exit and renders exit-2 +
+# stderr as a "Stop hook error", while codex/gemini read only the exit code -
+# so exit 2 remains their block signal.
 
 set -uo pipefail
 
@@ -276,6 +282,10 @@ DECISION=$(echo "$DECISION_JSON" | jq -r '.decision // "allow"')
 MESSAGE=$(echo "$DECISION_JSON" | jq -r '.message // ""')
 
 if [[ "$DECISION" == "block" ]]; then
+    if [[ "${CLAUDECODE:-0}" == "1" || -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+        jq -cn --arg r "$MESSAGE" '{"decision":"block","reason":$r}'
+        exit 0
+    fi
     echo "target stop-hook: $MESSAGE" >&2
     exit 2
 fi

@@ -7381,7 +7381,7 @@ fn king_arm_blocks_while_the_board_is_not_empty() {
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
-    assert_eq!(code, 2, "a non-empty board must block: {d}");
+    assert_eq!(code, 0, "a non-empty board must block: {d}");
     assert_eq!(d["decision"], "block");
     assert_eq!(d["actionable"], 2);
     let reason = d["reason"].as_str().unwrap();
@@ -7490,6 +7490,7 @@ fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
     assert_eq!(code, 2, "blind is not clean: {d}");
+    assert_eq!(d["decision"], "block", "the unavailable path stays exit 2 (fail-closed): {d}");
     assert!(d["reason"].as_str().unwrap().contains("unreadable"));
 }
 
@@ -7538,7 +7539,8 @@ fn a_cleared_row_is_progress_and_needs_no_event_producer() {
     let fno = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
-    assert_eq!(code, 2, "clearing a row must keep the loop running: {d}");
+    assert_eq!(code, 0, "clearing a row must keep the loop running: {d}");
+    assert_eq!(d["decision"], "block", "a block at exit 0 must still say so in the JSON: {d}");
     assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
 }
 
@@ -7572,15 +7574,17 @@ fn the_cleared_row_reset_survives_into_the_next_fire() {
     // Fire that clears x-1234.
     let cleared_bin = king_board_bin(bin_dir.path(), BOARD_ONE_CLEARED, 0);
     let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
-    assert_eq!(code, 2, "the clearing fire must keep running: {d}");
+    assert_eq!(code, 0, "the clearing fire must keep running: {d}");
+    assert_eq!(d["decision"], "block");
 
     // The very next fire clears nothing. Pre-fix this read three dry fires and
     // terminated; the king had just done real work one fire earlier.
     let (code, d) = king_fire(&state, cwd, &events, &cleared_bin);
     assert_eq!(
-        code, 2,
+        code, 0,
         "a single dry fire after real progress must not end the king: {d}"
     );
+    assert_eq!(d["decision"], "block");
     assert_eq!(
         d["termination_reason"],
         serde_json::Value::Null,
@@ -7617,7 +7621,8 @@ fn a_row_cleared_while_the_board_grew_is_still_progress() {
     let fno = king_board_bin(bin_dir.path(), BOARD_REFILLED, 0);
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
-    assert_eq!(code, 2, "a grown board that cleared a row is progress: {d}");
+    assert_eq!(code, 0, "a grown board that cleared a row is progress: {d}");
+    assert_eq!(d["decision"], "block");
     assert_eq!(d["actionable"], 3);
     assert_eq!(d["fires"], 1);
 }
@@ -7700,7 +7705,7 @@ fn king_progress_is_an_action_against_a_target_id_not_seen_before() {
     );
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 2, "progress must keep the loop running: {d}");
+    assert_eq!(code, 0, "progress must keep the loop running: {d}");
     assert_eq!(d["decision"], "block");
     assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
 }
@@ -7789,7 +7794,8 @@ fn another_kings_events_do_not_move_this_kings_counter() {
     }
 
     let (code, d) = king_fire(&state, cwd, &events, &fno);
-    assert_eq!(code, 2, "a sibling king's fires are not mine: {d}");
+    assert_eq!(code, 0, "a sibling king's fires are not mine: {d}");
+    assert_eq!(d["decision"], "block");
     assert_eq!(d["fires"], 1);
 }
 
@@ -7980,7 +7986,7 @@ fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
         last = king_fire(&state, cwd, &events, &fno);
         if i < boards.len() - 1 {
             assert_eq!(
-                last.0, 2,
+                last.0, 0,
                 "fire {i} must keep the king running: {:?}",
                 last.1
             );

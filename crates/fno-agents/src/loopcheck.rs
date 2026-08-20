@@ -9626,6 +9626,9 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // Blind is not clean. Block, but let the dry-fire counter below
             // bound it: a board that never answers reaches the ceiling and
             // terminates NoProgress rather than holding the king forever.
+            // Unlike the clean block at the bottom, exit 2 here is
+            // deliberate: an unreadable board is an unavailable path, and the
+            // shim's bounded-block counter - fail-closed - decides it.
             if dry + 1 >= KING_DRY_FIRE_CEILING {
                 return terminate(
                     TerminationReason::NoProgress,
@@ -9719,8 +9722,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let top = board
         .top_row
         .unwrap_or_else(|| "an actionable queue".to_string());
+    // decide()'s documented contract, one screen up: exit 0 ALWAYS for
+    // allow/block; non-zero only for internal/CLI errors. Encoding a healthy
+    // block in the exit code made the shim read it as a broken checker and
+    // count it toward the unavailable budget that ends in a ship-gate-off
+    // allow. The JSON `decision` field is the block signal; the exit code
+    // never is.
     (
-        2,
+        0,
         king_output(
             "block",
             None,

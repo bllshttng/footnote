@@ -9,7 +9,7 @@
 # Tests:
 #   T1  no state file -> exit 0, no unavailable counter written
 #   T2  binary missing (active session) -> exit 2 bounded-block + event + counter=1
-#   T3  block decision -> exit 2, message on stderr
+#   T3  block decision (non-claude env) -> exit 2, message on stderr
 #   T4  allow decision with TerminationReason -> exit 0
 #   T5  read-only invariant: state file unchanged across a block fire
 #   T6  foreign transcript -> exit 0 without invoking the binary
@@ -21,6 +21,9 @@
 #   T10  counter at MAX -> loud give-up: exit 0 + loop_check_unavailable_giveup (both logs)
 #   T11  counter is per-session_id (a sibling session's budget is untouched)
 #   T12  clean decision self-heals the counter (removed before honoring)
+#
+# x-154c block-as-JSON on the claude harness:
+#   T13  block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -190,9 +193,9 @@ log "T2: binary missing (active session) -> exit 2 bounded-block + event + count
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T3: block decision -> exit 2, message on stderr
+# T3: block decision (non-claude env) -> exit 2, message on stderr
 # ─────────────────────────────────────────────────────────────────────────────
-log "T3: block decision -> exit 2 + message on stderr"
+log "T3: block decision (non-claude env) -> exit 2 + message on stderr"
 {
     setup_env "cccc-0003"
 
@@ -206,7 +209,9 @@ STUB
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" \
         "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
+        "FNO_AGENTS_BIN=${STUB}" \
+        "CLAUDECODE=0" \
+        "CLAUDE_PLUGIN_ROOT="
 
     t3_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -462,7 +467,8 @@ exit 0
 STUB
 
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+        "CLAUDECODE=0" "CLAUDE_PLUGIN_ROOT="
 
     t12_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -472,6 +478,43 @@ STUB
         fail "T12: counter should have been removed on a clean decision"; t12_ok=false
     fi
     [[ "$t12_ok" == "true" ]] && pass "T12: clean decision removed the counter"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T13: block decision on the claude harness -> stdout JSON + exit 0
+# ─────────────────────────────────────────────────────────────────────────────
+log "T13: claude block -> stdout JSON decision + exit 0"
+{
+    setup_env "eeee-0013"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_STDOUT=$(
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
+            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+
+    t13_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T13: expected exit 0 (structured block), got $HOOK_RC"; t13_ok=false
+    fi
+    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "keep going"' >/dev/null 2>&1; then
+        fail "T13: stdout is not a block decision JSON; got: ${HOOK_STDOUT}"; t13_ok=false
+    fi
+    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
+        fail "T13: a clean block must not write an unavailable counter"; t13_ok=false
+    fi
+    [[ "$t13_ok" == "true" ]] && pass "T13: claude block -> stdout JSON + exit 0, no counter"
     cleanup
 }
 
