@@ -8,8 +8,10 @@ Blocks:
 - gh pr merge without two-factor state+artifact verification
 
 Allowed without gate:
-- gh pr create (ad-hoc development is legitimate; merge gate enforces
-  pipeline discipline at the shipping boundary)
+- gh pr create, EXCEPT from a node-bearing branch with no sign the exact
+  `Backlog-Closure:` trailer was composed (see _closure_trailer_refusal).
+  Ad-hoc development stays legitimate: `FNO_PR_CLOSURE_OK=1` clears it, and a
+  branch naming no node is never gated.
 
 Two-factor merge verification:
   (1) target-state.md (NOT megawalk-state.md) with
@@ -33,8 +35,9 @@ Main" bypass phrase and approve_no_verify.flag).
 
 Megawalk-state.md deliberately does NOT authorize gh pr merge. When
 megawalk is invoked, only target (via its internal Phase 7a pipeline) can
-merge a PR; the outer megawalk thread must not. PR creation, however, is
-not a megawalk-only concern - it's always allowed.
+merge a PR; the outer megawalk thread must not. PR creation is not a
+megawalk-only concern either, and is ungated here except for the closure
+trailer described above.
 """
 import json
 import os
@@ -458,7 +461,8 @@ def _get_active_target_session(prefer_pr=None):
 
     The megawalk-state.md file deliberately does NOT authorize gh pr create or
     gh pr merge. Megawalk orchestrates target subagents; if target fails, megawalk
-    must halt, not take over PR operations itself.
+    must halt, not take over PR operations itself. (Creation is otherwise
+    ungated except for _closure_trailer_refusal.)
     """
     matches = []
     for repo_root in _candidate_repo_roots():
@@ -1173,11 +1177,28 @@ def _effective_argv(seg):
     """Strip a leading run of subshell `(`, env-assignments (NAME=value), and
     command wrappers (sudo/env/...) so the real executable token lands at
     argv[0]. Keeps a wrapper prefix from hiding a gated verb."""
+    return _effective_argv_and_assignments(seg)[0]
+
+
+def _effective_argv_and_assignments(seg):
+    """The real argv, plus the NAME=value assignments a shell would apply.
+
+    One walk, two answers, because a second copy of this scan disagreed with it.
+    `_pr_create_signals` used to re-implement the prefix walk and got two shapes
+    wrong that this function has always handled: a create behind `bash -c`,
+    which is unwrapped here but one opaque token there, and a wrapper carrying
+    its own option (`timeout 60 FNO_PR_CLOSURE_OK=1 gh pr create`), skipped here
+    but a hard stop there. A thinner second implementation of an existing one is
+    the pitfall by name, so this is the only walk now.
+    """
     i, n = 0, len(seg)
     saw_wrapper = False
+    assignments = []
     while i < n:
         tok = seg[i]
         if tok == "(" or _ASSIGN_RE.match(tok):
+            if tok != "(":
+                assignments.append(tok)
             i += 1
             continue
         # Lowercased for the same reason the segment finders are: on a
@@ -1222,8 +1243,10 @@ def _effective_argv(seg):
         except ValueError:
             inner = argv[0].split()
         if inner:
-            return _effective_argv(inner)
-    return argv
+            inner_argv, inner_assignments = _effective_argv_and_assignments(inner)
+            # The wrapper's own assignments still apply to the inner command.
+            return inner_argv, assignments + inner_assignments
+    return argv, assignments
 
 
 # Git's global options, which sit BEFORE the subcommand. The value-taking ones
@@ -1360,6 +1383,181 @@ def _find_merge_segment(segments):
     Kept so the segment-matching tests can assert one match readably."""
     found = _find_merge_segments(segments)
     return found[0] if found else None
+
+
+def _find_pr_create_segments(segments):
+    """Every `gh pr create` segment, as its RAW token list.
+
+    Raw rather than joined: the closure hatch below must be an ASSIGNMENT
+    PREFIX on this segment, and joining destroys the token boundary that
+    separates one from the same string sitting inside a quoted argument.
+    """
+    out = []
+    for seg in segments:
+        argv = _effective_argv(seg)
+        if not argv or argv[0].rsplit("/", 1)[-1].lower() != "gh":
+            continue
+        argv = _strip_gh_global_opts(argv)
+        if len(argv) >= 3 and [t.lower() for t in argv[1:3]] == ["pr", "create"]:
+            out.append(seg)
+    return out
+
+
+# Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
+# scripts/lib/node-id.sh. This hook is stdlib-only and runs under a bare
+# interpreter that may not import fno at all, so it cannot defer to either.
+# test_pr_closure_producer.py pins this copy against fno.pr.closure.
+# branch_node_ids so the three cannot drift apart in silence.
+_HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
+_HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+
+
+def _branch_node_ids(head_ref):
+    """Delimiter-bounded node ids in a branch name, in order, deduplicated."""
+    ids = []
+    for match in _HOOK_BRANCH_NODE_ID_RE.finditer(head_ref or ""):
+        if match.group(1) not in ids:
+            ids.append(match.group(1))
+    return ids
+
+
+def _body_file_is_unjudgeable(path):
+    """A `--body-file` path this hook cannot judge, which is all of them.
+
+    This used to read the file and deny when its last trailer did not claim
+    every id. That is unsound, because a PreToolUse hook runs BEFORE the
+    command. Two spellings broke on it, both of them the flow
+    skills/pr/references/create.md now prescribes:
+
+      printf '%s\\n' "$BODY" > .fno/pr-body.md && gh pr create --body-file .fno/pr-body.md
+
+    On a first run the path does not exist yet, and reading that as "no claim"
+    denied a body composed correctly one line later. On a LATER run a stale
+    .fno/pr-body.md from a previous PR sits at that fixed, never-cleaned path,
+    and the hook judged the old contents of a file the very same command is
+    about to overwrite. Same defect, opposite symptom.
+
+    The hook cannot distinguish a stale file from a final one, so it never had
+    a sound DENY here. Its contract already names the tradeoff: the only
+    failure mode is a false ALLOW, which CI still catches, and a composed body
+    is never denied. Returning True for every body-file is that contract said
+    plainly, rather than a read that is right only when the file happens to be
+    current. `path` is unused and kept for the caller's readability.
+    """
+    return True
+
+
+def _pr_create_signals(seg):
+    """The closure-relevant facts of one `gh pr create` segment, from its tokens.
+
+    Returns (hatch, head, body_files). All three by POSITION, never presence:
+    a whole-command regex read every one of them out of quoted prose. A --body
+    merely QUOTING the words "--head chore/tidy-docs" retargeted the gate; one
+    naming a --body-file path in prose satisfied it; and the string
+    FNO_PR_CLOSURE_OK=1 anywhere in a commit message opened it. That is the
+    marker-substring false allow this guard exists to close, on three flags.
+    Argv position is the only thing separating a flag from a word, and shlex
+    has already collapsed each quoted argument into one token.
+
+    The prefix walk is _effective_argv_and_assignments', not a copy of it, so
+    this agrees with the detector on `bash -c "gh pr create ..."` and on a
+    wrapper carrying its own option.
+    """
+    argv, assignments = _effective_argv_and_assignments(seg)
+    hatch = "FNO_PR_CLOSURE_OK=1" in assignments
+    argv = _strip_gh_global_opts(argv)
+    head, body_files = None, []
+    i, n = 0, len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok in ("--head", "-H") and i + 1 < n:
+            head = argv[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--head="):
+            head = tok[len("--head="):]
+            i += 1
+            continue
+        if tok in ("--body-file", "-F") and i + 1 < n:
+            body_files.append(argv[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--body-file="):
+            body_files.append(tok[len("--body-file="):])
+            i += 1
+            continue
+        i += 1
+    return hatch, head, body_files
+
+
+def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
+    """Deny reason for a `gh pr create` that shows no composed closure trailer.
+
+    Measured 2026-08-19: five PRs in one evening red on
+    scripts/ci/check-pr-node-closure.sh for one reason - the generator
+    (`fno pr closure-trailer`) already existed and nothing ran it. The Python
+    creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
+    this covers the prose path, where an agent types the command.
+
+    The ceiling, stated because it decides what this can promise. A `--body`
+    reaches gh as an unexpanded `"$BODY"`, so on that spelling the hook cannot
+    read the string that will be sent; it asserts a POSITIVE marker that the
+    composition STEP ran - a literal trailer key, or the CLOSURE_TRAILER
+    variable skills/pr/references/create.md sets - and never an absence. A
+    `--body-file` names a real path, so that spelling is judged on the file's
+    own trailer instead of on a marker. Either way the only failure mode is a
+    false ALLOW, which CI still catches; a composed body is never denied.
+
+    The ids come from `--head` when the command names one, and only otherwise
+    from the checkout. The PR closes the node its HEAD ref names, which is what
+    the CI gate reads; judging `gh pr create --head chore/docs` against a
+    node-bearing local branch denied a PR that closes nothing, and told the
+    author to claim a node the PR does not ship.
+    """
+    # Both spellings, because only one of them is the one people type. A
+    # PreToolUse hook is a SEPARATE PROCESS, so an inline
+    # `FNO_PR_CLOSURE_OK=1 gh pr create ...` sets the variable for gh and never
+    # reaches this os.environ - and _effective_argv strips the assignment, so
+    # the segment still matched and still denied. The documented hatch was a
+    # dead end, and the refusal message taught it. `hatch` carries the
+    # POSITION-checked answer from _pr_create_signals; never re-derive it from
+    # a substring search over the command.
+    if hatch or os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
+        return None
+    ids = _branch_node_ids(head if head else get_current_branch())
+    if not ids:
+        return None
+    # The one remaining whole-command read, and it stays one on purpose: this
+    # is the "did the composition step run" heuristic for an unexpandable
+    # "$BODY", so a marker in prose costs a false ALLOW that CI still catches.
+    # The three POSITION-read signals above are what a false allow would have
+    # bypassed silently.
+    if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
+        return None
+    for path in body_files:
+        if _body_file_is_unjudgeable(path):
+            return None
+    # This message NAMES candidates and never prescribes a trailer to paste.
+    # A refusal is the highest-trust text a blocked agent reads, so advice here
+    # is a PRODUCER of claims, and this producer has no graph to check against.
+    # `_branch_node_ids` reads the id GRAMMAR, which ordinary English also fits:
+    # on `fix-dead-code` it yields `fix-dead`. The old message told the author
+    # to write `Backlog-Closure: fix-dead`, which greens CI and then makes
+    # `bind_closure_claims` refuse the WHOLE binding at merge, so the real node
+    # never closes and nothing says so. `ensure_closure_trailer` refuses that
+    # exact claim on the producer side; this text used to advise it.
+    # So it points at the generator, which DOES read the graph.
+    return (
+        f"[fno closure trailer] branch segments that fit the node-id grammar: "
+        f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
+        f"claims at least one REAL node.\n"
+        f"Generate the line (graph-checked, with contained_in descendants) via "
+        f"`fno pr closure-trailer <node-id>` and paste its output.\n"
+        f"Do NOT paste a candidate from this message: a segment can match the "
+        f"grammar without being a node, and one unknown id voids the whole "
+        f"binding at merge.\n"
+        f"Ad-hoc PR that closes nothing: re-run with FNO_PR_CLOSURE_OK=1."
+    )
 
 
 def _find_git_segments(segments):
@@ -1820,10 +2018,32 @@ def main():
         _emit("deny", reason)
         sys.exit(0)
 
+    # gh pr create - gated only on the closure trailer (x-49ec). Everything
+    # else about ad-hoc creation stays ungated; the merge gate below is where
+    # pipeline discipline is enforced.
+    if segments is not None:
+        pr_create_segs = _find_pr_create_segments(segments)
+    else:
+        # legacy fallback: unbalanced quotes, so match the whole command.
+        pr_create_segs = re.findall(r"gh\s+pr\s+create", command, re.IGNORECASE)
+    if pr_create_segs:
+        # Judge each create segment on ITS OWN tokens. The legacy fallback
+        # below has no tokens at all, so it reads none of the three signals -
+        # deny-leaning there, matching that path's stated posture.
+        for seg in pr_create_segs:
+            if segments is not None:
+                seg_hatch, seg_head, seg_body_files = _pr_create_signals(seg)
+            else:
+                seg_hatch, seg_head, seg_body_files = False, None, []
+            closure_reason = _closure_trailer_refusal(
+                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files
+            )
+            if closure_reason:
+                _emit("deny", closure_reason)
+                sys.exit(0)
+
     # ==========================================
-    # gh pr create - always allowed (ad-hoc dev is legit; the merge gate is
-    # where pipeline discipline is enforced). gh pr merge - allow only with
-    # two-factor (state + artifact) verification.
+    # gh pr merge - allow only with two-factor (state + artifact) verification.
     # ==========================================
     if segments is not None:
         merge_segs = _find_merge_segments(segments)

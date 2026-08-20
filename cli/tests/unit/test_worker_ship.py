@@ -10,6 +10,21 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _known_graph_ids(monkeypatch):
+    """Pin the closure producer's graph read.
+
+    ensure_closure_trailer verifies a branch-derived id against the graph, and
+    that read shells out to git twice. These tests mock subprocess.run with a
+    fixed list of side effects, so a real read consumes one and every later
+    assertion shifts by one call. Pin it: this file tests ship's PR logic, and
+    the verification has its own suite.
+    """
+    monkeypatch.setattr(
+        "fno.pr.closure.known_node_ids", lambda: frozenset({"x-49ec", "ab-55ba9adb"})
+    )
+
+
+@pytest.fixture(autouse=True)
 def _verified_head(monkeypatch):
     monkeypatch.setattr(
         "fno.pr._preflight.local_verification_required",

@@ -18,7 +18,11 @@ git checkout -b feature/{same-slug-as-main-branch}   # branch FIRST
 git add supabase/migrations/YYYYMMDD_*.sql            # only your files
 git commit -m "feat(schema): add facility_responses tables"
 git push -u origin feature/{same-slug-as-main-branch}
-gh pr create --title "feat(schema): ..." --body "Related: {main-repo} PR pending"
+# FNO_PR_CLOSURE_OK=1: the closure gate reads the MAIN repo's branch, which is
+# node-bearing, and this PR closes nothing in that backlog. Without the hatch it
+# refuses, and its advice would put the main repo's node id on a secondary PR -
+# closing the node when the WRONG PR merges.
+FNO_PR_CLOSURE_OK=1 gh pr create --title "feat(schema): ..." --body "Related: {main-repo} PR pending"
 cd -
 ```
 

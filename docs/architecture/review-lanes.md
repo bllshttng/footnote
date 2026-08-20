@@ -44,6 +44,26 @@ worktree with the **EnterWorktree** tool, then launch bare.
 A worker seeded via `fno agents spawn --cwd <worktree>` lands there
 correctly and reviews the right diff without an extra move.
 
+### The silent fork
+
+A forked run can finish its work while its finder notifications never arrive. The run then neither returns nor reports, and that silence reads exactly like a clean run still in progress.
+
+Send the fork a message and ask it to finish in-context and report its findings to you directly. It holds the work. Only the notification path is broken.
+
+Never kill it and never re-run it. A second run is a second writer on the worktree, and one has soft-reset two committed commits out from under a worker on this repo.
+
+The positive marker is what a finished run produces: it returns findings, or it states that it found none. Silence is neither.
+
+Silence alone is not a wedge, so probe before you conclude. `git status` naming modified files is the portable positive marker for writing. `stat` is the precise one. Spell it `stat -f '%m %N' <paths>` on BSD and `stat -c '%Y %n' <paths>` on GNU. Compare either against `date +%s`. Read epoch seconds on both sides, because a local-time format string compared against a UTC clock makes a file written seconds ago look hours stale.
+
+Anchor the probe at the repository root, because a relative pathspec silently matches nothing from the wrong directory. Print the count of files scanned beside the result, because zero writes and a broken probe are otherwise the same output.
+
+The probe answers in the positive direction only. A fresh write proves a live writer. A stale read proves nothing, because a fork thinking between edits and a fork wedged look identical from outside. So a wedge call needs more than a quiet probe, and more than a timer.
+
+A forked review does not appear in `fno agents top --subagents` or in `claude agents --json`. Only the launching session's own agent list shows it. So only that session can judge its fork, and an observer must take that session's answer rather than check an outside surface. A reader who checks the documented subagent verb sees nothing and reads the rule as satisfied. The instrument manufactures the absence it is read for.
+
+This section is prose and stays prose. A gate needs a mechanical signal, and the whole defect is that no signal arrives.
+
 ## Lane 2: raw-inject via `fno mail send --raw`
 
 The documented operator front door for asking another session (or your own) to fire a raw verb is `fno mail send --raw`.

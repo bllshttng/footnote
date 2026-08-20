@@ -239,9 +239,13 @@ if [[ -n "${CLOSURE_TRAILER:-}" ]]; then
 ${CLOSURE_TRAILER}"
 fi
 
+# --body-file, not --body: the git-protection hook judges a --body-file on the
+# file's own trailer, where a "$BODY" variable it cannot expand leaves it
+# guessing from the command text. Write the composed body, then pass the path.
+printf '%s\n' "$BODY" > .fno/pr-body.md
 gh pr create \
   --title "$TITLE" \
-  --body "$BODY"
+  --body-file .fno/pr-body.md
 ```
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
@@ -315,7 +319,10 @@ Derive from commits:
 
 ### Create PR
 ```bash
-gh pr create --title "title" --body "body"
+# The body must carry the exact `Backlog-Closure:` trailer when the branch names
+# a node, or check-pr-node-closure reds the PR. Compose it into a file (see the
+# step-5 block above) rather than passing a bare --body.
+gh pr create --title "title" --body-file .fno/pr-body.md
 ```
 
 ### Get Detailed Commit Log

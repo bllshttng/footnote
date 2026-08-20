@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
-from fno.graph._constants import is_wellformed_node_id
+from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
 
 TRAILER_KEY = "Backlog-Closure"
 
@@ -99,6 +100,127 @@ def render_pr_closure_trailer(
         if is_wellformed_node_id(extra):
             ids.append(extra)
     return render_closure_trailer(ids)
+
+
+# ---------------------------------------------------------------------------
+# Produce: the trailer a PR-creation path owes its own branch.
+# ---------------------------------------------------------------------------
+
+# Delimiter-bounded candidates from a head ref, the producer half of the set
+# `scripts/ci/check-pr-node-closure.sh` demands. Non-overlapping left-to-right
+# scanning is what makes the two agree on a ref like "feature/x-cdef-1234":
+# once "x-cdef" is consumed the scan resumes at "-1234", which is not
+# letter-led, so the bogus "cdef-1234" candidate the gate's skip-both-segments
+# step exists to prevent is never produced on this side either.
+_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({NODE_ID_BODY})(?=$|[/-])")
+
+
+def branch_node_ids(head_ref: str) -> list[str]:
+    """Well-formed node ids named as delimiter-bounded segments of ``head_ref``.
+
+    Order-preserved, deduplicated. A bare substring never counts - fixed-width
+    hex makes ``x-5b66`` a prefix of ``x-5b667`` - which is the same rule
+    ``_branch_matches_node`` enforces on the reconcile side.
+    """
+    if not isinstance(head_ref, str) or not head_ref:
+        return []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in _BRANCH_NODE_ID_RE.finditer(head_ref):
+        candidate = match.group(1)
+        if candidate not in seen:
+            seen.add(candidate)
+            ids.append(candidate)
+    return ids
+
+
+def known_node_ids() -> frozenset[str]:
+    """Every id the graph actually carries; empty when it cannot be read.
+
+    Empty is the SAFE direction. With nothing verified, no branch-derived
+    candidate is claimed and the CI gate reds loudly, which a human can see and
+    act on. The alternative is a trailer naming an id the graph does not carry:
+    that PASSES CI, and then ``bind_closure_claims`` refuses the WHOLE binding
+    at merge, so the real node never closes and nothing says so.
+    """
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            # graph.json is not the delivery record of truth under an external
+            # tracker, which is the same posture `fno pr closure-trailer` takes
+            # there. Nothing to verify against, so nothing is claimed.
+            return frozenset()
+        return frozenset(
+            e["id"]
+            for e in read_graph(graph_json())
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        )
+    except Exception as exc:
+        # Say so. Returning empty silently turns the producer into a no-op:
+        # no trailer is written, the PR opens, and the only symptom is a red
+        # gate that names the branch rather than the read that failed.
+        print(f"fno: closure trailer cannot read the graph ({exc}); "
+              f"claiming no branch-derived node", file=sys.stderr)
+        return frozenset()
+
+
+def ensure_closure_trailer(
+    body: str,
+    head_ref: str,
+    *,
+    extra_ids: Optional[list[str]] = None,
+    known_ids: Optional[Iterable[str]] = None,
+) -> str:
+    """``body`` with an exact trailer claiming every node id in ``head_ref``.
+
+    The one call a `gh pr create` path makes so the CI gate never reds a PR over
+    a line the generator could have written. Returns the body unchanged when the
+    ref names no node or the last trailer already claims them all, so a caller
+    applies it unconditionally and a re-run changes nothing.
+
+    Appends rather than rewrites: ``parse_closure_trailer`` and the gate both
+    read the LAST trailer line, so a new final line wins without touching what
+    an author already wrote.
+
+    A branch-derived candidate is a GUESS and is verified against the graph
+    before it is claimed; ``extra_ids`` is a caller's ASSERTION that those nodes
+    ship here, so it is trusted. That asymmetry is the whole point: the CI gate
+    may be liberal because it only DEMANDS a claim, but a producer that MINTS
+    one has to be right. ``branch_node_ids("feature/x-49ec-cache-dead")`` yields
+    ``cache-dead`` from ordinary English, and claiming it made every real claim
+    on the line void at merge while CI stayed green.
+
+    ``known_ids`` defaults to reading the graph, so a caller cannot skip the
+    check by forgetting an argument. Pass an explicit set to stay pure.
+    Nothing to verify means nothing to read: with no branch candidate the graph
+    read is skipped, because the batch path passes no head ref at all and paid
+    two git subprocesses and 2127 ids to filter an empty list.
+    ``contained_in`` descendants remain ``render_pr_closure_trailer``'s job.
+    """
+    text = body if isinstance(body, str) else ""
+    candidates = branch_node_ids(head_ref)
+    if known_ids is not None:
+        known = frozenset(known_ids)
+    else:
+        known = known_node_ids() if candidates else frozenset()
+    wanted = list(
+        dict.fromkeys(
+            [n for n in candidates if n in known]
+            + [e for e in (extra_ids or []) if is_wellformed_node_id(e)]
+        )
+    )
+    if not wanted:
+        return text
+    claimed = parse_closure_trailer(text)
+    if all(node_id in claimed for node_id in wanted):
+        return text
+    line = render_closure_trailer(claimed + wanted)
+    if not line:
+        return text
+    return f"{text.rstrip()}\n\n{line}\n" if text.strip() else f"{line}\n"
 
 
 # ---------------------------------------------------------------------------
