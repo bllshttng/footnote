@@ -1386,10 +1386,20 @@ def inject_spawn_defaults(
         # --once/-o is in this list because cli.py refuses placement on
         # `substrate != "pane" OR once`, so a one-shot spawn has no pane
         # geometry either even though its substrate resolves to "pane".
+        # PRESENCE, not value: `_flag_value` answers None for a valueless
+        # trailing `--at`, which read as "no conflict" and injected the group,
+        # so dispatch then hard-refused on a flag the caller never typed. A
+        # `--flag=value` spelling has to be matched on its prefix.
+        _placement_flags = ("--split", "-x", "--at", "--once", "-o")
         conflicting = next(
-            (f for f in ("--split", "-x", "--at") if _flag_value(out[1:], f) is not None),
+            (
+                f
+                for f in _placement_flags
+                for tok in out[1:]
+                if tok == f or tok.startswith(f + "=")
+            ),
             None,
-        ) or next((f for f in ("--once", "-o") if f in out[1:]), None)
+        )
         if eff_substrate != "pane":
             print(
                 f"fno agents spawn: pane group skipped (resolved substrate "

@@ -367,6 +367,31 @@ def rust_runtime_enabled() -> bool:
     return runtime_mode() == "rust"
 
 
+
+def _export_worker_dirs_at_seam(args: "Sequence[str]") -> None:
+    """Publish fno's computed writable-dir set for the Rust spawn route.
+
+    Best-effort: a failure here must never break a spawn, and the worst case is
+    the pre-existing behavior (no grant), not a broken launch.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.agents.writable_dirs import export_worker_writable_dirs
+
+        cwd = None
+        toks = list(args)
+        for i, tok in enumerate(toks):
+            if tok == "--cwd" and i + 1 < len(toks):
+                cwd = toks[i + 1]
+                break
+            if tok.startswith("--cwd="):
+                cwd = tok.split("=", 1)[1]
+                break
+        export_worker_writable_dirs(Path(cwd) if cwd else Path.cwd(), os.environ)
+    except Exception:
+        pass  # ponytail: a grant we cannot compute must never block the spawn
+
 def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` targeting the ``pane`` substrate (4a-G2).
 
@@ -1014,6 +1039,14 @@ def make_agents_group_cls() -> type:
                     from fno.agents.spawn_defaults import inject_spawn_defaults
 
                     args = inject_spawn_defaults(args)
+                    # Same seam, same reason as the account handling below: the
+                    # writable-dir grant must cover BOTH runtimes. The Python
+                    # token builders only ever see the pane substrate, because
+                    # the carve-out above keeps just that lane in Python; every
+                    # other spawn execs the Rust binary, which builds the
+                    # harness argv itself. Publishing on the env is what reaches
+                    # that binary (os.execv inherits it).
+                    _export_worker_dirs_at_seam(args)
                     # Same seam, same reason: these must see the post-defaults
                     # args and must cover BOTH runtimes, so they run here rather
                     # than in either spawn implementation. The pick runs FIRST so

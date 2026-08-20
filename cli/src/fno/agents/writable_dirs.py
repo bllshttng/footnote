@@ -42,11 +42,32 @@ at ``<repo>/.claude/worktrees`` rather than under the state root.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, MutableMapping, Optional, Sequence
 
-__all__ = ["add_dir_tokens", "worker_writable_dirs"]
+__all__ = [
+    "WORKER_ADD_DIRS_ENV",
+    "add_dir_tokens",
+    "export_worker_writable_dirs",
+    "worker_writable_dirs",
+]
+
+#: Channel the Python spawn seam uses to hand the computed set to the Rust
+#: client. `--substrate bg|headless` does NOT stay in Python: `rust_runtime`
+#: carves out only the pane substrate, and every other spawn `os.execv`s the
+#: `fno-agents` binary, which builds the harness argv itself and forwards only
+#: the OPERATOR's `--add-dir`. So the three Python token builders cover exactly
+#: one reachable lane, and a bg claude worker - the substrate the shipped stage
+#: table uses for its own delivery lane - still could not write the claim store.
+#:
+#: An env var rather than a new flag: `--add-dir` is scalar in both runtimes
+#: (typer `str | None`, and `params.insert` in the Rust arg parser overwrites),
+#: so a repeated token cannot carry N directories without widening the flag on
+#: both sides plus its parity mirror. `os.execv` inherits the environment, so
+#: this reaches the binary with no parser change and keeps ONE resolver.
+WORKER_ADD_DIRS_ENV = "FNO_WORKER_ADD_DIRS"
 
 
 ADD_DIR_PROVIDERS = ("claude", "codex", "agy")
@@ -188,3 +209,17 @@ def worker_writable_dirs(
         seen.add(token)
         out.append(token)
     return out
+
+
+def export_worker_writable_dirs(cwd: "Path", env: "MutableMapping[str, str]") -> list[str]:
+    """Compute the set for ``cwd`` and publish it on ``env`` for the Rust client.
+
+    Called at the spawn seam, before the route/fork, so it covers the lanes the
+    Python token builders never see. Returns what it published so a caller can
+    log or assert on it. Publishes nothing when the set is empty, so an argv that
+    would gain no grant is byte-identical to today's.
+    """
+    dirs = worker_writable_dirs(cwd)
+    if dirs:
+        env[WORKER_ADD_DIRS_ENV] = os.pathsep.join(dirs)
+    return dirs

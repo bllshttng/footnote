@@ -3074,7 +3074,13 @@ def dispatch_spawn_pane(
         if pane_group is not None:
             try:
                 place_pane_in_group_tab(session, pane_id, pane_group, runner)
-            except DispatchAskError as exc:
+            except (DispatchAskError, TypeError, ValueError) as exc:
+                # TypeError/ValueError are in the net because `int(pane_ids[0])`
+                # sits inside this call: a malformed row - the exact case the
+                # guard there calls itself defensive against - would otherwise
+                # escape as an unhandled exception and take down the receipt and
+                # the registry row for a cosmetic placement step.
+                #
                 # Do NOT reap. The pane was created with the seed already in its
                 # argv, so by this point the worker is live and may have started
                 # work. Grouping is cosmetic by this function's own account (it

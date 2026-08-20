@@ -343,7 +343,9 @@ This is not one harness's problem. codex `workspace-write` is the visible case. 
 | The plan directory | The directory holding this spawn's plan, never the vault above it. A worker writes its plan, not the operator's notes. |
 | Sibling project roots | Only for a multi-repo wave, passed by the caller. |
 
-Three funnels carry it and each is tested on its own lane: the pane builder, claude's bg/headless builder, and codex's headless builder. A grant on one of several reachable paths is decorative.
+Four funnels carry it and each is tested on its own lane. Three are Python token builders: the pane builder, claude's bg/headless builder, and codex's headless builder. The fourth is the spawn seam, and it is the one that matters most. `rust_runtime` keeps only the PANE substrate in Python. Every other spawn execs the `fno-agents` binary, which builds the harness argv itself and forwards only the operator's own `--add-dir`. So the three Python builders cover exactly one reachable lane. A `--substrate bg` spawn launched a worker with no write access to the claim store. That is the substrate the shipped stage table uses for its own delivery lane.
+
+The seam publishes the computed set on `FNO_WORKER_ADD_DIRS`, which `os.execv` carries into the binary. An env var carries it rather than a repeated flag. `--add-dir` is scalar in both runtimes: typer types it `str | None`, and the Rust arg parser's `params.insert` overwrites. Widening it on both sides plus its parity mirror buys nothing the env channel does not, and the resolver stays in one language either way. A grant on one of several reachable paths is decorative.
 
 **The provider with no additive grant.** opencode's `--dir` sets the working directory rather than adding one, so there is no cell to carry the set. An explicit operator `--add-dir` keeps its hard refusal there. The computed set is skipped with one named line on stderr instead. Fail-closed is right for something a human typed. For a default the caller never asked for, it is wrong: it refuses every opencode spawn.
 

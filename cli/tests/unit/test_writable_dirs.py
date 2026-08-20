@@ -232,3 +232,85 @@ def test_explicit_add_dir_still_refuses_on_that_provider(tmp_path: Path) -> None
 
     with pytest.raises(DispatchAskError, match="not supported for provider"):
         build_pane_argv("opencode", "t", tmp_path, False, None, add_dir="/w")
+
+
+# --------------------------------------------------------------------------
+# The lane the Python token builders never see.
+# --------------------------------------------------------------------------
+
+
+def test_seam_export_publishes_the_set_for_the_rust_route(
+    fake_state: Path, tmp_path: Path
+) -> None:
+    """`rust_runtime` keeps only the PANE substrate in Python; every other spawn
+    execs the Rust binary, which builds the harness argv itself and forwards only
+    the operator's --add-dir. So the three token builders cover one reachable
+    lane, and `--substrate bg` - what the shipped stage table uses for its own
+    delivery lane - launched a worker that could not write the claim store.
+    """
+    from fno.agents.writable_dirs import (
+        WORKER_ADD_DIRS_ENV,
+        export_worker_writable_dirs,
+    )
+
+    env: dict[str, str] = {}
+    published = export_worker_writable_dirs(tmp_path, env)
+    assert published == [str(fake_state)]
+    assert env[WORKER_ADD_DIRS_ENV] == str(fake_state)
+
+
+def test_seam_export_publishes_nothing_when_the_set_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An argv that would gain no grant stays byte-identical to today's."""
+    from fno.agents.writable_dirs import (
+        WORKER_ADD_DIRS_ENV,
+        export_worker_writable_dirs,
+    )
+
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path / "nope")
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "nope")
+    monkeypatch.setattr(
+        "fno.claims.io.claims_dir", lambda root=None: tmp_path / "nope" / "claims"
+    )
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
+    env: dict[str, str] = {}
+    assert export_worker_writable_dirs(tmp_path, env) == []
+    assert WORKER_ADD_DIRS_ENV not in env
+
+
+def test_seam_reads_cwd_from_the_spawn_argv(
+    fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grant is computed for the worker's cwd, not the seam's."""
+    import fno.agents.rust_runtime as rr
+    from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "fno.agents.writable_dirs.export_worker_writable_dirs",
+        lambda cwd, env: seen.setdefault("cwd", cwd),
+    )
+    monkeypatch.delenv(WORKER_ADD_DIRS_ENV, raising=False)
+    for argv in (
+        ["spawn", "--cwd", str(tmp_path), "x"],
+        ["spawn", f"--cwd={tmp_path}", "x"],
+    ):
+        seen.clear()
+        rr._export_worker_dirs_at_seam(argv)
+        assert seen["cwd"] == tmp_path
+
+
+def test_seam_export_never_breaks_a_spawn(tmp_path: Path, monkeypatch) -> None:
+    """A grant fno cannot compute must leave the spawn alone, not refuse it."""
+    import fno.agents.rust_runtime as rr
+
+    def boom(cwd, env):
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr(
+        "fno.agents.writable_dirs.export_worker_writable_dirs", boom
+    )
+    rr._export_worker_dirs_at_seam(["spawn", "--cwd", str(tmp_path), "x"])

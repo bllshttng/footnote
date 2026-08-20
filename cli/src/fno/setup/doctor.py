@@ -297,14 +297,15 @@ def check_state_root_writable() -> list[str]:
         store = claims_dir(global_claims_root())
     except Exception as exc:
         return [f"could not resolve the claim store: {exc}"]
-    # Probe the nearest EXISTING ancestor rather than creating the store: a
-    # worker creates the store itself on first claim, and the question is
-    # whether this session can write there, not whether doctor can.
-    target = store
-    while not target.is_dir() and target != target.parent:
-        target = target.parent
+    # Probe the STORE, creating it if absent. An earlier version walked up to the
+    # nearest existing ancestor to avoid creating state from a diagnostic, and
+    # that answered about the wrong directory: a session sandboxed to its cwd but
+    # able to write $HOME passed, while the message still named the store. The
+    # creation is what a worker does on its first claim anyway, it is idempotent,
+    # and a mkdir that fails is itself the answer.
     try:
-        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(target))
+        store.mkdir(parents=True, exist_ok=True)
+        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(store))
         os.close(fd)
         os.unlink(probe_path)
     except OSError as exc:
