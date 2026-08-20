@@ -1434,9 +1434,19 @@ def _mesh_env_wrapper(
 
 
 #: The provenance env keys, as one set. Callers that export them must set or
-#: clear the whole triple together so a child never sees a mix of its own node
-#: and its parent's slug/plan.
-PROVENANCE_KEYS: tuple[str, ...] = ("FNO_NODE", "FNO_SLUG", "FNO_PLAN")
+#: clear the whole group together so a child never sees a mix of its own node
+#: and its parent's slug, plan, or claim holder.
+#:
+#: ``FNO_NODE_CLAIM_HOLDER`` belongs here for the same reason the other three
+#: do: it is written beside ``FNO_NODE`` for a node-driven spawn, and a copy
+#: left behind would offer a later child the prior worker's handover holder to
+#: name back - which is the one thing that proves successorship.
+PROVENANCE_KEYS: tuple[str, ...] = (
+    "FNO_NODE",
+    "FNO_SLUG",
+    "FNO_PLAN",
+    "FNO_NODE_CLAIM_HOLDER",
+)
 
 
 def resolve_provenance(

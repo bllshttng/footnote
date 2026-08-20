@@ -1453,6 +1453,19 @@ mod tests {
         }
     }
 
+    /// The plan grant production resolves for `create_ctx()`'s cwd.
+    ///
+    /// `plan_content_dir` canonicalizes what it grants, and on macOS `/tmp` is
+    /// a symlink to `/private/tmp`. A hardcoded `/tmp/...` expectation
+    /// therefore passes on Linux CI and fails on every developer mac, which
+    /// reads as a broken checkout rather than a broken assertion. Resolving it
+    /// the way the code does makes the test say the same thing on both.
+    fn expected_plan_grant() -> String {
+        resolve_allow_missing(&PathBuf::from("/tmp/example-repo/.fno/plans"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     // ---- argv shapes ----
 
     #[test]
@@ -1533,7 +1546,7 @@ mod tests {
                 "--sandbox",
                 "workspace-write",
                 "--add-dir",
-                "/tmp/example-repo/.fno/plans",
+                &expected_plan_grant(),
                 "--",
                 "build feature X"
             ]
@@ -1599,7 +1612,21 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_fno, perms).unwrap();
         let old_path = std::env::var_os("PATH");
-        unsafe { std::env::set_var("PATH", &bin) };
+        // PREPEND, never replace. PATH is process-global and this test holds it
+        // for the whole argv build, so replacing it took `git` away from every
+        // concurrent test in the binary. That is what made the paths and
+        // roster_progress git fixtures fail at random. The stub still wins for
+        // `fno`, which is all this test needs.
+        let stubbed = match &old_path {
+            Some(prev) => {
+                let mut v = std::ffi::OsString::from(&bin);
+                v.push(":");
+                v.push(prev);
+                v
+            }
+            None => std::ffi::OsString::from(&bin),
+        };
+        unsafe { std::env::set_var("PATH", stubbed) };
 
         let mut create_ctx = create_ctx();
         create_ctx.cwd = dir.path().to_path_buf();
@@ -1622,14 +1649,19 @@ mod tests {
             .enumerate()
             .filter_map(|(i, token)| (token == "--add-dir").then(|| &create[i + 1]))
             .collect();
-        assert!(grants
-            .iter()
-            .any(|path| *path == &plan_dir.to_string_lossy()));
+        // The grant is canonicalized, and a mac tempdir sits under a symlinked
+        // /var. Compare against the resolved form or this passes only on Linux.
+        let want = resolve_allow_missing(&plan_dir);
+        let want = want.to_string_lossy();
+        assert!(
+            grants.iter().any(|path| *path == &want),
+            "plan grant missing: {grants:?} has no {want}"
+        );
         let roots = resume
             .iter()
             .find(|arg| arg.starts_with("sandbox_workspace_write.writable_roots="))
             .expect("writable_roots override present");
-        assert!(roots.contains(plan_dir.to_str().unwrap()));
+        assert!(roots.contains(want.as_ref()));
         assert_eq!(
             resume
                 .iter()
@@ -1668,7 +1700,7 @@ mod tests {
             .enumerate()
             .filter_map(|(i, token)| (token == "--add-dir").then(|| &argv[i + 1]))
             .collect();
-        assert_eq!(grants, vec!["/tmp/example-repo/.fno/plans"]);
+        assert_eq!(grants, vec![&expected_plan_grant()]);
     }
 
     /// The bounded posture does NOT survive `codex exec resume` on its own:
@@ -2477,17 +2509,19 @@ mod tests {
         p
     }
 
-    /// Process-global lock serializing $HOME mutation. cargo runs tests in
-    /// parallel threads within one process; HOME is process-global, so two
-    /// `with_home` calls would race without this guard.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Run `f` with $HOME set to `home`, restoring the prior value after. The
     /// reachability helpers read HOME on each call; the lock makes the
     /// set -> run -> restore window atomic across parallel test threads.
+    ///
+    /// It takes the crate-wide `test_env_lock`, not a private one. A second
+    /// mutex over the same process-global environment excludes only its own
+    /// callers: every other test in this binary, including any that spawns a
+    /// child inheriting $HOME, kept running straight through this window.
     fn with_home(home: &std::path::Path, f: impl FnOnce()) {
         // Poisoning is irrelevant here (the guarded data is unit); recover it.
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("HOME");
         std::env::set_var("HOME", home);
         f();

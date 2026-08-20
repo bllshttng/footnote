@@ -639,7 +639,10 @@ PYEOF
     #     shows NO fresh activity. Fresh activity => a live session is working
     #     here; refuse as `contested` (the claim-wait BLOCKED contract: the
     #     caller relays REASON/UNBLOCKS_AFTER and stops) rather than steal.
-    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json 2>/dev/null \
+    # --no-roster: only `state` is read here, and this call hits the free/stale
+    # branch in the common case, which is exactly where the cross-check spends
+    # a harness subprocess on a field nothing downstream looks at.
+    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json --no-roster 2>/dev/null \
       | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
     case "${_CLAIM_STATE:-}" in
       free|stale|corrupted)
@@ -1211,9 +1214,128 @@ PYEOF
   # to resolve).
   if [[ -z "$_NODE_ID" && -n "${INITIAL_INPUT// /}" ]]; then
     if [[ "$_GUARD_AMBIGUOUS" -eq 1 ]]; then
-      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous, no node claimed" >&2
+      # Still "ambiguous", and the word is load-bearing: the manifest's single
+      # graph_node_id and the in_review guard genuinely cannot pick one. Only
+      # the CLAIM stops treating ambiguity as a reason to record nothing.
+      #
+      # The tail states what will ACTUALLY happen, checking the same two gates
+      # the claim block below is guarded by. It promised "claiming each"
+      # unconditionally, so with no owner id or no `fno` on PATH the operator
+      # was told about claims that were never attempted.
+      if [[ -n "$claim_owner_id" ]] && command -v fno >/dev/null 2>&1; then
+        _AMBIG_TAIL="claiming each"
+      elif [[ -z "$claim_owner_id" ]]; then
+        _AMBIG_TAIL="no owner id resolved, so claiming none"
+      else
+        _AMBIG_TAIL="fno not on PATH, so claiming none"
+      fi
+      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous for the manifest, $_AMBIG_TAIL" >&2
     else
       echo "target: no backlog node resolved from input '$INITIAL_INPUT'; running unclaimed" >&2
+    fi
+  fi
+
+  # A two-node payload used to take ZERO claims. That is the worst of the three
+  # options available: the work is real, two nodes are being built, and the store
+  # recorded neither, so both read free to every king that checked (x-cd1e).
+  #
+  # The ambiguity refusal was written for `graph_node_id` and the in_review
+  # guard, which genuinely need ONE node. A claim does not: a session building
+  # two nodes holds two claims, and that is simply the truth. So _GUARD_AMBIGUOUS
+  # keeps its meaning for those two, and only what the claim block does with it
+  # changes. Single-node resolution above is untouched.
+  _EXTRA_CLAIMED=""
+  if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
+     && command -v fno >/dev/null 2>&1; then
+    _MULTI_HOLDER="target-session:${claim_owner_id}"
+    # SHORTER than the single-node 2h, because nothing renews these and nothing
+    # releases them. `loop-check` renews `target_claim_key`, which this branch
+    # never sets, and every release site keys on that same field - so the TTL is
+    # not a lease here, it is the entire lifetime of the claim.
+    #
+    # At 2h a session that FINISHED left both nodes reading SUSPECT (unexpired
+    # TTL, dead pid) for the rest of the window, and SUSPECT blocks dispatch, so
+    # the work being done wedged its own nodes for up to two hours. Thirty
+    # minutes covers the launch and the early work; past it the claim lapses to
+    # STALE, which reads free and is the honest answer for a claim nobody is
+    # renewing.
+    _MULTI_TTL="${TARGET_CLAIM_MULTI_TTL:-30m}"
+    _MULTI_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
+    _MULTI_PID_FLAGS=""
+    [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
+    _MULTI_HANDOVER_FLAGS=""
+    [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+      _MULTI_HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
+    _MULTI_OK=1
+    # THE SPAWN-BOUND NODE GOES FIRST, whatever order the payload named ids in.
+    # The loop breaks on the first sibling held elsewhere, so in token order it
+    # could abort before ever reaching $FNO_NODE - the one node this worker is
+    # actually about to build. The rollback's keep-FNO_NODE guard then had
+    # nothing to keep, and the session ran on the 15m spawn-side claim alone.
+    _MULTI_ORDER="$_GUARD_MATCHES"
+    if [[ -n "${FNO_NODE:-}" ]] && printf '%s' " $_GUARD_MATCHES " | grep -q " ${FNO_NODE} "; then
+      _MULTI_ORDER="$FNO_NODE"
+      for _mn in $_GUARD_MATCHES; do
+        [[ "$_mn" == "${FNO_NODE}" ]] || _MULTI_ORDER="$_MULTI_ORDER $_mn"
+      done
+    fi
+    for _mnode in $_MULTI_ORDER; do
+      # The handover flag belongs here too. `fno agents spawn --node X` takes a
+      # claim on X, and a payload naming X plus a second id lands on THIS loop,
+      # not the single-node block. Without it the acquire on X collides with the
+      # claim taken for this very worker, the all-or-nothing rollback below
+      # releases the sibling, and the session ends up holding nothing - a
+      # two-node payload back to zero claims, which is the defect being fixed.
+      # The harness flag belongs with the handover for the same reason the
+      # single-node path carries it: a rebind keeps the PRIOR holder's harness
+      # tag unless this call names the new one, so a claude worker inheriting a
+      # codex spawner's claim would read as codex for the rest of its life.
+      if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "node:${_mnode}" \
+            --holder "$_MULTI_HOLDER" --ttl "$_MULTI_TTL" $_MULTI_PID_FLAGS \
+            $_MULTI_HANDOVER_FLAGS ${_CLAIM_HARNESS_FLAG:-} \
+            --reason "target dispatch (multi-node payload)" >/dev/null 2>&1; then
+        _EXTRA_CLAIMED="${_EXTRA_CLAIMED:+$_EXTRA_CLAIMED }$_mnode"
+      else
+        _MULTI_OK=0
+        echo "target: could not claim node:${_mnode} (held elsewhere?); releasing the partial set" >&2
+        break
+      fi
+    done
+    # All or nothing. Half a session's work recorded is a worse lie than none:
+    # a king reading the claimed half would conclude the unclaimed half is free
+    # and staff it, which is the duplicate this whole change exists to stop.
+    if [[ "$_MULTI_OK" -ne 1 ]]; then
+      _MULTI_KEPT=""
+      for _mnode in $_EXTRA_CLAIMED; do
+        # NEVER the node this worker was spawned for. That claim was taken at
+        # dispatch and handed to this session, and this session is about to
+        # build it. Releasing it because a SIBLING id was held elsewhere would
+        # publish the one node genuinely being worked as free, which is the
+        # duplicate launch the rollback exists to prevent.
+        if [[ -n "${FNO_NODE:-}" && "$_mnode" == "${FNO_NODE}" ]]; then
+          _MULTI_KEPT="$_mnode"
+          continue
+        fi
+        FNO_CLAIMS_ROOT="$HOME" fno claim release "node:${_mnode}" \
+          --holder "$_MULTI_HOLDER" >/dev/null 2>&1 || true
+      done
+      _EXTRA_CLAIMED="$_MULTI_KEPT"
+    fi
+    if [[ -n "$_EXTRA_CLAIMED" ]]; then
+      echo "target: claimed $_EXTRA_CLAIMED for this session" >&2
+      # Recorded so the set is discoverable from the manifest alone, and the
+      # limit is said out loud rather than left to be found. NOTHING renews
+      # these and NOTHING releases them: `fno-agents loop-check` renews the
+      # single `target_claim_key`, and so does every release site, and this path
+      # never sets that field. The TTL above is therefore the whole lifetime,
+      # which is why it is shorter than the single-node one.
+      #
+      # An expiring claim still beats no claim: it is true while the work is
+      # young and then reads STALE, which is reapable and honest, rather than
+      # free. Wiring a real release means teaching every release site to read a
+      # SET rather than one key, which is its own change.
+      echo "target_claim_multi_keys: \"$_EXTRA_CLAIMED\"" >> "$STATE_FILE"
+      echo "target_claim_multi_holder: \"$_MULTI_HOLDER\"" >> "$STATE_FILE"
     fi
   fi
 
@@ -1235,10 +1357,24 @@ PYEOF
       # omit --pid and degrade to TTL-only liveness, byte-for-byte as before.
       _SESSION_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
       _PID_FLAGS=""; [[ "$_SESSION_PID" =~ ^[0-9]+$ ]] && _PID_FLAGS="--pid $_SESSION_PID"
+      # Inherit the claim `fno agents spawn --node` took for this worker, rather
+      # than colliding with it. The spawner claims the node before the worker
+      # exists so the node never reads free mid-launch; without this the
+      # worker's own acquire would hit that claim, see a different holder, and
+      # turn a closed visibility hole into a dead launch.
+      #
+      # The holder arrives in the environment, so only the process spawned for
+      # this node can name it, and naming it exactly is the proof the handover
+      # requires. Unset (every hand-started or non-spawn run) => zero args and
+      # an ordinary acquire, byte-for-byte as before.
+      _HANDOVER_FLAGS=""
+      [[ -n "${FNO_NODE_CLAIM_HOLDER:-}" ]] && \
+        _HANDOVER_FLAGS="--handover-from ${FNO_NODE_CLAIM_HOLDER}"
       # Unquoted on purpose: empty => zero args (bash 3.2 set -u safe, unlike an
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
+            $_HANDOVER_FLAGS \
             $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment

@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from urllib.parse import quote as _url_quote
 
@@ -50,7 +50,7 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .staleness import classify, classify_for_sweep, now_ms
+from .staleness import classify, classify_for_sweep, is_expired, is_live, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
@@ -158,6 +158,7 @@ __all__ = [
     "list_claims",
     "list_claims_with_counts",
     "reap_dead_claims",
+    "sweep_verdict",
     "refresh_claim",
     "release_claim",
 ]
@@ -348,7 +349,7 @@ def acquire_claim(
         # enough (recurse vs. raise vs. continue on timeout) that it was
         # judged a separate, larger refactor rather than folded into this
         # PR's mutex-consolidation and reap-hardening scope.
-        recovery_lock = path.with_name(path.name + ".recovery.d")
+        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
         try:
@@ -387,7 +388,7 @@ def acquire_claim(
     # actually moves, one no-ops), and both successfully create the new lock
     # in the gap between archive-and-create.
     if not _existing_is_live(existing):
-        recovery_lock = path.with_name(path.name + ".recovery.d")
+        recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
         acquired_lock = False
         recovery_token = ""
         try:
@@ -465,7 +466,17 @@ def acquire_claim(
     )
 
 
-def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Claim:
+def _rebound_claim(
+    existing: Claim,
+    new_pid: int,
+    ttl_ms: Optional[int],
+    *,
+    new_holder: Optional[str] = None,
+    new_reason: Optional[str] = None,
+    new_harness: Optional[str] = None,
+    new_metadata: Optional[dict] = None,
+    keep_acquired_at: bool = False,
+) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
     The native-resume rebind keeps ``key``/``holder``/``reason``/``metadata``/
@@ -474,26 +485,52 @@ def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Clai
     PID-liveness claim stays PID-liveness (``ttl_ms`` None and no prior
     ``expires_at``); a TTL claim refreshes to ``now + prior_window`` so the
     deadline never compounds across rebinds (the renew() lesson).
+
+    ``new_holder`` is the one exception to "identity preserved", and only the
+    dispatch handover passes it: the spawn side and the worker side of one
+    launch are genuinely different names for one piece of work. Its caller
+    proved the prior holder first; see :func:`compare_and_rebind`.
+
+    ``new_reason`` and ``new_harness`` travel with it. A handover changes WHO
+    owns the claim, so keeping the spawner's reason and harness tag would leave
+    the claim describing the wrong owner - and the init hook passes a PROVEN
+    harness precisely so a session that inherited a foreign marker does not
+    mislabel its claim. Both default to None, which preserves the existing
+    value, so every same-holder rebind is unchanged.
+
+    ``keep_acquired_at`` is for the renewal RE-ANCHOR, which repairs the process
+    anchor rather than acquiring anew. Two things depend on it. The do
+    provenance row keys ``started_at`` on ``acquired_at``, so moving it makes
+    the release stamp open a SECOND row instead of closing the one this claim
+    opened. And PID-reuse detection compares ``create_time(pid)`` against it, so
+    holding it still refuses an anchor whose session began AFTER the claim -
+    which is the cross-session takeover a re-anchor must never perform.
     """
-    acquired = now_ms()
+    # TWO CLOCKS, and conflating them froze the lease. `acquired` is the record
+    # of when this claim began; the DEADLINE always runs from now. Deriving the
+    # deadline from a held `acquired` made a re-anchoring refresh extend the
+    # claim by zero, and on a short window it wrote a deadline in the PAST, so
+    # the heartbeat drove its own claim from suspect straight to stale.
+    now = now_ms()
+    acquired = existing.acquired_at if keep_acquired_at else now
     if ttl_ms is not None:
-        expires_at: Optional[int] = acquired + ttl_ms
+        expires_at: Optional[int] = now + ttl_ms
     elif existing.expires_at is not None:
-        expires_at = acquired + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
+        expires_at = now + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
     else:
         expires_at = None
     return Claim(
         schema_version=existing.schema_version,
         key=existing.key,
-        holder=existing.holder,
+        holder=new_holder or existing.holder,
         acquired_at=acquired,
         expires_at=expires_at,
         pid=new_pid,
         host=socket.gethostname(),
         machine_id=machine_id() or None,
-        reason=existing.reason,
-        harness=existing.harness,
-        metadata=existing.metadata,
+        reason=new_reason if new_reason is not None else existing.reason,
+        harness=new_harness if new_harness is not None else existing.harness,
+        metadata=new_metadata if new_metadata else existing.metadata,
     )
 
 
@@ -501,6 +538,10 @@ def compare_and_rebind(
     key: str,
     expected_holder: str,
     *,
+    new_holder: Optional[str] = None,
+    new_reason: Optional[str] = None,
+    new_harness: Optional[str] = None,
+    new_metadata: Optional[dict] = None,
     new_pid: Optional[int] = None,
     ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
@@ -531,13 +572,33 @@ def compare_and_rebind(
     is the explicit ``fno target start`` successor path). Emits ``claim_rebound``;
     raises ``RebindRefused`` on any refusal.
 
+    ``new_holder`` moves the claim to a DIFFERENT holder on proof of the prior
+    one (x-cd1e). The dispatch handover needs it: ``fno agents spawn --node``
+    takes the node claim before the worker exists, and the worker's own
+    ``fno target init`` must then take it over rather than find it held and
+    abort. ``acquire_claim`` cannot do this - it raises ``ClaimHeldByOther`` for
+    a different holder on a live claim - and the same-holder rebind above cannot
+    either, because the two ends genuinely have different names.
+
+    Proof is what makes the move safe, and it is the SAME proof the same-holder
+    path already demands: the caller must name the exact prior holder, and this
+    re-reads under the mutex and refuses on any mismatch. The spawn-side holder
+    is worker-specific and reaches only that worker (exported into its
+    environment), so naming it is evidence of being the intended successor
+    rather than a bystander who guessed a key. A live prior PID that is not this
+    one still refuses as a concurrent writer, so the move never yanks a running
+    owner.
+
+    Omitting it preserves the holder, which is every pre-existing caller.
+
     Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
-    rebound) or ``"idempotent"`` (a live same-PID lease refresh).
+    rebound), ``"idempotent"`` (a live same-PID lease refresh), or ``"handover"``
+    (a named prior holder was replaced by ``new_holder``).
     """
     _validate_inputs(key, expected_holder, ttl_ms)
     path = claim_path(key, root=root)
     npid = new_pid if new_pid is not None else os.getpid()
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
@@ -586,10 +647,92 @@ def compare_and_rebind(
             )
 
         state = classify(existing)
+        # ONLY a launch-window holder may be replaced. Naming the prior holder
+        # is the proof, and for `spawn-handover:<worker>` that proof is real: it
+        # is minted per worker and travels only in that worker's environment.
+        # Every other holder is PUBLISHED by `fno claim status`, so without this
+        # anyone could read a holder off the store and hand the node to
+        # themselves - taking a running owner's claim, which `ClaimHeldByOther`
+        # had always refused.
+        #
+        # Computed ONCE and applied at all three rebind sites. Gating only the
+        # LIVE branch would leave the rename reachable through the idempotent
+        # and dead-owner paths, which is the same rule on one of three paths.
+        handover_allowed = bool(
+            new_holder
+            and new_holder != existing.holder
+            and existing.holder.startswith(HANDOVER_HOLDER_PREFIX)
+        )
+        if new_holder and new_holder != existing.holder and not handover_allowed:
+            # REFUSE, never fall through. Gating only the RENAME left this call
+            # dropping into the same-holder rebind below, which rewrote the
+            # victim's pid/host/expires_at and republished their claim as LIVE
+            # under THIS process. That is worse than the takeover the gate was
+            # added to stop: the claim then reads live to every dispatcher and
+            # `sweep_verdict` short-circuits on LIVE, so nothing can reap it.
+            raise RebindRefused(
+                f"holder {existing.holder!r} is not a launch-window holder; "
+                "only a spawn-side handover claim can be taken over",
+                state=classify(existing).value,
+                holder=existing.holder,
+                pid=existing.pid,
+            )
+        effective_new_holder = new_holder if handover_allowed else None
+        # The reason and the harness tag describe the OWNER, so they travel with
+        # the rename or not at all. Applying them to a refused handover let a
+        # caller rewrite another holder's fields while leaving the holder alone.
+        effective_new_reason = new_reason if handover_allowed else None
+        effective_new_metadata = new_metadata if handover_allowed else None
+        # A handover with no PINNED harness resolves one from the ambient
+        # markers, exactly as `_make_claim` does on the ordinary acquire path.
+        # Preserving the spawner's tag instead left a claude worker under a
+        # codex king reading as codex for the life of the claim, and that tag
+        # flows on into the do provenance row. The init hook omits --harness
+        # whenever its owned-identity probe fails, so this is not a rare path.
+        effective_new_harness = (
+            (new_harness if new_harness is not None else resolve_harness_identity().harness)
+            if handover_allowed
+            else None
+        )
+        if state == ClaimState.LIVE and handover_allowed:
+            # A HANDOVER, and a live prior pid does not refuse it. The
+            # concurrent-writer rule below protects one symbolic owner from two
+            # of its own processes, which is a different situation: here the
+            # caller named a DIFFERENT prior holder exactly, and that holder
+            # exists only to be handed over.
+            #
+            # A live prior pid is in fact the NORMAL case on the blocking
+            # substrates. `fno agents spawn --substrate headless` (and `--once`)
+            # stays in dispatch_spawn for the worker's whole run, so the spawner
+            # is still alive when the worker reaches `fno target init`. Refusing
+            # there left the worker unclaimed for the full lease, which is the
+            # free-read this whole change exists to close, reintroduced on the
+            # one substrate that blocks.
+            rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
+            )
+            _atomic_replace(path, serialize_claim(rebound))
+            if emit:
+                emit_claim_rebound(
+                    rebound,
+                    previous_pid=existing.pid,
+                    previous_state=state.value,
+                    mode="handover",
+                    fno_id=fno_id,
+                    harness=harness_tag,
+                    harness_session_id=harness_session_id,
+                )
+            return rebound, "handover"
         if state == ClaimState.LIVE:
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
-                rebound = _rebound_claim(existing, npid, ttl_ms)
+                rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
+            )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
                     emit_claim_rebound(
@@ -623,23 +766,56 @@ def compare_and_rebind(
             )
 
         # Local same-holder, prior PID dead: the resume rebind.
-        rebound = _rebound_claim(existing, npid, ttl_ms)
+        rebound = _rebound_claim(
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
+                new_metadata=effective_new_metadata,
+            )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
             emit_claim_rebound(
                 rebound,
                 previous_pid=existing.pid,
                 previous_state=state.value,
-                mode="rebound",
+                mode="handover" if handover_allowed else "rebound",
                 fno_id=fno_id,
                 harness=harness_tag,
                 harness_session_id=harness_session_id,
             )
-        return rebound, "rebound"
+        # A rename applied here is a HANDOVER, whatever the prior state was.
+        # This is in fact the dominant real case: on the pane substrate the
+        # spawner's pid is already dead when the worker reaches `target init`,
+        # so the claim reads SUSPECT and lands on this branch, not the LIVE one
+        # above. Reporting `rebound` made `acquire --handover-from` treat the
+        # successful takeover as a decline, fall through, and write the claim a
+        # second time - and labelled a holder change as a resume in the event.
+        return rebound, ("handover" if handover_allowed else "rebound")
     finally:
         if acquired_lock:
             release_dir_mutex(recovery_lock, recovery_token)
 
+
+#: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
+#: a worker that does not exist yet. The handover branch above accepts ONLY this
+#: prefix as a replaceable prior holder, which is why the constant lives here
+#: rather than in the command module that re-exports it.
+#:
+#: WHAT THIS IS NOT: a secret. `fno claim status` publishes every holder, so
+#: naming one back proves nothing about who is asking. What the prefix restricts
+#: is the BLAST RADIUS - only a launch-window claim can be taken over this way,
+#: never a working session's `target-session:` claim, which `ClaimHeldByOther`
+#: still protects. The window is TTL-bound (`HANDOVER_TTL`), so the exposure is
+#: bounded to it, and before this change that same window carried NO claim at
+#: all. Closing it properly needs a secret the worker alone holds, which is its
+#: own change.
+HANDOVER_HOLDER_PREFIX = "spawn-handover:"
+
+#: Suffix of the per-claim recovery mutex directory. One definition: this
+#: string was written out at six call sites, and a seventh (the dispatch
+#: guard's targeted recovery) is what made the duplication worth collapsing.
+#: A caller that spells it differently takes a DIFFERENT lock and silently
+#: serializes against nobody.
+RECOVERY_LOCK_SUFFIX = ".recovery.d"
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
@@ -746,6 +922,76 @@ def release_claim(
     return existing
 
 
+def _reanchor_pid_for(existing: Claim) -> Optional[int]:
+    """The durable pid a renewal should re-anchor EXISTING to, or None.
+
+    Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
+    preserve the recorded pid, and that is what made SUSPECT mean two things: a
+    respawned worker renewing under a new pid left a claim byte-identical to a
+    dead worker's, so nothing on disk separated a live session from a corpse and
+    every reader that must not steal from the first was forced to protect the
+    second (x-05be).
+
+    Returns None - meaning leave the anchor alone - in three cases, each for its
+    own reason:
+
+      * The recorded pid is still LIVE. There is nothing to repair, and
+        rewriting it would let any process holding the same holder string take
+        over a running session's anchor.
+      * The claim is off-machine. We cannot read another box's pid table, so a
+        dead-looking pid there is unverified.
+      * No harness ancestor resolves. There is no better anchor to write, and a
+        transient pid is a worse one: ``fno-agents loop-check`` exits about a
+        second after it renews, so anchoring to the renewer would re-file the
+        corpse under a fresh number and fix nothing.
+
+    PID-reuse detection survives because the anchor moves WITH the pid.
+    ``_rebound_claim`` rewrites ``acquired_at`` alongside ``pid``, and the
+    harness ancestor started before this renewal, so the claim reads live now
+    and a later recycle of that pid number reads ``create_time > acquired_at``
+    exactly as today.
+
+    THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
+    by its holder string and nothing else, and `fno claim status` publishes that
+    string. So a different session on this machine that refreshes under a
+    published holder re-anchors the claim to ITS ancestor, and the claim then
+    reads LIVE until that session ends instead of SUSPECT.
+
+    That is the same credential `release_claim` and `refresh_claim` have always
+    accepted, not a new one, and no stronger check is available here: the
+    recorded pid is dead by precondition, so its ancestry cannot be walked to
+    prove the renewer shares its session. Closing it needs a session identity in
+    the claim record, which is its own change.
+    """
+    # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
+    # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
+    # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
+    # this mirrors, has always refused there; without the same refusal here the
+    # two implementations of one operation answered differently.
+    if is_expired(existing):
+        return None
+    if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
+        return None
+    from .session_pid import resolve_session_pid
+
+    anchor = resolve_session_pid(from_pid=os.getpid())
+    if anchor is None:
+        return None
+    # ONLY when the move actually repairs the claim. `acquired_at` is held now
+    # (the do row keys started_at on it), and `is_live` refuses a pid whose
+    # create_time is AFTER it. A RESUMED session's harness process started after
+    # the claim was filed, so anchoring to it would still classify SUSPECT while
+    # overwriting the original holder's pid for nothing. Leave the anchor alone
+    # there and let the TTL decide, which is what a claim with no better anchor
+    # has always done.
+    from .staleness import _process_create_time_ms
+
+    created = _process_create_time_ms(anchor)
+    if created is None or created > existing.acquired_at:
+        return None
+    return anchor
+
+
 def refresh_claim(
     key: str,
     holder: str,
@@ -790,7 +1036,7 @@ def refresh_claim(
     # (cheap, uncontended) instead. Without the lock, _atomic_replace happily
     # recreates `path` even if reap already archived it in the gap between a
     # read and this write - silently resurrecting a claim GC just removed.
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
@@ -813,8 +1059,14 @@ def refresh_claim(
         if existing.expires_at is None:
             return None
 
-        new_expires = now_ms() + (ttl_ms if ttl_ms is not None else MIN_TTL_MS)
-        refreshed = existing.model_copy(update={"expires_at": new_expires})
+        window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
+        anchor_pid = _reanchor_pid_for(existing)
+        if anchor_pid is not None:
+            refreshed = _rebound_claim(
+                existing, anchor_pid, window, keep_acquired_at=True
+            )
+        else:
+            refreshed = existing.model_copy(update={"expires_at": now_ms() + window})
 
         try:
             _atomic_replace(path, serialize_claim(refreshed))
@@ -980,6 +1232,7 @@ def force_release_claim(
     reason: str,
     *,
     root: Optional[Path] = None,
+    holding_recovery_lock: bool = False,
 ) -> None:
     """Administratively drop a claim, regardless of holder.
 
@@ -987,6 +1240,13 @@ def force_release_claim(
     override and why. Idempotent: missing claim file is success. Existing
     claims are archived to ``.expired/`` rather than unlinked, so a forensic
     trail survives.
+
+    ``holding_recovery_lock`` is for the one caller that already holds this
+    key's recovery mutex and is calling from inside it. The mutex is a mkdir
+    lock and mkdir locks are not reentrant, so without this the nested acquire
+    below cannot ever succeed: it waits out the full timeout and then archives
+    UNLOCKED, which is the exact race the lock exists to close, bought at five
+    seconds per recovery.
     """
     if not key:
         raise ClaimValidationError("key must be non-empty")
@@ -1007,12 +1267,18 @@ def force_release_claim(
     # raising, preserving its "always succeeds" administrative-override
     # contract - the exposure narrows from "always racy" to "racy only past
     # a 5s timeout under sustained contention" instead of closing to zero.
-    recovery_lock = path.with_name(path.name + ".recovery.d")
+    recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
     acquired_lock = False
     recovery_token = ""
     try:
-        token = acquire_dir_mutex(
-            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        token = (
+            None
+            if holding_recovery_lock
+            else acquire_dir_mutex(
+                recovery_lock,
+                _RECOVERY_LOCK_MAX_WAIT_S,
+                poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
+            )
         )
         if token is not None:
             recovery_token = token
@@ -1042,6 +1308,41 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
+def sweep_verdict(
+    claim: Claim,
+    *,
+    now: Optional[int] = None,
+    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+) -> tuple[bool, str]:
+    """Can this claim be archived, and if not, which bucket says why?
+
+    :func:`fno.claims.staleness.classify_for_sweep` plus the roster probe on the
+    one case a pid cannot settle: a ``node:`` claim reading SUSPECT, whose
+    holder is a session and so genuinely might come back under a new pid.
+
+    THE single reap decision. The sweep's lock-free triage, its under-mutex
+    re-verify, and the spawn guard's targeted recovery all call this, so no two
+    of them can drift into different answers about the same claim - the shape
+    the first pitfalls entry names.
+
+    Buckets: ``""`` (reapable), ``"live"``, ``"offhost"``, ``"suspect"`` (no
+    probe was supplied), ``"suspect_alive"`` (a worker is on the node) and
+    ``"suspect_unprobed"`` (the probe could not run). The last two are kept
+    apart deliberately: one is a measurement and the other is its absence.
+    """
+    provably_dead, bucket = classify_for_sweep(claim, now)
+    if provably_dead or bucket != "suspect":
+        return provably_dead, bucket
+    if abandonment_probe is None or not claim.key.startswith("node:"):
+        return False, "suspect"
+    verdict = abandonment_probe(claim)
+    if verdict is True:
+        return True, ""
+    # False: a live worker holds this node. None: the probe could not run,
+    # which is unknown, and unknown keeps.
+    return False, "suspect_alive" if verdict is False else "suspect_unprobed"
+
+
 def _default_reap_roots() -> list[Path]:
     """Both claims roots swept by a bare ``fno claim reap`` (AC2).
 
@@ -1058,6 +1359,7 @@ def reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
+    abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
 ) -> dict[str, Any]:
     """Archive every provably-dead claim across one or more claims roots.
 
@@ -1097,10 +1399,33 @@ def reap_dead_claims(
     ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
     exits non-zero when that list is non-empty.
 
+    ``abandonment_probe`` is the SECOND instrument, and it is optional so that
+    omitting it is byte-for-byte today's behavior. A ``node:`` claim reading
+    SUSPECT (dead pid, unexpired TTL) is the one case a pid cannot settle: the
+    holder is a session, and a session can be respawned under a new pid. The
+    probe answers "is a live worker actually on this node" from the roster, and
+    is called ONLY for a ``node:`` key that classified SUSPECT - never to
+    override a live claim, and never for a key family with no roster to consult.
+
+    Its three answers are deliberately not a bool:
+
+      ``True``  proven abandoned; reap it.
+      ``False`` a live worker is on the node; keep it (``kept_suspect_alive``).
+      ``None``  the probe could not run; keep it (``kept_suspect_unprobed``).
+
+    ``None`` KEEPS. Reaping because a probe returned nothing is the exact
+    inversion of this fix: an instrument that did not run must never be read as
+    a finding, and archiving a live worker's claim is x-ba4b's disaster from the
+    other side.
+
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
-    ``kept_live``, ``kept_suspect``, ``kept_offhost``, ``corrupted``,
-    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path, reason)``),
-    ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
+    ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
+    ``kept_suspect_unprobed``, ``kept_offhost``, ``corrupted``, ``vanished``,
+    ``contended``, ``reap_failed`` (list of ``(path, reason)``), ``apply``,
+    ``roots``. The two new suspect buckets split what used to be one number:
+    "kept: 2 suspect" is the line that taught the operator the reaper was
+    useless, because it could not say whether those two were protected or
+    merely unmeasured. A ``claim_reap_swept`` event fires on every
     ``apply=True`` call, including a zero-reap run - a leg that never ran
     must not look the same as one that ran and found nothing. A dry run
     fires no event: the "nothing is written" promise above covers the
@@ -1113,7 +1438,14 @@ def reap_dead_claims(
     scanned = 0
     reaped = 0
     would_reap = 0
-    kept: dict[str, int] = {"offhost": 0, "suspect": 0, "live": 0}
+    kept: dict[str, int] = {
+        "offhost": 0, "suspect": 0, "live": 0,
+        "suspect_alive": 0, "suspect_unprobed": 0,
+    }
+
+    def _sweep_verdict(claim: Claim) -> tuple[bool, str]:
+        return sweep_verdict(claim, now=ts, abandonment_probe=abandonment_probe)
+
     corrupted = 0
     vanished = 0
     # A provably-dead claim whose recovery mutex is held by a genuine live
@@ -1167,7 +1499,7 @@ def reap_dead_claims(
             # because the claim may have been archived-and-recreated between
             # this scan and the lock. Do not "de-duplicate" that second call;
             # it is the TOCTOU check, not redundant work.
-            provably_dead, bucket = classify_for_sweep(claim, ts)
+            provably_dead, bucket = _sweep_verdict(claim)
 
             if provably_dead:
                 if not apply:
@@ -1183,7 +1515,7 @@ def reap_dead_claims(
                 # cadence and blocking here would stall the whole sweep; a
                 # live owner (no steal) means a real recovery is in flight,
                 # left for the next sweep.
-                recovery_lock = entry.with_name(entry.name + ".recovery.d")
+                recovery_lock = entry.with_name(entry.name + RECOVERY_LOCK_SUFFIX)
                 recovery_token = acquire_dir_mutex(recovery_lock, 0)
                 if recovery_token is None:
                     # A live, in-age holder - genuine contention, not a
@@ -1201,7 +1533,7 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    fresh_dead, fresh_bucket = classify_for_sweep(fresh, ts)
+                    fresh_dead, fresh_bucket = _sweep_verdict(fresh)
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
                         continue
@@ -1267,6 +1599,8 @@ def reap_dead_claims(
         "would_reap": would_reap,
         "kept_live": kept["live"],
         "kept_suspect": kept["suspect"],
+        "kept_suspect_alive": kept["suspect_alive"],
+        "kept_suspect_unprobed": kept["suspect_unprobed"],
         "kept_offhost": kept["offhost"],
         "corrupted": corrupted,
         "vanished": vanished,

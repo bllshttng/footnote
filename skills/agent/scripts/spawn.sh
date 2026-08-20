@@ -23,6 +23,14 @@
 #   result=already-running name=<n> reason="<why>"
 #   result=failed reason="<real captured error>"
 # Exit: 0 launched | 0 already-running | 1 failed.
+#
+# already-running vs failed is the DEDUP/WEDGE cut, not a severity dial. A live
+# worker holds the node, so the desired end state is already true and a sweep
+# must keep going: already-running, exit 0. A suspect claim or a held
+# reservation means nobody is building it and nobody will until an operator
+# intervenes: failed, exit 1, and the message carries the clearing command. Both
+# used to exit 0 while launching nothing, so a caller reading the exit code was
+# told the launch worked (x-05be).
 
 set -uo pipefail
 
@@ -159,6 +167,16 @@ if [[ -n "$NODE" ]]; then
   guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$NODE" --holder "dispatch-skill-probe:$$" --no-reserve --json ${guard_cwd_args[@]+"${guard_cwd_args[@]}"} 2>/dev/null)"; guard_rc=$?
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
+  # An untried wedge is DISPATCHABLE as far as this script is concerned. The
+  # probe takes no recovery, so a wedge it reports has not been tried yet, and
+  # the only path that clears the claim is the real `fno agents spawn` below.
+  # Failing here is what made that recovery unreachable from `/fno:agent spawn
+  # --node`. Rewriting the verdict, rather than breaking out of the case, keeps
+  # every other arm's contract intact.
+  if [[ "$verdict" == "already-running" ]] \
+     && [[ "$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)" == "not-attempted" ]]; then
+    verdict="dispatchable"
+  fi
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
@@ -179,11 +197,15 @@ if [[ -n "$NODE" ]]; then
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi
-      elif [[ "$reason" == "suspect-claim" ]]; then
-        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        printf 'result=already-running name=%s reason="suspect worker claim holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
       else
-        printf 'result=already-running name=%s reason="family-2 guard blocked node:%s"\n' "$NAME" "$NODE"
+        # NO suspect-claim arm here, and the omission is load-bearing. This call
+        # is a probe, a probe reports every wedge as recovery not-attempted, and
+        # the rewrite above turns that into `dispatchable` so the real spawn can
+        # try the recovery. The wedge that survives THAT is handled at the
+        # post-spawn refusal below, which is the only place a wedge can now be
+        # observed. An arm here would look like the handler and never run.
+        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
+        fail "family-2 guard blocked node:$NODE; no worker launched"
       fi
       exit 0 ;;
     corrupted)
@@ -444,9 +466,19 @@ if [[ "$spawn_rc" -ne 0 ]]; then
   if [[ -n "$NODE" ]] && printf '%s' "$spawn_err" | grep -qF "node dispatch refused:"; then
     guard_reason="$(printf '%s' "$spawn_err" | sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q')"
     case "$guard_reason" in
-      live-claim|suspect-claim)
+      live-claim)
         printf 'result=already-running name=%s action=%s reason="shared family-2 guard refused node:%s; no worker launched"\n' "$NAME" "$guard_reason" "$NODE"
         exit 0 ;;
+      suspect-claim)
+        # THE wedge, and this is the arm that fires on one. Recovery ran here,
+        # inside the real spawn, and could not prove the holder dead, so nobody
+        # is building this node and nobody will until an operator intervenes.
+        # `already-running` plus exit 0 told a caller reading the exit code that
+        # the launch worked, which is the x-05be defect on the one path that
+        # actually reaches it. The remedy goes to stderr; this file's contract
+        # is ONE line on stdout.
+        printf '%s' "$spawn_err" | grep -E '^  (Clear it|Override): ' >&2 || true
+        fail "suspect worker claim holds node:$NODE; no worker launched" ;;
       reservation-held|duplicate-claim)
         printf 'result=already-running name=%s action=duplicate-claim reason="skipped: duplicate-claim (peer dispatcher holds dispatch:%s); no worker launched"\n' "$NAME" "$NODE"
         exit 0 ;;

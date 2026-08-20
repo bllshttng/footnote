@@ -258,7 +258,8 @@ DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
 DISPATCH_COMMAND_BASE="$DISPATCH_COMMAND"
 
 # ---- per-node dispatch ------------------------------------------------------
-n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
+n_launched=0; n_parked=0; n_already=0; n_skipped=0
+n_wedged=0; n_done=0; n_failed=0; n_capped=0
 
 for id in "${NODES[@]}"; do
   # --max soft cap: once reached, report the remainder rather than dropping silently.
@@ -584,6 +585,12 @@ for id in "${NODES[@]}"; do
   # could leak onto stdout), then parse the verdict.
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
+  # NO untried-wedge rewrite here, unlike spawn.sh, and the asymmetry is the
+  # point. This probe runs only under --dry-run or for a `claimed` node. A dry
+  # run must preview, never launch, and a `claimed` node is parked for manual
+  # recovery by the arm below. Every other node skips the probe entirely and
+  # goes straight to the real spawn, which is where the recovery already
+  # happens. A rewrite would be dead code wearing a safety comment.
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
@@ -596,6 +603,14 @@ for id in "${NODES[@]}"; do
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
+        # NO remedy read here, and no n_wedged. This arm sees only the PROBE's
+        # verdict, and a probe never carries one: the remedy is force-release
+        # advice that is honest only after a recovery has been tried, so the
+        # guard withholds it under --no-reserve. Reading `.remedy` here found
+        # the empty string every time, so the counter could not increment and
+        # the wedge exit below was unreachable from this arm. The wedge that
+        # matters is counted at the post-spawn refusal, which is the only place
+        # a tried-and-failed recovery can be observed.
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
         n_skipped=$((n_skipped + 1))
       else
@@ -900,6 +915,15 @@ for id in "${NODES[@]}"; do
           continue ;;
         suspect-claim)
           echo "skipped-contested $id reason=\"suspect-claim by shared family-2 guard; no worker launched\""
+          # From THIS refusal's stderr, not the probe JSON above: that variable
+          # was assigned once, before the spawn, and by here always reads
+          # `dispatchable`, so its `.remedy` was always empty and n_wedged could
+          # never increment.
+          remedy="$(printf '%s' "$spawn_err" | grep -E '^  (Clear it|Override): ' || true)"
+          if [[ -n "$remedy" ]]; then
+            echo "$remedy"
+            n_wedged=$((n_wedged + 1))
+          fi
           n_skipped=$((n_skipped + 1))
           continue ;;
         auto-deferred)
@@ -974,10 +998,18 @@ for id in "${NODES[@]}"; do
   n_launched=$((n_launched + 1))
 done
 
-echo "summary: launched=$n_launched parked=$n_parked already=$n_already skipped=$n_skipped done=$n_done failed=$n_failed capped=$n_capped"
+echo "summary: launched=$n_launched parked=$n_parked already=$n_already skipped=$n_skipped done=$n_done failed=$n_failed capped=$n_capped wedged=$n_wedged"
 # Exit non-zero only when nothing launched AND at least one hard failure, so a
 # caller can detect a total dispatch failure while a mixed batch still exits 0.
 if [[ "$n_launched" -eq 0 && "$n_failed" -gt 0 ]]; then
+  exit 1
+fi
+# A WEDGE fails only a SINGLE-node invocation. A batch sweep must not fail
+# because one node of twenty is wedged - it did the other nineteen - but
+# `dispatch-node.sh <one-id>` that launched nothing because that node is wedged
+# has no other work to report, and exiting 0 tells its caller the launch worked
+# (x-05be shape 3). The remedy line is already on stdout above.
+if [[ "$n_wedged" -gt 0 && "${#NODES[@]}" -eq 1 && "$n_launched" -eq 0 ]]; then
   exit 1
 fi
 exit 0

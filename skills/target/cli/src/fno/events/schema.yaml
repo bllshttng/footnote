@@ -1158,6 +1158,12 @@ event_types:
           type: integer
         kept_suspect:
           type: integer
+        kept_suspect_alive:
+          type: integer
+          description: "SUSPECT node claims the roster probe MEASURED as still worked: the holder's own row was found and reads engaged. A measurement, kept apart from its absence below."
+        kept_suspect_unprobed:
+          type: integer
+          description: "SUSPECT node claims the roster probe could not answer for: no row resolved to the holder, or the roster itself did not read. Absence, never proof, so the claim is kept."
         kept_offhost:
           type: integer
         corrupted:
@@ -2808,7 +2814,7 @@ event_types:
           enum: [working, waiting, suspect, stalled, unknown]
         action:
           type: string
-          enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed]
+          enum: [blocked, redispatch, dispatch, auto-deferred, defer-failed, reaped-abandoned]
     consumers: [operator]
 
   - name: dispatch_dead_failure_limit
@@ -3317,7 +3323,7 @@ event_types:
           description: "The row's name."
         verdict:
           type: string
-          description: "ghost | reap | stale | reroute | wake."
+          description: "ghost | reap | stale | reroute | wake | leave | unclaimed."
         basis:
           type: string
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."

@@ -1599,10 +1599,33 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
 /// under any pid with no separate heartbeat.
 ///
 /// The deadline is `now + ttl_ms` (a FIXED window, never a growing span): using
-/// the claim's `expires_at - acquired_at` would compound, because `acquired_at`
-/// is preserved while `expires_at` moves forward, leaving a dead session's claim
-/// over-extended for hours. Only `expires_at` changes — `acquired_at`, `pid`,
-/// `host`, `reason`, `metadata` are preserved, so PID-reuse detection is intact.
+/// the claim's `expires_at - acquired_at` would compound, leaving a dead
+/// session's claim over-extended for hours. `holder`, `reason` and `metadata`
+/// are always preserved.
+///
+/// RE-ANCHORING (x-05be). When the recorded pid is NOT live and the renewer is
+/// on this machine, renewal rewrites `pid`, `host`, `machine_id` and
+/// `acquired_at` together alongside `expires_at`. This function used to
+/// preserve the pid, and that is what made SUSPECT mean two different things: a
+/// respawned worker renewing under a new pid left a claim byte-identical to a
+/// dead worker's — dead pid, unexpired TTL — so nothing on disk separated a
+/// live session from a corpse, and every reader that must not steal from the
+/// first was forced to protect the second.
+///
+/// PID-reuse detection survives BECAUSE the anchor moves WITH the pid, which is
+/// the property the old comment was reaching for. Detection compares
+/// `create_time(pid)` against `acquired_at`: the renewer started before it
+/// renewed, so the rewritten claim reads live, and if that pid later dies and
+/// the kernel recycles the number, the recycled process's create_time is after
+/// the new `acquired_at` and reads reused exactly as today. Preserving a dead
+/// pid while moving only `expires_at` is what broke the property, because it
+/// kept a corpse anchored to a real acquire time forever.
+///
+/// The re-anchor is narrow on purpose. A LIVE recorded pid is never rewritten,
+/// so a claim whose holder is running keeps its original anchor and a concurrent
+/// writer under the same holder string cannot quietly take it over. Off-machine
+/// claims are never rewritten either: we cannot read another box's pid table, so
+/// a dead-looking pid there is unverifiable and only the TTL may move.
 ///
 /// The whole mutate runs under the SAME per-claim recovery mutex `acquire` uses
 /// for stale recovery, and re-reads inside the lock, so a renew can never clobber
@@ -1661,6 +1684,67 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     result
 }
 
+/// The durable session pid: the nearest harness ancestor of THIS process.
+///
+/// Delegates to `fno claim session-pid`, the one implementation of the walk
+/// (`cli/src/fno/claims/session_pid.py`). `fno target init` already shells the
+/// same verb to acquire, so re-implementing the ancestry scan here would put two
+/// producers on one answer and let them drift.
+///
+/// Returns `None` on every failure - verb missing, non-numeric output, no
+/// harness ancestor - because the caller's fallback is to leave the anchor
+/// exactly as it found it. An unresolvable pid is not a reason to write a worse
+/// one.
+fn durable_session_pid() -> Option<i32> {
+    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let mut child = std::process::Command::new(&fno)
+        .args(["claim", "session-pid", "--from-pid"])
+        .arg(std::process::id().to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // BOUNDED, because this runs inside the per-claim recovery mutex: an
+    // unbounded wait on a slow python start stalls every acquire, refresh and
+    // reap contending on the same key. The host has no `timeout` binary, so the
+    // bound is native: poll `try_wait`, then kill. A kill degrades to None, and
+    // None leaves the anchor exactly as it was found.
+    let deadline = std::time::Instant::now() + SESSION_PID_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+}
+
+/// Wall-clock ceiling on the `claim session-pid` shell-out.
+///
+/// UNDER the python side's own wait for this same mutex. `compare_and_rebind`
+/// gives up after `_RECOVERY_LOCK_MAX_WAIT_S` (5.0s) and `reap`'s targeted
+/// recovery waits zero, so a bound above that let a cold python start here hold
+/// the lock long enough to make a successor's `fno target init --handover-from`
+/// refuse as mutex-busy, fall through to a plain acquire, and cancel the
+/// session on ClaimHeldByOther. Three seconds leaves headroom under 5 and is
+/// still ample for a warm resolve; a slower one degrades to None, which leaves
+/// the anchor alone.
+const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.
 fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> {
@@ -1678,7 +1762,50 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
     if is_expired(&existing, now_ms()) {
         return Ok(false); // reclaimable already; do not resurrect + race recovery
     }
-    existing.expires_at = Some(now_ms() + ttl_ms);
+    let now = now_ms();
+    // Re-anchor a corpse (x-05be). Guarded three ways: the holder already
+    // matched above, the recorded pid must be dead or reused, and the claim must
+    // be on THIS machine - off-host we cannot read the pid table, so a
+    // dead-looking pid is unverified and only the deadline may move. A LIVE
+    // recorded pid is left exactly as it is, so a healthy claim keeps the anchor
+    // it was acquired with and this costs nothing on the common path.
+    if is_same_machine(&existing.host, existing.machine_id.as_deref()) && !is_live(&existing) {
+        // The anchor must be the DURABLE session pid, never this renewer's own.
+        // `fno-agents loop-check` is a stop hook that exits in about a second,
+        // so anchoring to it would re-file the corpse under a fresh number and
+        // fix nothing. `resolve_session_pid` walks up to the nearest harness
+        // ancestor and is the single resolver `fno target init` already uses to
+        // acquire (`hooks/helpers/init-target-state.sh` shells the same verb);
+        // a second walk implemented here would be two producers of one answer.
+        // ONLY when the move actually repairs the claim. acquired_at is held
+        // below, and is_live refuses a pid whose create_time is AFTER it, so a
+        // RESUMED session's harness (started after the claim was filed) would
+        // still classify SUSPECT while overwriting the original holder's pid
+        // for nothing. Mirrors `_reanchor_pid_for` in claims/core.py.
+        let anchor = durable_session_pid().filter(|pid| {
+            process_create_time_ms(*pid).is_some_and(|created| created <= existing.acquired_at)
+        });
+        if let Some(anchor_pid) = anchor {
+            existing.pid = anchor_pid;
+            existing.host = hostname();
+            let mine = machine_id();
+            existing.machine_id = if mine.is_empty() { None } else { Some(mine) };
+            // acquired_at STAYS PUT, and the earlier reasoning for moving it
+            // was wrong in both directions. Reuse detection compares
+            // create_time(pid) against it, and the harness ancestor started
+            // BEFORE this renewal, so the original value already reads the
+            // anchor as live. Holding it also refuses an anchor whose session
+            // began AFTER the claim, which is the cross-session takeover a
+            // re-anchor must never perform. And the do provenance row keys
+            // started_at on this field, so moving it made the release stamp
+            // open a second row instead of closing the one this claim opened.
+            // `_rebound_claim(keep_acquired_at=True)` is the python twin.
+        }
+        // No resolvable durable pid (plain-shell ancestry, or the verb is
+        // missing) means no better anchor exists, so the deadline moves alone -
+        // byte-for-byte the pre-change behavior rather than a worse guess.
+    }
+    existing.expires_at = Some(now + ttl_ms);
     let payload = serialize_claim(&existing)?;
     atomic_replace(path, &payload)?;
     Ok(true)
@@ -1824,6 +1951,148 @@ mod tests {
             t0 + 120_000
         );
         assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
+    }
+
+    /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
+    fn dead_pid() -> u32 {
+        let mut candidate = 999_999u32;
+        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
+            || unsafe { libc::kill(candidate as i32, 0) } == 0
+        {
+            candidate += 1;
+        }
+        candidate
+    }
+
+    /// Point `FNO_BIN` at a stub answering `claim session-pid` with `pid`.
+    /// An empty `pid` reproduces the no-harness-ancestor degrade, which the
+    /// real verb signals with empty stdout and exit 0.
+    fn stub_session_pid(dir: &std::path::Path, pid: &str) -> PathBuf {
+        let script = dir.join("fno-stub");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{pid}'\n")).unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    #[test]
+    fn renew_reanchors_a_dead_pid_to_the_durable_session_pid() {
+        // x-05be: preserving a corpse is what made SUSPECT mean two things. A
+        // respawned worker and a dead one left byte-identical claims.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        o.pid = Some(dead_pid());
+        let _ = acquire("node:x-corpse", "target-session:me", o);
+        assert_eq!(
+            classify(&read_claim(&td, "node:x-corpse"), None),
+            ClaimState::Suspect,
+            "fixture must start SUSPECT or this proves nothing"
+        );
+
+        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
+        std::env::set_var("FNO_BIN", &stub);
+        let result = renew(
+            "node:x-corpse",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        std::env::remove_var("FNO_BIN");
+        assert_eq!(result, Ok(true));
+
+        let after = read_claim(&td, "node:x-corpse");
+        assert_eq!(after.pid, std::process::id() as i32);
+        assert_eq!(
+            classify(&after, None),
+            ClaimState::Live,
+            "a re-anchored claim must read LIVE, not SUSPECT"
+        );
+    }
+
+    #[test]
+    fn renew_holds_acquired_at_while_re_anchoring_the_pid() {
+        // acquired_at STAYS PUT. Reuse detection compares create_time(pid)
+        // against it, and the anchor started BEFORE the claim, so the original
+        // value already reads the anchor as live - asserted below by
+        // classifying LIVE, not by reading the field alone.
+        //
+        // Two things need it to hold still. The do provenance row keys
+        // started_at on this field, so moving it made the release stamp open a
+        // second row instead of closing the one this claim opened. And a fixed
+        // anchor refuses a session that began AFTER the claim, which is exactly
+        // the cross-session takeover a re-anchor must never perform.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        o.pid = Some(dead_pid());
+        let _ = acquire("node:x-anchor", "target-session:me", o);
+        let before = read_claim(&td, "node:x-anchor").acquired_at;
+        std::thread::sleep(Duration::from_millis(2));
+
+        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
+        std::env::set_var("FNO_BIN", &stub);
+        let _ = renew(
+            "node:x-anchor",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        std::env::remove_var("FNO_BIN");
+
+        let after = read_claim(&td, "node:x-anchor");
+        assert_eq!(
+            after.acquired_at, before,
+            "acquired_at moved; the do row keys started_at on it"
+        );
+        assert_eq!(
+            after.pid,
+            std::process::id() as i32,
+            "the pid must still be re-anchored"
+        );
+        assert_eq!(
+            classify(&after, None),
+            ClaimState::Live,
+            "a held anchor must still read LIVE, or the repair did nothing"
+        );
+    }
+
+    #[test]
+    fn renew_leaves_the_anchor_alone_with_no_harness_ancestor() {
+        // No better anchor exists, and this renewer's own pid is a worse one:
+        // loop-check exits about a second after renewing.
+        let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.ttl_ms = Some(120_000);
+        let corpse = dead_pid();
+        o.pid = Some(corpse);
+        let _ = acquire("node:x-noanchor", "target-session:me", o);
+        let before = read_claim(&td, "node:x-noanchor");
+        // now_ms() has millisecond resolution, so without this the acquire and
+        // the renew can land in the SAME millisecond and the strict deadline
+        // comparison below flakes. The sibling deadline tests sleep for the
+        // same reason.
+        std::thread::sleep(Duration::from_millis(2));
+
+        let stub = stub_session_pid(td.path(), "");
+        std::env::set_var("FNO_BIN", &stub);
+        let result = renew(
+            "node:x-noanchor",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        std::env::remove_var("FNO_BIN");
+        assert_eq!(result, Ok(true));
+
+        let after = read_claim(&td, "node:x-noanchor");
+        assert_eq!(after.pid, corpse as i32);
+        assert_eq!(after.acquired_at, before.acquired_at);
+        assert!(after.expires_at.unwrap() > before.expires_at.unwrap());
     }
 
     #[test]

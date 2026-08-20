@@ -347,6 +347,40 @@ mod tests {
         p
     }
 
+    /// Run git in `dir`, panicking with git's own stderr when it fails.
+    ///
+    /// Three copies of this lived inside the tests below, each asserting on a
+    /// bare bool. A CI failure then read `assertion failed: git(...)` and cost a
+    /// whole pass to diagnose, so the stderr is the point of the helper.
+    ///
+    /// The ambient config files are pinned out because a git child inherits the
+    /// process environment at the moment it starts, and sibling tests in this
+    /// binary mutate process-global `$HOME`. The fixture repo carries its own
+    /// `user.name` / `user.email` locally, so it needs nothing from either file.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    /// Mirrors the Python `skipif(no git)`: these fixtures need a real git.
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
     #[test]
     fn layout_paths_are_under_root() {
         let root = tmp("layout");
@@ -389,6 +423,12 @@ mod tests {
 
     #[test]
     fn from_env_honors_override() {
+        // FNO_AGENTS_HOME is process-global and the unit tests share one
+        // process. Unlocked, this set/remove pair landed inside another test's
+        // window and sent its resolution at the real ~/.fno/agents.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = tmp("env");
         std::env::set_var(HOME_ENV, &root);
         let home = AgentsHome::from_env();
@@ -452,25 +492,12 @@ mod tests {
 
     #[test]
     fn worktree_repo_root_resolves_from_subdirectory() {
-        fn git(dir: &Path, args: &[&str]) -> bool {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
-        }
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !git_available() {
             return;
         }
         let repo = tmp("repo-root");
         std::fs::create_dir_all(repo.join("nested/source")).unwrap();
-        assert!(git(&repo, &["init", "-q"]));
+        git(&repo, &["init", "-q"]);
 
         let resolved = worktree_repo_root(&repo.join("nested/source"));
         assert_eq!(resolved, std::fs::canonicalize(&repo).unwrap());
@@ -481,32 +508,18 @@ mod tests {
     fn canonical_repo_root_resolves_main_from_linked_worktree() {
         // The core failure mode: resolution must give the MAIN checkout, not the
         // linked worktree, via git-common-dir (athens/milan-style fixture).
-        fn git(dir: &Path, args: &[&str]) -> bool {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-        // Skip when git is unavailable (mirrors the Python skipif(no git)).
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !git_available() {
             return;
         }
         let base = tmp("wt");
         let main = base.join("main");
         std::fs::create_dir_all(&main).unwrap();
-        assert!(git(&main, &["init", "-q"]));
-        assert!(git(&main, &["config", "user.email", "t@t"]));
-        assert!(git(&main, &["config", "user.name", "t"]));
-        assert!(git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]));
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
         let linked = base.join("wt");
-        assert!(git(
+        git(
             &main,
             &[
                 "worktree",
@@ -514,9 +527,9 @@ mod tests {
                 "-q",
                 linked.to_str().unwrap(),
                 "-b",
-                "feat"
-            ]
-        ));
+                "feat",
+            ],
+        );
 
         let want = std::fs::canonicalize(&main).unwrap();
         // From the linked worktree -> canonical main.
@@ -531,29 +544,13 @@ mod tests {
         // A bare repo reports a git dir whose basename is not `.git`; resolution
         // must return None (caller-cwd fallback), never a wrong parent. Same
         // guard protects the --separate-git-dir layout (review HIGH 1).
-        fn git(dir: &Path, args: &[&str]) -> bool {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !git_available() {
             return;
         }
         let base = tmp("bare");
         std::fs::create_dir_all(&base).unwrap();
         let bare = base.join("repo.git");
-        assert!(git(
-            &base,
-            &["init", "--bare", "-q", bare.to_str().unwrap()]
-        ));
+        git(&base, &["init", "--bare", "-q", bare.to_str().unwrap()]);
         assert!(
             canonical_repo_root(&bare).is_none(),
             "a bare repo must resolve to None (safe-side fallback), not a wrong parent"

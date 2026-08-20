@@ -24,6 +24,11 @@ Two traps a stranger inherits (both measured by hand on 2026-08-15):
     manifest, NEVER on a name regex: eight auto-named workers read as
     nobody-on-this-node and were nearly double-dispatched.
   - a wake is confirmed by transcript content, never by a state field.
+
+A third, added 2026-08-19 (x-cd1e): the ``unclaimed`` verdict flags a live row
+whose node carries no claim, and it is ADVISORY. The worker is fine; the record
+is wrong. It never wakes, reroutes or reaps, and its own blind spot is the shape
+that produced the defect - see ``_unclaimed_node_basis``.
 """
 from __future__ import annotations
 
@@ -63,6 +68,19 @@ REROUTE = "reroute"
 WAKE = "wake"
 STALE = "stale"
 LEAVE = "leave"
+#: Advisory only (x-cd1e): the worker is fine, the RECORD is wrong. Never a
+#: wake, never a reroute, never a reap - the action lanes below switch on the
+#: specific verdict, so this one cannot reach any of them. It replaces LEAVE so
+#: the row surfaces in the digest, which is the whole point: nothing today
+#: notices a live worker on a node no claim covers.
+UNCLAIMED = "unclaimed"
+
+#: Every verdict this module can return. `--only` validates against THIS, not
+#: against a hand-copied tuple in the CLI: the copy went stale the moment a
+#: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
+#: had been producing all along.
+VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
+
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
@@ -94,6 +112,30 @@ _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: mid-turn is exactly a stopped row) to re-guard what the stalled check
 #: already guards.
 _WAKE_STATES = frozenset({"working", "blocked", "stopped"})
+
+#: Graph statuses that mean the work is over, so an absent claim is the system
+#: working rather than a gap. Read from the node, never from the row: the row
+#: can still say `working` while the node is done, which is exactly the shape
+#: that put completed work in the digest.
+_FINISHED_NODE_STATUSES = frozenset({"done", "superseded", "deferred"})
+
+#: Prefix marking a warning that leaves the LISTING USABLE. A reader deciding
+#: whether it may trust a reading blocks on anything WITHOUT this, so a warning
+#: nobody anticipated degrades safely by default - the polarity an allowlist of
+#: known-harmless phrases got wrong twice: first it named only the latency
+#: notice, and the unmapped-state notices still threw away a listing whose rows
+#: were all present.
+#:
+#: Two warnings earn it. The latency notice is about elapsed time on a probe
+#: that returned everything. An unmapped row state is a fidelity note on a row
+#: that IS in the result, and it degrades conservatively downstream: an unknown
+#: state matches no finished state, so a reader sees an engaged worker and a
+#: reaper sees a holder still working.
+ADVISORY_WARNING_PREFIX = "roster advisory: "
+
+#: Prefix of the headroom notice. It carries ADVISORY_WARNING_PREFIX because a
+#: probe that took a while still returned every row.
+HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe, not a status line: measured at 3.4s /
@@ -283,17 +325,32 @@ def verdicts(
 
     out: list[Verdict] = []
     for row in rows:
-        out.append(
-            _verdict_one(
-                row,
-                facts=facts_by_row.get(row.row_id),
-                claim_for=claim_for,
-                node_state_for=node_state_for,
-                now_s=now_s,
-                quiet_after_s=quiet_after_s,
-                cotenants=_cotenants(row),
-            )
+        verdict = _verdict_one(
+            row,
+            facts=facts_by_row.get(row.row_id),
+            claim_for=claim_for,
+            node_state_for=node_state_for,
+            now_s=now_s,
+            quiet_after_s=quiet_after_s,
+            cotenants=_cotenants(row),
         )
+        # The unclaimed advisory upgrades a LEAVE, and it is applied HERE
+        # rather than at a leave return because there are four of them. Putting
+        # it on one read as protection and left the common case - a healthy
+        # working row whose tail is not stalled - silently uncovered, which is
+        # the first pitfalls entry happening inside the fix for it. Caught by
+        # its own test.
+        #
+        # Only LEAVE is upgraded. Every other verdict already says something
+        # louder and more actionable, and burying it under a record-keeping
+        # note would trade a real signal for an advisory one.
+        if verdict.verdict == LEAVE:
+            unclaimed_basis = _unclaimed_node_basis(row, claim_for, node_state_for)
+            if unclaimed_basis:
+                verdict = verdict._replace(
+                    verdict=UNCLAIMED, basis=f"{verdict.basis}; {unclaimed_basis}"
+                )
+        out.append(verdict)
     return out
 
 
@@ -630,6 +687,63 @@ def _verdict_one(
     return Verdict(row.row_id, row.name, row.state, LEAVE, basis, "none")
 
 
+def _unclaimed_node_basis(
+    row: Row,
+    claim_for: Callable[[str], dict],
+    node_state_for: Callable[[str], Optional[dict]],
+) -> str:
+    """Is this live row working a node that no claim covers?
+
+    BLIND SPOT, stated here beside the two the module header already records.
+    A row whose node did not resolve carries ``node=None`` and cannot be
+    checked, and that is PRECISELY the shape of a worker that never ran
+    ``fno target init``: ``Row.node`` comes from the worktree manifest and then
+    the session-keyed ledger, and both are written downstream of init. So this
+    catches the manifest-written-but-unclaimed case and nothing else. Reading it
+    as "every unclaimed worker is flagged" would make it the same decorative
+    guard this change exists to remove.
+
+    Everything else here degrades to silence. An unresolved node, a claim read
+    that raises, or any state that is not a plain ``free`` reports nothing: an
+    advisory that fires on an unreadable store trains its reader to ignore it.
+    """
+    if not row.node or row.state in _TERMINAL_STATES:
+        # A finished row's claim was CORRECTLY released, so flagging it reports
+        # the system working. `claude agents --json --all` keeps terminal rows
+        # forever, so without this the digest accumulates permanent noise and
+        # the advisory trains its reader to ignore it. Every terminal state
+        # counts, not just `done`: a narrower set here flagged `completed`,
+        # `exited` and `killed` rows forever, which is the same noise under a
+        # different name.
+        return ""
+    try:
+        claim = claim_for(row.node)
+    except Exception:  # noqa: BLE001 - a failed read is never a finding
+        return ""
+    # PLAIN `free` only, and `stale` is deliberately excluded. A stale claim is
+    # the NORMAL reading for a healthy worker parked in a CI wait: the heartbeat
+    # is driven by tool calls, so a session that is waiting on purpose stops
+    # renewing and its claim lapses. Flagging that puts a working fleet in the
+    # digest every tick, which is the permanent noise this advisory must not
+    # become. It is also the reading the never-renewed multi-node claims carry.
+    if claim.get("state") != "free":
+        return ""
+    # A FINISHED node has no claim because the work is over and the claim was
+    # released, which is the system behaving. Reporting it is the same permanent
+    # noise the terminal-row skip above exists to prevent, arriving by the other
+    # door: the row still reads `working` while the graph says done, so it
+    # reaches this LEAVE and gets upgraded. An unreadable node state answers
+    # nothing and the advisory stays silent, because a report built on a failed
+    # read trains its reader to ignore the report.
+    try:
+        node_state = node_state_for(row.node) or {}
+    except Exception:  # noqa: BLE001 - a failed read is never a finding
+        return ""
+    if str(node_state.get("status") or "").lower() in _FINISHED_NODE_STATUSES:
+        return ""
+    return f"node {row.node} carries NO claim while this row is live"
+
+
 def _holder_session(holder: Optional[str]) -> Optional[str]:
     """The canonical holder parser, so the holder vocabulary (claude
     ``target-session:<uuid>`` today, codex durable thread ids as they land)
@@ -816,8 +930,8 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         # the line has to be the thing that speaks.
         warnings = [
             *warnings,
-            f"roster probe took {elapsed:.1f}s of its {budget:.0f}s budget "
-            f"for {len(raw)} row(s); past the budget the sweep reads zero "
+            f"{HEADROOM_WARNING_PREFIX}took {elapsed:.1f}s of its {budget:.0f}s "
+            f"budget for {len(raw)} row(s); past the budget the sweep reads zero "
             f"rows and refuses. Raise ROSTER_TIMEOUT_S",
         ]
     by_sid: dict[str, Any] = {}
@@ -929,9 +1043,15 @@ def _row_state(r: dict) -> tuple[str, str]:
             if mapped is None:
                 if raw in _TERMINAL_STATES:
                     return raw, ""
-                return raw, f"unmapped row state {raw!r}, classified by name only"
+                return raw, (
+                    f"{ADVISORY_WARNING_PREFIX}unmapped row state {raw!r}, "
+                    "classified by name only"
+                )
             return _CANONICAL_STATE.get(mapped, mapped.lower()), ""
-    return "", "row carried no state under either alias, unmeasurable"
+    return "", (
+        f"{ADVISORY_WARNING_PREFIX}row carried no state under either alias, "
+        "unmeasurable"
+    )
 
 
 def _is_linked_worktree(cwd: str) -> bool:

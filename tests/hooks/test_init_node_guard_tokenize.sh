@@ -109,7 +109,20 @@ run_init "$TMP2" "tst-aa00aa00 tst-bb00bb00"
 CK2="$(claim_key_of "$STATE")"
 [[ -z "$CK2" ]] || fail "AC3-ERR: ambiguous input still claimed '${CK2}'"
 grep -qi 'ambiguous' "$ERRLOG" || fail "AC3-ERR: no ambiguity line printed"
-pass "AC3-ERR: ambiguous input claims nothing and prints an ambiguity line"
+pass "AC3-ERR: ambiguous input sets no single graph_node_id and says why"
+
+# ── x-cd1e: ambiguous for the MANIFEST is not ambiguous for the CLAIM ─────
+# A two-node payload used to take zero claims, which is the worst of the three
+# options: two nodes are being built and the store recorded neither, so both
+# read free to every king that checked. The manifest still holds one
+# graph_node_id (asserted above); the claims are per node.
+log "x-cd1e: 'tst-aa00aa00 tst-bb00bb00' claims BOTH nodes"
+MK2="$(grep '^target_claim_multi_keys:' "$STATE" 2>/dev/null | sed 's/^target_claim_multi_keys:[[:space:]]*//' | tr -d '"\r')"
+[[ "$MK2" == *"tst-aa00aa00"* ]] \
+  || fail "x-cd1e: first node of the pair went unclaimed (multi_keys='${MK2}')"
+[[ "$MK2" == *"tst-bb00bb00"* ]] \
+  || fail "x-cd1e: second node of the pair went unclaimed (multi_keys='${MK2}')"
+pass "x-cd1e: a two-node payload claims both nodes"
 
 # ── AC3-ERR: free-text description => no claim, no ambiguity line ──────────
 log "AC3-ERR: 'add dark mode' => no claim, no ambiguity line"

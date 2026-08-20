@@ -1636,6 +1636,8 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    # The dispatch takes a real node claim; keep it out of the user's global store.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
 
     res = CliRunner().invoke(
         agents_cli.agents_app,
@@ -1643,8 +1645,11 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
          "--node", "x-84a8", "--slug", "s", "--plan", "p.md"],
     )
     assert res.exit_code == 0, res.output
+    # The claim holder rides with the provenance group: the worker names it back
+    # at init to prove it is the successor this dispatch claimed the node for.
     assert captured["provenance"] == {
         "FNO_NODE": "x-84a8", "FNO_SLUG": "s", "FNO_PLAN": "p.md",
+        "FNO_NODE_CLAIM_HOLDER": "spawn-handover:t-x-84a8-s",
     }
 
 
