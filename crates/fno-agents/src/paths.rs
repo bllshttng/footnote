@@ -423,6 +423,12 @@ mod tests {
 
     #[test]
     fn from_env_honors_override() {
+        // FNO_AGENTS_HOME is process-global and the unit tests share one
+        // process. Unlocked, this set/remove pair landed inside another test's
+        // window and sent its resolution at the real ~/.fno/agents.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = tmp("env");
         std::env::set_var(HOME_ENV, &root);
         let home = AgentsHome::from_env();

@@ -511,6 +511,13 @@ mod tests {
         )
         .unwrap();
         // Isolate from any real env override so this reads the file alone.
+        // Under the crate-wide lock: removing the var is itself a write, and
+        // the resolver also reads $FNO_CONFIG, which sibling tests repoint at
+        // their own files. Unlocked, this read landed on someone else's config
+        // and fell back to the default.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("FNO_AGENTS_DEAD_ROW_GRACE_SECS");
         assert_eq!(dead_row_grace_secs(&dir, "codex"), 28800);
         assert_eq!(
