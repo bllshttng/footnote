@@ -1,2 +1,3 @@
 [build]
 rustc-wrapper = "scripts/lib/cargo-rustc-wrapper.sh"
+incremental = false
