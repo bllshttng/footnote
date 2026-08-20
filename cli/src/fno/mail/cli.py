@@ -3572,7 +3572,12 @@ def cmd_hold(
     # The third drain trigger. Detached on purpose: it must outlive this CLI
     # invocation, because the whole contract is that the drain happens with no
     # further input from the operator.
-    binary = shutil.which("fno")
+    #
+    # Re-invoke THIS executable, not whatever `fno` is on PATH. A deployed
+    # binary can be several merges behind the code that just armed the hold,
+    # and one that predates this verb dies instantly on an unknown command -
+    # the timer never runs, and the only symptom is a hold that never lifts.
+    binary = sys.argv[0] if os.path.isfile(sys.argv[0]) else shutil.which("fno")
     armed = False
     if binary:
         try:
