@@ -3115,12 +3115,11 @@ def _mark_stopped_orphaned(name: str, existing: AgentEntry) -> None:
             decline_reason=decline_reason,
         )
         if not status_written:
-            reason = {
-                "row_removed": "row_removed",
-                "duplicate_name": "duplicate_name",
-            }.get(
-                decline_reason[0] if decline_reason else "",
-                "recipient_identity_changed",
+            first_reason = decline_reason[0] if decline_reason else ""
+            reason = (
+                first_reason
+                if first_reason in ("row_removed", "duplicate_name")
+                else "recipient_identity_changed"
             )
             events.emit(
                 "agent_stopped_status_write_failed",
