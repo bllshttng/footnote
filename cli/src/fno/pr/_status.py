@@ -179,7 +179,23 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
 
     Classifies only the latest run per check name so a superseded CANCELLED run
     (left in the rollup by a force/amend push) no longer yields a false red.
-    `counts["total"]` is the deduped count, the honest check total.
+    `counts["total"]` is the deduped count over the WHOLE rollup, which carries
+    two different kinds of row: GitHub check-runs (the `name` key, produced by
+    Actions and Checks-API apps) and commit StatusContexts (the `context` key,
+    posted to the statuses endpoint). `counts["check_runs"]` and
+    `counts["statuses"]` split that total, because a reader who compares
+    `total` against `gh api .../check-runs` sees a phantom gap otherwise: that
+    endpoint never returns statuses. Measured 2026-08-20 - the tally said 15,
+    the check-runs endpoint named 13 jobs, and the 2-row gap was
+    fno's own statuses (stacked-base-guard, fno/review-coverage). The two
+    sub-counts need not sum to `total`: a rollup row carrying neither key is
+    counted in neither (it is also never deduped).
+
+    `counts["fail_check_runs"]` and `counts["fail_statuses"]` split the fail
+    bucket the same way, and they are what lets a caller name a red honestly.
+    The VERDICT deliberately does not split: a failing StatusContext is a real
+    red (`stacked-base-guard` is one), so it must never read green. What the
+    split fixes is the ATTRIBUTION - see `_ready_blockers`.
     `counts["unsettled"]` counts latest runs with NO settled marker (an absent
     result: cancelled, stale, still running), and `settled` is derived from it
     positively elsewhere - never from the absence of a pending run.
@@ -195,25 +211,35 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     deduped = _latest_per_name(rollup)
     counts = {
         "total": len(deduped),
+        "check_runs": 0,
+        "statuses": 0,
+        "fail_check_runs": 0,
+        "fail_statuses": 0,
         "pass": 0,
         "fail": 0,
         "pending": 0,
         "unsettled": 0,
     }
-    real_check_runs = 0
     for c in deduped:
-        counts[_classify(c)] += 1
+        kind = _classify(c)
+        counts[kind] += 1
         if not _has_settled_marker(c):
             counts["unsettled"] += 1
         if c.get("name") not in (None, ""):
-            real_check_runs += 1
+            counts["check_runs"] += 1
+            if kind == "fail":
+                counts["fail_check_runs"] += 1
+        elif c.get("context") not in (None, ""):
+            counts["statuses"] += 1
+            if kind == "fail":
+                counts["fail_statuses"] += 1
     if not deduped:
         return ("unknown", 3, counts)
     if counts["fail"]:
         return ("red", 1, counts)
     if counts["pending"]:
         return ("pending", 2, counts)
-    if not real_check_runs:
+    if not counts["check_runs"]:
         # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
         # real CI still rides the legacy commit-status API (no GitHub Actions,
         # no Checks-API app) would never clear this and would hold forever
@@ -279,13 +305,17 @@ def _ready_blockers(
     head: str = "",
     code_review_required: bool = False,
     mergeable: Optional[str] = None,
+    counts: Optional[dict] = None,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
-    A bare ``ready: false`` has one explanation per conjunct (CI red, an
+    A bare ``ready: false`` has one explanation per conjunct (a red check, an
     unresolved optional finding, coverage unknown or uncovered) and a reader
     cannot tell them apart; the list is the positive marker that names what is
-    holding. ``unknown`` coverage blocks and is named as its own blocker: the
+    holding. A red is split by the KIND of row that failed: ``ci_<verdict>``
+    when a real check-run failed, ``commit_status_red`` when a commit
+    StatusContext failed and no job failed at all.
+    ``unknown`` coverage blocks and is named as its own blocker: the
     reason a read returned unknown is a separate question (x-b56a), this only
     reports that the answer is missing. Fail-closed everywhere: an unset
     unresolved count blocks as ``optional_reviews_unknown``, and the coverage
@@ -317,7 +347,34 @@ def _ready_blockers(
     if mergeable not in (None, "MERGEABLE"):
         blockers.append(f"not_mergeable_{str(mergeable).lower()}")
     if not green:
-        blockers.append(f"ci_{verdict}")
+        # A red is named for the KIND of row that failed, never generically.
+        # `ci_red` on a head whose every job passed is a lie a reader acts on:
+        # it woke a session with "CI red, fno/review-coverage failed", which
+        # is two incompatible claims in one line. The counts already know
+        # which kind failed, so the name reads them.
+        #
+        # Rename, never remove. `stacked-base-guard` is also a StatusContext,
+        # so on some PRs a status-only red is the ONLY red there is - dropping
+        # the blocker would silence a real gate to de-duplicate a different
+        # one. Both still block, and the verdict stays red either way.
+        #
+        # The predicate is POSITIVE (a status provably failed), never the
+        # absence of a failing job. A rollup row carrying neither `name` nor
+        # `context` still classifies as a fail and lands in NEITHER sub-count,
+        # so "no job failed" alone would name a commit status that does not
+        # exist. An unattributable red keeps the generic name - and so does a
+        # MIXED red, where a status failed beside an unkeyed row: `not
+        # fail_check_runs` reads true there too, and the honest test is that
+        # EVERY failing row is a status, not merely that no job was among them.
+        if (
+            verdict == "red"
+            and counts
+            and counts.get("fail_statuses")
+            and counts.get("fail_statuses") == counts.get("fail")
+        ):
+            blockers.append("commit_status_red")
+        else:
+            blockers.append(f"ci_{verdict}")
     if unresolved is None or not isinstance(unresolved, int):
         # None is the read's own "unknown"; a non-int is a contract violation.
         # Both fail closed as unknown rather than TypeError or a silent pass.
@@ -452,6 +509,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # above - a merged/closed PR's mergeable field is stale and must not
         # hold a report that changes nothing.
         mergeable=None if is_terminal else pr_json.get("mergeable"),
+        counts=counts,
     )
     if hold_reason:
         blockers.append("dispatch_hold")
@@ -576,10 +634,24 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
 
 def main(argv: Sequence[str]) -> int:
-    if not argv:
+    known = {"--refresh", "--no-cache"}
+    flags = {str(a) for a in argv if str(a).startswith("-")}
+    args = [a for a in argv if not str(a).startswith("-")]
+    refresh = bool(flags & known)
+    # An unrecognised flag is REFUSED, never dropped: `--refresh` exists for a
+    # caller who distrusts a cached verdict, so silently ignoring `--refesh`
+    # would hand back the very row they were trying to bypass. The split is on
+    # ONE leading dash, not two: with `--` alone, `-x` fell into neither set
+    # and was read as the PR number, which is the silent drop this refuses.
+    # An EXTRA POSITIONAL is refused for the same reason an unknown flag is.
+    # `main(["42", "43"])` answered for 42 and dropped 43 silently, which is
+    # the same shape one line up: a caller asked something the parser did not
+    # answer and got no signal. Typer rejects it today, and `main` is the
+    # module entry that the next caller inherits.
+    if len(args) != 1 or not flags <= known:
         import sys
 
-        sys.stderr.write("usage: fno pr status <pr-number>\n")
+        sys.stderr.write("usage: fno pr status <pr-number> [--refresh|--no-cache]\n")
         return 2
     try:
         from fno.pr._cache import cached_status
@@ -588,7 +660,7 @@ def main(argv: Sequence[str]) -> int:
         # polling one PR issue one network read per TTL. The
         # library entry (run_status) stays uncached for programmatic callers
         # and tests.
-        return cached_status(str(argv[0]))
+        return cached_status(str(args[0]), refresh=refresh)
     except ToolMissing:
         import sys
 

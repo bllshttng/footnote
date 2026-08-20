@@ -26,6 +26,7 @@ from __future__ import annotations
 import fcntl
 import io
 import json
+import math
 import os
 import sys
 import time
@@ -109,7 +110,56 @@ def _write_row_locked(p: Path, row: dict) -> None:
     os.replace(tmp, p)
 
 
+def finite_or_zero(value: object) -> float:
+    """`value` as a finite float, 0.0 when absent, unparseable or not finite.
+
+    Public because a cache row is read on more than one path and the guard has
+    to travel with it. `fno.graph.board` reads the same row's `ts` through
+    `newest_row_offline`, and while this lived as a private row-keyed helper
+    that path kept a bare `float()` and crashed on the same values - a guard
+    on one of two reachable paths, under a docstring claiming it covered both.
+
+    `json.loads` accepts a bare `NaN` / `Infinity` by default, so a row
+    carrying `"ts": Infinity` parses cleanly and survives `float()`.
+    """
+    try:
+        v = float(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+def _num(row: dict, key: str) -> float:
+    """A numeric field of a cache ROW, guarded by `finite_or_zero`.
+
+    A row written by a different schema (a concurrent fno install polling the
+    same PR) must read as a miss, never crash a caller - the same discipline
+    `_serve` already applies to a corrupt exit code.
+
+    Finite is necessary and NOT sufficient, which is why callers that hand the
+    result to `time` still guard the conversion. `1e18` is perfectly finite
+    and still raises out of `time.gmtime`, so a value passing here can fail
+    one caller and satisfy another.
+    """
+    return finite_or_zero(row.get(key))
+
+
 def _serve(row: dict, *, stale: bool) -> int:
+    """Print one cached row and return its exit code (-1 = not servable).
+
+    The served line says WHEN and at WHAT HEAD it was computed, not merely
+    that it came from a cache. `cached: true` alone is decorative: it tells a
+    reader the answer is second-hand but gives no way to judge whether the
+    staleness matters for their question, so every consumer ignored it. The
+    row's own `head` is the head the verdict was computed at; on the
+    head-unreadable path that can be a head the PR has since moved past, and
+    `cached_age_seconds` is the number that says how far past.
+
+    Deliberately NO `cached_head`: it was a verbatim copy of `head` under a
+    second name, which adds no fact a reader did not have and gives the one
+    fact two places to drift apart. `head` already documents itself as the
+    commit this verdict describes.
+    """
     out = dict(row.get("output") or {})
     if not out:
         # Nothing servable ever landed in the row (a first-read secondary
@@ -142,6 +192,20 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
         code = 3
     out["cached"] = True
+    ts = _num(row, "ts")
+    # A finite `ts` can still be outside the platform's time_t range: 1e18
+    # raises OSError and 1e300 raises OverflowError out of `gmtime`. Finite is
+    # what the row guard can promise, and it is not what `time` requires, so
+    # the conversion is guarded where it happens rather than by widening
+    # `finite_or_zero` into a timestamp validator it is not.
+    try:
+        out["cached_at"] = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
+        )
+    except (OSError, OverflowError, ValueError):
+        out["cached_at"] = None
+        ts = 0.0
+    out["cached_age_seconds"] = int(max(0.0, time.time() - ts)) if ts else None
     sys.stdout.write(json.dumps(out) + "\n")
     # A degraded-coverage note must survive the coalescing this module exists
     # to do: without this, the note reaches only the one session whose live
@@ -152,8 +216,16 @@ def _serve(row: dict, *, stale: bool) -> int:
     return code
 
 
-def cached_status(pr: str, cwd: Optional[str] = None) -> int:
+def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
     """`fno pr status` through the coalescing cache: the CLI chokepoint.
+
+    `refresh=True` (`fno pr status --refresh`) is the sanctioned escape: no row
+    is served, the live read runs, and the fresh row replaces whatever was
+    there. Before it existed a caller who distrusted a cached verdict had no
+    option at all - `--help` listed none - and had to drop to raw `gh api`,
+    which is what a king did on PR 994 after the cache reported red on a PR
+    GitHub called clean. It is a MANUAL verb: it defeats the coalescing this
+    module exists to do, so never put it in a watcher loop.
 
     Rows are keyed by (repo, PR, head): a verdict is a fact about ONE commit,
     and serving a green row cached for head A after a push moved the PR to
@@ -177,6 +249,12 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
     slug_key = slug.replace("/", "--")
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
+        if refresh:
+            # The caller asked for truth, not a row. With no readable head
+            # there is no fresher answer than the loud live read - serving a
+            # degraded row here would answer the question --refresh was
+            # raised to refuse.
+            return run_status(pr, cwd)
         # Head unreadable (secondary window, network): fail CLOSED. Serve the
         # PR's newest existing row degraded (unknown, unsettled - keeps the
         # zero-network collapse without ever answering green off data nobody
@@ -193,14 +271,14 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         -1 when the caller must do (or wait on) a live read."""
         if not row:
             return -1
-        if at - float(row.get("ts") or 0) < _ttl():
+        if at - _num(row, "ts") < _ttl():
             return _serve(row, stale=False)
-        if float(row.get("backoff_until") or 0) > at:
+        if _num(row, "backoff_until") > at:
             return _serve(row, stale=True)
         return -1
 
     now = time.time()
-    code = _servable(read_row(key), now)
+    code = -1 if refresh else _servable(read_row(key), now)
     if code >= 0:
         return code
 
@@ -217,13 +295,20 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             row = read_row(key)
-            code = _servable(row, time.time())
+            code = -1 if refresh else _servable(row, time.time())
             if code >= 0:
                 return code
 
             # Capture the one JSON line the verb prints so the row holds
             # exactly what a caller saw (verdict, checks, coverage - all of
             # it; partial caching would let a hit serve a mixed row).
+            # The clock the backoff decision uses, read BEFORE the network
+            # call. `run_status` can burn tens of seconds before a
+            # secondary-limit refusal, and the shortest window is 60s, so a
+            # window that expires DURING the read flipped `held` false and let
+            # the refused refresh double the fleet's wait - the exact harm the
+            # comment below refuses.
+            before_read = time.time()
             buf = io.StringIO()
             real_stdout = sys.stdout
             sys.stdout = buf
@@ -241,8 +326,26 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
             now = time.time()
             reason = str((output or {}).get("reason", "")).lower()
             if code == 4 and output is not None and "secondary rate limit" in reason:
-                fails = int((row or {}).get("fail_count") or 0) + 1
-                backoff = min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                # A manual --refresh punches THROUGH a live backoff window (the
+                # window may have cleared server-side, and the escape hatch is
+                # worth the one read). Being refused by it must not DEEPEN it:
+                # the fleet's wait is not the refresher's to double, and an
+                # operator who retries the hatch would otherwise walk the whole
+                # window to the 900s cap - the very "retry that sustains the
+                # refusal it is waiting out" this module refuses to be.
+                prior_until = _num(row or {}, "backoff_until")
+                held = refresh and prior_until > before_read
+                fails = int(_num(row or {}, "fail_count")) + (0 if held else 1)
+                # Held: the window is written back VERBATIM, never
+                # recomputed as `now + remaining`. The old form leaned on
+                # `now + (prior_until - now)` cancelling exactly, and that
+                # identity died the moment `held` moved to the pre-read
+                # clock: a read spanning the expiry then pushed the window
+                # PAST where it stood, extending the fleet's wait by the
+                # duration of the read.
+                backoff = (
+                    None if held else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                )
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
                 # with none, keep the error row itself (loud: verdict error).
@@ -260,7 +363,7 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
                         "exit": (row or {}).get("exit") if had_prior else 4,
                         "output": (row or {}).get("output") if had_prior else output,
                         "fail_count": fails,
-                        "backoff_until": now + backoff,
+                        "backoff_until": prior_until if backoff is None else now + backoff,
                     },
                 )
                 return code

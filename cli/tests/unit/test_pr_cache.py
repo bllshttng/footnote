@@ -361,3 +361,275 @@ def test_corrupt_cached_exit_code_falls_through_to_a_live_read(cache_env, monkey
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 1, f"expected exactly one JSON line, got: {lines}"
     assert json.loads(lines[0])["verdict"] == "green"
+
+
+def test_a_served_row_names_its_age_and_the_head_it_was_computed_at(
+    cache_env, monkeypatch, capsys
+):
+    """`cached: true` alone is decorative and every consumer ignored it.
+
+    It says the answer is second-hand but not how second-hand, so a reader
+    cannot judge whether the staleness matters for their question. The served
+    line must carry the age and the head the verdict was computed at.
+    """
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    _cache.cached_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["cached"] is True
+    assert calls["n"] == 1, "the second call must be a hit, not a live read"
+    # `head` IS the computed-at head. There is deliberately no second field
+    # carrying the same value under another name.
+    assert out["head"] == "a" * 40
+    assert "cached_head" not in out
+    assert isinstance(out["cached_age_seconds"], int)
+    assert out["cached_at"].endswith("Z")
+
+
+def test_refresh_ignores_a_fresh_row_and_reads_live(cache_env, monkeypatch, capsys):
+    """`--refresh` is the sanctioned escape from a verdict a caller distrusts.
+
+    Before it existed the only option was raw `gh api`, which is what a king
+    did on PR 994 after the cache reported red on a PR GitHub called clean.
+    A refresh inside the TTL must spend a real read and print a line with no
+    `cached` marker on it.
+    """
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    code = _cache.cached_status("42", refresh=True)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert calls["n"] == 2, "--refresh must not be served from the row"
+    assert "cached" not in out
+
+
+def test_refresh_replaces_the_row_it_bypassed(cache_env, monkeypatch, capsys):
+    """The fresh read is not thrown away: the next ordinary caller inherits it.
+
+    A refresh that read live and then left the distrusted row on disk would
+    make every sibling session re-run the escape hatch.
+    """
+    cache_dir, head = cache_env
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    _row_path(cache_dir).write_text(json.dumps({
+        "ts": time.time(),
+        "exit": 1,
+        "output": {"verdict": "red", "settled": True, "head": "a" * 40},
+    }))
+    capsys.readouterr()
+
+    _cache.cached_status("42", refresh=True)
+    capsys.readouterr()
+    code = _cache.cached_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["verdict"] == "green"
+    assert out["cached"] is True
+
+
+def test_refresh_with_an_unreadable_head_goes_loud_not_stale(
+    cache_env, monkeypatch, capsys
+):
+    """With no readable head there is no fresher answer than the live read.
+
+    Serving a degraded row here would answer the exact question `--refresh`
+    was raised to refuse, and it would do it while looking like compliance.
+    """
+    cache_dir, head = cache_env
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    head["fail"] = True
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    code = _cache.cached_status("42", refresh=True)
+    out = json.loads(capsys.readouterr().out)
+    assert calls["n"] == 1, "an unreadable head must still produce a live read"
+    assert code == 0
+    assert "cached" not in out
+    assert "stale_reason" not in out
+
+
+def test_a_refused_refresh_never_deepens_the_backoff_window(
+    cache_env, monkeypatch, capsys
+):
+    """`--refresh` punches through a live backoff window; it must not double it.
+
+    The degraded `unknown` serve inside a backoff window is exactly when an
+    operator reaches for the escape hatch, so the collision is the modal case,
+    not an edge one. Letting the refused read escalate `fail_count` walks the
+    whole fleet's wait toward the 900s cap one keystroke at a time - the
+    "retry that sustains the very refusal it is waiting out" this module
+    exists to refuse.
+    """
+    cache_dir, head = cache_env
+    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    p = _row_path(cache_dir)
+    row = json.loads(p.read_text())
+    row["ts"] -= 3600  # past the TTL, so the next call is a real miss
+    p.write_text(json.dumps(row))
+
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    _cache.cached_status("42")
+    opened = json.loads(p.read_text())
+    assert opened["fail_count"] == 1
+    window = opened["backoff_until"]
+
+    capsys.readouterr()
+    fetch, calls = _fetch_spy([err])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42", refresh=True) == 4
+    assert calls["n"] == 1, "the escape hatch still spends its one read"
+    after = json.loads(p.read_text())
+    assert after["fail_count"] == 1, "a refused refresh must not escalate"
+    assert after["backoff_until"] == pytest.approx(window, abs=1.0)
+    assert after["output"] == opened["output"], "the last good verdict survives"
+
+
+def test_an_unknown_flag_is_refused_whatever_its_dash_count(monkeypatch):
+    """The refusal must cover EVERY flag shape, not only the two-dash one.
+
+    A guard on one of the reachable spellings reads as protection and ships
+    green while the rest stay broken. Split on `--` alone, `-x` fell into
+    neither the flag set nor the argument list, so it was read as the PR
+    number and spent a live `gh` read - the silent drop the refusal exists to
+    refuse.
+    """
+    monkeypatch.setattr(
+        _cache, "cached_status",
+        lambda *a, **k: pytest.fail("an unknown flag must never reach the cache"),
+    )
+    assert _status.main(["-x", "42"]) == 2
+    assert _status.main(["--refesh", "42"]) == 2
+    assert _status.main(["--refresh"]) == 2
+
+
+def test_a_known_flag_still_parses_to_the_pr_number(cache_env, monkeypatch, capsys):
+    """The refusal above must not eat the flags that do exist."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN, _GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _status.main(["42", "--no-cache"]) == 0
+    assert _status.main(["--refresh", "42"]) == 0
+    capsys.readouterr()
+    assert calls["n"] == 2, "both spellings must bypass the row"
+
+
+def test_a_non_finite_row_number_reads_as_a_miss_not_a_crash(cache_env, monkeypatch, capsys):
+    """`json.loads` accepts a bare `Infinity`, and `float()` happily keeps it.
+
+    So a foreign-schema row parsed clean, survived the guard, and then raised
+    `OverflowError` out of `time.gmtime` - the crash `_num`'s own docstring
+    promised to stop, on the path it claimed to cover. A guard that raises
+    where its stated invariant reaches is decorative.
+    """
+    assert _cache._num({"ts": float("inf")}, "ts") == 0.0
+    assert _cache._num({"ts": float("-inf")}, "ts") == 0.0
+    assert _cache._num({"ts": float("nan")}, "ts") == 0.0
+
+    cache_dir, head = cache_env
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Written the way a foreign writer would: bare Infinity, which json
+    # accepts by default on the way back in.
+    _row_path(cache_dir).write_text(
+        '{"ts": Infinity, "exit": 0, "output": {"verdict": "green", "head": "a"}}'
+    )
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    # No traceback: the row is unusable, so the live read decides.
+    assert _cache.cached_status("42") == 0
+    assert calls["n"] == 1
+
+
+def test_a_window_expiring_during_the_read_still_holds_the_refresh(
+    cache_env, monkeypatch, capsys
+):
+    """`held` is decided from the PRE-read clock, never the post-read one.
+
+    `run_status` can burn tens of seconds before a secondary-limit refusal and
+    the shortest window is 60s. Deciding after the read let a window that
+    expired mid-call flip `held` false, so the refused `--refresh` doubled the
+    fleet's wait - the exact harm the comment beside it refuses.
+    """
+    cache_dir, head = cache_env
+    err = (None, "HTTP 403: You have exceeded a secondary rate limit")
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    p = _row_path(cache_dir)
+    row = json.loads(p.read_text())
+    row["ts"] -= 3600
+    p.write_text(json.dumps(row))
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    _cache.cached_status("42")
+    opened = json.loads(p.read_text())
+    assert opened["fail_count"] == 1
+    capsys.readouterr()
+
+    # A CONTROLLED clock, because the real one cannot be made to cross a 60s
+    # window inside a test. Writing the expiry to the row mid-read does not
+    # work either: `prior_until` is read from the in-memory row before the
+    # call, so that version of this test passed against the unfixed code -
+    # a test that cannot fail, which is the defect this file exists to catch.
+    row = json.loads(p.read_text())
+    t0 = row["backoff_until"] - 30  # 30s of window left when the read starts
+    clock = iter([t0, t0, t0 + 120])  # pre-lock, pre-read, post-read
+    last = [t0 + 120]
+
+    def fake_clock():
+        try:
+            last[0] = next(clock)
+        except StopIteration:
+            pass
+        return last[0]
+
+    monkeypatch.setattr(_cache.time, "time", fake_clock)
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    assert _cache.cached_status("42", refresh=True) == 4
+    after = json.loads(p.read_text())
+    assert after["fail_count"] == 1, "a refused refresh must not escalate"
+    assert after["backoff_until"] <= row["backoff_until"], "nor extend the window"
+
+
+def test_an_out_of_range_finite_ts_reads_as_a_miss_not_a_crash(cache_env, monkeypatch, capsys):
+    """Finite is what the row guard promises. It is not what `time` requires.
+
+    1e18 raises OSError and 1e300 raises OverflowError out of `time.gmtime`,
+    so the non-finite fix closed one number and left the next one open. Same
+    crash, one guard narrower.
+    """
+    assert _cache.finite_or_zero(1e18) == 1e18, "finite stays finite"
+    for ts in (1e18, 1e300):
+        row = {"ts": ts, "exit": 0, "output": {"verdict": "green", "head": "a"}}
+        code = _cache._serve(row, stale=False)
+        assert code == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["cached_at"] is None, "an unconvertible stamp reads as absent"
+        assert out["cached_age_seconds"] is None
+
+
+def test_the_row_guard_is_shared_with_every_reader_of_the_row():
+    """`fno.graph.board` reads the SAME row and used to keep a bare float().
+
+    A guard on one of two reachable paths, under a docstring claiming it
+    covered both. The claim is now true because the guard is shared, not
+    because the docstring was reworded.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph import board
+
+    now = datetime.now(timezone.utc)
+    for bad in (float("inf"), float("nan")):
+        assert board._age_from_epoch(bad, now) == "unknown age"
