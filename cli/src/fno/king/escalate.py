@@ -83,8 +83,8 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     """
     import secrets
 
-    from fno.events import append_event, operator_question
-    from fno.outstanding.core import events_path
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
 
     key = dedupe_key(stalled_ids)
     existing = already_asked(root, key)
@@ -93,7 +93,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
     ids = sorted(set(stalled_ids))
     qid = f"q-{secrets.token_hex(4)}"
-    append_event(
+    append_question_event(
         operator_question(
             question_id=qid,
             question=question_text(ids, key, reason),
@@ -103,6 +103,6 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
             # and not every queue holds backlog nodes, so any value here would
             # be a guess. The question text names the rows instead.
         ),
-        events_path=events_path(root),
+        root,
     )
     return ("recorded", qid)

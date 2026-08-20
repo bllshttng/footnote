@@ -22,6 +22,11 @@ from typing import Any
 
 DECISION_EVENT = "operator_decision"
 
+# The deployed writer still labelled agent-authored rulings as ``operator``.
+# This safely postdates every row that writer produced during the cutover; the
+# reader refuses to fabricate law from those ambiguous append-only records.
+AUTHORITY_LANE_CUTOVER = "2026-08-21T00:00:00Z"
+
 PROJECTION_FIELDS = (
     "decision_id",
     "decision",
@@ -53,17 +58,47 @@ class IndexWriteError(RuntimeError):
         self.cause = cause
 
 
+class RefusedAuthorityError(RuntimeError):
+    """An agent session tried to record a ruling as operator law."""
+
+    def __init__(self, agent_handle: str) -> None:
+        super().__init__(
+            f"agent {agent_handle} cannot record under operator authority"
+        )
+        self.agent_handle = agent_handle
+
+
 def mint_decision_id() -> str:
     """A stable handle in the q-/fu- family: d-<hex>."""
     return f"d-{secrets.token_hex(4)}"
+
+
+def _resolve_decider(
+    decided_by: str | None, authority_source: str | None
+) -> tuple[str, str]:
+    """Resolve omitted provenance from the ambient harness identity."""
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    agent = (
+        canonical_handle(ident.session_id)
+        if ident.session_id and ident.harness
+        else None
+    )
+    if agent and authority_source == "operator":
+        raise RefusedAuthorityError(agent)
+    return (
+        decided_by or agent or "operator",
+        authority_source or ("agent" if agent else "operator"),
+    )
 
 
 def record_decision(
     *,
     decision: str,
     subject: str | None = None,
-    decided_by: str = "operator",
-    authority_source: str = "operator",
+    decided_by: str | None = None,
+    authority_source: str | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -87,6 +122,8 @@ def record_decision(
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
+
+    decided_by, authority_source = _resolve_decider(decided_by, authority_source)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
@@ -400,8 +437,24 @@ def _subject_matcher(subject: str):
     return matches
 
 
+def _decision_lane(row: dict) -> str:
+    """Map stored provenance to the authority lane a reader can trust."""
+    authority = str(row.get("authority_source") or "")
+    if authority == "agent":
+        return "coord"
+    if authority == "beastmode":
+        return "grant"
+    if authority == "operator":
+        if str(row.get("ts") or "") >= AUTHORITY_LANE_CUTOVER:
+            return "law"
+        return "unattributed"
+    return "unattributed"
+
+
 def list_decisions(
-    subject: str | None = None, limit: int | None = None
+    subject: str | None = None,
+    limit: int | None = None,
+    lane: str | None = None,
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -447,6 +500,9 @@ def list_decisions(
         row = dict(row)
         winner = superseded_by.get(str(row.get("decision_id")))
         row["superseded_by"] = winner[1] if winner else None
+        row["lane"] = _decision_lane(row)
+        if lane is not None and row["lane"] != lane:
+            continue
         out.append(row)
 
     # decision_id breaks the tie. A stable sort keeps file order for equal

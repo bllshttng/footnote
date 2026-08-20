@@ -524,6 +524,11 @@ def decisions_jsonl() -> Path:
     return ledger_json().parent / "decisions.jsonl"
 
 
+def questions_jsonl() -> Path:
+    """Return the permanent machine-wide operator-question index."""
+    return ledger_json().parent / "questions.jsonl"
+
+
 def project_events_json() -> Path:
     """The per-checkout event journal, or the scratch journal a harness pins.
 

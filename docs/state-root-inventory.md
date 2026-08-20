@@ -30,6 +30,7 @@ One file per install. These belong at the root.
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
 | `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs` | rotated |
 | `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
+| `questions.jsonl` | `paths.questions_jsonl()`, written by `fno outstanding` | permanent; a question does not expire |
 | `decisions.jsonl.corrupt` | `decide/__init__.py::_compact_index` | permanent; the only copy of a row whose source journal is gone |
 | `decisions.jsonl.compact` | `decide/__init__.py::_compact_index` | transient; replaced onto `decisions.jsonl` in the same call |
 | `evals-history.jsonl` | `paths.evals_history()` | append-only |

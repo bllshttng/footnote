@@ -8,20 +8,25 @@ only ``deferred`` carve-outs block anything (condition D in ``graph/_reconcile.p
 refuses a node close on an unharvested one), and 39 of those rows are ``oos-bug``,
 which blocks nothing, ever. So the fix is a surface, not a wire.
 
-Read-only by construction: this module imports no graph or state writer.
+The report path is read-only; explicit ask, clear, and reindex helpers own writes.
 """
+
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+import sys
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 # Rows rendered before the footer takes over. A growing pile should read as a
 # number, not as a wall - a block that scrolls the operator's screen gets
 # skipped, which is the failure this verb exists to fix.
 RENDER_CAP = 3
+QUESTION_RENDER_CAP = 10
 
 EVENTS_NAME = "events.jsonl"
 # `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
@@ -31,6 +36,10 @@ QUESTION_CLOSED_EVENT = "operator_question_closed"
 # Both question types share this prefix, so a raw line without it cannot be
 # one of ours. See the substring prefilter in read_open_questions.
 QUESTION_MARKER = "operator_question"
+# SessionStart has a 1.5s hook budget. Reachability may scan multi-gigabyte
+# harness stores, so the report gives it one bounded slice and renders an
+# explicit unknown for anything that cannot finish in time.
+LIVENESS_BUDGET_SECONDS = 0.05
 
 
 class OutstandingError(Exception):
@@ -42,6 +51,15 @@ class OutstandingError(Exception):
     """
 
 
+class QuestionIndexWriteError(OutstandingError, RuntimeError):
+    """A question event is durable but missing from the recall index."""
+
+    def __init__(self, question_id: str, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.question_id = question_id
+        self.cause = cause
+
+
 @dataclass(frozen=True)
 class Question:
     id: str
@@ -50,8 +68,13 @@ class Question:
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     node: Optional[str] = None
+    asker: Optional[str] = None
+    ask: Optional[str] = None
+    options: tuple[str, ...] = ()
+    blocks: tuple[str, ...] = ()
+    live: Optional[bool] = None
 
-    def as_dict(self) -> "dict[str, Any]":
+    def as_dict(self, *, rank: Optional[int] = None) -> "dict[str, Any]":
         return {
             "id": self.id,
             "ts": self.ts,
@@ -59,6 +82,12 @@ class Question:
             "session_id": self.session_id,
             "cwd": self.cwd,
             "node": self.node,
+            "asker": self.asker,
+            "ask": self.ask,
+            "options": list(self.options),
+            "blocks": list(self.blocks),
+            "live": self.live,
+            "rank": rank,
         }
 
 
@@ -108,7 +137,7 @@ class Outstanding:
                 "by_kind": dict(self.carveout_by_kind),
                 "oldest_ts": self.carveout_oldest_ts,
             },
-            "questions": [q.as_dict() for q in self.questions],
+            "questions": [q.as_dict(rank=rank) for rank, q in enumerate(self.questions, 1)],
             "captures": {
                 "total": len(self.captures),
                 "resolved_files": self.capture_file_total,
@@ -152,49 +181,157 @@ def _iter_question_lines(fh: "Iterable[str]") -> "Iterator[str]":
             yield line
 
 
-def read_open_questions(root: Path) -> "list[Question]":
+def questions_path() -> Path:
+    """Resolve the machine-wide question index through the configured state dir."""
+    from fno import paths
+
+    return paths.questions_jsonl()
+
+
+def append_question_event(event: dict[str, Any], root: Path) -> None:
+    """Write one event to project durability first, then machine-wide recall."""
+    from fno.events import append_event
+
+    data = event.get("data")
+    question_id = data.get("question_id") if isinstance(data, dict) else None
+    if not question_id:
+        raise ValueError("question event has no question_id")
+    try:
+        append_event(event, events_path=events_path(root))
+    except Exception as exc:
+        raise OutstandingError(f"failed to append question to project journal: {exc}") from exc
+    try:
+        append_event(event, events_path=questions_path())
+    except Exception as exc:  # noqa: BLE001 - caller needs the durable event id
+        raise QuestionIndexWriteError(str(question_id), exc) from exc
+
+
+def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, Any]]":
+    """Read valid question envelopes, distinguishing absent from unreadable."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if missing_hint:
+                print(
+                    f"outstanding: question index {path} is missing; run "
+                    "`fno outstanding reindex` to recover project questions.",
+                    file=sys.stderr,
+                )
+            return []
+        except OSError as exc:
+            raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+        raise OutstandingError(f"cannot read question index {path}: dangling symlink")
+    except OSError as exc:
+        raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+
+    events: "list[dict[str, Any]]" = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in _iter_question_lines(fh):
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") not in {
+                    QUESTION_EVENT,
+                    QUESTION_CLOSED_EVENT,
+                }:
+                    continue
+                data = rec.get("data")
+                if isinstance(data, dict) and data.get("question_id"):
+                    events.append(rec)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+    return events
+
+
+def _resolve_question_liveness(
+    askers: "list[str]",
+    *,
+    budget_seconds: float,
+    clock: "Callable[[], float]",
+    resolver: "Callable[[str], tuple[Any, list[str]]] | None",
+) -> "dict[str, bool]":
+    """Resolve unique askers within one wall-clock slice.
+
+    The resolver runs in a child process that is terminated and reaped at the
+    deadline, so a store scan cannot survive until interpreter shutdown. Only
+    answers completed by the deadline land in the result; every absent key is
+    explicitly unknown, never guessed stale.
+    """
+    import multiprocessing
+
+    if not askers or budget_seconds <= 0:
+        return {}
+    if resolver is None:
+        from fno.agents.discover import resolve_reachable
+
+        resolver = resolve_reachable
+    context = multiprocessing.get_context("fork")
+    receive, send = context.Pipe(duplex=False)
+    _ = clock
+
+    def resolve_all() -> None:
+        answers: "dict[str, bool]" = {}
+        try:
+            for asker in dict.fromkeys(askers):
+                try:
+                    reachable, ambiguous = resolver(asker)
+                    answer = reachable is not None and not ambiguous
+                except Exception:  # noqa: BLE001 - a completed refusal is stale
+                    answer = False
+                answers[asker] = answer
+        finally:
+            try:
+                send.send(answers)
+            except (BrokenPipeError, OSError):
+                pass
+            send.close()
+
+    process = context.Process(
+        target=resolve_all, name="fno-question-liveness", daemon=True
+    )
+    process.start()
+    send.close()
+    answers: "dict[str, bool]" = {}
+    try:
+        if receive.poll(budget_seconds):
+            payload = receive.recv()
+            if isinstance(payload, dict):
+                answers = payload
+    except (EOFError, OSError):
+        pass
+    finally:
+        receive.close()
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=budget_seconds)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    return answers
+
+
+def read_open_questions(
+    root: Path,
+    *,
+    liveness_budget_seconds: float = LIVENESS_BUDGET_SECONDS,
+    clock: "Callable[[], float]" = time.monotonic,
+    resolver: "Callable[[str], tuple[Any, list[str]]] | None" = None,
+) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
-    Newest first. A malformed line is SKIPPED, never raised, inheriting
+    Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
-    journal is the common case and reads as no questions.
+    index reads as no questions with a recovery hint; an unreadable one fails.
     """
-    path = events_path(root)
-    if not path.exists():
-        return []
-
+    _ = root  # The index is machine-wide; retain the argument for caller parity.
     asked: "dict[str, Question]" = {}
     closed: "set[str]" = set()
-    try:
-        # STREAM, never read_text().splitlines(). This journal is shared and
-        # never rotated, so materializing it holds the whole file in memory
-        # before the prefilter below skips anything - the read itself becomes
-        # the cost the prefilter was added to remove.
-        with path.open(encoding="utf-8") as fh:
-            lines = list(_iter_question_lines(fh))
-    except (OSError, UnicodeDecodeError) as exc:
-        raise OutstandingError(f"cannot read events journal {path}: {exc}") from exc
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Substring prefilter before json.loads. This journal is shared,
-        # append-only and never rotated, so nearly every line belongs to some
-        # other event type; parsing all of them cost ~0.9s against the hook's
-        # 3s bound, and the bound firing does not surface an error - the block
-        # just vanishes and the operator reads "nothing outstanding". That is
-        # the absence-as-success failure this whole verb exists to prevent, so
-        # the read must not get slower as the journal grows. Full history is
-        # preserved: questions never expire, so a tail read is not an option.
-        if QUESTION_MARKER not in stripped:
-            continue
-        try:
-            rec = json.loads(stripped)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(rec, dict):
-            continue
+    for rec in _read_question_events(questions_path(), missing_hint=True):
         data = rec.get("data")
         if not isinstance(data, dict):
             continue
@@ -209,6 +346,10 @@ def read_open_questions(root: Path) -> "list[Question]":
                 session_id=data.get("session_id") or None,
                 cwd=data.get("cwd") or None,
                 node=data.get("node") or None,
+                asker=data.get("asker") or None,
+                ask=data.get("ask") or None,
+                options=tuple(data.get("options") or ()),
+                blocks=tuple(data.get("blocks") or ()),
             )
         elif rec.get("type") == QUESTION_CLOSED_EVENT:
             qid = data.get("question_id")
@@ -216,9 +357,28 @@ def read_open_questions(root: Path) -> "list[Question]":
                 closed.add(str(qid))
 
     open_qs = [q for qid, q in asked.items() if qid not in closed]
-    # Newest first. No auto-expiry: a question that goes quiet with age is the
-    # exact failure being fixed, so age never removes one from this list.
-    open_qs.sort(key=lambda q: q.ts, reverse=True)
+    resolved = _resolve_question_liveness(
+        [q.asker for q in open_qs if q.asker],
+        budget_seconds=liveness_budget_seconds,
+        clock=clock,
+        resolver=resolver,
+    )
+    open_qs = [
+        replace(q, live=False if not q.asker else resolved.get(q.asker))
+        for q in open_qs
+    ]
+    # A stale asker never outranks a reachable one, even when it blocks more.
+    # Within each liveness lane, unblock the most nodes first, then honor the
+    # questions that have waited longest. No auto-expiry: age only ranks.
+    open_qs.sort(
+        key=lambda q: (
+            q.live is not True,
+            -len(q.blocks),
+            not bool(q.ts),
+            q.ts,
+            q.id,
+        )
+    )
     return open_qs
 
 
@@ -233,20 +393,121 @@ def _capture_project_roots(root: Path) -> "list[Path]":
     """
     roots = {Path(root).resolve()}
     try:
-        # cwd and source_cwd are footnote-owned sidecar fields; the scan runs
-        # over the sidecar projection so capture collection works on any
-        # tracker backend.
-        from fno.tracker import sidecar as sidecar_store
+        backend = os.environ.get("FNO_TRACKER_BACKEND") or "graph"
+        if backend == "graph":
+            from fno import paths
 
-        for sc in sidecar_store.load_all().values():
-            for raw in (sc.cwd, sc.source_cwd):
+            payload = json.loads(paths.graph_json().read_text(encoding="utf-8"))
+            entries = payload.get("entries", []) if isinstance(payload, dict) else payload
+            locations = (
+                (entry.get("cwd"), entry.get("source_cwd"))
+                for entry in entries
+                if isinstance(entry, dict)
+            )
+        else:
+            # External trackers keep footnote-owned checkout fields in their
+            # sidecars; graph mode reads those same fields from their owner.
+            from fno.tracker import sidecar as sidecar_store
+
+            locations = ((sc.cwd, sc.source_cwd) for sc in sidecar_store.load_all().values())
+        for pair in locations:
+            for raw in pair:
                 if isinstance(raw, str) and raw:
                     p = Path(raw)
                     if p.is_dir():
-                        roots.add(p.resolve())
+                        # Graph checkout paths are already absolute in normal
+                        # records. Keep relative legacy rows absolute without
+                        # resolving every symlink here: the inbox and journal
+                        # folds below resolve their physical stores once for
+                        # deduplication, which is the authority that matters.
+                        roots.add(Path(os.path.abspath(p)))
     except Exception:  # noqa: BLE001 - the graph is advisory here, never fatal
         pass
     return sorted(roots)
+
+
+def _canonical_checkout_for(root: Path) -> Path:
+    """Collapse a linked worktree onto its canonical checkout without git.
+
+    Standard linked-worktree ``.git`` files point into
+    ``<canonical>/.git/worktrees/<name>``. Other shapes keep the existing
+    root so their established resolver can handle them.
+    """
+    root = Path(root)
+    marker = root / ".git"
+    if marker.is_dir():
+        return root
+    try:
+        line = marker.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return root
+    if not line.startswith("gitdir:"):
+        return root
+    git_dir = Path(line.partition(":")[2].strip())
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    if git_dir.parent.name != "worktrees" or git_dir.parent.parent.name != ".git":
+        return root
+    canonical = git_dir.parent.parent.parent
+    return canonical if (canonical / ".git").is_dir() else root
+
+
+def _question_journals(root: Path) -> "list[Path]":
+    """Every graph-named project journal, deduped by physical file."""
+    seen: "set[tuple[int, int]]" = set()
+    journals: "list[Path]" = []
+    for project_root in _capture_project_roots(root):
+        path = events_path(project_root)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = (stat.st_dev, stat.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        journals.append(path)
+    return journals
+
+
+def _question_event_identity(event: dict[str, Any]) -> "tuple[str, str] | None":
+    event_type = event.get("type")
+    data = event.get("data")
+    question_id = data.get("question_id") if isinstance(data, dict) else None
+    if event_type not in {QUESTION_EVENT, QUESTION_CLOSED_EVENT} or not question_id:
+        return None
+    return str(event_type), str(question_id)
+
+
+def reindex_questions(root: Path) -> "dict[str, int]":
+    """Append every missing ask/close identity from graph-named projects."""
+    from fno.events import append_event
+
+    index = questions_path()
+    existing = _read_question_events(index, missing_hint=False)
+    known = {
+        identity for event in existing if (identity := _question_event_identity(event)) is not None
+    }
+    preexisting = set(known)
+    added = 0
+    already: "set[tuple[str, str]]" = set()
+    for journal in _question_journals(root):
+        try:
+            events = _read_question_events(journal, missing_hint=False)
+        except OutstandingError:
+            continue
+        for event in events:
+            identity = _question_event_identity(event)
+            if identity is None:
+                continue
+            if identity in known:
+                if identity in preexisting:
+                    already.add(identity)
+                continue
+            append_event(event, events_path=index)
+            known.add(identity)
+            added += 1
+    return {"added": added, "already": len(already), "total": len(known)}
 
 
 def _capture_added_at(root: Path) -> "dict[str, str]":
@@ -325,15 +586,19 @@ def _read_open_captures_with_counts(root: Path) -> "tuple[list[Capture], int, in
             pass
         return roots[0].name if roots else "unknown"
 
-    by_path: "dict[Path, list[Path]]" = {}
+    by_repo: "dict[Path, list[Path]]" = {}
     for project_root in _capture_project_roots(root):
+        by_repo.setdefault(_canonical_checkout_for(project_root), []).append(project_root)
+
+    by_path: "dict[Path, list[Path]]" = {}
+    for config_root, project_roots in by_repo.items():
         try:
-            path = inbox_path(project_root=project_root).resolve()
+            path = inbox_path(project_root=config_root).resolve()
             if not path.exists():
                 continue
         except Exception:  # noqa: BLE001 - a bad path is one project less
             continue
-        by_path.setdefault(path, []).append(project_root)
+        by_path.setdefault(path, []).extend(project_roots)
 
     captures: "list[Capture]" = []
     seen_ids: "set[str]" = set()
@@ -485,20 +750,49 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
 
     if outstanding.questions:
         mine = [q for q in outstanding.questions if session_id and q.session_id == session_id]
-        theirs = [q for q in outstanding.questions if q not in mine]
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
-        shown = (mine + theirs)[:RENDER_CAP]
-        for q in shown:
+        shown = outstanding.questions[:QUESTION_RENDER_CAP]
+
+        def append_question(q: Question, *, stale_row: bool = False) -> None:
             label = "[this session] " if q in mine else ""
-            # cwd/node are captured so a cross-project question names its
-            # origin. Rendering them is the whole reason they are recorded.
             where = q.node or (Path(q.cwd).name if q.cwd else None)
-            suffix = f"  ({where})" if where else ""
+            details = [where] if where else []
+            if stale_row:
+                age = _age_days(q.ts)
+                details.append(f"{_plural(age, 'day')} old" if age is not None else "age unknown")
+            suffix = f"  ({'; '.join(details)})" if details else ""
             lines.append(f"  {label}{q.id}  {q.question}{suffix}")
-        dropped = len(outstanding.questions) - len(shown)
-        if dropped:
-            lines.append(f"  ... and {dropped} more.")
+            if q.ask:
+                lines.append(f"    Action: {q.ask}")
+
+        last_live: "bool | None | object" = object()
+        has_stale = False
+        has_unknown = False
+        for q in shown:
+            is_live = q.live
+            if is_live != last_live:
+                if is_live is True:
+                    lines.append("  Live open questions:")
+                elif is_live is False:
+                    lines.append("  Stale questions:")
+                else:
+                    lines.append("  Questions with unknown liveness:")
+                last_live = is_live
+            append_question(q, stale_row=is_live is False)
+            has_stale = has_stale or is_live is False
+            has_unknown = has_unknown or is_live is None
+        if has_stale:
+            lines.append("  Answering a stale question records the decision but reaches nobody.")
+        if has_unknown:
+            lines.append(
+                "  Unknown means reachability did not finish inside the report budget; "
+                "answering still records the decision."
+            )
+        if len(outstanding.questions) > QUESTION_RENDER_CAP:
+            lines.append(
+                f"  Showing {len(shown)} of {len(outstanding.questions)} open questions."
+            )
         lines.append("  Answer with: fno outstanding clear <id> --answer \"...\"")
         lines.append("")
 

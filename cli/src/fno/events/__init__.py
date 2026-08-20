@@ -865,6 +865,10 @@ def operator_question(
     session_id: str | None = None,
     cwd: str | None = None,
     node: str | None = None,
+    asker: str | None = None,
+    ask: str | None = None,
+    options: "list[str] | None" = None,
+    blocks: "list[str] | None" = None,
     source: str = "target",
 ) -> dict[str, Any]:
     """Build an ``operator_question`` event (an agent needs a human answer).
@@ -876,7 +880,15 @@ def operator_question(
         "question_id": question_id,
         "question": question[:QUESTION_CAP],
     }
-    for key, value in (("session_id", session_id), ("cwd", cwd), ("node", node)):
+    for key, value in (
+        ("session_id", session_id),
+        ("cwd", cwd),
+        ("node", node),
+        ("asker", asker),
+        ("ask", ask),
+        ("options", options),
+        ("blocks", blocks),
+    ):
         if value is not None:
             data[key] = value
     return _build("operator_question", source, data)

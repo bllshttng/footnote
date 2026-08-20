@@ -57,13 +57,13 @@ def record(
     decided_by: Optional[str] = typer.Option(
         None,
         "--decided-by",
-        help="Who decided. Defaults to the operator; name the agent under a beastmode grant.",
+        help="Who decided. Omit to use the current agent handle, or the operator outside a session.",
     ),
     authority: Optional[str] = typer.Option(
         None,
         "--authority",
-        help="How the decider was entitled to decide: 'operator' (default) or "
-        "'beastmode'. Pass it when an agent decided under a grant.",
+        help="How the decider was entitled to decide: 'operator', 'agent', or "
+        "'beastmode'. Omit to resolve it from the current session.",
     ),
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
@@ -75,22 +75,31 @@ def record(
         )
         raise typer.Exit(1)
 
-    from fno.decide import IndexWriteError, record_decision
+    from fno.decide import IndexWriteError, RefusedAuthorityError, record_decision
 
     try:
         result = record_decision(
             decision=decision,
             subject=subject,
             question_id=question_id,
-            decided_by=decided_by or "operator",
+            decided_by=decided_by,
             # Stated, never inferred. Reading `--decided-by "J.N. Choi"` as a
             # beastmode grant writes wrong provenance into the one field a
             # reader months later trusts to say how a ruling was entitled.
-            authority_source=authority or "operator",
+            authority_source=authority,
             rationale=rationale,
             options=list(option) or None,
             supersedes=supersedes,
         )
+    except RefusedAuthorityError as exc:
+        typer.echo(
+            f"decide: refused. This session is agent {exc.agent_handle}, so it "
+            "cannot record under operator authority. If only the operator can "
+            "settle this, use `fno outstanding ask`. If ruling as an agent, "
+            "drop --authority operator; it records agent coordination.",
+            err=True,
+        )
+        raise typer.Exit(3)
     except IndexWriteError as exc:
         # Exit 1, because the ruling is not recoverable yet. But name the right
         # remedy: the durable event HAS landed, so re-running this command
@@ -152,6 +161,12 @@ def list_cmd(
     limit: int = typer.Option(
         20, "--limit", help="Most recent N. 0 or less means no cap."
     ),
+    lane: Optional[str] = typer.Option(
+        None,
+        "--lane",
+        metavar="law|coord|grant|unattributed",
+        help="Show only one authority lane.",
+    ),
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
@@ -160,11 +175,18 @@ def list_cmd(
     from fno.decide import list_decisions
     from fno.tracker.metadata import ExternalMetadataUnavailable
 
+    if lane not in {None, "law", "coord", "grant", "unattributed"}:
+        typer.echo(
+            "decide list: --lane must be law, coord, grant, or unattributed",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     try:
         # No cap on the read. The cap is applied HERE so the total is known,
         # and a truncated answer can say so - a silent cut on a recall verb is
         # the same lie as a missing record.
-        label, found, damaged = list_decisions(subject, limit=None)
+        label, found, damaged = list_decisions(subject, limit=None, lane=lane)
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
@@ -205,6 +227,18 @@ def list_cmd(
         # empty answer names the backfill whenever the index is missing.
         from fno.decide import _index_path
 
+        if lane == "law" and _index_path().exists():
+            _, legacy, _ = list_decisions(subject, limit=None, lane="unattributed")
+            if legacy:
+                noun = "decision remains" if len(legacy) == 1 else "decisions remain"
+                typer.echo(
+                    f"decide list: 0 law decisions for '{label}'; "
+                    f"{len(legacy)} pre-cutover {noun} unattributed. "
+                    "Use --lane unattributed to inspect them.",
+                    err=True,
+                )
+                return
+
         hint = (
             "" if _index_path().exists()
             else " (no index yet on this machine - run `fno decide reindex` to "
@@ -219,8 +253,9 @@ def list_cmd(
         # Across subjects the subject IS the column that tells the rows apart;
         # scoped to one it is the same word on every line.
         scope = "" if subject else f"{d.get('subject') or '(none)'}  "
+        lane_marker = "LAW" if d.get("lane") == "law" else d.get("lane", "")
         typer.echo(
-            f"{d.get('decision_id')}  {d.get('ts', '')}  {scope}"
+            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts', '')}  {scope}"
             f"{d.get('decided_by', '')}  {d.get('decision', '')}{marker}"
         )
         if d.get("rationale"):

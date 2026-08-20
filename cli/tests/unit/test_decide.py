@@ -95,6 +95,24 @@ def _events(root: Path) -> list[dict]:
     ]
 
 
+def _write_decision_index(index: Path, *rows: dict) -> None:
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "type": "operator_decision",
+                    "ts": row.pop("ts"),
+                    "data": row,
+                }
+            )
+            + "\n"
+            for row in rows
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_graph: Path, index: Path):
     """fno decide writes the event AND the graph projection."""
     res = runner.invoke(
@@ -357,6 +375,128 @@ def test_limit_caps_the_newest_and_zero_means_no_cap(
         ).stdout
     )
     assert len(uncapped["decisions"]) == 4
+
+
+@pytest.mark.parametrize(
+    "authority,ts,question_id,expected",
+    [
+        ("operator", "2026-08-21T00:00:01Z", None, "law"),
+        ("operator", "2026-08-20T23:59:59Z", "q-human", "unattributed"),
+        ("agent", "2026-08-20T23:59:59Z", None, "coord"),
+        ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
+        ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
+    ],
+    ids=["post-cutover-law", "legacy-question", "coord", "grant", "legacy"],
+)
+def test_list_derives_and_filters_authority_lanes_in_the_engine(
+    index: Path,
+    authority: str,
+    ts: str,
+    question_id: str | None,
+    expected: str,
+):
+    from fno.decide import list_decisions
+
+    row = {
+        "ts": ts,
+        "decision_id": f"d-{expected}",
+        "subject": "pr-923",
+        "decision": f"{expected} ruling",
+        "decided_by": "someone",
+        "authority_source": authority,
+    }
+    if question_id:
+        row["question_id"] = question_id
+    _write_decision_index(index, row)
+
+    _, decisions, _ = list_decisions("pr-923", lane=expected)
+    assert [d["lane"] for d in decisions] == [expected]
+    _, excluded, _ = list_decisions("pr-923", lane="unattributed" if expected != "unattributed" else "law")
+    assert excluded == []
+
+
+@pytest.mark.parametrize(
+    "authority,ts,question_id,marker",
+    [
+        ("operator", "2026-08-21T00:00:01Z", None, "LAW"),
+        ("agent", "2026-08-20T23:59:59Z", None, "coord"),
+        ("beastmode", "2026-08-20T23:59:59Z", None, "grant"),
+        ("operator", "2026-08-20T23:59:59Z", None, "unattributed"),
+    ],
+)
+def test_human_render_leads_with_the_authority_lane(
+    index: Path,
+    authority: str,
+    ts: str,
+    question_id: str | None,
+    marker: str,
+):
+    row = {
+        "ts": ts,
+        "decision_id": "d-render",
+        "subject": "pr-923",
+        "decision": "render me",
+        "decided_by": "someone",
+        "authority_source": authority,
+    }
+    if question_id:
+        row["question_id"] = question_id
+    _write_decision_index(index, row)
+
+    rendered = runner.invoke(decide_app, ["list", "--subject", "pr-923"])
+    assert rendered.exit_code == 0, rendered.output
+    assert rendered.stdout.startswith(f"{marker}  d-render")
+
+
+def test_json_rows_carry_the_derived_lane(index: Path):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-20T23:59:59Z",
+            "decision_id": "d-json",
+            "subject": "pr-923",
+            "decision": "coordinate",
+            "decided_by": "worker",
+            "authority_source": "agent",
+        },
+    )
+
+    result = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "coord", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["decisions"][0]["lane"] == "coord"
+
+
+def test_legacy_operator_rows_stay_byte_identical_and_empty_law_is_positive(
+    index: Path,
+):
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-20T23:59:59Z",
+            "decision_id": "d-legacy",
+            "subject": "pr-923",
+            "decision": "old writer stamped this operator",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+    )
+    before = index.read_bytes()
+
+    legacy = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "unattributed"]
+    )
+    assert legacy.exit_code == 0, legacy.output
+    assert legacy.stdout.startswith("unattributed  d-legacy")
+
+    law = runner.invoke(
+        decide_app, ["list", "--subject", "pr-923", "--lane", "law"]
+    )
+    assert law.exit_code == 0, law.output
+    assert "0 law decisions" in law.output
+    assert "1 pre-cutover decision remains unattributed" in law.output
+    assert index.read_bytes() == before
 
 
 # --- reindex: the records already on disk become readable -------------------
@@ -887,11 +1027,71 @@ def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     assert "the schema will not accept" in res.output
 
 
-def test_authority_source_is_stated_never_inferred(
-    root: Path, tmp_graph: Path, index: Path
+def test_resolve_agent_identity_defaults_decider_and_authority(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["decided_by"] == harness_identity.canonical_handle(session_id)
+    assert decision["authority_source"] == "agent"
+
+
+def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+
+    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["decided_by"] == "operator"
+    assert decision["authority_source"] == "operator"
+
+
+def test_decided_by_override_keeps_resolved_agent_authority(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Reading --decided-by as a beastmode grant writes wrong provenance into
     the field a reader months later trusts."""
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(
+            "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", "codex"
+        ),
+    )
+
     runner.invoke(
         decide_app,
         ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
@@ -899,7 +1099,8 @@ def test_authority_source_is_stated_never_inferred(
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
     )
-    assert payload["decisions"][0]["authority_source"] == "operator"
+    assert payload["decisions"][0]["decided_by"] == "J.N. Choi"
+    assert payload["decisions"][0]["authority_source"] == "agent"
 
     runner.invoke(
         decide_app,
@@ -914,6 +1115,139 @@ def test_authority_source_is_stated_never_inferred(
         runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
     )
     assert granted["decisions"][0]["authority_source"] == "beastmode"
+
+
+def test_record_decision_refuses_agent_operator_authority_before_either_write(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The engine is the choke point for every current and future CLI spelling."""
+    from fno import harness_identity
+    from fno.decide import RefusedAuthorityError, record_decision
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    with pytest.raises(RefusedAuthorityError, match=handle):
+        record_decision(
+            subject="pr-923",
+            decision="claim operator authority",
+            authority_source="operator",
+            events_root=root,
+        )
+    # Positive control: beastmode reaches both instruments, proving that their
+    # refusal-state contents below are meaningful rather than an unread probe.
+    written = record_decision(
+        subject="pr-923",
+        decision="use the granted authority",
+        authority_source="beastmode",
+        events_root=root,
+    )
+    journal_events = [e for e in _events(root) if e["type"] == "operator_decision"]
+    index_events = [
+        json.loads(line)
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [e["data"]["decision_id"] for e in journal_events] == [
+        written["decision_id"]
+    ]
+    assert [e["data"]["decision_id"] for e in index_events] == [
+        written["decision_id"]
+    ]
+
+
+def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(session_id, "codex"),
+    )
+
+    refused = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "claim operator authority",
+            "--authority",
+            "operator",
+        ],
+    )
+    assert refused.exit_code == 3, refused.output
+    assert handle in refused.output
+    assert "fno outstanding ask" in refused.output
+    assert "drop --authority operator" in refused.output
+
+    # The successful-control write proves both stores were inspected after the
+    # refused command, not merely absent because the writer never ran.
+    granted = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "use the granted authority",
+            "--authority",
+            "beastmode",
+        ],
+    )
+    assert granted.exit_code == 0, granted.output
+    did = granted.stdout.strip().splitlines()[-1]
+    assert [e["data"]["decision_id"] for e in _events(root)] == [did]
+    assert [
+        json.loads(line)["data"]["decision_id"]
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ] == [did]
+
+
+def test_no_identity_explicit_operator_authority_records(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+
+    recorded = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "operator ruling",
+            "--authority",
+            "operator",
+        ],
+    )
+    assert recorded.exit_code == 0, recorded.output
+    did = recorded.stdout.strip().splitlines()[-1]
+    assert _events(root)[0]["data"]["decision_id"] == did
+    assert _events(root)[0]["data"]["authority_source"] == "operator"
 
 
 def test_a_torn_archive_also_stops_the_backfill(

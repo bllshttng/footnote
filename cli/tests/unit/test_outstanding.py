@@ -10,6 +10,7 @@ absence has two explanations (the real outcome, or the instrument never ran)
 and a test built on one cannot tell them apart; test_hook_block_positive_control
 is the pair that closes that gap for the silent-on-zero case.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,8 +21,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno.harness_identity import HarnessIdentity
 from fno.outstanding.cli import outstanding_app
-from fno.outstanding.core import RENDER_CAP
+from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
 
 runner = CliRunner()
 
@@ -79,11 +81,17 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Sidecar/metadata seam readers resolve through paths.graph_json at call
     # time; pin the resolver too or the seam reads the real machine graph.
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(
+        "fno.paths.questions_jsonl",
+        lambda: tmp_path / "questions.jsonl",
+        raising=False,
+    )
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
 
 # --- 2.1 both legs -----------------------------------------------------------
+
 
 def test_both_legs_report_a_count_each(root: Path):
     _write_carveouts(
@@ -140,6 +148,7 @@ def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
 
 # --- 2.2 an unreadable ledger is a stated failure ----------------------------
 
+
 def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
     ledger = root / ".fno" / "carveouts.jsonl"
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +167,7 @@ def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
 
 
 # --- 2.3 ask then clear ------------------------------------------------------
+
 
 def test_ask_clear_round_trip_and_idempotence(root: Path):
     asked = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
@@ -200,6 +210,362 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert len(closed) == 1
     assert closed[0]["data"]["answer"] == "the codex lane"
     assert closed[0]["data"]["question_id"] == qid
+
+
+def test_asker_ask_field_options_and_blocks_are_recorded(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("fno.outstanding.cli._session_id", lambda: "ledger-run-id")
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: HarnessIdentity(session_id="01234567-full-session", harness="codex"),
+    )
+
+    asked = runner.invoke(
+        outstanding_app,
+        [
+            "ask",
+            "which implementation should land?",
+            "--ask",
+            "pick one",
+            "--option",
+            "index",
+            "--option",
+            "journal",
+            "--blocks",
+            "x-one",
+            "--blocks",
+            "x-two",
+        ],
+    )
+
+    assert asked.exit_code == 0, asked.output
+    event = json.loads((root / ".fno" / "events.jsonl").read_text().splitlines()[-1])
+    assert event["data"]["asker"] == "01234567"
+    assert event["data"]["ask"] == "pick one"
+    assert event["data"]["options"] == ["index", "journal"]
+    assert event["data"]["blocks"] == ["x-one", "x-two"]
+    assert event["data"]["session_id"] == "ledger-run-id"
+    assert "live" not in event["data"], "liveness is computed, never stored"
+
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable",
+        lambda asker: (object(), []) if asker == "01234567" else (None, []),
+    )
+    question = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"][0]
+    assert question == {
+        "id": event["data"]["question_id"],
+        "ts": event["ts"],
+        "question": "which implementation should land?",
+        "session_id": "ledger-run-id",
+        "cwd": str(Path.cwd()),
+        "node": None,
+        "asker": "01234567",
+        "ask": "pick one",
+        "options": ["index", "journal"],
+        "blocks": ["x-one", "x-two"],
+        "live": True,
+        "rank": 1,
+    }
+
+
+def test_live_is_computed_for_json_and_missing_asker_is_stale(
+    root: Path,
+):
+    from fno.outstanding.core import read_open_questions
+
+    def resolve(asker: str):
+        return (object(), []) if asker == "live-ask" else (None, [])
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-live", "2026-08-19T00:00:00Z", asker="live-ask", blocks=[]
+            ),
+            _indexed_question(
+                "q-stale", "2026-08-18T00:00:00Z", asker="gone-ask", blocks=[]
+            ),
+            {
+                "ts": "2026-08-17T00:00:00Z",
+                "type": "operator_question",
+                "source": "test",
+                "data": {"question_id": "q-legacy", "question": "legacy?"},
+            },
+        ],
+    )
+    questions = read_open_questions(
+        root,
+        liveness_budget_seconds=1.0,
+        clock=lambda: 0.0,
+        resolver=resolve,
+    )
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=questions,
+        captures=[],
+    )
+
+    payload = report.as_dict()["questions"]
+
+    assert {row["id"]: row["live"] for row in payload} == {
+        "q-live": True,
+        "q-stale": False,
+        "q-legacy": False,
+    }
+
+
+def test_liveness_budget_expiry_is_unknown_and_does_not_block_report(
+    root: Path,
+):
+    """AC-ERR: a blocked durable-store scan expires as explicit unknown."""
+    import multiprocessing
+    import threading
+
+    from fno.outstanding.core import read_open_questions
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-slow", "2026-08-19T00:00:00Z", asker="slow-ask", blocks=[]
+            )
+        ],
+    )
+    process_context = multiprocessing.get_context("fork")
+    started = process_context.Event()
+
+    def slow_resolver(_asker):
+        started.set()
+        time.sleep(1)
+        return object(), []
+
+    began = time.perf_counter()
+    questions = read_open_questions(
+        root, liveness_budget_seconds=0.1, resolver=slow_resolver
+    )
+    elapsed = time.perf_counter() - began
+    lingering = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name == "fno-question-liveness" and thread.is_alive()
+    ]
+
+    assert started.is_set()
+    assert elapsed < 0.4
+    assert lingering == []
+    assert questions[0].as_dict()["live"] is None
+    output = render(
+        Outstanding(0, {}, None, questions, [])
+    )
+    assert "Questions with unknown liveness" in output
+    assert "Stale questions" not in output
+
+
+def test_liveness_within_budget_keeps_resolver_fidelity_and_live_first(
+    root: Path,
+):
+    """AC-HP: completed reachable and stale answers retain exact semantics."""
+    from fno.outstanding.core import read_open_questions
+
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-stale", "2026-08-19T00:00:00Z", asker="stale", blocks=[]
+            ),
+            _indexed_question(
+                "q-live", "2026-08-19T01:00:00Z", asker="live", blocks=[]
+            ),
+        ],
+    )
+
+    def resolver(asker):
+        return (object(), []) if asker == "live" else (None, [])
+
+    questions = read_open_questions(
+        root,
+        liveness_budget_seconds=1.0,
+        clock=lambda: 0.0,
+        resolver=resolver,
+    )
+
+    assert [(q.id, q.live) for q in questions] == [
+        ("q-live", True),
+        ("q-stale", False),
+    ]
+
+
+def _write_indexed_questions(root: Path, rows: list[dict]) -> None:
+    (root / "questions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
+def _indexed_question(
+    qid: str,
+    ts: str,
+    *,
+    asker: str,
+    blocks: list[str],
+) -> dict:
+    return {
+        "ts": ts,
+        "type": "operator_question",
+        "source": "test",
+        "data": {
+            "question_id": qid,
+            "question": f"question {qid}",
+            "asker": asker,
+            "blocks": blocks,
+        },
+    }
+
+
+def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable",
+        lambda asker: (object(), []) if asker == "live" else (None, []),
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-zero", "2026-08-19T03:00:00Z", asker="live", blocks=[]
+            ),
+            _indexed_question(
+                "q-two", "2026-08-19T02:00:00Z", asker="live", blocks=["x-a", "x-b"]
+            ),
+            _indexed_question(
+                "q-one", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-stale", "2026-08-19T00:00:00Z", asker="stale", blocks=["x-a", "x-b", "x-c"]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-two", "q-one", "q-zero", "q-stale"]
+    assert [row["rank"] for row in payload] == [1, 2, 3, 4]
+
+
+def test_question_rank_uses_oldest_then_id_within_a_block_count(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (object(), [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-new", "2026-08-19T03:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-z", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-a", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-a", "q-z", "q-new"]
+    assert [row["rank"] for row in payload] == [1, 2, 3]
+
+
+def test_question_render_cap_shows_ten_and_names_true_total(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("fno.agents.discover.resolve_reachable", lambda _asker: (None, []))
+    rows = [
+        _indexed_question(
+            f"q-{i:02d}", f"2026-08-19T{i:02d}:00:00Z", asker="stale", blocks=[]
+        )
+        for i in range(11)
+    ]
+    _write_indexed_questions(root, rows)
+
+    out = runner.invoke(outstanding_app, []).stdout
+
+    assert sum(row["data"]["question_id"] in out for row in rows) == 10
+    assert "Showing 10 of 11 open questions" in out
+
+
+def test_stale_questions_render_under_visible_heading_with_age(
+):
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question(
+                "q-stale",
+                stale_ts,
+                "which lane?",
+                asker="gone-ask",
+                ask="pick a lane",
+                live=False,
+            )
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Stale questions" in output
+    assert "2 days old" in output
+    assert "records the decision but reaches nobody" in output
+
+
+def test_manual_question_liveness_tristate_renders_and_serializes_explicitly():
+    questions = [
+        Question("q-live", "2026-08-19T00:00:00Z", "live?", live=True),
+        Question("q-stale", "2026-08-19T00:00:01Z", "stale?", live=False),
+        Question("q-unknown", "2026-08-19T00:00:02Z", "unknown?", live=None),
+    ]
+    report = Outstanding(0, {}, None, questions, [])
+
+    assert [row["live"] for row in report.as_dict()["questions"]] == [
+        True,
+        False,
+        None,
+    ]
+    output = render(report)
+    assert "Live open questions" in output
+    assert "Stale questions" in output
+    assert "Questions with unknown liveness" in output
+
+
+def test_clear_preserves_asker_as_the_best_answer_provenance(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: HarnessIdentity(session_id="89abcdef-full-session", harness="codex"),
+    )
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
+    recorded: dict[str, object] = {}
+
+    def record_decision(**kwargs):
+        recorded.update(kwargs)
+        return {"decision_id": "d-recorded"}
+
+    monkeypatch.setattr("fno.decide.record_decision", record_decision)
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coord"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert recorded["asked_by"] == "89abcdef"
 
 
 def test_clear_with_answer_emits_operator_decision(root: Path):
@@ -346,7 +712,181 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
 
 
+# --- 2.2 machine-wide question index ---------------------------------------
+
+
+def test_question_index_dual_writes_ask_and_close(root: Path):
+    asked = runner.invoke(outstanding_app, ["ask", "which lane ships first?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+
+    project_path = root / ".fno" / "events.jsonl"
+    index_path = root / "questions.jsonl"
+    project_ask = json.loads(project_path.read_text(encoding="utf-8").splitlines()[-1])
+    index_ask = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert project_ask == index_ask
+    assert project_ask["data"]["question_id"] == qid
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid])
+    assert cleared.exit_code == 0, cleared.output
+    project_close = json.loads(project_path.read_text(encoding="utf-8").splitlines()[-1])
+    index_close = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert project_close == index_close
+    assert project_close["type"] == "operator_question_closed"
+    assert project_close["data"]["question_id"] == qid
+
+
+def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
+    from fno import paths
+    from fno.events import append_event as real_append_event
+
+    index_path = paths.questions_jsonl()
+    monkeypatch.setattr("fno.outstanding.cli.secrets.token_hex", lambda _n: "feedface")
+
+    def fail_index(event, *, events_path=None):
+        if events_path == index_path:
+            raise OSError("index unavailable")
+        return real_append_event(event, events_path=events_path)
+
+    monkeypatch.setattr("fno.events.append_event", fail_index)
+    result = runner.invoke(outstanding_app, ["ask", "which index?"])
+
+    assert result.exit_code == 1
+    assert "q-feedface" in result.output
+    assert "fno outstanding reindex" in result.output
+    durable = json.loads(
+        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert durable["data"]["question_id"] == "q-feedface"
+
+
+def test_question_close_index_failure_names_id_and_reindex(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno import paths
+    from fno.events import append_event as real_append_event
+
+    asked = runner.invoke(outstanding_app, ["ask", "which close path?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+    index_path = paths.questions_jsonl()
+
+    def fail_close_index(event, *, events_path=None):
+        if event["type"] == "operator_question_closed" and events_path == index_path:
+            raise OSError("index unavailable")
+        return real_append_event(event, events_path=events_path)
+
+    monkeypatch.setattr("fno.events.append_event", fail_close_index)
+    result = runner.invoke(outstanding_app, ["clear", qid])
+
+    assert result.exit_code == 1
+    assert qid in result.output
+    assert "fno outstanding reindex" in result.output
+    project_close = json.loads(
+        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert project_close["type"] == "operator_question_closed"
+    index_last = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert index_last["type"] == "operator_question"
+
+
+def test_missing_question_index_reports_empty_with_reindex_hint(root: Path):
+    result = runner.invoke(outstanding_app, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["questions"] == []
+    assert "fno outstanding reindex" in result.stderr
+
+
+def test_unreadable_question_index_is_a_failed_read(root: Path):
+    index_path = root / "questions.jsonl"
+    index_path.mkdir()
+
+    result = runner.invoke(outstanding_app, ["--json"])
+
+    assert result.exit_code == 1
+    assert "failed to read" in result.output
+    assert "questions.jsonl" in result.output
+
+
+def test_reindex_is_idempotent_and_machine_wide(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.events import append_event, operator_question, operator_question_closed
+    from fno.outstanding.core import events_path
+
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    first = operator_question(
+        question_id="q-first",
+        question="first project question",
+        session_id="s-first",
+        cwd=str(root),
+    )
+    first["ts"] = "2026-08-19T00:00:00Z"
+    second = operator_question(
+        question_id="q-second",
+        question="second project question",
+        session_id="s-second",
+        cwd=str(sibling),
+    )
+    second["ts"] = "2026-08-19T00:01:00Z"
+    closed = operator_question_closed(question_id="q-first", closed_by="operator")
+    closed["ts"] = "2026-08-19T00:02:00Z"
+    append_event(first, events_path=events_path(root))
+    append_event(second, events_path=events_path(sibling))
+    append_event(closed, events_path=events_path(root))
+    monkeypatch.setattr(
+        "fno.outstanding.core._capture_project_roots", lambda _root: [root, sibling]
+    )
+
+    indexed = runner.invoke(outstanding_app, ["reindex"])
+    assert indexed.exit_code == 0, indexed.output
+    assert "3 event(s) added" in indexed.output
+    indexed_again = runner.invoke(outstanding_app, ["reindex"])
+    assert indexed_again.exit_code == 0, indexed_again.output
+    assert "0 event(s) added" in indexed_again.output
+
+    monkeypatch.setattr("fno.outstanding.cli._storage_root", lambda: root)
+    from_first = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+    monkeypatch.setattr("fno.outstanding.cli._storage_root", lambda: sibling)
+    from_second = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+    assert from_first == from_second
+    assert [row["id"] for row in from_first] == ["q-second"]
+
+    indexed_events = [
+        json.loads(line)
+        for line in (root / "questions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert indexed_events == [first, closed, second]
+
+
+def test_reindex_dedupes_symlinked_journals_by_inode(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.events import append_event, operator_question
+    from fno.outstanding.core import events_path
+
+    append_event(
+        operator_question(
+            question_id="q-control",
+            question="positive control",
+            session_id="s-control",
+            cwd=str(root),
+        ),
+        events_path=events_path(root),
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr("fno.outstanding.core._capture_project_roots", lambda _root: [root, alias])
+
+    from fno.outstanding.core import _question_journals
+
+    assert _question_journals(root) == [events_path(root)]
+
+
 # --- 3rd leg: the capture fold -----------------------------------------------
+
 
 def _write_inbox(root: Path, lines: list[str]) -> Path:
     inbox = root / "internal" / "fno" / "backlog" / "inbox.md"
@@ -364,6 +904,201 @@ def _capture_event(fu_id: str, ts: str) -> str:
             "data": {"session_id": "manual", "fu_id": fu_id, "title": "t"},
         }
     )
+
+
+def test_capture_project_roots_reads_graph_without_importing_tracker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: the default fold stays off the heavy tracker import path."""
+    import builtins
+
+    from fno.outstanding.core import _capture_project_roots
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-this", "cwd": str(this)},
+                    {"id": "x-sibling", "source_cwd": str(sibling)},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    real_import = builtins.__import__
+
+    def refuse_tracker_import(name, *args, **kwargs):
+        if name == "fno.tracker" or name.startswith("fno.tracker."):
+            raise AssertionError("default graph fold imported fno.tracker")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_tracker_import)
+
+    assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
+
+
+def test_capture_project_roots_does_not_resolve_every_graph_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: later physical-store dedup owns filesystem resolution."""
+    from fno.outstanding.core import _capture_project_roots
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"cwd": str(this)}, {"cwd": str(sibling)}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    real_resolve = Path.resolve
+    resolved: list[Path] = []
+
+    def track_resolve(path, *args, **kwargs):
+        resolved.append(path)
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", track_resolve)
+
+    roots = _capture_project_roots(this)
+
+    assert roots == [sibling, this]
+    assert resolved == [this]
+
+
+def test_capture_project_roots_preserves_external_backend_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-EDGE: non-graph trackers still discover roots through sidecars."""
+    from types import SimpleNamespace
+
+    from fno.outstanding.core import _capture_project_roots
+    from fno.tracker import sidecar as sidecar_store
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    monkeypatch.setattr(
+        sidecar_store,
+        "load_all",
+        lambda: {
+            "external-1": SimpleNamespace(cwd=None, source_cwd=str(sibling)),
+        },
+    )
+
+    assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
+
+
+def test_storage_root_skips_worktree_scan_in_canonical_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: a canonical checkout needs no git worktree subprocess."""
+    from fno.outstanding.cli import _storage_root
+
+    canonical = tmp_path / "canonical"
+    (canonical / ".git").mkdir(parents=True)
+    monkeypatch.chdir(canonical)
+
+    def refuse_repo_probe():
+        raise AssertionError("canonical checkout ran the repo resolver")
+
+    monkeypatch.setattr("fno.paths.resolve_repo_root", refuse_repo_probe)
+
+    def refuse_worktree_scan():
+        raise AssertionError("canonical checkout ran the worktree resolver")
+
+    monkeypatch.setattr(
+        "fno.carveout.core.resolve_carveout_root", refuse_worktree_scan
+    )
+
+    assert _storage_root() == canonical
+
+
+def test_session_id_reads_manifest_without_importing_state_stack(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: report ownership needs two scalars, not state/filelock."""
+    import builtins
+
+    from fno.outstanding.cli import _session_id
+
+    (root / ".fno" / "target-state.md").write_text(
+        "---\nfno_id: run-fast\nsession_id: run-legacy\n---\nbody session_id: wrong\n",
+        encoding="utf-8",
+    )
+    real_import = builtins.__import__
+
+    def refuse_state_import(name, *args, **kwargs):
+        if name == "fno.state" or name.startswith("fno.state."):
+            raise AssertionError("outstanding report imported the state stack")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_state_import)
+
+    assert _session_id() == "run-fast"
+
+
+def test_capture_fold_resolves_one_inbox_per_repo_but_reads_each_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: worktrees share config lookup, not capture-event history."""
+    from fno.outstanding.core import _read_open_captures_with_counts
+
+    canonical = tmp_path / "repo"
+    worktree_a = tmp_path / "worktree-a"
+    worktree_b = tmp_path / "worktree-b"
+    git_dir = canonical / ".git"
+    git_dir.mkdir(parents=True)
+    for name, worktree in (("a", worktree_a), ("b", worktree_b)):
+        worktree.mkdir()
+        worktree_git_dir = git_dir / "worktrees" / name
+        worktree_git_dir.mkdir(parents=True)
+        (worktree / ".git").write_text(
+            f"gitdir: {worktree_git_dir}\n", encoding="utf-8"
+        )
+    inbox = tmp_path / "inbox.md"
+    inbox.write_text("- [ ] fu-aaaaaa - one\n", encoding="utf-8")
+    roots = [canonical, worktree_a, worktree_b]
+    monkeypatch.setattr(
+        "fno.outstanding.core._capture_project_roots", lambda _root: roots
+    )
+    inbox_calls: list[Path] = []
+
+    def resolve_inbox(*, project_root):
+        inbox_calls.append(project_root)
+        return inbox
+
+    monkeypatch.setattr("fno.paths.inbox_path", resolve_inbox)
+    journal_calls: list[Path] = []
+
+    def added_at(project_root):
+        journal_calls.append(project_root)
+        return {}
+
+    monkeypatch.setattr("fno.outstanding.core._capture_added_at", added_at)
+    monkeypatch.setattr(
+        "fno.outstanding.core.events_path",
+        lambda project_root: project_root / ".fno" / "events.jsonl",
+    )
+
+    captures, file_total, row_total = _read_open_captures_with_counts(canonical)
+
+    assert inbox_calls == [canonical]
+    assert set(journal_calls) == set(roots)
+    assert [row.fu_id for row in captures] == ["fu-aaaaaa"]
+    assert (file_total, row_total) == (1, 1)
 
 
 @pytest.fixture()
@@ -538,6 +1273,7 @@ def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
 
 # --- 2.5 the SessionStart block ---------------------------------------------
 
+
 def test_hook_block_is_silent_on_zero(root: Path):
     result = runner.invoke(outstanding_app, [])
     assert result.exit_code == 0
@@ -558,6 +1294,7 @@ def test_hook_block_positive_control(root: Path):
 
 # --- 3.3 output modes --------------------------------------------------------
 
+
 def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
     _write_carveouts(root, [_carveout("cv-1", "deferred")])
     runner.invoke(outstanding_app, ["ask", "a question"])
@@ -568,6 +1305,7 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 
 
 # --- 5.2 the asking session's own questions lead -----------------------------
+
 
 def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
@@ -604,12 +1342,10 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     monkeypatch.delenv("FNO_THINK_SPAWN_PRESENCE", raising=False)
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
-    # Bounded by the cap, never the whole queue.
-    assert out.count("question number") == 3
-    assert "3 more" in out
+    assert out.count("question number") == 6
     # Every rendered row carries an id, so the clear instruction has an operand.
     assert "fno outstanding clear" in out
-    assert out.count("q-") >= 3
+    assert out.count("q-") >= 6
 
 
 def test_an_attended_session_does_see_other_sessions_questions(
@@ -631,14 +1367,12 @@ def test_an_attended_session_does_see_other_sessions_questions(
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
-    # Capped: a growing pile reads as a number, not as a wall.
-    assert out.count("question number") == 3
-    assert "3 more" in out
+    assert out.count("question number") == 6
 
 
 def test_render_caps_rows_and_states_the_drop_count(root: Path):
-    for i in range(5):
+    for i in range(11):
         runner.invoke(outstanding_app, ["ask", f"q{i}"])
     out = runner.invoke(outstanding_app, []).stdout
-    assert "5 open question" in out
-    assert "2 more" in out
+    assert "11 open question" in out
+    assert "Showing 10 of 11 open questions" in out

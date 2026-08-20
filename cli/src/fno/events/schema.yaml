@@ -2195,6 +2195,20 @@ event_types:
         node:
           type: string
           description: "Optional. The backlog node the question is about, when the asking session has one bound."
+        asker:
+          type: string
+          description: "Optional. The asking session's canonical mail handle, resolved at ask time so an answer can route back."
+        ask:
+          type: string
+          description: "Optional. One line naming the action that closes the question."
+        options:
+          type: array
+          items: { type: string }
+          description: "Optional choices when the question is a pick rather than free text."
+        blocks:
+          type: array
+          items: { type: string }
+          description: "Optional backlog node ids that stop while the question remains open."
     consumers: [operator, fno-agents needs]
 
   - name: operator_question_closed
@@ -2247,10 +2261,10 @@ event_types:
           description: "Optional. What was on the table, so a later reader sees what was rejected."
         decided_by:
           type: string
-          description: "Optional. The operator, or the agent that decided under a beastmode grant."
+          description: "Optional. The operator name or canonical agent handle; omitted values resolve from ambient session identity."
         authority_source:
           type: string
-          description: "Optional. How the decider was entitled to decide: operator, beastmode, etc."
+          description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."
         rationale:
           type: string
           description: "Optional. One line: the reason, not a restatement."
