@@ -44,8 +44,10 @@ DIRECTORY, not the file, so a worker that mutates the graph needs the root
 itself. Granting the children instead would leave every graph write refused.
 
 A project that does not want the sibling-worktree reach moves them out with
-``config.paths.worktrees_base``; the harness-native default already places them
-at ``<repo>/.claude/worktrees`` rather than under the state root.
+``config.paths.worktrees_base``. The harness-native default already places them
+inside the repo rather than under the state root, so the overlap is a
+machine-local consequence of pointing the base at the state root, not the
+shipped shape.
 """
 
 from __future__ import annotations

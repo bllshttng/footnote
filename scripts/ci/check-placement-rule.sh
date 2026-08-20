@@ -210,6 +210,7 @@ cli/src/fno/runtime/worktree.py
 cli/src/fno/scoreboard/fold.py
 cli/src/fno/setup_cli.py
 cli/src/fno/setup/cli_hooks.py
+cli/src/fno/setup/doctor.py
 cli/src/fno/setup/integration.py
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
