@@ -1421,32 +1421,30 @@ def _branch_node_ids(head_ref):
     return ids
 
 
-def _file_trailer_claims(path, ids):
-    """True when the file at `path` has a last trailer line naming every id.
+def _body_file_is_unjudgeable(path):
+    """A `--body-file` path this hook cannot judge, which is all of them.
 
-    Reads the LAST `Backlog-Closure:` line only, and accepts whitespace or a
-    comma either side of an id, both mirroring check-pr-node-closure.sh.
+    This used to read the file and deny when its last trailer did not claim
+    every id. That is unsound, because a PreToolUse hook runs BEFORE the
+    command. Two spellings broke on it, both of them the flow
+    skills/pr/references/create.md now prescribes:
 
-    An unreadable path returns True, not False. A PreToolUse hook runs BEFORE
-    the command, so the usual spelling - compose into a file, then pass it -
-    presents a path that does not exist yet: `printf '%s\\n' "$BODY" >
-    .fno/pr-body.md` and `gh pr create --body-file .fno/pr-body.md` in one call.
-    Reading that as "no claim" denied a body composed correctly one line later,
-    the false DENY this gate's contract rules out. Unreadable means the hook
-    cannot judge, and an unjudgeable body-file falls to the false-ALLOW side
-    that CI still catches.
+      printf '%s\\n' "$BODY" > .fno/pr-body.md && gh pr create --body-file .fno/pr-body.md
+
+    On a first run the path does not exist yet, and reading that as "no claim"
+    denied a body composed correctly one line later. On a LATER run a stale
+    .fno/pr-body.md from a previous PR sits at that fixed, never-cleaned path,
+    and the hook judged the old contents of a file the very same command is
+    about to overwrite. Same defect, opposite symptom.
+
+    The hook cannot distinguish a stale file from a final one, so it never had
+    a sound DENY here. Its contract already names the tradeoff: the only
+    failure mode is a false ALLOW, which CI still catches, and a composed body
+    is never denied. Returning True for every body-file is that contract said
+    plainly, rather than a read that is right only when the file happens to be
+    current. `path` is unused and kept for the caller's readability.
     """
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return True
-    lines = re.findall(r"(?im)^Backlog-Closure:[ \t]*(.*)$", text)
-    if not lines:
-        return False
-    claimed = lines[-1]
-    return all(
-        re.search(rf"(^|[\s,]){re.escape(node_id)}($|[\s,])", claimed) for node_id in ids
-    )
+    return True
 
 
 def _pr_create_signals(seg):
@@ -1522,8 +1520,8 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     # reaches this os.environ - and _effective_argv strips the assignment, so
     # the segment still matched and still denied. The documented hatch was a
     # dead end, and the refusal message taught it. `hatch` carries the
-    # POSITION-checked answer from _segment_has_closure_hatch; never re-derive
-    # it from a substring search over the command.
+    # POSITION-checked answer from _pr_create_signals; never re-derive it from
+    # a substring search over the command.
     if hatch or os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
         return None
     ids = _branch_node_ids(head if head else get_current_branch())
@@ -1537,16 +1535,28 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
         return None
     for path in body_files:
-        if _file_trailer_claims(path, ids):
+        if _body_file_is_unjudgeable(path):
             return None
+    # This message NAMES candidates and never prescribes a trailer to paste.
+    # A refusal is the highest-trust text a blocked agent reads, so advice here
+    # is a PRODUCER of claims, and this producer has no graph to check against.
+    # `_branch_node_ids` reads the id GRAMMAR, which ordinary English also fits:
+    # on `fix-dead-code` it yields `fix-dead`. The old message told the author
+    # to write `Backlog-Closure: fix-dead`, which greens CI and then makes
+    # `bind_closure_claims` refuse the WHOLE binding at merge, so the real node
+    # never closes and nothing says so. `ensure_closure_trailer` refuses that
+    # exact claim on the producer side; this text used to advise it.
+    # So it points at the generator, which DOES read the graph.
     return (
-        f"[fno closure trailer] branch names {', '.join(ids)}, so "
-        f"check-pr-node-closure reds this PR unless the body carries the exact "
-        f"trailer. Add this as its own paragraph in the body:\n"
-        f"    Backlog-Closure: {' '.join(ids)}\n"
-        f"Generate it (with contained_in descendants) via "
-        f"`fno pr closure-trailer {ids[0]}`. Ad-hoc PR that closes nothing: "
-        f"re-run with FNO_PR_CLOSURE_OK=1."
+        f"[fno closure trailer] branch segments that fit the node-id grammar: "
+        f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
+        f"claims at least one REAL node.\n"
+        f"Generate the line (graph-checked, with contained_in descendants) via "
+        f"`fno pr closure-trailer <node-id>` and paste its output.\n"
+        f"Do NOT paste a candidate from this message: a segment can match the "
+        f"grammar without being a node, and one unknown id voids the whole "
+        f"binding at merge.\n"
+        f"Ad-hoc PR that closes nothing: re-run with FNO_PR_CLOSURE_OK=1."
     )
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -157,7 +158,12 @@ def known_node_ids() -> frozenset[str]:
             for e in read_graph(graph_json())
             if isinstance(e, dict) and isinstance(e.get("id"), str)
         )
-    except Exception:
+    except Exception as exc:
+        # Say so. Returning empty silently turns the producer into a no-op:
+        # no trailer is written, the PR opens, and the only symptom is a red
+        # gate that names the branch rather than the read that failed.
+        print(f"fno: closure trailer cannot read the graph ({exc}); "
+              f"claiming no branch-derived node", file=sys.stderr)
         return frozenset()
 
 

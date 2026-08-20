@@ -210,12 +210,24 @@ def ship(
                 "error": base_msg or "stale base: refused to open PR from a stale base",
                 "branch": branch,
             }
-        # Claim this branch's node(s) in the exact trailer BEFORE gh sees the
-        # body (x-49ec). Unconditional: it is a no-op on a non-node branch and
+        # Claim this session's node in the exact trailer BEFORE gh sees the
+        # body. Unconditional: it is a no-op with nothing to claim and
         # idempotent on a body that already claims them.
+        #
+        # The MANIFEST id leads, and the branch is only a fallback. The branch
+        # name is a guess that the graph then has to confirm, while
+        # `_read_graph_node_id` is what this session actually claimed - and it
+        # was already being read 50 lines below, for the PR that this same call
+        # was labelling from the branch. On a reused or handed-off worktree the
+        # branch still carries a previous node, so the trailer closed something
+        # this PR does not ship. Passing it as `extra_ids` also keeps
+        # `contained_in` descendants reachable, which a branch-derived id drops.
         from fno.pr.closure import ensure_closure_trailer
 
-        body = ensure_closure_trailer(body, branch)
+        manifest_node = _read_graph_node_id(state_path)
+        body = ensure_closure_trailer(
+            body, branch, extra_ids=[manifest_node] if manifest_node else None
+        )
         # Create new PR
         create_result = subprocess.run(
             [

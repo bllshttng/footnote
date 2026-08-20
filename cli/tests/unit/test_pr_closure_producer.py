@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -286,8 +287,18 @@ def test_hook_denies_a_bare_create_from_a_node_branch(monkeypatch):
         'gh pr create --title t --body "$BODY"', "feature/x-49ec", monkeypatch=monkeypatch
     )
     assert reason is not None
-    assert "Backlog-Closure: x-49ec" in reason
-    assert "fno pr closure-trailer x-49ec" in reason
+    # The refusal NAMES the candidate and never prescribes a trailer to paste.
+    # A gate's remediation advice is a PRODUCER of claims, and this producer
+    # reads no graph: `_branch_node_ids` matches the id GRAMMAR, which ordinary
+    # English also fits (`fix-dead-code` yields `fix-dead`). The old text told
+    # the author to write that id, which greens CI and then voids the whole
+    # binding at merge - the exact claim `ensure_closure_trailer` refuses.
+    assert "x-49ec" in reason
+    assert "Backlog-Closure: x-49ec" not in reason, (
+        "the refusal prescribes a literal trailer again, which is the "
+        "unverified-mint defect this text was rewritten to close"
+    )
+    assert "fno pr closure-trailer" in reason
 
 
 def test_hook_allows_a_non_node_branch(monkeypatch):
@@ -322,10 +333,67 @@ def test_a_batch_branch_never_parses_as_node_bearing(domain):
     assert _gate(ensure_closure_trailer("Batch body.", ref, known_ids=KNOWN), ref) == 0
 
 
+@pytest.mark.parametrize(
+    "head_ref",
+    [
+        # The regression. `cache-dead` fits the id grammar and is ordinary
+        # English, so the producer refuses to claim it while the gate demanded
+        # it, and NO body satisfied both. Measured against the pre-fix gate:
+        # this ref exits 1 there and 0 here. It is the docstring's own example.
+        "feature/x-49ec-cache-dead",
+        # These two already passed both gates and are pinned so they keep
+        # passing. Saying which is which matters: three green rows over a
+        # one-row fix reads as threefold proof.
+        "feature/x-49ec-tidy-docs",
+        "feature/x-49ec",
+    ],
+)
+def test_what_the_producer_writes_always_satisfies_the_gate(head_ref):
+    # The property the two halves must share, run END TO END rather than
+    # asserted on the producer alone. The previous parity test pinned the
+    # producer half and never invoked `_gate`, so a gate demanding an
+    # unclaimable id passed it.
+    body = ensure_closure_trailer("Summary.", head_ref, known_ids=KNOWN)
+    assert _gate(body, head_ref) == 0, (
+        f"producer wrote a body the gate rejects for {head_ref!r}: {body!r}"
+    )
+
+
+def test_a_branch_naming_no_real_node_still_fails_the_gate():
+    # The other half of the property, and NOT a bug. On `fix-dead-code` the
+    # only candidate is `fix-dead`, which the graph does not carry, so the
+    # producer writes no trailer and the gate correctly demands a real claim.
+    # The author names the real node or takes the documented hatch.
+    # Without this case the parity test above reads as "the producer can always
+    # satisfy the gate", which is false and would justify deleting the gate.
+    body = ensure_closure_trailer("Summary.", "fix-dead-code", known_ids=KNOWN)
+    assert "Backlog-Closure" not in body
+    assert _gate(body, "fix-dead-code") != 0
+
+
+def test_the_gate_still_fails_a_body_that_claims_nothing():
+    # The negative control for the parity test. Loosening the gate to "at least
+    # one" must not loosen it to "never fails", which is the shape that reads
+    # as a passing gate while checking nothing.
+    assert _gate("Summary with no trailer at all.", "feature/x-49ec") != 0
+
+
 def test_hook_docstrings_do_not_claim_creation_is_ungated():
     # A PR must not ship a doc its own code disproves.
+    #
+    # Assert a POSITIVE marker, never an absence. The old body checked that one
+    # exact phrase was gone, so any REWORD of the same stale claim passed and
+    # the test read as protection. An absence has two explanations, the real
+    # outcome and "the instrument never ran", and this one could not tell them
+    # apart: it passes identically against an empty file.
     text = HOOK.read_text(encoding="utf-8")
-    assert "it's always allowed" not in text
+    assert text, "hook source read as empty, so any absence check here is vacuous"
+    # The docstring must state the gate that actually exists.
+    assert "_closure_trailer_refusal" in text
+    assert re.search(r"gh pr create.{0,400}closure", text, re.IGNORECASE | re.DOTALL), (
+        "the hook no longer documents that it gates `gh pr create` on a "
+        "closure trailer, so its docstring and its code disagree"
+    )
 
 
 def test_hook_escape_hatch_clears_the_gate(monkeypatch):
@@ -497,7 +565,10 @@ def test_hook_still_denies_a_node_bearing_explicit_head(node_branch_repo):
         'gh pr create --head feature/x-1111 --body "$BODY"', node_branch_repo
     )
     assert payload["permissionDecision"] == "deny"
-    assert "Backlog-Closure: x-1111" in payload["permissionDecisionReason"]
+    # The --head id is still what gets NAMED, and is still not prescribed.
+    reason = payload["permissionDecisionReason"]
+    assert "x-1111" in reason
+    assert "Backlog-Closure: x-1111" not in reason
 
 
 @pytest.mark.parametrize("flag", ["--body-file", "-F"])
@@ -508,12 +579,28 @@ def test_hook_reads_a_body_file_under_either_spelling(flag, node_branch_repo, tm
     assert payload is None or payload["permissionDecision"] != "deny"
 
 
-def test_hook_denies_a_body_file_missing_the_claim(node_branch_repo, tmp_path):
+def test_hook_never_denies_on_a_body_file_it_cannot_judge(node_branch_repo, tmp_path):
+    # A stale file must NOT deny. This hook runs BEFORE the command, so a
+    # fixed, never-cleaned path like .fno/pr-body.md holds the PREVIOUS PR's
+    # body while the very same command is about to overwrite it. Judging that
+    # content denied the compose-then-pass flow skills/pr/references/create.md
+    # prescribes. The hook cannot tell stale from final, so it never had a
+    # sound deny here, and its contract already accepts a false ALLOW that CI
+    # catches while ruling out a false DENY.
     body = tmp_path / "pr-body.md"
     body.write_text("Summary.\n\nBacklog-Closure: x-1111\n")
     payload = _hook_main(f"gh pr create --title t --body-file {body}", node_branch_repo)
-    assert payload["permissionDecision"] == "deny"
-    assert "Backlog-Closure: x-49ec" in payload["permissionDecisionReason"]
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_never_denies_on_a_body_file_that_does_not_exist_yet(node_branch_repo, tmp_path):
+    # The same defect with the opposite symptom, and the reason the sound
+    # answer is "always allow" rather than "read it more carefully".
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {tmp_path / 'not-written-yet.md'}",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
 
 
 def test_hook_allows_a_body_file_the_same_command_is_about_to_write(node_branch_repo, tmp_path):
@@ -533,7 +620,10 @@ def test_hook_denies_the_full_pretooluse_payload(node_branch_repo):
     # reason nothing calls is the decorative-guard shape this node exists to fix.
     payload = _hook_main('gh pr create --title t --body "$BODY"', node_branch_repo)
     assert payload["permissionDecision"] == "deny"
-    assert "Backlog-Closure: x-49ec" in payload["permissionDecisionReason"]
+    reason = payload["permissionDecisionReason"]
+    assert "x-49ec" in reason
+    assert "fno pr closure-trailer" in reason
+    assert "Backlog-Closure: x-49ec" not in reason
 
 
 def test_hook_main_allows_a_composed_body(node_branch_repo):

@@ -119,14 +119,36 @@ for cand in "${candidates[@]}"; do
   fi
 done
 
-if [[ ${#missing[@]} -gt 0 ]]; then
+# AT LEAST ONE claimed, never all of them. This gate has no graph (see the
+# format-check note above), so it cannot tell a real node id from ordinary
+# English that fits the same grammar. The producer CAN, and refuses to claim
+# an id the graph does not carry, because one unknown id makes
+# bind_closure_claims refuse the WHOLE binding at merge.
+#
+# Demanding all of them therefore made some branches unsatisfiable rather than
+# merely strict: on "feature/x-49ec-cache-dead" the producer writes x-49ec and
+# this gate demanded "cache-dead", so no body passed both. Reproduced live
+# before this change. An unsatisfiable gate is worse than a liberal one - it
+# has no green state, so the only way past it is to ignore it.
+#
+# One claim still catches the defect this gate exists for: a `gh pr create`
+# that wrote no trailer at all names zero ids and fails here.
+claimed=$(( ${#candidates[@]} - ${#missing[@]} ))
+if [[ $claimed -eq 0 ]]; then
   {
-    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${missing[*]}"), but the exact trailer omits it."
-    echo "  Add (or extend) a line reading:"
-    echo "    Backlog-Closure: ${missing[*]}"
-    echo "  Generate it with: fno pr closure-trailer <node-id>"
+    echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact trailer claims none of them."
+    echo "  Add a line reading:"
+    echo "    Backlog-Closure: <the node id this PR closes>"
+    echo "  Generate it with: fno pr closure-trailer <node-id>, which checks the"
+    echo "  id against the graph. Do NOT paste a candidate from this message:"
+    echo "  a branch segment can match the id grammar without being a real node,"
+    echo "  and one unknown id voids the whole binding at merge."
   } >&2
   exit 1
 fi
 
-echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' node id(s) [${candidates[*]}] all present in the exact trailer."
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' claims $claimed of ${#candidates[@]} candidate(s); unclaimed: ${missing[*]} (not demanded - this gate reads no graph)."
+else
+  echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' node id(s) [${candidates[*]}] all present in the exact trailer."
+fi
