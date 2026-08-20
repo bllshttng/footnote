@@ -927,6 +927,23 @@ def cmd_crown(
     print(json.dumps(receipt))
 
 
+@agents_app.command("court", hidden=True)
+def cmd_court(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON instead of the table."
+    ),
+) -> None:
+    """The whole court: every live crown, its scope, its holder, its grantor,
+    and whether the registry and the graph agree - the read that answers "did
+    the coronations work" without trusting the absence of a disagreement.
+
+    Exit 0 always: this is a read, and a caller gates on the JSON keys
+    (``agree``, ``summary.disagreements``, ``summary.unknowns``), not the
+    process status.
+    """
+    from fno.agents.court import render_court
+
+    print(render_court(json_output))
 
 
 @agents_app.command("spawn")
