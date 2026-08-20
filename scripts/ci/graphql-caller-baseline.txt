@@ -30,5 +30,5 @@
 # is routed rather than raw.
 fno-process-proxy 110
 fixed-purpose-adapter 19
-operator-guard-definition 7
+operator-guard-definition 5
 quota-soak-broker 1

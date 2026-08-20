@@ -80,13 +80,19 @@ self_test() {
     echo 'exit 0' > "$tmp/scripts/ci/check-ok.sh"
     echo 'exit 0' > "$tmp/scripts/ci/check-unlisted.sh"
     echo 'exit 0' > "$tmp/scripts/ci/check-mentioned.sh"
-    # check-ok.sh is RUN. check-mentioned.sh is only named, the way a paths:
+    echo 'exit 0' > "$tmp/scripts/ci/check-underdeclared.sh"
+    # check-ok.sh is RUN. check-mentioned.sh is only NAMED, the way a paths:
     # filter names a file - the decorative case the whole gate exists to catch.
-    printf 'on:\n  push:\n    paths:\n      - scripts/ci/check-mentioned.sh\njobs:\n  a:\n    steps:\n      - run: bash scripts/ci/check-ok.sh\n' \
+    # check-underdeclared.sh is run by w2.yml and its row names only w.yml,
+    # which is the case the undeclared-invoker scan exists for.
+    printf 'on:\n  push:\n    paths:\n      - scripts/ci/check-mentioned.sh\njobs:\n  a:\n    steps:\n      - run: bash scripts/ci/check-ok.sh\n      - run: bash scripts/ci/check-underdeclared.sh\n' \
         > "$tmp/.github/workflows/w.yml"
+    printf 'jobs:\n  b:\n    steps:\n      - run: bash scripts/ci/check-underdeclared.sh\n' \
+        > "$tmp/.github/workflows/w2.yml"
     printf 'check-ok.sh\tci\t.github/workflows/w.yml\tfixture, stays ci on purpose\n' > "$tmp/scripts/ci/ci-gate-lanes.tsv"
     printf 'check-mentioned.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
     printf 'check-gone.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-underdeclared.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
 
     out="$(CI_GATE_LANES_ROOT="$tmp" bash "$0" 2>&1)"
     rc=$?
@@ -106,6 +112,15 @@ self_test() {
     esac
     case "$out" in *"check-mentioned.sh: '.github/workflows/w.yml' does not invoke it"*) ;; *)
         echo "ci-gate-lanes: self-test FAILED - a mention-only invoker was accepted as a real one" >&2
+        echo "$out" >&2; exit 1 ;;
+    esac
+    # The undeclared-invoker scan is the load-bearing half of this gate, and
+    # every assertion above exercises only the DECLARED half. Without this case
+    # a `return 0` at the top of scan_surface still prints "self-test ok", so
+    # the half that catches a row naming one of two real invokers could break
+    # silently - which is this gate's own defect, in its own self-test.
+    case "$out" in *"check-underdeclared.sh: '.github/workflows/w2.yml' invokes it but the row does not list it"*) ;; *)
+        echo "ci-gate-lanes: self-test FAILED - the undeclared-invoker scan did not report w2.yml" >&2
         echo "$out" >&2; exit 1 ;;
     esac
     # Positive control on the matcher: the fixture's one real invocation must
@@ -176,7 +191,10 @@ while IFS=$'\t' read -r script lane invoker note; do
             else
                 case "$one" in
                     cli/src/fno/test_cmd.py|scripts/ci/preflight.sh) has_early=1 ;;
-                    .github/workflows/*) has_ci=1 ;;
+                    # A composite action counts as a CI surface: a gate invoked
+                    # from one is really reached in CI, and refusing to record
+                    # that would leave the row unable to name a real invoker.
+                    .github/workflows/*|.github/actions/*) has_ci=1 ;;
                     scripts/ci/*)
                         # One level of indirection: a gate run by another gate
                         # is reachable only if that one is. Its row is the
@@ -241,9 +259,18 @@ scan_surface() {
           done
 }
 
-for wf in "$REPO_ROOT"/.github/workflows/*.yml; do
+# Both spellings, and composite actions too. The surfaces this scan reads have
+# to be the surfaces a gate can actually be invoked from, or an under-declared
+# row becomes invisible again by the back door: today the tree has 18 .yml and
+# no .yaml, and .github/actions/guards-setup already exists as a composite this
+# repo uses, so both shapes are one edit away from being real.
+for wf in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
     [ -f "$wf" ] || continue
     scan_surface ".github/workflows/$(basename "$wf")"
+done >> "$REAL"
+for act in "$REPO_ROOT"/.github/actions/*/action.yml "$REPO_ROOT"/.github/actions/*/action.yaml; do
+    [ -f "$act" ] || continue
+    scan_surface ".github/actions/$(basename "$(dirname "$act")")/$(basename "$act")"
 done >> "$REAL"
 scan_surface "cli/src/fno/test_cmd.py" >> "$REAL"
 for g in "$GATE_DIR"/*.sh; do

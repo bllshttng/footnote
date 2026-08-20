@@ -633,3 +633,38 @@ def test_the_row_guard_is_shared_with_every_reader_of_the_row():
     now = datetime.now(timezone.utc)
     for bad in (float("inf"), float("nan")):
         assert board._age_from_epoch(bad, now) == "unknown age"
+
+
+def test_a_future_stamp_is_not_an_age_on_either_board_reader():
+    """`finite_or_zero` closes non-finite, not out-of-range.
+
+    `1e18` is perfectly finite, so it passed that guard, went hugely negative
+    against `now`, and `_format_age` floored it at zero - rendering a garbage
+    stamp as "1m ago", freshly verified. The bound therefore lives in
+    `_format_age`, which is the one place BOTH board readers pass through; the
+    epoch reader alone is one of two reachable paths.
+
+    The tolerance is deliberate and pinned here so it cannot be quietly
+    widened: the board samples `now` once and then reads rows, so a row written
+    concurrently is a second or two ahead and must still read as fresh.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph import board
+
+    now = datetime.now(timezone.utc)
+
+    assert board._age_from_epoch(1e18, now) == "unknown age"
+    assert board._age_from_epoch(1e300, now) == "unknown age"
+    # Inside the tolerance: a concurrent writer, not a garbage stamp.
+    assert board._age_from_epoch(now.timestamp() + 2, now) == "1m ago"
+    # Outside it: no longer explicable as clock jitter.
+    assert board._age_from_epoch(now.timestamp() + 600, now) == "unknown age"
+    # A real age still reads as one.
+    assert board._age_from_epoch(now.timestamp() - 7200, now) == "2h ago"
+
+    # The sibling reader shares the bound, which is the whole point of moving
+    # it into _format_age.
+    assert board._age_from_iso((now + timedelta(hours=3)).isoformat(), now) == "unknown age"
+    assert board._age_from_iso((now + timedelta(seconds=2)).isoformat(), now) == "1m ago"
+    assert board._age_from_iso((now - timedelta(hours=3)).isoformat(), now) == "3h ago"

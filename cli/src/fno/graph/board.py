@@ -57,11 +57,27 @@ def _parse_iso(value: object) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# A stamp from the future is not an age. The tolerance is not slop: the board
+# samples `now` once and then reads rows, so a row written concurrently is
+# legitimately a second or two ahead of it, and flooring that at "1m ago" is
+# the behaviour worth keeping. A garbage stamp misses by decades, never by
+# seconds, so a minute of headroom separates the two cleanly.
+#
+# This lives HERE, in the shared formatter, rather than in one caller. It was
+# fixed in `_age_from_epoch` alone first, which left `_age_from_iso` - the
+# other reader, three lines away, on the same board render - still printing
+# "merged 1m ago" off a future `completed_at`. One guard on one of two
+# reachable paths is the shape this repo's own pitfalls corpus opens with.
+_FUTURE_STAMP_TOLERANCE_S = -60
+
+
 def _format_age(seconds: float) -> str:
     # Several near-identical seconds/timedelta-to-string age humanizers
     # already exist (fno.mail.cli._humanize_age and others); this is its
     # own copy, not a reuse, because a board line has no use for the
     # sub-minute precision those give - it floors at "1m ago".
+    if seconds < _FUTURE_STAMP_TOLERANCE_S:
+        return "unknown age"
     seconds = max(0, int(seconds))
     if seconds < 3600:
         return f"{max(1, seconds // 60)}m ago"
@@ -96,15 +112,9 @@ def _age_from_epoch(ts: object, now: datetime) -> str:
     ts_f = finite_or_zero(ts)
     if not ts_f:
         return "unknown age"
-    # The tolerance is not slop. `compute_board` samples `now` once and then
-    # reads rows, so a concurrent `fno pr status` writing a row mid-render is
-    # legitimately a second or two ahead of it, and flooring that at 0 was the
-    # OLD behaviour worth keeping. A garbage stamp misses by decades, never by
-    # seconds, so a minute of headroom separates the two cleanly.
-    delta = now.timestamp() - ts_f
-    if delta < -60:
-        return "unknown age"
-    return _format_age(max(delta, 0.0))
+    # The future-stamp bound lives in `_format_age`, so both readers of a board
+    # row get it rather than this one.
+    return _format_age(now.timestamp() - ts_f)
 
 
 def _just_finished_fact(entry: dict, now: datetime) -> str:
