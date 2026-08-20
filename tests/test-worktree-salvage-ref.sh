@@ -27,58 +27,28 @@ trap 'rm -rf "$SCRATCH"' EXIT
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-install_dispatcher() {
-  # Mirrors scripts/setup/setup-worktree.sh's CREATE path (fresh install, no
-  # pre-existing hook): a shared post-commit dispatcher in the git-common-dir
-  # that resolves the COMMITTING worktree's own checked-out copy of the real
-  # hook at execution time. Never exits early - see prepend_dispatcher below
-  # for why.
-  local wt="$1"
-  local common_dir
-  common_dir="$(git -C "$wt" rev-parse --git-common-dir)"
-  [[ "$common_dir" = /* ]] || common_dir="$wt/$common_dir"
-  mkdir -p "$common_dir/hooks"
-  cat > "$common_dir/hooks/post-commit" <<'HOOK'
-#!/usr/bin/env bash
-toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
-if [[ -n "$toplevel" ]]; then
-  _fno_salvage_script="$toplevel/hooks/worktree-salvage-ref.sh"
-  [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"
-fi
-HOOK
-  chmod +x "$common_dir/hooks/post-commit"
+SETUP_WORKTREE_SH="$REPO_ROOT/scripts/setup/setup-worktree.sh"
+
+extract_install_snippet() {
+  # Extracts the REAL salvage-ref install block from setup-worktree.sh
+  # instead of hand-copying it a third time (a code-review finding: this
+  # file and the create/prepend logic it mirrors had already drifted once).
+  # Bounded by two markers that each occur exactly once in the file; the
+  # end marker line is excluded from the extracted range.
+  sed -n '/^_salvage_marker="worktree-salvage-ref\.sh"$/,/^if (( events_journal_shared == 0 )); then$/p' \
+    "$SETUP_WORKTREE_SH" | sed '$d'
 }
 
-prepend_dispatcher() {
-  # Mirrors scripts/setup/setup-worktree.sh's PREPEND path (a post-commit
-  # hook already exists and is not ours): a code-review finding caught that
-  # appending after an existing hook's own `exit` makes the appended block
-  # dead code, unreachable regardless of file position. This prepends
-  # instead, right after any shebang line, and the body above never exits
-  # early - so whatever the pre-existing hook does next still runs.
+run_setup_worktree_install() {
+  # Runs the extracted snippet for real against a synthetic $WORKTREE, so
+  # this test proves the ACTUAL create/prepend logic works, not a
+  # hand-typed mirror of it. The snippet's own `if [[ ! -e "$_post_commit" ]]`
+  # branch decides create vs. prepend, so one function covers both cases.
   local wt="$1"
-  local common_dir post_commit tmp first_line
-  common_dir="$(git -C "$wt" rev-parse --git-common-dir)"
-  [[ "$common_dir" = /* ]] || common_dir="$wt/$common_dir"
-  post_commit="$common_dir/hooks/post-commit"
-  tmp="$(mktemp "${post_commit}.XXXXXX")"
-  first_line="$(head -n 1 "$post_commit")"
-  if [[ "$first_line" == "#!"* ]]; then
-    {
-      printf '%s\n' "$first_line"
-      echo "toplevel=\"\$(git rev-parse --show-toplevel 2>/dev/null)\""
-      echo 'if [[ -n "$toplevel" ]]; then'
-      echo '  _fno_salvage_script="$toplevel/hooks/worktree-salvage-ref.sh"'
-      echo '  [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"'
-      echo "fi"
-      echo ""
-      tail -n +2 "$post_commit"
-    } > "$tmp"
-  else
-    fail "test fixture hook has no shebang - unexpected"
-  fi
-  mv -f "$tmp" "$post_commit"
-  chmod +x "$post_commit"
+  local snippet
+  snippet="$(extract_install_snippet)"
+  [[ -n "$snippet" ]] || fail "could not extract the salvage-ref install snippet from setup-worktree.sh - markers moved?"
+  WORKTREE="$wt" bash -c "$snippet"
 }
 
 link_real_hook() {
@@ -105,7 +75,7 @@ git -C "$canonical" push -q origin trunk
 attached="$SCRATCH/attached-wt"
 git -C "$canonical" worktree add -q -b attached-branch "$attached" >/dev/null
 link_real_hook "$attached"
-install_dispatcher "$attached"
+run_setup_worktree_install "$attached"
 git -C "$attached" config user.email t@t.co
 git -C "$attached" config user.name t
 echo y > "$attached/g.txt"
@@ -192,7 +162,7 @@ touch "$marker_file"
 exit 0
 HOOK
 chmod +x "$common_dir/hooks/post-commit"
-prepend_dispatcher "$preexisting"
+run_setup_worktree_install "$preexisting"
 
 git -C "$preexisting" config user.email t@t.co
 git -C "$preexisting" config user.name t
