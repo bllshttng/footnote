@@ -874,7 +874,7 @@ mod drift_restart_tests {
         let (_silent, mut read_side) = tokio::io::duplex(64);
         let deadline = Duration::from_millis(150);
         let started = Instant::now();
-        let err = read_response_bounded(&mut read_side, "agent.status", deadline)
+        let err = read_response_bounded(&mut read_side, "agent.rm", deadline)
             .await
             .expect_err("silent peer must fail");
         assert!(
