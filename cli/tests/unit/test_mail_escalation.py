@@ -358,6 +358,14 @@ def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, c
     assert "codex app-server daemon start" not in out
 
 
+#: The five axes are never inferred from a value: `claude` is a HARNESS, and
+#: `register_existing_session`'s parameter is named `provider`. Binding the
+#: literal there directly is what `check-axis-vocabulary` refuses, so the
+#: axis is named once here - the same idiom as `CODEX_HARNESS` in
+#: `cli/tests/agents/test_spawn_pane.py`.
+CLAUDE_HARNESS = "claude"
+
+
 def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
     """`adopted` is the weakest origin and must not overwrite a stronger one.
 
@@ -373,12 +381,12 @@ def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
 
     sid = "3f2b71c0-11aa-4bb2-9cc3-5d6e7f809a1b"
     register_existing_session(
-        provider="claude", session_id=sid, cwd=str(mailbox), origin="operator"
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="operator"
     )
 
     # The healer refreshing the same row, as it does on a store hit.
     register_existing_session(
-        provider="claude", session_id=sid, cwd=str(mailbox), origin="adopted"
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
     )
 
     row = next(r for r in load_registry() if r.harness_session_id == sid)
@@ -391,9 +399,9 @@ def test_store_healing_still_stamps_a_row_with_no_origin(mailbox):
     from fno.agents.registry import register_existing_session, load_registry
 
     sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
-    register_existing_session(provider="claude", session_id=sid, cwd=str(mailbox))
+    register_existing_session(provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox))
     register_existing_session(
-        provider="claude", session_id=sid, cwd=str(mailbox), origin="adopted"
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
     )
 
     row = next(r for r in load_registry() if r.harness_session_id == sid)
