@@ -90,12 +90,20 @@ async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-/// Write one request, refusing to wait past `timeout` (self-review finding).
-/// `read_response_bounded` bounds only the read half of the round trip; a
-/// daemon wedged before it starts reading its socket (e.g. stuck holding the
-/// registry lock before `read_request`) fills the OS receive buffer, and this
-/// half of the write blocks in the kernel with no deadline. Same failure this
-/// PR fixes on the read side, unbounded on the write side otherwise.
+/// Bound for the write half of a round trip (self-review finding). A small
+/// JSON request frame to an already-connected local socket clears the kernel
+/// send buffer near instantly unless the daemon has stopped reading its
+/// socket entirely; kept short and separate from [`RESPONSE_DEADLINE`] so
+/// pairing it with the read's own bound does not double that constant's
+/// carefully-tuned worst case into a ~240s round trip.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Write one request, refusing to wait past `timeout`. `read_response_bounded`
+/// bounds only the read half of the round trip; a daemon wedged before it
+/// starts reading its socket (e.g. stuck holding the registry lock before
+/// `read_request`) fills the OS receive buffer, and this half of the write
+/// blocks in the kernel with no deadline. Same failure this PR fixes on the
+/// read side, unbounded on the write side otherwise.
 async fn write_request_bounded(
     conn: &mut UnixStream,
     req: &Request,
@@ -343,9 +351,8 @@ pub async fn call(
 ) -> Result<Response, ClientError> {
     ensure_daemon(home, daemon_bin).await?;
     let mut conn = UnixStream::connect(home.supervisor_sock()).await?;
-    let deadline = response_deadline();
-    write_request_bounded(&mut conn, req, deadline).await?;
-    read_response_bounded(&mut conn, &req.method, deadline).await
+    write_request_bounded(&mut conn, req, WRITE_TIMEOUT).await?;
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 /// Send one request to an ALREADY-RUNNING daemon, WITHOUT lazy-starting one.
@@ -367,9 +374,8 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
         }
         Err(e) => return Err(ClientError::Io(e)),
     };
-    let deadline = response_deadline();
-    write_request_bounded(&mut conn, req, deadline).await?;
-    read_response_bounded(&mut conn, &req.method, deadline).await
+    write_request_bounded(&mut conn, req, WRITE_TIMEOUT).await?;
+    read_response_bounded(&mut conn, &req.method, response_deadline()).await
 }
 
 // ---------------------------------------------------------------------------

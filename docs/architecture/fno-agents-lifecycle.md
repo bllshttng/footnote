@@ -146,7 +146,7 @@ Worker shutdown escalates: graceful `worker.shutdown` RPC → poll up to a 5s gr
 
 ### rm (US6.8)
 
-`handle_rm` refuses with **exit 18 UNCONDITIONALLY** while a controlling driver is active — even with `--force`. Unlike `stop`, `--force` does NOT evict the driver here; the operator must detach → stop → wait `exited` → rm. A live agent without a driver still needs `--force` (also exit 18 without it). Force-removing a live agent stops its worker first (refusing if the worker can't be confirmed down, so a live PTY is never orphaned). Orphaned entries are removed with no subprocess action and emit `agent_removed{was_orphaned: true}`.
+`handle_rm` refuses with **exit 18 UNCONDITIONALLY** while a controlling driver is active — even with `--force`. Unlike `stop`, `--force` does NOT evict the driver here; the operator must detach → stop → wait `exited` → rm. A live agent without a driver still needs `--force` (also exit 18 without it) — *except* a claude row the daemon can independently prove is gone from the `claude agents --json --all` roster (`provably_gone`), which proceeds without `--force`; this reconciliation is claude-only today (codex/opencode are not yet covered), so those harnesses still hit the stale-status refusal with `--force` as the only escape. Force-removing a live agent stops its worker first (refusing if the worker can't be confirmed down, so a live PTY is never orphaned). Orphaned entries are removed with no subprocess action and emit `agent_removed{was_orphaned: true}`.
 
 ### reconcile (US6.9)
 
