@@ -30,11 +30,12 @@ if [[ -f "$WT_HELPER" ]]; then
 fi
 
 # Evaluate the predicate once in machine mode. Empty output means no fresh peer
-# (self-only, stale, missing identity, missing/malformed dir) -> stay silent.
+# (self-only, stale, missing identity, missing/malformed dir).
 obs="$(bash "$SCRIPT_DIR/helpers/worktree-live-peers.sh" --machine 2>/dev/null || true)"
-[[ -n "$obs" ]] || exit 0
 
-lines=('- Another session is working in this worktree. [fno-overlap-observed]')
+peer_lines=()
+if [[ -n "$obs" ]]; then
+peer_lines=('- Another session is working in this worktree. [fno-overlap-observed]')
 
 # Best-effort record + recurrence fold. A missing/old fno, a rejected payload,
 # lock contention, an unreadable journal, OR a hung CLI never changes the
@@ -70,7 +71,7 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
           if [[ "$met" == "true" ]]; then
             distinct="$(printf '%s' "$raw" | jq -r '.fold.distinct_observations // 0' 2>/dev/null || echo 0)"
             thresh="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold // 3' 2>/dev/null || echo 3)"
-            lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
+            peer_lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
           fi
         fi
       else
@@ -83,9 +84,56 @@ else
 fi
 
 case "$record_status" in
-  unrecorded) lines+=('- [fno-overlap-unrecorded]') ;;
-  count-unavailable) lines+=('- [fno-overlap-count-unavailable]') ;;
+  unrecorded) peer_lines+=('- [fno-overlap-unrecorded]') ;;
+  count-unavailable) peer_lines+=('- [fno-overlap-count-unavailable]') ;;
 esac
+fi
+
+# Stranded-worktree residual report (x-f4e9). Recovery is automatic - the
+# pr-watch tick leg pushes and files every STRANDED row unattended - so this
+# prints only what automation refused to touch on its own: UNKNOWN rows
+# (fail-open, never acted on) and ABANDONED rows (deletion is the one
+# destructive act and stays with a human; `fno worktree cleanup --merged`
+# turns the confirm into a one-liner instead of an investigation). Silent
+# when both sets are empty. A timeout - or any other reason the sweep did
+# not complete - says so rather than staying quiet, so an incomplete sweep
+# never reads as a clean one.
+stranded_lines=()
+if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  sweep_raw=""
+  sweep_rc=0
+  if command -v with_timeout >/dev/null 2>&1; then
+    sweep_raw="$(with_timeout 30 fno worktree stranded --json 2>/dev/null)"; sweep_rc=$?
+  else
+    sweep_raw="$(fno worktree stranded --json 2>/dev/null)"; sweep_rc=$?
+  fi
+  if (( sweep_rc == 124 )); then
+    stranded_lines+=('- stranded sweep did not complete (timeout). [fno-stranded-sweep-incomplete]')
+  elif [[ $sweep_rc -ne 0 || -z "$sweep_raw" ]]; then
+    stranded_lines+=('- stranded sweep did not complete. [fno-stranded-sweep-incomplete]')
+  else
+    while IFS=$'\t' read -r klass node path; do
+      [[ -n "$klass" ]] || continue
+      case "$klass" in
+        UNKNOWN)
+          stranded_lines+=("- ${node:-?} at ${path}: could not classify (UNKNOWN, never acted on). [fno-stranded-unknown]")
+          ;;
+        ABANDONED)
+          stranded_lines+=("- ${node:-?} at ${path}: abandoned work, confirm with \`fno worktree cleanup --merged\`. [fno-stranded-abandoned]")
+          ;;
+      esac
+    done < <(printf '%s' "$sweep_raw" | jq -r '.rows[]? | select(.class=="UNKNOWN" or .class=="ABANDONED") | [.class, (.node // "?"), .path] | @tsv' 2>/dev/null)
+  fi
+else
+  stranded_lines+=('- stranded sweep skipped: fno or jq unavailable. [fno-stranded-sweep-incomplete]')
+fi
+
+# The `${arr[@]+"${arr[@]}"}` form, not a bare `"${arr[@]}"`: bash 3.2 (the
+# macOS system bash this hook runs under) treats element-expansion of an
+# EMPTY array as an unbound variable under `set -u`, and peer_lines is
+# routinely empty when there is no live peer.
+lines=("${peer_lines[@]+"${peer_lines[@]}"}" "${stranded_lines[@]+"${stranded_lines[@]}"}")
+(( ${#lines[@]} > 0 )) || exit 0
 
 if (( BODY_ONLY )); then
   printf '%s\n' "${lines[@]}"
