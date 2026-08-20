@@ -181,6 +181,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Human-attended in-place crown grant. Pure shared-registry transaction;
     # spawn-time grant and succession remain on the Rust-backed spawn path.
     "crown",
+    # x-8cee: the whole-court read (every live crown + registry/graph
+    # agreement). Pure Python (fno.agents.court reads the registry and the
+    # graph); no Rust client port, so it must never auto-route to the daemon.
+    "court",
     # G2 Task 2.3: injection gate management; uses Python _daemon_rpc; no Rust port planned.
     "gate",
     # Messaging (send/inbox/ack) moved OUT of `fno agents` into the dedicated
