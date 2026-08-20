@@ -35,6 +35,9 @@ class FakeRun:
         head_repo: str = "owner/repo",
         base_repo: str = "owner/repo",
         checks: dict | None = None,
+        base_move_files: list[str] | None = None,
+        pr_files: list[str] | None = None,
+        compare_truncated: bool = False,
     ) -> None:
         self.gh_merge = gh_merge or Result(0, "", "")
         self.view_fails = view_fails
@@ -47,6 +50,12 @@ class FakeRun:
         self.head_ref = head_ref
         self.head_repo = head_repo
         self.base_repo = base_repo
+        # The overlap hold's probes: the reverse compare's file list
+        # and the PR's own changed paths. compare_truncated forces the
+        # fail-closed miss branch without building a 300-file payload.
+        self.base_move_files = base_move_files
+        self.pr_files = pr_files
+        self.compare_truncated = compare_truncated
         # require_checks_pass is enforced in-process now (x-9d11), so the
         # default fake serves a GREEN rollup; tests exercising refusal paths
         # pass their own.
@@ -112,6 +121,11 @@ class FakeRun:
                 return Result(0, self.view_url + "\n", "")
             if cmd[1] == "api":
                 endpoint = cmd[-1]
+                if any(a.startswith("repos/") and a.endswith("/files") for a in cmd):
+                    # The overlap probe's PR-side read (paginated REST, jq
+                    # emits one filename per line); None serves an empty
+                    # diff, which proves no overlap rather than a miss.
+                    return Result(0, "\n".join(self.pr_files or []) + "\n", "")
                 if endpoint.startswith("repos/owner/repo/pulls/") and "/comments" not in endpoint:
                     return Result(
                         0,
@@ -161,6 +175,20 @@ class FakeRun:
                     ]
                     return Result(0, json.dumps({"statuses": rows}) + "\n", "")
                 if len(cmd) > 2 and "/compare/" in cmd[2]:
+                    if any("truncated" in a for a in cmd):
+                        # The overlap probe's reverse compare: one
+                        # payload carries the truncation flag and the names.
+                        return Result(
+                            0,
+                            json.dumps(
+                                {
+                                    "truncated": self.compare_truncated,
+                                    "names": self.base_move_files or [],
+                                }
+                            )
+                            + "\n",
+                            "",
+                        )
                     return Result(0, f"{self.behind_by}\n", "")
                 if "DELETE" in cmd and "/git/refs/heads/" in cmd[-1]:
                     # The post-merge branch delete (gh api against the verified
@@ -705,17 +733,78 @@ def test_merge_lock_unavailable_fails_open(enabled, monkeypatch, capsys, tmp_pat
 
 
 def test_stale_base_with_live_lanes_holds_exit_2(enabled, monkeypatch, capsys, tmp_path):
+    # AC2-HOLD: the base moved over a file this PR also changes. The positive
+    # marker is the overlapping PATH named in the reason, never the absence of
+    # a merge: a probe that never ran looks exactly like a clean pass.
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    shared = "cli/src/fno/pr/_merge.py"
     fake = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),
         toplevel=str(tmp_path),
         behind_by=3,
+        base_move_files=[shared, "docs/unrelated.md"],
+        pr_files=[shared, "docs/x.md"],
     )
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     obj = _last_json(capsys)
     assert obj["outcome"] == "held"
-    assert "stale base" in obj["reason"]
+    assert shared in obj["reason"]
+    assert "fno pr rebase" in obj["reason"]
+    assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
+def test_stale_base_without_overlap_merges(enabled, monkeypatch, capsys, tmp_path):
+    # AC1-HAPPY: behind > 0 with disjoint file sets merges. Distance from the
+    # base is no longer the predicate, so no rebase is asked for.
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=3,
+        base_move_files=["crates/other.rs"],
+        pr_files=["cli/src/fno/pr/_merge.py"],
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert any(c[1:3] == ["pr", "merge"] for c in fake.calls)
+
+
+def test_stale_base_docs_only_overlap_merges(enabled, monkeypatch, capsys, tmp_path):
+    # AC3-DOCS: the only shared files are documentation, which cannot carry a
+    # semantic conflict, so the PR 965 shape does not arrive through the merge
+    # gate.
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=2,
+        base_move_files=["docs/guide.md"],
+        pr_files=["docs/guide.md", "cli/src/fno/pr/_merge.py"],
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_stale_base_probe_miss_holds(enabled, monkeypatch, capsys, tmp_path):
+    # AC4-EDGE: a truncated reverse compare under-reports the base move, which
+    # fails in the merging direction, so it holds like any other miss.
+    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        toplevel=str(tmp_path),
+        behind_by=3,
+        compare_truncated=True,
+        base_move_files=["cli/src/fno/pr/_merge.py"],
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert "overlap probe unavailable" in obj["reason"]
     assert "fno pr rebase" in obj["reason"]
     assert not any(c[1:3] == ["pr", "merge"] for c in fake.calls)
 

@@ -230,12 +230,12 @@ Addressing a review invalidated the proof the review happened.
 An agent given three findings, fixing them in three commits, owed three re-reviews.
 Across footnote PRs 824-831, PR 828 moved through six heads and PR 830 through five.
 
-Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`.
-It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of four states:
+Both now call one predicate, `review_freshness(reviewed_sha, head_sha)`. It lives in `crates/fno-agents/src/loopcheck.rs` and returns one of five states:
 
 - `fresh` - the reviewer read this exact commit.
 - `carried_base_sync` - the PR's own code delta is byte-identical. Any tree difference came from the base moving. A rebase is this shape.
 - `carried_docs_only` - only documentation paths changed since the reviewed commit.
+- `carried_subset` - the code delta only shrank. Every raw line still shipping is byte-identical to one the reviewer read. The vanished lines are paths the base absorbed on the rebase. The grade compares the sorted raw lines the identity keeps beside its hash. The HEAD set contained in the reviewed set is a shrink. A line the reviewer never saw is new unreviewed code.
 - `stale` - everything else, **including every failure path**.
 
 `carried_*` is decided by comparing a **PR code-diff identity** at each commit.
