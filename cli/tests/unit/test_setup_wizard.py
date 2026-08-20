@@ -331,3 +331,75 @@ def test_cli_hook_offer_propagates_installer_failure():
         )
 
     assert exc_info.value.exit_code == 1
+
+
+def test_report_machine_blockers_names_a_real_blocker(monkeypatch):
+    """AC: build_report returns a result carrying one blocker -> the echoed
+    text contains that blocker's summary text."""
+    import fno.doctor as doctor
+    from fno.setup_cli import report_machine_blockers
+
+    monkeypatch.setattr(
+        doctor,
+        "build_report",
+        lambda source=None: {
+            "status": "stale",
+            "launch_agents": {},
+            "archive_id_collisions": {},
+            "fd_limit": {},
+            "plugin_hooks": {},
+            "plugin_cache": {},
+        },
+    )
+
+    lines = []
+    blockers = report_machine_blockers(echo_fn=lines.append)
+
+    assert len(blockers) == 1
+    assert any("behind source" in line for line in lines)
+
+
+def test_report_machine_blockers_survives_a_raising_doctor(monkeypatch):
+    """AC: build_report raises -> returns [], echoes one line, never
+    propagates the exception. A machine finding the user just learned about
+    must not look like setup failing."""
+    import fno.doctor as doctor
+    from fno.setup_cli import report_machine_blockers
+
+    def boom(source=None):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(doctor, "build_report", boom)
+
+    lines = []
+    blockers = report_machine_blockers(echo_fn=lines.append)
+
+    assert blockers == []
+    assert len(lines) == 1
+    assert "could not run" in lines[0]
+
+
+def test_report_machine_blockers_clean_machine_says_so(monkeypatch):
+    """AC: a machine with no blockers says so in one line rather than
+    printing an empty header."""
+    import fno.doctor as doctor
+    from fno.setup_cli import report_machine_blockers
+
+    monkeypatch.setattr(
+        doctor,
+        "build_report",
+        lambda source=None: {
+            "status": "fresh",
+            "launch_agents": {"applicable": True, "dead": []},
+            "archive_id_collisions": {"count": 0, "ids": []},
+            "fd_limit": {"verdict": "ok"},
+            "plugin_hooks": {"failed": 0},
+            "plugin_cache": {"status": "fresh"},
+        },
+    )
+
+    lines = []
+    blockers = report_machine_blockers(echo_fn=lines.append)
+
+    assert blockers == []
+    assert any("clean" in line for line in lines)
