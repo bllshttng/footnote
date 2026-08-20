@@ -1278,7 +1278,8 @@ def test_reconcile_json_shape_round_trips_gemini_error(
     result = dispatch.reconcile_agents()
     assert result.scanned == 1
     assert len(result.errors) == 1
-    assert result.errors[0]["provider"] == "gemini"
+    assert result.errors[0]["provider"] is None
+    assert result.errors[0]["harness"] == "gemini"
     assert result.errors[0]["reason"] == "retired-provider"
     # Round-trips through json without error.
     payload = {
@@ -1290,7 +1291,8 @@ def test_reconcile_json_shape_round_trips_gemini_error(
     }
     encoded = json.dumps(payload)
     decoded = json.loads(encoded)
-    assert decoded["errors"][0]["provider"] == "gemini"
+    assert decoded["errors"][0]["provider"] is None
+    assert decoded["errors"][0]["harness"] == "gemini"
 
 
 def test_reconcile_codex_index_missing(
@@ -1399,7 +1401,8 @@ def test_reconcile_backfills_late_codex_pane_identity_without_index(
     assert result.backfilled == [
         {
             "name": "worker-codex",
-            "provider": "codex",
+            "provider": None,
+            "harness": "codex",
             "harness_session_id": session_id,
         }
     ]
@@ -2116,7 +2119,7 @@ def test_reconcile_orphans_a_pending_codex_pane_after_process_exit(
     assert row.status == "orphaned"
     assert row.harness_session_id is None
     assert result.orphaned == [
-        {"name": "worker-codex", "provider": "codex", "id": None}
+        {"name": "worker-codex", "provider": None, "harness": "codex", "id": None}
     ]
 
 
@@ -2606,7 +2609,7 @@ def test_reconcile_codex_index_stat_permission_does_not_abort(
     result = dispatch.reconcile_agents()
 
     # Codex side: routed to errors with unreadable reason.
-    codex_errors = [e for e in result.errors if e["provider"] == "codex"]
+    codex_errors = [e for e in result.errors if e["harness"] == "codex"]
     assert len(codex_errors) == 1
     assert codex_errors[0]["reason"] == "codex-session-index-unreadable"
     # Status untouched.
@@ -2615,7 +2618,7 @@ def test_reconcile_codex_index_stat_permission_does_not_abort(
 
     # Legacy Gemini rows are retained for read compatibility but their
     # retired adapter is not probed.
-    gemini_errors = [e for e in result.errors if e["provider"] == "gemini"]
+    gemini_errors = [e for e in result.errors if e["harness"] == "gemini"]
     assert len(gemini_errors) == 1
     assert gemini_errors[0]["reason"] == "retired-provider"
 
