@@ -429,6 +429,8 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("CI gate lanes self-test", ".", "bash scripts/ci/check-ci-gate-lanes.sh --self-test"),
     ("CI gate lanes (every gate has a real invoker)", ".", "bash scripts/ci/check-ci-gate-lanes.sh"),
     ("GraphQL PR reads are routed, not raw", ".", "bash scripts/ci/check-no-direct-graphql-pr-read.sh"),
+    ("Docstring-restating-comment lint has not drifted to density", ".",
+     "bash scripts/ci/check-comment-restates-docstring.sh --self-check"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
     ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),

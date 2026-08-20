@@ -23,6 +23,7 @@ apply-merge-ruleset.sh	ci	scripts/ci/check-merge-coverage-audit.sh
 check-autonomy-registry.sh	ci	.github/workflows/guards.yml	
 check-axis-vocabulary.sh	ci	.github/workflows/guards.yml	
 check-ci-gate-lanes.sh	local	cli/src/fno/test_cmd.py	
+check-comment-restates-docstring.sh	local	cli/src/fno/test_cmd.py	
 check-company-boundaries.sh	local	cli/src/fno/test_cmd.py	
 check-company-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
 check-config-schema-drift.sh	local	cli/src/fno/test_cmd.py	

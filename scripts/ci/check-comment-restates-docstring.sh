@@ -66,6 +66,29 @@ set -euo pipefail
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$REPO_ROOT"
 
+# --self-check is what makes this script reachable at all. Until 2026-08-20 no
+# runner invoked it, so the reading list it produces was never produced and its
+# "advisory" status meant "off". The reading list is a human activity and does
+# not belong in a CI log; instrument drift does. The header names the exact
+# drift to watch: the densest file in the repository must score ZERO, and a
+# finding there means the threshold has slid toward measuring density. That is
+# a real assertion that can fail, so it is the half CI holds.
+EXEMPLAR="cli/src/fno/agents/harnesses/base.py"
+if [[ "${1:-}" == "--self-check" ]]; then
+    if [[ ! -f "$EXEMPLAR" ]]; then
+        echo "comment-restates-docstring: exemplar missing at $EXEMPLAR - repoint it, do not drop the check" >&2
+        exit 1
+    fi
+    n=$(bash "$0" "$EXEMPLAR" | awk '/^findings:/ {print $2}')
+    if [[ "$n" != "0" ]]; then
+        echo "comment-restates-docstring: the density exemplar $EXEMPLAR scored $n findings, expected 0." >&2
+        echo "The instrument has drifted toward measuring documentation density, which is the axis this lint exists NOT to measure. Re-examine the threshold; do not lower it." >&2
+        exit 1
+    fi
+    echo "comment-restates-docstring: self-check ok ($EXEMPLAR scores 0)"
+    exit 0
+fi
+
 # Advisory: findings never affect the exit code. python exits 0 on success; a
 # crash (non-zero) is a real bug and is allowed to surface.
 python3 - "$@" <<'PY'
