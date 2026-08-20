@@ -1705,6 +1705,59 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
+    # A resume may restore a recorded route inside dispatch_spawn. Resolve its
+    # separately stored provider axis before admission so the gate judges the
+    # destination the revived worker will actually use.
+    if resume is not None and route_provider is None:
+        from fno.agents.registry import load_registry
+
+        try:
+            loaded = load_registry()
+            if getattr(loaded, "complete", True) is not True:
+                raise RuntimeError("registry forward read is incomplete")
+        except Exception as exc:
+            print(
+                f"resume provider unreadable ({exc}); refusing because its provider "
+                "cap cannot be evaluated; no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from exc
+        source_row = next(
+            (
+                row
+                for row in loaded
+                if row.name == name and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        ) or next(
+            (
+                row
+                for row in loaded
+                if getattr(row, "harness_session_id", None) == resume
+                and getattr(row, "route_settings_path", None)
+            ),
+            None,
+        )
+        if source_row is not None:
+            recorded_provider = getattr(source_row, "provider", None)
+            if not recorded_provider:
+                print(
+                    f"route recorded for {source_row.name!r} has no model-provider "
+                    "axis; refusing because its provider cap cannot be evaluated; "
+                    "no worker launched",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+            route_provider = recorded_provider
+
+    # The node guard sits BELOW the resume-provider resolution on purpose.
+    # It acquires `dispatch:<id>` (and the handover `node:<id>`), and every
+    # exit above it is an exit that would strand those keys for their whole
+    # TTL with nothing launched. Taking the reservation after the launch is
+    # proven is one placement; a release bolted onto each exit is a guard on
+    # one of N paths, and the next exit added to that stretch leaks again.
+    # Below this point the only exit is `run_gate`, whose `except
+    # BaseException` releases both keys.
     node_reservation: tuple[str, str] | None = None
     node_claim: tuple[str, str] | None = None
     if node is not None:
@@ -1770,51 +1823,6 @@ def cmd_spawn(
                 f"({guard['node_claim_error']}); the worker claims it at init",
                 file=sys.stderr,
             )
-
-    # A resume may restore a recorded route inside dispatch_spawn. Resolve its
-    # separately stored provider axis before admission so the gate judges the
-    # destination the revived worker will actually use.
-    if resume is not None and route_provider is None:
-        from fno.agents.registry import load_registry
-
-        try:
-            loaded = load_registry()
-            if getattr(loaded, "complete", True) is not True:
-                raise RuntimeError("registry forward read is incomplete")
-        except Exception as exc:
-            print(
-                f"resume provider unreadable ({exc}); refusing because its provider "
-                "cap cannot be evaluated; no worker launched",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2) from exc
-        source_row = next(
-            (
-                row
-                for row in loaded
-                if row.name == name and getattr(row, "route_settings_path", None)
-            ),
-            None,
-        ) or next(
-            (
-                row
-                for row in loaded
-                if getattr(row, "harness_session_id", None) == resume
-                and getattr(row, "route_settings_path", None)
-            ),
-            None,
-        )
-        if source_row is not None:
-            recorded_provider = getattr(source_row, "provider", None)
-            if not recorded_provider:
-                print(
-                    f"route recorded for {source_row.name!r} has no model-provider "
-                    "axis; refusing because its provider cap cannot be evaluated; "
-                    "no worker launched",
-                    file=sys.stderr,
-                )
-                raise typer.Exit(code=2)
-            route_provider = recorded_provider
 
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
@@ -2069,7 +2077,17 @@ def cmd_spawn(
         # Release the gate's claims once the dispatch result exists (or the
         # spawn failed): registry/roster rows carry the count from here.
         gate.release()
-        if not spawn_succeeded:
+        # A one-shot's worker has already exited by the time `dispatch_spawn`
+        # returns, so there is nobody left to inherit the reservation and
+        # holding it to TTL wedges the node under a holder that is gone.
+        # `spawn_succeeded` is the wrong discriminator here: it is only
+        # evaluated after the worker exits on exactly these two substrates, so
+        # a twenty-second `--once` run kept `dispatch:<id>` for the rest of its
+        # TTL. `pane` and `bg` return while the worker lives on, so their
+        # reservation is inherited and must stay. `--once` is the pre-substrate
+        # spelling of headless, so both spellings answer the same.
+        one_shot = once or substrate == "headless"
+        if one_shot or not spawn_succeeded:
             _release_dispatch_claims(node_reservation, node_claim)
         for _k, _v in prov_prev.items():
             if _v is None:
