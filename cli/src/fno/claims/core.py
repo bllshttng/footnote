@@ -50,7 +50,6 @@ from .io import (
     read_claim_file,
     serialize_claim,
 )
-from .hostid import is_same_machine
 from .staleness import classify, classify_for_sweep, is_expired, is_live, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
