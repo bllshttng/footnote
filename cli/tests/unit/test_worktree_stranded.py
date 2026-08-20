@@ -345,3 +345,20 @@ def test_unpushed_batch_ignores_cwd(tmp_path, monkeypatch):
     count, ok, _age = counts[str(work)]
     assert ok is True
     assert count > 0
+
+
+def test_unpushed_batch_missing_path_reads_unverifiable(tmp_path):
+    """A code-review finding: a path that vanished mid-sweep (removed by
+    something else while the batch was running - a real race, not a
+    hypothetical) used to fail toward the safe COUNT (1, unpushed) but
+    silently keep ok=True, since `wt_unpushed_count` printed no "not
+    verifiable" text for that case. Constraint 4 needs the read itself
+    marked unreliable, not just the count nudged safe - a genuinely
+    positive read and a coerced fallback must not look the same to
+    classify()'s fail-open gate."""
+    ghost = tmp_path / "does-not-exist"
+
+    counts = _unpushed_batch([str(ghost)])
+    count, ok, _age = counts[str(ghost)]
+    assert ok is False
+    assert count == 1

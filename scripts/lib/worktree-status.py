@@ -31,14 +31,25 @@ from typing import Optional
 _ALIVE_STATUSES = frozenset({"spawning", "ready", "idle", "busy", "live", "restarting"})
 
 
-def _load_registry() -> dict[str, tuple[str, str]]:
-    """cwd -> (name, status), preferring a live row, else the most recent."""
+def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
+    """cwd -> (name, status), preferring a live row, else the most recent.
+
+    Plus an ok flag: a missing registry is a legitimate empty fleet (nothing
+    has ever registered) and is ok; a registry that exists but fails to
+    parse is a genuine read failure. worktree_stranded.py's fail-open
+    classifier reuses this function (rather than a second copy of the same
+    best-row selection) and needs that distinction - reading a corrupt
+    registry as empty would silently read every live worker as absent."""
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
     path = Path(override) if override else Path(os.path.expanduser("~/.fno/agents/registry.json"))
+    if not path.exists():
+        return {}, True
     try:
         data = json.loads(path.read_text())
-    except Exception:
-        return {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}, False
+    if not isinstance(data, dict):
+        return {}, False
     best: dict[str, tuple[int, str, str, str]] = {}
     for a in data.get("agents", []):
         cwd = a.get("cwd") or ""
@@ -52,7 +63,7 @@ def _load_registry() -> dict[str, tuple[str, str]]:
         cur = best.get(cwd)
         if cur is None or (rank, ts) > (cur[0], cur[2]):
             best[cwd] = (rank, name, ts, status)
-    return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}
+    return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}, True
 
 
 def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
@@ -115,7 +126,10 @@ def main(argv: list[str]) -> int:
     if "--repo" in argv:
         repo = Path(argv[argv.index("--repo") + 1])
 
-    registry = _load_registry()
+    registry, registry_ok = _load_registry()
+    if not registry_ok:
+        print("worktree-status: registry.json exists but could not be parsed; "
+              "every session reads as none until it is fixed", file=sys.stderr)
     rows = []
     total = live_n = dead_n = none_n = 0
     for branch, wt_path in _worktrees(repo):

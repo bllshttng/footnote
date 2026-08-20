@@ -33,6 +33,25 @@ from fno.graph.store import (
     read_graph_strict,
 )
 
+
+def _load_worktree_status_module():
+    """``scripts/lib/worktree-status.py`` as a module, loaded once. It is a
+    standalone script (invoked by worktree-lifecycle.sh via subprocess), not
+    part of the installed package, so it needs ``spec_from_file_location``
+    rather than a normal import - the same porcelain parser and registry
+    reader this file reuses used to be copied verbatim into this file, and a
+    code review caught both copies going byte-for-byte/near-identical in
+    this same PR, exactly the "N implementations of one operation" trap."""
+    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-status.py"
+    spec = importlib.util.spec_from_file_location("_fno_worktree_status", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_worktree_status_module = _load_worktree_status_module()
+_worktrees = _worktree_status_module._worktrees
+
 _QUIET_TERMINAL_STATUSES = frozenset({"superseded", "deferred"})
 
 # klass values, in the order classify() checks them. CLEAN and the five
@@ -213,56 +232,24 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool]]:
 def _load_registry() -> tuple[dict[str, str], bool]:
     """cwd -> status, plus an ok flag.
 
-    A missing registry is a legitimate empty fleet (nothing has ever
-    registered) and is ok. A registry that exists but fails to parse is a
-    genuine read failure: reading it as empty would silently read every
+    Delegates to ``scripts/lib/worktree-status.py``'s own ``_load_registry``
+    (loaded once as ``_worktree_status_module`` below) rather than a second
+    copy of the same best-row selection - the exact "N implementations of
+    one operation" trap ``_worktrees`` below was already fixed for. That
+    function returns cwd -> (name, status); this drops the name, which only
+    the display CLI needs.
+
+    The ok flag matters here in a way it does not for a display tool: a
+    missing registry is a legitimate empty fleet (nothing has ever
+    registered) and is ok, but a registry that exists and fails to parse is
+    a genuine read failure - reading it as empty would silently read every
     live worker as absent, which is exactly the false STRANDED constraint 4
     forbids."""
-    override = os.environ.get("WORKTREE_STATUS_REGISTRY")
-    target = Path(override) if override else Path(os.path.expanduser("~/.fno/agents/registry.json"))
-    if not target.exists():
-        return {}, True
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return {}, False
-    if not isinstance(data, dict):
-        return {}, False
-
-    best: dict[str, tuple[int, str, str]] = {}
-    for a in data.get("agents", []):
-        cwd = a.get("cwd") or ""
-        if not cwd:
-            continue
-        cwd = str(Path(cwd))
-        status = a.get("status") or "unknown"
-        rank = 1 if status in _ALIVE_STATUSES else 0
-        ts = a.get("last_reconciled_at") or a.get("exited_at") or a.get("created_at") or ""
-        cur = best.get(cwd)
-        if cur is None or (rank, ts) > (cur[0], cur[1]):
-            best[cwd] = (rank, ts, status)
-    return {cwd: status for cwd, (_rank, _ts, status) in best.items()}, True
+    by_cwd, ok = _worktree_status_module._load_registry()
+    return {cwd: status for cwd, (_name, status) in by_cwd.items()}, ok
 
 
 # --- the sweep driver ------------------------------------------------------
-
-
-def _load_worktree_status_module():
-    """``scripts/lib/worktree-status.py`` as a module, loaded once. It is a
-    standalone script (invoked by worktree-lifecycle.sh via subprocess), not
-    part of the installed package, so it needs ``spec_from_file_location``
-    rather than a normal import - the same porcelain parser this function
-    reuses used to be copied verbatim into this file, and a code review
-    caught the two `_worktrees()` copies going byte-for-byte identical in
-    this same PR, exactly the "N implementations of one operation" trap."""
-    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-status.py"
-    spec = importlib.util.spec_from_file_location("_fno_worktree_status", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_worktrees = _load_worktree_status_module()._worktrees
 
 
 def sweep(repo: Path) -> list[Row]:
