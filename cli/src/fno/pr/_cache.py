@@ -110,6 +110,16 @@ def _write_row_locked(p: Path, row: dict) -> None:
 
 
 def _serve(row: dict, *, stale: bool) -> int:
+    """Print one cached row and return its exit code (-1 = not servable).
+
+    The served line says WHEN and at WHAT HEAD it was computed, not merely
+    that it came from a cache. `cached: true` alone is decorative: it tells a
+    reader the answer is second-hand but gives no way to judge whether the
+    staleness matters for their question, so every consumer ignored it. The
+    row's own `head` is the head the verdict was computed at; on the
+    head-unreadable path that can be a head the PR has since moved past, and
+    `cached_age_seconds` is the number that says how far past.
+    """
     out = dict(row.get("output") or {})
     if not out:
         # Nothing servable ever landed in the row (a first-read secondary
@@ -142,6 +152,12 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
         code = 3
     out["cached"] = True
+    ts = float(row.get("ts") or 0)
+    out["cached_head"] = out.get("head")
+    out["cached_at"] = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
+    )
+    out["cached_age_seconds"] = int(max(0.0, time.time() - ts)) if ts else None
     sys.stdout.write(json.dumps(out) + "\n")
     # A degraded-coverage note must survive the coalescing this module exists
     # to do: without this, the note reaches only the one session whose live
@@ -152,8 +168,16 @@ def _serve(row: dict, *, stale: bool) -> int:
     return code
 
 
-def cached_status(pr: str, cwd: Optional[str] = None) -> int:
+def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
     """`fno pr status` through the coalescing cache: the CLI chokepoint.
+
+    `refresh=True` (`fno pr status --refresh`) is the sanctioned escape: no row
+    is served, the live read runs, and the fresh row replaces whatever was
+    there. Before it existed a caller who distrusted a cached verdict had no
+    option at all - `--help` listed none - and had to drop to raw `gh api`,
+    which is what a king did on PR 994 after the cache reported red on a PR
+    GitHub called clean. It is a MANUAL verb: it defeats the coalescing this
+    module exists to do, so never put it in a watcher loop.
 
     Rows are keyed by (repo, PR, head): a verdict is a fact about ONE commit,
     and serving a green row cached for head A after a push moved the PR to
@@ -177,6 +201,12 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
     slug_key = slug.replace("/", "--")
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
+        if refresh:
+            # The caller asked for truth, not a row. With no readable head
+            # there is no fresher answer than the loud live read - serving a
+            # degraded row here would answer the question --refresh was
+            # raised to refuse.
+            return run_status(pr, cwd)
         # Head unreadable (secondary window, network): fail CLOSED. Serve the
         # PR's newest existing row degraded (unknown, unsettled - keeps the
         # zero-network collapse without ever answering green off data nobody
@@ -200,7 +230,7 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         return -1
 
     now = time.time()
-    code = _servable(read_row(key), now)
+    code = -1 if refresh else _servable(read_row(key), now)
     if code >= 0:
         return code
 
@@ -217,7 +247,7 @@ def cached_status(pr: str, cwd: Optional[str] = None) -> int:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             row = read_row(key)
-            code = _servable(row, time.time())
+            code = -1 if refresh else _servable(row, time.time())
             if code >= 0:
                 return code
 

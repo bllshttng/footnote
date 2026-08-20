@@ -590,10 +590,12 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
 
 def main(argv: Sequence[str]) -> int:
-    if not argv:
+    args = [a for a in argv if not str(a).startswith("--")]
+    refresh = any(str(a) in ("--refresh", "--no-cache") for a in argv)
+    if not args:
         import sys
 
-        sys.stderr.write("usage: fno pr status <pr-number>\n")
+        sys.stderr.write("usage: fno pr status <pr-number> [--refresh]\n")
         return 2
     try:
         from fno.pr._cache import cached_status
@@ -602,7 +604,7 @@ def main(argv: Sequence[str]) -> int:
         # polling one PR issue one network read per TTL. The
         # library entry (run_status) stays uncached for programmatic callers
         # and tests.
-        return cached_status(str(argv[0]))
+        return cached_status(str(args[0]), refresh=refresh)
     except ToolMissing:
         import sys
 

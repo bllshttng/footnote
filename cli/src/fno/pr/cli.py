@@ -84,17 +84,33 @@ def verify(
         "2 pending, 3 unknown (no checks), 4 fetch error, 127 gh-missing. "
         "In-progress checks read as pending, never red. settled is true only "
         "when every latest run carries a real conclusion, so a cancelled run "
-        "reads red AND unsettled."
+        "reads red AND unsettled. checks.total counts the whole rollup: "
+        "checks.check_runs and checks.statuses split it, because "
+        "`gh api .../check-runs` returns only the first kind. A served answer "
+        "carries cached/cached_at/cached_age_seconds/cached_head; "
+        "--refresh bypasses the cache for one live read."
     ),
 )
-def status(pr_number: int = typer.Argument(..., help="GitHub PR number")) -> None:
+def status(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        "--no-cache",
+        help=(
+            "Bypass the coalescing cache and read GitHub live. Manual use "
+            "only - it defeats the coalescing that keeps a watcher fleet "
+            "under the REST secondary limit, so never put it in a poll loop."
+        ),
+    ),
+) -> None:
     from fno.pr import _status
 
     # main() routes through the coalescing cache: the watcher
     # recipe polls this verb every 60s per session, and N sessions polling one
     # PR must collapse to one network read per TTL or they trip the REST
     # secondary limit (which counts request rate, not budget).
-    rc = _status.main([str(pr_number)])
+    rc = _status.main([str(pr_number)] + (["--refresh"] if refresh else []))
     raise typer.Exit(code=rc)
 
 

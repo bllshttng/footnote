@@ -29,6 +29,10 @@ Exit code 0 is green, 1 is red, 2 is pending.
 This is the CI verdict alone.
 A green CI with a required reviewer still pending still reads green.
 
+`checks.total` counts the whole rollup, which holds two different kinds of row. GitHub check-runs carry a `name` and come from Actions or a Checks-API app. Commit statuses carry a `context` and are posted to the statuses endpoint. `checks.check_runs` and `checks.statuses` split the total, so a total that disagrees with `gh api repos/OWNER/REPO/commits/SHA/check-runs` is legible rather than alarming: that endpoint returns only the first kind. On PR 994 the tally said 15, the endpoint named 13, and the two extra rows were fno's own `stacked-base-guard` and `fno/review-coverage` statuses.
+
+The answer can come from the coalescing cache. That cache keys one row per repo, PR and head, so a verdict never answers for a commit it was not computed at. A served answer says so in `cached`. It says how second-hand it is in `cached_at`, `cached_age_seconds` and `cached_head`. To refuse the cache for one read, pass `--refresh` (`--no-cache` is the same flag). When a verdict looks wrong, use that flag by hand. Do not put it in a poll loop: the coalescing is what keeps a fleet of watchers under GitHub's REST secondary limit.
+
 Read the run's manifest:
 
 ```bash

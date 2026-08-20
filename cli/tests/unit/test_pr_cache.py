@@ -361,3 +361,97 @@ def test_corrupt_cached_exit_code_falls_through_to_a_live_read(cache_env, monkey
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 1, f"expected exactly one JSON line, got: {lines}"
     assert json.loads(lines[0])["verdict"] == "green"
+
+
+def test_a_served_row_names_its_age_and_the_head_it_was_computed_at(
+    cache_env, monkeypatch, capsys
+):
+    """`cached: true` alone is decorative and every consumer ignored it.
+
+    It says the answer is second-hand but not how second-hand, so a reader
+    cannot judge whether the staleness matters for their question. The served
+    line must carry the age and the head the verdict was computed at.
+    """
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    _cache.cached_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["cached"] is True
+    assert calls["n"] == 1, "the second call must be a hit, not a live read"
+    assert out["cached_head"] == "a" * 40
+    assert isinstance(out["cached_age_seconds"], int)
+    assert out["cached_at"].endswith("Z")
+
+
+def test_refresh_ignores_a_fresh_row_and_reads_live(cache_env, monkeypatch, capsys):
+    """`--refresh` is the sanctioned escape from a verdict a caller distrusts.
+
+    Before it existed the only option was raw `gh api`, which is what a king
+    did on PR 994 after the cache reported red on a PR GitHub called clean.
+    A refresh inside the TTL must spend a real read and print a line with no
+    `cached` marker on it.
+    """
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    code = _cache.cached_status("42", refresh=True)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert calls["n"] == 2, "--refresh must not be served from the row"
+    assert "cached" not in out
+
+
+def test_refresh_replaces_the_row_it_bypassed(cache_env, monkeypatch, capsys):
+    """The fresh read is not thrown away: the next ordinary caller inherits it.
+
+    A refresh that read live and then left the distrusted row on disk would
+    make every sibling session re-run the escape hatch.
+    """
+    cache_dir, head = cache_env
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    _row_path(cache_dir).write_text(json.dumps({
+        "ts": time.time(),
+        "exit": 1,
+        "output": {"verdict": "red", "settled": True, "head": "a" * 40},
+    }))
+    capsys.readouterr()
+
+    _cache.cached_status("42", refresh=True)
+    capsys.readouterr()
+    code = _cache.cached_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["verdict"] == "green"
+    assert out["cached"] is True
+
+
+def test_refresh_with_an_unreadable_head_goes_loud_not_stale(
+    cache_env, monkeypatch, capsys
+):
+    """With no readable head there is no fresher answer than the live read.
+
+    Serving a degraded row here would answer the exact question `--refresh`
+    was raised to refuse, and it would do it while looking like compliance.
+    """
+    cache_dir, head = cache_env
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    capsys.readouterr()
+
+    head["fail"] = True
+    fetch, calls = _fetch_spy([_GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    code = _cache.cached_status("42", refresh=True)
+    out = json.loads(capsys.readouterr().out)
+    assert calls["n"] == 1, "an unreadable head must still produce a live read"
+    assert code == 0
+    assert "cached" not in out
+    assert "stale_reason" not in out
