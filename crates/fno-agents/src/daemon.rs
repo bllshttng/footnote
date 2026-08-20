@@ -5110,13 +5110,22 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
 /// SIGTERM -> SIGKILL escalation is the recovery.
 const WORKER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bound on the WRITE half of a `worker.shutdown` round trip (x-76d1 self-review
+/// finding, mirrors [`crate::client::WRITE_TIMEOUT`]). A small JSON request to an
+/// already-connected local socket clears the kernel send buffer near instantly
+/// unless the worker has stopped reading its socket entirely; kept short and
+/// separate from `WORKER_ACK_TIMEOUT` so pairing it with the read's own 30s bound
+/// does not silently double the documented shutdown-ack budget in
+/// [`crate::client::RESPONSE_DEADLINE`]'s worst-case math.
+const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Fire-and-forget `worker.shutdown` to a worker that must not be left running
 /// (a spawn that failed or lost a name race): connect, ask it to tear down, and
 /// move on. Best-effort by design — the caller is already on an error path.
 async fn best_effort_worker_shutdown(sock: &std::path::Path) {
     if let Ok(mut conn) = UnixStream::connect(sock).await {
         let _ = tokio::time::timeout(
-            WORKER_ACK_TIMEOUT,
+            WORKER_ACK_WRITE_TIMEOUT,
             write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
         )
         .await;
@@ -5136,13 +5145,14 @@ async fn best_effort_worker_shutdown(sock: &std::path::Path) {
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
     let sock = ctx.home.worker_sock(&entry.short_id);
     // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the
-    //    write and the ACK read are bounded (see WORKER_ACK_TIMEOUT): a
-    //    worker that is wedged (including one that has stopped reading its
-    //    socket entirely, which blocks the write side too) must fall through
-    //    to the escalation below, not park this handler.
+    //    write (WORKER_ACK_WRITE_TIMEOUT) and the ACK read (WORKER_ACK_TIMEOUT)
+    //    are bounded, asymmetrically like the client's own request/response
+    //    split: a worker that is wedged (including one that has stopped
+    //    reading its socket entirely, which blocks the write side too) must
+    //    fall through to the escalation below, not park this handler.
     if let Ok(mut conn) = UnixStream::connect(&sock).await {
         let _ = tokio::time::timeout(
-            WORKER_ACK_TIMEOUT,
+            WORKER_ACK_WRITE_TIMEOUT,
             write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
         )
         .await;
