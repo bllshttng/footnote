@@ -167,6 +167,16 @@ if [[ -n "$NODE" ]]; then
   guard_out="$(FNO_AGENTS_RUNTIME=python fno agents spawn-guard "$NODE" --holder "dispatch-skill-probe:$$" --no-reserve --json ${guard_cwd_args[@]+"${guard_cwd_args[@]}"} 2>/dev/null)"; guard_rc=$?
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
+  # An untried wedge is DISPATCHABLE as far as this script is concerned. The
+  # probe takes no recovery, so a wedge it reports has not been tried yet, and
+  # the only path that clears the claim is the real `fno agents spawn` below.
+  # Failing here is what made that recovery unreachable from `/fno:agent spawn
+  # --node`. Rewriting the verdict, rather than breaking out of the case, keeps
+  # every other arm's contract intact.
+  if [[ "$verdict" == "already-running" ]] \
+     && [[ "$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)" == "not-attempted" ]]; then
+    verdict="dispatchable"
+  fi
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
@@ -189,33 +199,23 @@ if [[ -n "$NODE" ]]; then
         fi
       elif [[ "$reason" == "suspect-claim" ]]; then
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        recovery="$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)"
-        # A WEDGE, not benign dedup: dead pid, unexpired TTL, so nobody is
-        # building this node and nobody will until it clears.
+        # An UNTRIED wedge never reaches here: it was rewritten to dispatchable
+        # above so the real spawn can try the recovery. What is left is a wedge
+        # a launch already tried to clear and could not, so nobody is building
+        # this node and nobody will until an operator intervenes.
         #
-        # The call above is a PROBE and takes no recovery, so a wedge it reports
-        # has not been tried yet. Failing here is what made the recovery this PR
-        # adds unreachable from `/fno:agent spawn --node`: the only path that
-        # clears the claim is the real `fno agents spawn` below, and this exited
-        # before reaching it. Fall through instead. That spawn runs the same
-        # guard WITH a reservation, clears what it can prove dead, and refuses
-        # with a remedy on stderr when it cannot.
-        if [[ "$recovery" == "not-attempted" ]]; then
-          wedge_untried=1
-        else
-          # The remedy goes to STDERR, never inside the receipt: `fail` renders
-          # `result=failed reason="..."` and this file's contract is ONE line on
-          # stdout. A newline inside the quoted reason breaks every caller that
-          # parses that line. `fail` exits non-zero: exiting 0 here told a
-          # caller reading the exit code that the launch worked (x-05be).
-          printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
-          fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
-        fi
+        # The remedy goes to STDERR, never inside the receipt: `fail` renders
+        # `result=failed reason="..."` and this file's contract is ONE line on
+        # stdout. A newline inside the quoted reason breaks every caller that
+        # parses that line. `fail` exits non-zero: exiting 0 here told a caller
+        # reading the exit code that the launch worked (x-05be).
+        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
+        fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
       else
         printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
         fail "family-2 guard blocked node:$NODE; no worker launched"
       fi
-      [[ "${wedge_untried:-0}" == 1 ]] || exit 0 ;;
+      exit 0 ;;
     corrupted)
       fail "node:$NODE claim is corrupted; force-release or repair before dispatching" ;;
     refused)

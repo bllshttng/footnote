@@ -61,6 +61,7 @@ from typing import List, Mapping, NamedTuple, Optional
 import typer
 
 from .core import (
+    HANDOVER_HOLDER_PREFIX as _HANDOVER_HOLDER_PREFIX,
     ClaimContended,
     ClaimCorrupted,
     ClaimGoneAway,
@@ -819,11 +820,22 @@ def _roster_crosscheck(node_id: str, reading: Optional[RosterReading] = None) ->
     }
 
 
-#: A roster row in this state finished its turn. The session is RESUMABLE, so
-#: the row is worth naming, but nobody is driving the node right now and
-#: calling it a live worker would be the same overclaim the cross-check exists
-#: to delete - one word covering two facts.
-_FINISHED_ROW_STATE = "done"
+def _finished_row_states() -> frozenset:
+    """Roster row states that mean the session is no longer driving the node.
+
+    ONE authority, the watchdog's own terminal set, because this file carried
+    two hand-written copies that both read ``{"done"}``. A ``killed`` row then
+    counted as an engaged worker: the cross-check called the node worked, and
+    the abandonment probe answered "the holder is still working", so the claim
+    was never reaped and the operator was told a live worker held it.
+
+    ``done`` is not terminal for the SESSION (it is resumable), but it is the
+    positive marker that this worker stopped working, which is the only thing
+    either caller needs to know.
+    """
+    from fno.agents.watchdog import _TERMINAL_STATES
+
+    return _TERMINAL_STATES
 
 
 def _roster_verdict_line(info: dict) -> str:
@@ -841,7 +853,8 @@ def _roster_verdict_line(info: dict) -> str:
     if not info.get("roster_consulted"):
         return f"free, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
-    engaged = [w for w in workers if w["state"] != _FINISHED_ROW_STATE]
+    finished = _finished_row_states()
+    engaged = [w for w in workers if w["state"] not in finished]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         return f"UNCLAIMED but a live worker is on this node: {rendered}"
@@ -1024,18 +1037,11 @@ def list_cmd(
         )
 
 
-#: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
-#: a worker that does not exist yet. Worker-specific (it carries the worker's
-#: name), so naming it back is evidence of being the intended successor rather
-#: than a bystander who guessed the key.
-HANDOVER_HOLDER_PREFIX = "spawn-handover:"
+#: Re-exported so every caller keeps its existing import site. The definition
+#: moved to :mod:`fno.claims.core`, which is where the handover branch enforces
+#: it - a second copy here would be a rule and its guard drifting apart.
+HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
-
-#: Roster row states that mean the session finished its turn. A row in any
-#: other state is still in play. ``done`` is NOT terminal for the session (it is
-#: resumable), but it IS the positive marker that this worker stopped working,
-#: which is the only thing abandonment needs to know.
-_TERMINAL_ROW_STATES = frozenset({"done"})
 
 
 def _abandonment_probe(reading: Optional[RosterReading] = None):
@@ -1093,7 +1099,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         if row is None:
             # Not found is not gone. See the docstring.
             return None
-        return row.get("state") in _TERMINAL_ROW_STATES
+        return row.get("state") in _finished_row_states()
 
     return _probe
 

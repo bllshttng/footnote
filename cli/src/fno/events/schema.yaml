@@ -3297,7 +3297,7 @@ event_types:
           description: "The row's name."
         verdict:
           type: string
-          description: "ghost | reap | stale | reroute | wake."
+          description: "ghost | reap | stale | reroute | wake | leave | unclaimed."
         basis:
           type: string
           description: "The measurement that decided the verdict (e.g. 'no transcript for <id>', 'node <id> done', '429 resets 18:48:21Z, 8m out')."

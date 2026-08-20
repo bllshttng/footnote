@@ -631,7 +631,24 @@ def compare_and_rebind(
             )
 
         state = classify(existing)
-        if state == ClaimState.LIVE and new_holder and new_holder != existing.holder:
+        # ONLY a launch-window holder may be replaced. Naming the prior holder
+        # is the proof, and for `spawn-handover:<worker>` that proof is real: it
+        # is minted per worker and travels only in that worker's environment.
+        # Every other holder is PUBLISHED by `fno claim status`, so without this
+        # anyone could read a holder off the store and hand the node to
+        # themselves - taking a running owner's claim, which `ClaimHeldByOther`
+        # had always refused.
+        #
+        # Computed ONCE and applied at all three rebind sites. Gating only the
+        # LIVE branch would leave the rename reachable through the idempotent
+        # and dead-owner paths, which is the same rule on one of three paths.
+        handover_allowed = bool(
+            new_holder
+            and new_holder != existing.holder
+            and existing.holder.startswith(HANDOVER_HOLDER_PREFIX)
+        )
+        effective_new_holder = new_holder if handover_allowed else None
+        if state == ClaimState.LIVE and handover_allowed:
             # A HANDOVER, and a live prior pid does not refuse it. The
             # concurrent-writer rule below protects one symbolic owner from two
             # of its own processes, which is a different situation: here the
@@ -646,7 +663,7 @@ def compare_and_rebind(
             # free-read this whole change exists to close, reintroduced on the
             # one substrate that blocks.
             rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=new_holder,
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=new_reason, new_harness=new_harness,
             )
             _atomic_replace(path, serialize_claim(rebound))
@@ -665,7 +682,7 @@ def compare_and_rebind(
             if existing.pid == npid:
                 # Idempotent: already bound to this process; refresh lease only.
                 rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=new_holder,
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=new_reason, new_harness=new_harness,
             )
                 _atomic_replace(path, serialize_claim(rebound))
@@ -702,7 +719,7 @@ def compare_and_rebind(
 
         # Local same-holder, prior PID dead: the resume rebind.
         rebound = _rebound_claim(
-                existing, npid, ttl_ms, new_holder=new_holder,
+                existing, npid, ttl_ms, new_holder=effective_new_holder,
                 new_reason=new_reason, new_harness=new_harness,
             )
         _atomic_replace(path, serialize_claim(rebound))
@@ -727,6 +744,14 @@ def compare_and_rebind(
 #: guard's targeted recovery) is what made the duplication worth collapsing.
 #: A caller that spells it differently takes a DIFFERENT lock and silently
 #: serializes against nobody.
+#: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
+#: a worker that does not exist yet. Worker-specific (it carries the worker's
+#: name) and delivered only in that worker's environment, so naming it back is
+#: evidence of being the intended successor rather than a bystander who read a
+#: holder off the store. The handover branch above enforces it, which is why the
+#: constant lives here rather than in the command module that re-exports it.
+HANDOVER_HOLDER_PREFIX = "spawn-handover:"
+
 RECOVERY_LOCK_SUFFIX = ".recovery.d"
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
@@ -862,6 +887,18 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     harness ancestor started before this renewal, so the claim reads live now
     and a later recycle of that pid number reads ``create_time > acquired_at``
     exactly as today.
+
+    THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
+    by its holder string and nothing else, and `fno claim status` publishes that
+    string. So a different session on this machine that refreshes under a
+    published holder re-anchors the claim to ITS ancestor, and the claim then
+    reads LIVE until that session ends instead of SUSPECT.
+
+    That is the same credential `release_claim` and `refresh_claim` have always
+    accepted, not a new one, and no stronger check is available here: the
+    recorded pid is dead by precondition, so its ancestry cannot be walked to
+    prove the renewer shares its session. Closing it needs a session identity in
+    the claim record, which is its own change.
     """
     if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
         return None

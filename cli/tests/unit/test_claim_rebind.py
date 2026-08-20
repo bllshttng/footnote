@@ -209,3 +209,37 @@ def test_rebind_ttl_window_does_not_compound(tmp_path):
     t0 = now_ms()
     claim, _ = compare_and_rebind(KEY, HOLDER, new_pid=os.getpid(), root=tmp_path, emit=False)
     assert abs(claim.expires_at - (t0 + window)) < 5_000
+
+
+def test_a_live_handover_needs_a_launch_window_holder(tmp_path):
+    """Naming the prior holder is the proof, and it is only proof for a holder
+    that is not published. `fno claim status` prints every other one, so without
+    this gate anyone could read a live worker's holder off the store and hand
+    the node to themselves - taking a running owner's claim."""
+    prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,
+                   holder="target-session:sid-live")
+    _write(tmp_path, prior)
+    claim, mode = compare_and_rebind(
+        KEY, "target-session:sid-live", new_holder="target-session:sid-thief",
+        new_pid=os.getpid(), root=tmp_path, emit=False,
+    )
+    # The rename is dropped on every path, not only the handover branch: this
+    # call lands on the idempotent one, which used to apply new_holder too.
+    assert mode == "idempotent"
+    assert claim.holder == "target-session:sid-live"
+    assert claim_status(KEY, root=tmp_path)["holder"] == "target-session:sid-live"
+
+
+def test_a_live_launch_window_holder_still_hands_over(tmp_path):
+    """The case the branch exists for. `--substrate headless` keeps the spawner
+    alive for the worker's whole run, so its claim is LIVE when the worker
+    reaches init. Refusing there left the worker unclaimed for the full lease."""
+    prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,
+                   holder="spawn-handover:t-worker")
+    _write(tmp_path, prior)
+    claim, mode = compare_and_rebind(
+        KEY, "spawn-handover:t-worker", new_holder="target-session:sid-worker",
+        new_pid=os.getpid(), root=tmp_path, emit=False,
+    )
+    assert mode == "handover"
+    assert claim.holder == "target-session:sid-worker"

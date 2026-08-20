@@ -111,8 +111,7 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
         sweep_verdict,
     )
     from fno.claims.io import claim_path, claims_root_for, read_claim_file
-    from fno.claims.staleness import classify, is_live, now_ms
-    from fno.claims.types import ClaimState
+    from fno.claims.staleness import is_live
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
     path = claim_path(key, root=claims_root_for(key))
@@ -306,6 +305,10 @@ def _spawn_guard_decision(
     if no_reserve:
         return {"verdict": "dispatchable"}, 0
 
+    #: True once this call has cleared a dead spawner's reservation. The node
+    #: claim below is the barrier that replaced it, so a failure to take it
+    #: means something different on this path than on the ordinary one.
+    reservation_recovered = False
     try:
         acquire_claim(
             res_key,
@@ -331,6 +334,7 @@ def _spawn_guard_decision(
             cleared, bucket = _reclaim_if_provably_dead(res_key)
         except Exception:  # noqa: BLE001 - a failed recovery clears nothing
             cleared, bucket = None, "unrecoverable"
+        reservation_recovered = cleared is not None
         if cleared is None:
             # A live spawner is mid-launch: benign dedup, and naming a
             # force-release here would be worse advice than none.
@@ -407,6 +411,23 @@ def _spawn_guard_decision(
                 root=claims_root_for(node_key),
             )
         except Exception as exc:  # noqa: BLE001 - visibility is best-effort here
+            if reservation_recovered:
+                # The ONE combination where nothing is protecting the launch
+                # window. Clearing a dead spawner's reservation is safe because
+                # this claim covers the window instead - and on this path it
+                # did not land. A spawner that forked a worker and exited
+                # normally is indistinguishable from one that died, so
+                # proceeding here re-opens the double dispatch both barriers
+                # exist to close. The reservation carries a 3m TTL and an
+                # expired claim is provably dead, so the node self-heals.
+                return {
+                    "verdict": "error",
+                    "detail": (
+                        f"recovered a dead spawner's {res_key} but could not take "
+                        f"node:{node_id} ({exc}); refusing rather than launching "
+                        "with neither barrier held"
+                    ),
+                }, 3
             out["node_claim_error"] = str(exc)
         else:
             out["node_claim_key"] = node_key

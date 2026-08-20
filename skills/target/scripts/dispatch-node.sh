@@ -585,8 +585,22 @@ for id in "${NODES[@]}"; do
   # could leak onto stdout), then parse the verdict.
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
-  # Per-node, so one node's untried wedge cannot leak into the next iteration.
-  wedge_untried=0
+  # An untried wedge is DISPATCHABLE as far as this loop is concerned, and it is
+  # rewritten here rather than handled inside the case.
+  #
+  # The probe takes no recovery, so a wedge it reports has not been tried yet.
+  # The only path that clears the claim is the real spawn below, which runs the
+  # same guard WITH a reservation. Refusing here is what made that recovery
+  # unreachable for a batch.
+  #
+  # Rewriting the verdict, rather than breaking out of the case, is what keeps
+  # the rest of the arm's contract: the `dispatchable` arm still parks a
+  # `claimed` node for manual recovery, and the dry-run branch below still
+  # previews rather than claiming a launch.
+  if [[ "$verdict" == "already-running" && "$DRY_RUN" -ne 1 ]] \
+     && [[ "$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)" == "not-attempted" ]]; then
+    verdict="dispatchable"
+  fi
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
@@ -599,27 +613,19 @@ for id in "${NODES[@]}"; do
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
-        recovery="$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null || true)"
-        if [[ "$recovery" == "not-attempted" ]]; then
-          # The probe takes no recovery, so this wedge has not been tried yet.
-          # Skipping here is what made the recovery unreachable for a batch: the
-          # only path that clears the claim is the real spawn below. Go there.
-          # It runs the same guard WITH a reservation, clears what it can prove
-          # dead, and refuses with a remedy on stderr when it cannot.
-          wedge_untried=1
-        else
-          echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
-          # A remedy is present only when the guard tried to clear this and
-          # could not prove the holder dead - the positive marker for a wedge. A
-          # batch keeps sweeping either way; the exit code below is what changes.
-          remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
-          if [[ -n "$remedy" ]]; then
-            echo "$remedy"
-            n_wedged=$((n_wedged + 1))
-          fi
-          n_skipped=$((n_skipped + 1))
-          continue
+        # An UNTRIED wedge never reaches here: it was rewritten to dispatchable
+        # above so the real spawn can try the recovery. What is left is a wedge
+        # a launch already failed to clear, or a dry run previewing one.
+        echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
+        # A remedy is present only when the guard tried to clear this and could
+        # not prove the holder dead - the positive marker for a wedge. A batch
+        # keeps sweeping either way; the exit code below is what changes.
+        remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
+        if [[ -n "$remedy" ]]; then
+          echo "$remedy"
+          n_wedged=$((n_wedged + 1))
         fi
+        n_skipped=$((n_skipped + 1))
       else
         # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-
         # held, or won the visibility barrier). Mirror spawn.sh's receipt so the
@@ -628,9 +634,7 @@ for id in "${NODES[@]}"; do
         echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds $res_key)\""
         n_already=$((n_already + 1))
       fi
-      # An untried wedge falls through to the real spawn; every other shape here
-      # has already reported and moves to the next node.
-      [[ "${wedge_untried:-0}" == 1 ]] || continue ;;
+      continue ;;
     corrupted)
       # The worker's init-side `fno claim acquire` cannot reclaim a corrupted
       # claim, so launching would run WITHOUT the node:<id> mutex and leave the
