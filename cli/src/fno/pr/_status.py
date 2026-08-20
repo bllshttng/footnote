@@ -190,6 +190,12 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     fno's own statuses (stacked-base-guard, fno/review-coverage). The two
     sub-counts need not sum to `total`: a rollup row carrying neither key is
     counted in neither (it is also never deduped).
+
+    `counts["fail_check_runs"]` and `counts["fail_statuses"]` split the fail
+    bucket the same way, and they are what lets a caller name a red honestly.
+    The VERDICT deliberately does not split: a failing StatusContext is a real
+    red (`stacked-base-guard` is one), so it must never read green. What the
+    split fixes is the ATTRIBUTION - see `_ready_blockers`.
     `counts["unsettled"]` counts latest runs with NO settled marker (an absent
     result: cancelled, stale, still running), and `settled` is derived from it
     positively elsewhere - never from the absence of a pending run.
@@ -207,6 +213,8 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
         "total": len(deduped),
         "check_runs": 0,
         "statuses": 0,
+        "fail_check_runs": 0,
+        "fail_statuses": 0,
         "pass": 0,
         "fail": 0,
         "pending": 0,
@@ -218,8 +226,12 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
             counts["unsettled"] += 1
         if c.get("name") not in (None, ""):
             counts["check_runs"] += 1
+            if _classify(c) == "fail":
+                counts["fail_check_runs"] += 1
         elif c.get("context") not in (None, ""):
             counts["statuses"] += 1
+            if _classify(c) == "fail":
+                counts["fail_statuses"] += 1
     real_check_runs = counts["check_runs"]
     if not deduped:
         return ("unknown", 3, counts)
@@ -293,13 +305,16 @@ def _ready_blockers(
     head: str = "",
     code_review_required: bool = False,
     mergeable: Optional[str] = None,
+    counts: Optional[dict] = None,
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
-    A bare ``ready: false`` has one explanation per conjunct (CI red, an
+    A bare ``ready: false`` has one explanation per conjunct (a red check, an
     unresolved optional finding, coverage unknown or uncovered) and a reader
     cannot tell them apart; the list is the positive marker that names what is
-    holding. ``unknown`` coverage blocks and is named as its own blocker: the
+    holding. A red is split by the KIND of row that failed: ``ci_<verdict>``
+    when a real check-run failed, ``commit_status_red`` when every failing row
+    is a commit StatusContext and no job failed at all. ``unknown`` coverage blocks and is named as its own blocker: the
     reason a read returned unknown is a separate question (x-b56a), this only
     reports that the answer is missing. Fail-closed everywhere: an unset
     unresolved count blocks as ``optional_reviews_unknown``, and the coverage
@@ -331,7 +346,20 @@ def _ready_blockers(
     if mergeable not in (None, "MERGEABLE"):
         blockers.append(f"not_mergeable_{str(mergeable).lower()}")
     if not green:
-        blockers.append(f"ci_{verdict}")
+        # A red is named for the KIND of row that failed, never generically.
+        # `ci_red` on a head whose every job passed is a lie a reader acts on:
+        # it woke a session with "CI red, fno/review-coverage failed", which
+        # is two incompatible claims in one line. The counts already know
+        # which kind failed, so the name reads them.
+        #
+        # Rename, never remove. `stacked-base-guard` is also a StatusContext,
+        # so on some PRs a status-only red is the ONLY red there is - dropping
+        # the blocker would silence a real gate to de-duplicate a different
+        # one. Both still block, and the verdict stays red either way.
+        if verdict == "red" and counts and not counts.get("fail_check_runs"):
+            blockers.append("commit_status_red")
+        else:
+            blockers.append(f"ci_{verdict}")
     if unresolved is None or not isinstance(unresolved, int):
         # None is the read's own "unknown"; a non-int is a contract violation.
         # Both fail closed as unknown rather than TypeError or a silent pass.
@@ -466,6 +494,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # above - a merged/closed PR's mergeable field is stale and must not
         # hold a report that changes nothing.
         mergeable=None if is_terminal else pr_json.get("mergeable"),
+        counts=counts,
     )
     if hold_reason:
         blockers.append("dispatch_hold")
