@@ -1799,14 +1799,12 @@ def main():
         if kind == "info":
             reason = (
                 f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability. "
-                "This refusal is unconditional: the direct read is ROUTED, never "
-                "rationed, so waiting for a quota reset changes nothing."
+                "This refusal is unconditional: the read is ROUTED, never rationed."
             )
         elif kind == "list":
             reason = (
                 "[fno GraphQL reserve] use `fno pr list` for a REST-backed listing. "
-                "This refusal is unconditional: the direct read is ROUTED, never "
-                "rationed, so waiting for a quota reset changes nothing."
+                "This refusal is unconditional: the read is ROUTED, never rationed."
             )
         elif kind == "status":
             reason = (
