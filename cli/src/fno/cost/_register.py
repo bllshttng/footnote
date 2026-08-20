@@ -920,12 +920,30 @@ def _emit_ledger_transition(entry: dict) -> None:
     env = os.environ.copy()
     env["EVENTS_FILE"] = str(Path(root_path) / ".fno" / "events.jsonl")
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["bash", "-c", cmd],
             check=False,
             timeout=5,
             env=env,
         )
+        if result.returncode != 0 or not (Path(root_path) / ".fno" / "events.jsonl").exists():
+            try:
+                from fno.events import _build, append_event
+
+                fallback = _build(
+                    "phase_transition",
+                    "target",
+                    {
+                        "session_id": session_id,
+                        "gate": "ledger_updated",
+                        "phase": "register",
+                        "nonce": nonce,
+                        "gate_bearing": True,
+                    },
+                )
+                append_event(fallback, Path(root_path) / ".fno" / "events.jsonl")
+            except Exception:  # noqa: BLE001 - telemetry remains best-effort
+                pass
     except (subprocess.TimeoutExpired, FileNotFoundError):
         # bash missing or hang - non-fatal (the ledger append already succeeded)
         pass
