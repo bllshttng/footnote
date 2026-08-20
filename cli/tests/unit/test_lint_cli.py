@@ -418,7 +418,7 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        violations, inspected, changed, unexplained = _style_added_lines("base", None)
+        violations, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         _clear_repo_root_cache()
@@ -551,7 +551,7 @@ def test_a_scope_naming_a_path_the_branch_renamed_away_is_allowed(
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        violations, inspected, changed, unexplained = _style_added_lines(
+        violations, inspected, changed, unexplained, _exempted = _style_added_lines(
             "base", [Path(old)]
         )
     finally:
@@ -603,7 +603,7 @@ def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
     _clear_repo_root_cache()
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
     try:
-        _v, _inspected, _changed, unexplained = _style_added_lines("base", None)
+        _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         _clear_repo_root_cache()
         os.chdir(cwd)
@@ -647,7 +647,7 @@ def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, changed, unexplained = _style_added_lines("base", None)
+        _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         _clear_repo_root_cache()
@@ -694,7 +694,7 @@ def test_style_gate_still_fails_when_the_parser_loses_added_lines(
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, changed, unexplained = _style_added_lines("base", None)
+        _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         _clear_repo_root_cache()
@@ -743,7 +743,7 @@ def test_the_guard_catches_a_partial_parser_loss_not_only_a_total_one(
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, _changed, unexplained = _style_added_lines("base", None)
+        _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         _clear_repo_root_cache()
@@ -918,3 +918,59 @@ def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
             f"`fno lint {name}` accepts {sorted(missing)}, which `fno lint` does "
             f"not declare, so those flags are unreachable. Add them to lint()."
         )
+
+
+def test_a_file_skipped_by_its_exception_marker_is_named_not_just_uncounted(
+    tmp_path: Path,
+) -> None:
+    """A skip and a clean scan must not print the same receipt.
+
+    An exempted file still counts as CHANGED while adding nothing to
+    INSPECTED, so "0 added line(s) across 1 changed file(s)" reads identically
+    whether the file had nothing to inspect or was never read. A reader cannot
+    judge an exception that the receipt does not mention.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    exempt = repo / "docs" / "exempt.md"
+    exempt.write_text(
+        "<!-- style-exception: fixture -->\nOne line.\n", encoding="utf-8"
+    )
+    (repo / "docs" / "plain.md").write_text("Alpha.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    exempt.write_text(
+        "<!-- style-exception: fixture -->\nOne line.\nA second line added here.\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "plain.md").write_text("Alpha.\nBeta.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a line to each")
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, inspected, changed, _unexplained, exempted = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert exempted == ["docs/exempt.md"], (
+        "the marker-skipped path must be named, since the counts alone cannot "
+        "distinguish a skipped file from one with nothing to inspect"
+    )
+    # Positive control: the un-exempted sibling really was scanned, so a zero
+    # from the exempted file is a skip rather than a scan that read nothing.
+    assert inspected == 1, "the plain file's one added line must still be read"
+    assert changed == 2, "both files changed; only one of them was read"
