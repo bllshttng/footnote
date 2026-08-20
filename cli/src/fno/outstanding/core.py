@@ -24,6 +24,7 @@ from typing import Any, Iterable, Iterator, Optional
 # number, not as a wall - a block that scrolls the operator's screen gets
 # skipped, which is the failure this verb exists to fix.
 RENDER_CAP = 3
+QUESTION_RENDER_CAP = 10
 
 EVENTS_NAME = "events.jsonl"
 # `retro sweep-carveouts` skips this kind; /fno:pr merged owns it.
@@ -78,7 +79,7 @@ class Question:
             return False
         return reachable is not None and not ambiguous
 
-    def as_dict(self) -> "dict[str, Any]":
+    def as_dict(self, *, rank: Optional[int] = None) -> "dict[str, Any]":
         return {
             "id": self.id,
             "ts": self.ts,
@@ -91,6 +92,7 @@ class Question:
             "options": list(self.options),
             "blocks": list(self.blocks),
             "live": self.live,
+            "rank": rank,
         }
 
 
@@ -140,7 +142,7 @@ class Outstanding:
                 "by_kind": dict(self.carveout_by_kind),
                 "oldest_ts": self.carveout_oldest_ts,
             },
-            "questions": [q.as_dict() for q in self.questions],
+            "questions": [q.as_dict(rank=rank) for rank, q in enumerate(self.questions, 1)],
             "captures": {
                 "total": len(self.captures),
                 "resolved_files": self.capture_file_total,
@@ -251,7 +253,7 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
 def read_open_questions(root: Path) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
-    Newest first. A malformed line is SKIPPED, never raised, inheriting
+    Ranked by liveness, blocked nodes, age, then id. A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
     index reads as no questions with a recovery hint; an unreadable one fails.
     """
@@ -282,9 +284,19 @@ def read_open_questions(root: Path) -> "list[Question]":
                 closed.add(str(qid))
 
     open_qs = [q for qid, q in asked.items() if qid not in closed]
-    # Newest first. No auto-expiry: a question that goes quiet with age is the
-    # exact failure being fixed, so age never removes one from this list.
-    open_qs.sort(key=lambda q: q.ts, reverse=True)
+    # A stale asker never outranks a reachable one, even when it blocks more.
+    # Within each liveness lane, unblock the most nodes first, then honor the
+    # questions that have waited longest. No auto-expiry: age only ranks.
+    live = {q.id: q.live for q in open_qs}
+    open_qs.sort(
+        key=lambda q: (
+            not live[q.id],
+            -len(q.blocks),
+            not bool(q.ts),
+            q.ts,
+            q.id,
+        )
+    )
     return open_qs
 
 
@@ -609,10 +621,9 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
 
     if outstanding.questions:
         mine = [q for q in outstanding.questions if session_id and q.session_id == session_id]
-        theirs = [q for q in outstanding.questions if q not in mine]
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
-        shown = (mine + theirs)[:RENDER_CAP]
+        shown = outstanding.questions[:QUESTION_RENDER_CAP]
 
         def append_question(q: Question, *, stale_row: bool = False) -> None:
             label = "[this session] " if q in mine else ""
@@ -637,9 +648,10 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
             has_stale = has_stale or not is_live
         if has_stale:
             lines.append("  Answering a stale question records the decision but reaches nobody.")
-        dropped = len(outstanding.questions) - len(shown)
-        if dropped:
-            lines.append(f"  ... and {dropped} more.")
+        if len(outstanding.questions) > QUESTION_RENDER_CAP:
+            lines.append(
+                f"  Showing {len(shown)} of {len(outstanding.questions)} open questions."
+            )
         lines.append("  Answer with: fno outstanding clear <id> --answer \"...\"")
         lines.append("")
 

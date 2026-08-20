@@ -194,6 +194,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                 continue;
             };
             let question = str_field(&v, "question").unwrap_or("");
+            let evidence = str_field(&v, "ask").unwrap_or(question);
             let node = str_field(&v, "node").map(str::to_string);
             let name = node
                 .clone()
@@ -217,7 +218,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
                             name,
                             title: None,
                             ts: ts.to_string(),
-                            evidence: question.to_string(),
+                            evidence: evidence.to_string(),
                             // Stamped always-live by stamp_liveness (no node claim).
                             live: false,
                         },
@@ -559,7 +560,7 @@ fn expand_eq(rest: &[String]) -> Vec<String> {
 }
 
 /// Default event/ledger sources: project `.fno/events.jsonl` + global
-/// `~/.fno/events.jsonl` + `~/.fno/ledger.json` (the digest layout).
+/// `~/.fno/events.jsonl` + `~/.fno/questions.jsonl` + `~/.fno/ledger.json`.
 fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
     let fno_dir = home
         .root()
@@ -567,9 +568,10 @@ fn default_sources(home: &AgentsHome) -> (Vec<PathBuf>, PathBuf) {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let global_events = fno_dir.join("events.jsonl");
+    let questions = fno_dir.join("questions.jsonl");
     let project_events = PathBuf::from(".fno").join("events.jsonl");
     let ledger = fno_dir.join("ledger.json");
-    (vec![project_events, global_events], ledger)
+    (vec![project_events, global_events, questions], ledger)
 }
 
 /// Stamp each item's `live` bit from its node claim (x-feec 1.4): an item whose
@@ -1542,6 +1544,37 @@ mod tests {
         assert_eq!(items[0].kind, "operator_question");
         assert_eq!(items[0].node.as_deref(), Some("x-e3be"));
         assert!(items[0].evidence.contains("auto-merge or hold?"));
+    }
+
+    #[test]
+    fn question_index_is_a_default_source_and_ask_is_folded_as_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join(".fno");
+        let home = AgentsHome::at(state_dir.join("agents"));
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let index = state_dir.join("questions.jsonl");
+        std::fs::write(
+            &index,
+            r#"{"ts":"2026-07-03T02:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-index-only","question":"long context","ask":"pick alpha or beta"}}
+"#,
+        )
+        .unwrap();
+
+        let (sources, _) = default_sources(&home);
+        let events = sources
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
+
+        assert!(
+            sources.contains(&index),
+            "the machine-wide question index is read"
+        );
+        assert_eq!(items.len(), 1, "the index-only row reaches the needs fold");
+        assert_eq!(items[0].session_id, "q-index-only");
+        assert_eq!(items[0].evidence, "pick alpha or beta");
     }
 
     #[test]

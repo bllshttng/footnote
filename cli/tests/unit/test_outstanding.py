@@ -265,6 +265,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "options": ["index", "journal"],
         "blocks": ["x-one", "x-two"],
         "live": True,
+        "rank": 1,
     }
 
 
@@ -294,6 +295,108 @@ def test_live_is_computed_for_json_and_missing_asker_is_stale(
 
     assert [row["live"] for row in payload] == [True, False, False]
     assert seen == ["live-ask", "gone-ask"]
+
+
+def _write_indexed_questions(root: Path, rows: list[dict]) -> None:
+    (root / "questions.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
+def _indexed_question(
+    qid: str,
+    ts: str,
+    *,
+    asker: str,
+    blocks: list[str],
+) -> dict:
+    return {
+        "ts": ts,
+        "type": "operator_question",
+        "source": "test",
+        "data": {
+            "question_id": qid,
+            "question": f"question {qid}",
+            "asker": asker,
+            "blocks": blocks,
+        },
+    }
+
+
+def test_question_rank_orders_live_then_blocks_then_oldest_and_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable",
+        lambda asker: (object(), []) if asker == "live" else (None, []),
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-zero", "2026-08-19T03:00:00Z", asker="live", blocks=[]
+            ),
+            _indexed_question(
+                "q-two", "2026-08-19T02:00:00Z", asker="live", blocks=["x-a", "x-b"]
+            ),
+            _indexed_question(
+                "q-one", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-stale", "2026-08-19T00:00:00Z", asker="stale", blocks=["x-a", "x-b", "x-c"]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-two", "q-one", "q-zero", "q-stale"]
+    assert [row["rank"] for row in payload] == [1, 2, 3, 4]
+
+
+def test_question_rank_uses_oldest_then_id_within_a_block_count(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable", lambda _asker: (object(), [])
+    )
+    _write_indexed_questions(
+        root,
+        [
+            _indexed_question(
+                "q-new", "2026-08-19T03:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-z", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+            _indexed_question(
+                "q-a", "2026-08-19T01:00:00Z", asker="live", blocks=["x-a"]
+            ),
+        ],
+    )
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+
+    assert [row["id"] for row in payload] == ["q-a", "q-z", "q-new"]
+    assert [row["rank"] for row in payload] == [1, 2, 3]
+
+
+def test_question_render_cap_shows_ten_and_names_true_total(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("fno.agents.discover.resolve_reachable", lambda _asker: (None, []))
+    rows = [
+        _indexed_question(
+            f"q-{i:02d}", f"2026-08-19T{i:02d}:00:00Z", asker="stale", blocks=[]
+        )
+        for i in range(11)
+    ]
+    _write_indexed_questions(root, rows)
+
+    out = runner.invoke(outstanding_app, []).stdout
+
+    assert sum(row["data"]["question_id"] in out for row in rows) == 10
+    assert "Showing 10 of 11 open questions" in out
 
 
 def test_stale_questions_render_under_visible_heading_with_age(
@@ -925,12 +1028,10 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     monkeypatch.delenv("FNO_THINK_SPAWN_PRESENCE", raising=False)
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
-    # Bounded by the cap, never the whole queue.
-    assert out.count("question number") == 3
-    assert "3 more" in out
+    assert out.count("question number") == 6
     # Every rendered row carries an id, so the clear instruction has an operand.
     assert "fno outstanding clear" in out
-    assert out.count("q-") >= 3
+    assert out.count("q-") >= 6
 
 
 def test_an_attended_session_does_see_other_sessions_questions(
@@ -952,14 +1053,12 @@ def test_an_attended_session_does_see_other_sessions_questions(
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
     out = runner.invoke(outstanding_app, []).stdout
     assert "6 open question" in out
-    # Capped: a growing pile reads as a number, not as a wall.
-    assert out.count("question number") == 3
-    assert "3 more" in out
+    assert out.count("question number") == 6
 
 
 def test_render_caps_rows_and_states_the_drop_count(root: Path):
-    for i in range(5):
+    for i in range(11):
         runner.invoke(outstanding_app, ["ask", f"q{i}"])
     out = runner.invoke(outstanding_app, []).stdout
-    assert "5 open question" in out
-    assert "2 more" in out
+    assert "11 open question" in out
+    assert "Showing 10 of 11 open questions" in out
