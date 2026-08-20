@@ -222,4 +222,13 @@ def export_worker_writable_dirs(cwd: "Path", env: "MutableMapping[str, str]") ->
     dirs = worker_writable_dirs(cwd)
     if dirs:
         env[WORKER_ADD_DIRS_ENV] = os.pathsep.join(dirs)
+    else:
+        # CLEAR rather than leave alone. The pane lane publishes on os.environ,
+        # and a pane shell inherits it, so a spawn made from inside a worker
+        # starts with the PARENT's value already set. Without this the empty
+        # branch would hand the Rust builders another project's directories as
+        # write grants, which is both wrong and wider than anything computed
+        # here. It is also what makes this function's own "publishes nothing"
+        # claim true rather than only true from a clean environment.
+        env.pop(WORKER_ADD_DIRS_ENV, None)
     return dirs

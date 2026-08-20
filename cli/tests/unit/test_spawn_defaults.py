@@ -1591,3 +1591,30 @@ def test_config_pane_group_degrades_open_beside_once(monkeypatch):
     assert "--tab" not in out
     assert "pane group skipped" in err.getvalue()
     assert "--once" in err.getvalue()
+
+
+def test_config_pane_group_survives_a_fenced_provider_argv(monkeypatch):
+    """`spawn ... -- claude --at 3` names a SEED token, not an fno flag. Scanning
+    raw argv would drop the config's pane_group and blame a flag the caller never
+    passed to fno."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1", "--", "claude", "--at", "3"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out[out.index("--tab") + 1] == "codex"
+    assert "pane group skipped" not in err.getvalue()
+
+
+def test_config_pane_group_defers_to_a_valueless_trailing_tab(monkeypatch):
+    """A value read answers None for a trailing bare `--tab`, so injecting beside
+    it puts TWO --tab tokens in the argv and click fails the spawn on the
+    operator's own flag."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1", "--tab"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out.count("--tab") == 1

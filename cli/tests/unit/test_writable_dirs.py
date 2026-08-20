@@ -314,3 +314,30 @@ def test_seam_export_never_breaks_a_spawn(tmp_path: Path, monkeypatch) -> None:
         "fno.agents.writable_dirs.export_worker_writable_dirs", boom
     )
     rr._export_worker_dirs_at_seam(["spawn", "--cwd", str(tmp_path), "x"])
+
+
+def test_seam_export_clears_an_inherited_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pane lane publishes on os.environ and a pane shell inherits it, so a
+    spawn made from inside a worker starts with the PARENT's value set. An empty
+    computation must clear it, not leave another project's directories standing
+    as write grants."""
+    from fno.agents.writable_dirs import (
+        WORKER_ADD_DIRS_ENV,
+        export_worker_writable_dirs,
+    )
+
+    for name in ("state_dir",):
+        monkeypatch.setattr(f"fno.paths.{name}", lambda: tmp_path / "nope")
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: tmp_path / "nope")
+    monkeypatch.setattr(
+        "fno.claims.io.claims_dir", lambda root=None: tmp_path / "nope" / "claims"
+    )
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
+
+    env = {WORKER_ADD_DIRS_ENV: "/some/other/project"}
+    assert export_worker_writable_dirs(tmp_path, env) == []
+    assert WORKER_ADD_DIRS_ENV not in env

@@ -1374,7 +1374,12 @@ def inject_spawn_defaults(
                 file=err,
             )
 
-    if cfg_pane_group and _flag_value(out[1:], "--tab") is None:
+    # _flag_present, not _flag_value: a valueless trailing `--tab` reads as
+    # absent to a value read, and injecting beside it puts TWO `--tab` tokens in
+    # the argv, so click fails the spawn on the operator's own flag. This is the
+    # same presence-not-value rule the conflict scan below states, applied to the
+    # flag the block is actually guarding on.
+    if cfg_pane_group and not _flag_present(out[1:], "--tab"):
         eff_substrate = explicit_substrate or injected_substrate or "pane"
         # A pane group places the pane by moving its OWN tab, so dispatch
         # hard-refuses a group beside --split/--at (the pane then sits in a tab
@@ -1390,12 +1395,16 @@ def inject_spawn_defaults(
         # trailing `--at`, which read as "no conflict" and injected the group,
         # so dispatch then hard-refused on a flag the caller never typed. A
         # `--flag=value` spelling has to be matched on its prefix.
+        # Scanned through _spawn_tokens like every other flag read here, so a
+        # fenced provider argv cannot suppress the group: `spawn ... -- claude
+        # --at 3` names a seed token, not an fno flag, and dropping the config's
+        # pane_group over it would blame the caller for a flag they never passed.
         _placement_flags = ("--split", "-x", "--at", "--once", "-o")
         conflicting = next(
             (
                 f
                 for f in _placement_flags
-                for tok in out[1:]
+                for _, tok in _spawn_tokens(out[1:])
                 if tok == f or tok.startswith(f + "=")
             ),
             None,
