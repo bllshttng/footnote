@@ -89,7 +89,7 @@ case "$record_status" in
 esac
 fi
 
-# Stranded-worktree residual report (x-f4e9). Recovery is automatic - the
+# Stranded-worktree residual report. Recovery is automatic - the
 # pr-watch tick leg pushes and files every STRANDED row unattended - so this
 # prints only what automation refused to touch on its own: UNKNOWN rows
 # (fail-open, never acted on) and ABANDONED rows (deletion is the one
@@ -109,6 +109,14 @@ fi
 # design - rather than block on the one sweep that would tell it otherwise.
 CACHE_MAX_AGE_S=900
 _CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
+# A dedicated stamp, not the cache file's own mtime: the window must be
+# claimed (stamp touched) BEFORE the background sweep launches, the same
+# up-front-claim pattern reconcile-throttle.sh uses, so a second SessionStart
+# hook firing in the same instant sees a fresh stamp and skips instead of
+# also kicking its own ~100s sweep. Touching the CACHE FILE itself to claim
+# would truncate the stale-but-valid JSON a concurrent session's read (lines
+# below) might be mid-parse of.
+_STAMP_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-refresh-stamp"
 # _reconcile_mtime, not a third hand-rolled `stat -f || stat -c`: GNU `stat -f`
 # means --file-system, not a format flag, so it SUCCEEDS on Linux and prints
 # garbage instead of failing - the `||` fallback to `stat -c %Y` never fires,
@@ -118,11 +126,11 @@ _CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
 _RT_HELPER="$SCRIPT_DIR/../scripts/lib/reconcile-throttle.sh"
 [[ -f "$_RT_HELPER" ]] && source "$_RT_HELPER"
 _cache_age() {
-  if ! command -v _reconcile_mtime >/dev/null 2>&1; then
-    echo 999999  # helper unavailable: read as maximally stale, never as fresh
+  if ! command -v _reconcile_mtime >/dev/null 2>&1 || [[ ! -f "$_STAMP_FILE" ]]; then
+    echo 999999  # helper unavailable or never claimed: maximally stale, never fresh
     return
   fi
-  echo $(( $(date +%s) - $(_reconcile_mtime "$_CACHE_FILE") ))
+  echo $(( $(date +%s) - $(_reconcile_mtime "$_STAMP_FILE") ))
 }
 
 stranded_lines=()
@@ -141,7 +149,9 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     done < <(jq -r '.rows[]? | select(.class=="UNKNOWN" or .class=="ABANDONED") | [.class, (.node // "?"), .path] | @tsv' "$_CACHE_FILE" 2>/dev/null)
   fi
 
-  if [[ ! -f "$_CACHE_FILE" ]] || (( $(_cache_age) > CACHE_MAX_AGE_S )); then
+  if (( $(_cache_age) > CACHE_MAX_AGE_S )); then
+    mkdir -p "$(dirname "$_STAMP_FILE")" 2>/dev/null
+    : > "$_STAMP_FILE" 2>/dev/null || touch "$_STAMP_FILE" 2>/dev/null || true
     (
       mkdir -p "$(dirname "$_CACHE_FILE")" 2>/dev/null
       tmp="$(mktemp "${_CACHE_FILE}.XXXXXX" 2>/dev/null)" || exit 0
