@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Non-terminal AgentStatus vocabulary (crates/fno-agents/src/lib.rs
 # `AgentStatus`), mirrored from `_OWNERSHIP_LIVE_STATUSES` in
@@ -54,20 +55,36 @@ def _load_registry() -> dict[str, tuple[str, str]]:
     return {cwd: (name, status) for cwd, (_rank, name, _ts, status) in best.items()}
 
 
-def _worktrees(repo: Path) -> list[tuple[str, str]]:
-    """[(branch, path), ...] for every worktree registered to `repo`."""
+def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
+    """[(branch, path), ...] for every worktree registered to `repo`.
+
+    A row only appended on a `branch refs/heads/` line drops every detached
+    worktree from the output - three of the previously reported stranded
+    rows were detached, so the surface structurally could not show the
+    cases that matter most (x-f4e9). Emit those too, with `branch: None`.
+    """
     out = subprocess.run(
         ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
         capture_output=True,
         text=True,
     )
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[Optional[str], str]] = []
     wt_path = ""
-    for line in out.stdout.splitlines():
+    branch: Optional[str] = None
+    detached = False
+    for line in out.stdout.splitlines() + [""]:
         if line.startswith("worktree "):
+            if wt_path:
+                rows.append((None if detached else branch, wt_path))
             wt_path = line[len("worktree ") :]
+            branch = None
+            detached = False
         elif line.startswith("branch refs/heads/"):
-            rows.append((line[len("branch refs/heads/") :], wt_path))
+            branch = line[len("branch refs/heads/") :]
+        elif line == "detached":
+            detached = True
+    if wt_path:
+        rows.append((None if detached else branch, wt_path))
     return rows
 
 
@@ -130,8 +147,9 @@ def main(argv: list[str]) -> int:
 
     print("Worktrees:")
     for r in rows:
+        branch_label = r["branch"] or "(detached)"
         print(
-            f"  {r['branch']:<30} | {r['last_commit']:<15} | "
+            f"  {branch_label:<30} | {r['last_commit']:<15} | "
             f"target: {r['target']:<20} | {r['path']}"
         )
     return 0

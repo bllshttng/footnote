@@ -319,3 +319,107 @@ def sweep(repo: Optional[Path] = None) -> list[Row]:
             )
         )
     return rows
+
+
+# --- recovery acts (STRANDED only) + UNKNOWN recording --------------------
+#
+# One producer for both call sites (the `stranded --apply` verb and the
+# pr-watch tick leg): a guard or an act living on only one of two reachable
+# paths is decorative on the path it skips, so both route through the same
+# functions here rather than each re-implementing "push, file, emit".
+
+
+def act_on_stranded(row: Row) -> dict:
+    """The three non-destructive acts, in order, stopping at the first
+    failure. Caller's responsibility to only call this for a STRANDED row."""
+    path = row.facts["path"]
+    branch = row.facts.get("branch")
+    node = row.node
+    acts: list[dict] = []
+
+    sha_p = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True)
+    sha = (sha_p.stdout or "").strip()
+
+    if branch:
+        push_branch = branch
+        push_p = subprocess.run(
+            ["git", "-C", path, "push", "-u", "origin", branch], capture_output=True, text=True
+        )
+    else:
+        push_branch = f"recovered/{node}"
+        push_p = subprocess.run(
+            ["git", "-C", path, "push", "origin", f"HEAD:refs/heads/{push_branch}"],
+            capture_output=True,
+            text=True,
+        )
+    push_ok = push_p.returncode == 0
+    acts.append({"act": "push", "branch": push_branch, "ok": push_ok, "detail": (push_p.stderr or "").strip()[:500]})
+    if not push_ok:
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "push"}
+
+    detail_line = (
+        f"Recovered {row.unpushed} unpushed commit(s) at {sha[:12] or 'unknown'} "
+        f"onto {push_branch} (stranded sweep)."
+    )
+    get_p = subprocess.run(["fno", "backlog", "get", node], capture_output=True, text=True)
+    try:
+        cur_details = (json.loads(get_p.stdout or "{}").get("details") or "") if get_p.returncode == 0 else ""
+    except json.JSONDecodeError:
+        cur_details = ""
+    new_details = f"{cur_details}\n\n{detail_line}" if cur_details else detail_line
+    upd_p = subprocess.run(
+        ["fno", "backlog", "update", node, "--details", new_details], capture_output=True, text=True
+    )
+    upd_ok = upd_p.returncode == 0
+    acts.append({"act": "backlog_update", "ok": upd_ok, "detail": (upd_p.stderr or "").strip()[:500]})
+    if not upd_ok:
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_update"}
+
+    ev_ok = _emit_sweep_event(row, node=node, branch=push_branch, sha=sha, acts=[a["act"] for a in acts])
+    acts.append({"act": "event_emit", "ok": ev_ok})
+    return {"node": node, "class": row.klass, "acts": acts, "stopped_at": None if ev_ok else "event_emit"}
+
+
+def record_unknown(row: Row) -> dict:
+    """UNKNOWN rows: recorded in the event, never pushed, never filed."""
+    ev_ok = _emit_sweep_event(row, node=row.node, branch=row.facts.get("branch"), sha=None, acts=[])
+    return {
+        "node": row.node,
+        "class": row.klass,
+        "acts": [{"act": "event_emit", "ok": ev_ok}],
+        "stopped_at": None if ev_ok else "event_emit",
+    }
+
+
+def _emit_sweep_event(
+    row: Row, *, node: Optional[str], branch: Optional[str], sha: Optional[str], acts: list[str]
+) -> bool:
+    data = json.dumps(
+        {
+            "path": row.facts.get("path"),
+            "branch": branch,
+            "class": row.klass,
+            "unpushed": row.unpushed,
+            "sha": sha,
+            "acts": acts,
+            "reason": row.facts.get("reason"),
+        }
+    )
+    args = ["fno", "event", "emit", "-t", "stranded_sweep", "-d", data]
+    if node:
+        args.extend(["--node", node])
+    ev_p = subprocess.run(args, capture_output=True, text=True)
+    return ev_p.returncode == 0
+
+
+def apply_sweep(rows: list[Row]) -> list[dict]:
+    """Act on a classified sweep: STRANDED rows get pushed and filed,
+    UNKNOWN rows get recorded, every other class stays quiet. Stops at the
+    first failed act per row; a later tick retries that row from scratch."""
+    outcomes: list[dict] = []
+    for row in rows:
+        if row.klass == STRANDED:
+            outcomes.append(act_on_stranded(row))
+        elif row.klass == UNKNOWN:
+            outcomes.append(record_unknown(row))
+    return outcomes

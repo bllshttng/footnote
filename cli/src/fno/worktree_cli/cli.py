@@ -57,6 +57,49 @@ def status(
     raise typer.Exit(code=_run_lifecycle(*args))
 
 
+@app.command("stranded", hidden=True)
+def stranded(
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit rows as JSON."),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Act on the classification: push+file STRANDED rows, record UNKNOWN rows. "
+        "Default is classify-and-print only.",
+    ),
+) -> None:
+    """Classify every worktree git+graph+fleet can't otherwise tell apart (x-f4e9).
+
+    Report, never reap: nothing here deletes a worktree, a branch, or a
+    commit. A row this sweep cannot positively close reads UNKNOWN and is
+    never acted on, apply or no apply.
+    """
+    import json as _json
+
+    from fno.worktree_stranded import apply_sweep, sweep
+
+    rows = sweep()
+    outcomes = apply_sweep(rows) if apply else []
+
+    if json_out:
+        payload = {
+            "rows": [
+                {"class": r.klass, "node": r.node, "unpushed": r.unpushed, "age": r.age, **r.facts}
+                for r in rows
+            ],
+        }
+        if apply:
+            payload["outcomes"] = outcomes
+        typer.echo(_json.dumps(payload, separators=(",", ":")))
+        raise typer.Exit(code=0)
+
+    for r in rows:
+        typer.echo(f"  {r.klass:<10} | {r.node or '-':<12} | {r.unpushed:>4} unpushed | {r.age:<15} | {r.facts.get('path')}")
+    if apply:
+        failed = [o for o in outcomes if o["stopped_at"]]
+        typer.echo(f"applied: {len(outcomes)} rows acted on, {len(failed)} stopped early")
+    raise typer.Exit(code=0)
+
+
 @app.command()
 def cleanup(
     older_than: Optional[str] = typer.Option(
