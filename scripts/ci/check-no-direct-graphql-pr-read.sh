@@ -92,7 +92,10 @@ if ! grep -q 'Command::new("fno-gh-coverage")' crates/fno-agents/src/finalize.rs
   echo "direct-graphql-pr-read: finalize.rs no longer SPAWNS the fno-gh-coverage adapter" >&2
   exit 1
 fi
-if ! grep -q 'FNO_LOOPCHECK_GH_BIN' crates/fno-agents/src/loopcheck.rs; then
+# `env::var("FNO_LOOPCHECK_GH_BIN")`, not the bare name: loopcheck.rs also
+# names the seam in a rustdoc line, so the bare grep stayed green with both
+# real lookups deleted - the same doc-comment hole this block claims to close.
+if ! grep -q 'env::var("FNO_LOOPCHECK_GH_BIN")' crates/fno-agents/src/loopcheck.rs; then
   echo "direct-graphql-pr-read: loopcheck.rs no longer resolves its gh binary through FNO_LOOPCHECK_GH_BIN" >&2
   exit 1
 fi

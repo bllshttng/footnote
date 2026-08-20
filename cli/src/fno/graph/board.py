@@ -96,10 +96,15 @@ def _age_from_epoch(ts: object, now: datetime) -> str:
     ts_f = finite_or_zero(ts)
     if not ts_f:
         return "unknown age"
+    # The tolerance is not slop. `compute_board` samples `now` once and then
+    # reads rows, so a concurrent `fno pr status` writing a row mid-render is
+    # legitimately a second or two ahead of it, and flooring that at 0 was the
+    # OLD behaviour worth keeping. A garbage stamp misses by decades, never by
+    # seconds, so a minute of headroom separates the two cleanly.
     delta = now.timestamp() - ts_f
-    if delta < 0:
+    if delta < -60:
         return "unknown age"
-    return _format_age(delta)
+    return _format_age(max(delta, 0.0))
 
 
 def _just_finished_fact(entry: dict, now: datetime) -> str:
