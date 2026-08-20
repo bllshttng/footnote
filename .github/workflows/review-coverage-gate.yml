@@ -145,8 +145,23 @@ jobs:
               # head is read by the post-merge audit, where a late invalidate
               # would false-red a merge that passed every gate, and nothing
               # can repair it (the branch is gone). Re-read the live state.
-              state="$(gh pr view "${{ github.event.pull_request.number }}" \
-                -R "${GITHUB_REPOSITORY}" --json state --jq .state)"
+              # Retries the same 3x/5s backoff as the reads below it: this is
+              # the first gh call in the step, so an un-retried transient 5xx
+              # here would abort the run earlier than any of its siblings.
+              pr_state_read() {
+                local attempt out
+                for attempt in 1 2 3; do
+                  if out="$(gh pr view "${{ github.event.pull_request.number }}" \
+                    -R "${GITHUB_REPOSITORY}" --json state --jq .state)"; then
+                    printf '%s' "$out"
+                    return 0
+                  fi
+                  echo "review-coverage-gate: PR-state read attempt ${attempt} failed; retrying after a backoff" >&2
+                  sleep 5
+                done
+                return 1
+              }
+              state="$(pr_state_read)"
               if [ "$state" != "OPEN" ]; then
                 echo "PR is ${state}; no status change"
                 exit 0
