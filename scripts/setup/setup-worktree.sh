@@ -1346,6 +1346,49 @@ link_dir ".codex"
 link_dir ".codex-plugin"
 link_dir ".gemini"
 
+# Salvage-ref post-commit hook (x-f4e9): makes every worktree's commits
+# gc-proof and enumerable at commit time, the one moment guaranteed to
+# occur before a worker is killed. Worktrees share one git-common-dir hooks
+# directory, so this installs (or, if a post-commit hook already exists and
+# is not ours, appends to) ONE shared post-commit dispatcher - idempotent
+# across every worktree's own setup run, and it resolves each committing
+# worktree's OWN checked-out copy of hooks/worktree-salvage-ref.sh at
+# execution time via `git rev-parse --show-toplevel`, so it stays correct
+# no matter which worktree fires it.
+_salvage_marker="worktree-salvage-ref.sh"
+_common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)"
+if [[ -n "$_common_hooks_dir" ]]; then
+  [[ "$_common_hooks_dir" = /* ]] || _common_hooks_dir="$WORKTREE/$_common_hooks_dir"
+  _common_hooks_dir="$_common_hooks_dir/hooks"
+  mkdir -p "$_common_hooks_dir" 2>/dev/null || true
+  _post_commit="$_common_hooks_dir/post-commit"
+  if [[ ! -e "$_post_commit" ]]; then
+    cat > "$_post_commit" <<'HOOK'
+#!/usr/bin/env bash
+# Installed by scripts/setup/setup-worktree.sh (x-f4e9). Dispatches to the
+# COMMITTING worktree's own checked-out salvage-ref hook, never a fixed
+# worktree's copy - see hooks/worktree-salvage-ref.sh for the real logic.
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+script="$toplevel/hooks/worktree-salvage-ref.sh"
+[[ -x "$script" ]] && exec "$script"
+exit 0
+HOOK
+    chmod +x "$_post_commit"
+    echo "setup-worktree: installed shared post-commit salvage-ref hook at $_post_commit"
+  elif ! grep -q "$_salvage_marker" "$_post_commit" 2>/dev/null; then
+    {
+      echo ""
+      echo "# Appended by scripts/setup/setup-worktree.sh (x-f4e9)."
+      echo 'toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0'
+      echo "script=\"\$toplevel/hooks/$_salvage_marker\""
+      echo '[[ -x "$script" ]] && "$script"'
+    } >> "$_post_commit"
+    echo "setup-worktree: appended salvage-ref call to existing post-commit hook at $_post_commit"
+  fi
+else
+  echo "setup-worktree: could not resolve git-common-dir; salvage-ref hook not installed" >&2
+fi
+
 if (( events_journal_shared == 0 )); then
   echo "setup-worktree: linked independent state but events journal is not shared" >&2
   exit 1
