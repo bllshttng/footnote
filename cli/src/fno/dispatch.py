@@ -581,53 +581,68 @@ def _dispatch_one(
         release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
         return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}
 
-    # 4. Spawn the pane worker into THIS session. Any failure releases BOTH the
-    #    lane slot and the dispatch reservation so the node stays re-dispatchable
-    #    - never a phantom lane holding the cap. On success dispatch:<id> is left
-    #    to TTL-expire (bridges the boot window until the worker owns node:<id>).
-    workdir = Path(cwd) if cwd else Path.cwd()
-    # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
-    # when routed, so the mux server reads it back for the sideline account
-    # glyph - a managed account shares ~/.claude, so the roster can't
-    # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
-    # not the registry schema).
-    provenance = resolve_provenance(node_id, slug)
-    if account:
-        provenance["FNO_ACCOUNT"] = account
-    # A cutover replaces all three parts of the launch together (harness,
-    # command, credential overlay); passing one without the others is the
-    # wrong-billing / wrong-binary launch the selector exists to prevent.
-    spawn_harness = "claude"
-    # Same posture render as the cutover destination: through the resolver, so
-    # the flag form (and any per-harness surface) comes from ONE template
-    # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
-    # drifts when the token changes shape (x-9d11).
-    message = _cutover_command(spawn_harness, node_id)
-    if cutover is not None:
-        spawn_harness = cutover.harness or "claude"
-        message = cutover_command
-        account_env = cutover.account_env
-        provenance["FNO_ACCOUNT"] = cutover.record_id or ""
-    # x-9d11 mechanical refusal carrier: the flag in the message is the
-    # attributable carrier; the pane env is the backstop, so a worker that
-    # never passes the flag through still folds the refusal at init.
-    if not message:
-        # _cutover_command's contract: empty = stage nothing. An unresolvable
-        # target command must never spawn a billed pane with an empty prompt
-        # (review round 5) - release both holds so the node stays grabbable.
+    # 4. Spawn the pane worker into THIS session. Any exit from here releases
+    #    BOTH the lane slot and the dispatch reservation so the node stays
+    #    re-dispatchable - never a phantom lane holding the cap. On success
+    #    dispatch:<id> is left to TTL-expire (bridges the boot window until the
+    #    worker owns node:<id>).
+    #
+    #    The window starts at the lane-slot acquisition, not at the spawn call.
+    #    Everything below - provenance, the cutover render, the refusal carrier -
+    #    runs with both holds taken, so an exception there leaks them just as a
+    #    failed spawn does. And the guard catches BaseException, not just
+    #    Exception: GateRefused subclasses SystemExit, which is a BaseException,
+    #    so an `except Exception` lets a gate refusal walk out still holding the
+    #    slot it was refused for. Same shape as the run_gate call site in
+    #    fno/agents/cli.py. A BaseException is re-raised rather than folded into
+    #    a verdict, so a refusal keeps its own exit code and an interrupt still
+    #    interrupts.
+    def _release_both() -> None:
         release_lane_slot(node_id)
         release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
-        return {
-            "outcome": "failed",
-            "node": node_id,
-            "slug": slug or "",
-            "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
-        }
-    from fno.agents.harness_map import message_carries_no_merge
 
-    if message_carries_no_merge(message):
-        provenance["TARGET_NO_MERGE"] = "1"
     try:
+        workdir = Path(cwd) if cwd else Path.cwd()
+        # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
+        # when routed, so the mux server reads it back for the sideline account
+        # glyph - a managed account shares ~/.claude, so the roster can't
+        # distinguish it, but the pane's own env can (Locked Decision 5: pane env,
+        # not the registry schema).
+        provenance = resolve_provenance(node_id, slug)
+        if account:
+            provenance["FNO_ACCOUNT"] = account
+        # A cutover replaces all three parts of the launch together (harness,
+        # command, credential overlay); passing one without the others is the
+        # wrong-billing / wrong-binary launch the selector exists to prevent.
+        spawn_harness = "claude"
+        # Same posture render as the cutover destination: through the resolver, so
+        # the flag form (and any per-harness surface) comes from ONE template
+        # (harness_map._AUTONOMOUS_COMMAND), not a second hardcoded string that
+        # drifts when the token changes shape (x-9d11).
+        message = _cutover_command(spawn_harness, node_id)
+        if cutover is not None:
+            spawn_harness = cutover.harness or "claude"
+            message = cutover_command
+            account_env = cutover.account_env
+            provenance["FNO_ACCOUNT"] = cutover.record_id or ""
+        # x-9d11 mechanical refusal carrier: the flag in the message is the
+        # attributable carrier; the pane env is the backstop, so a worker that
+        # never passes the flag through still folds the refusal at init.
+        if not message:
+            # _cutover_command's contract: empty = stage nothing. An unresolvable
+            # target command must never spawn a billed pane with an empty prompt
+            # (review round 5) - release both holds so the node stays grabbable.
+            _release_both()
+            return {
+                "outcome": "failed",
+                "node": node_id,
+                "slug": slug or "",
+                "detail": "target command unresolvable (dispatch_command refused); nothing spawned",
+            }
+        from fno.agents.harness_map import message_carries_no_merge
+
+        if message_carries_no_merge(message):
+            provenance["TARGET_NO_MERGE"] = "1"
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),
             message=message,
@@ -638,9 +653,11 @@ def _dispatch_one(
             account_env=account_env,
         )
     except Exception as exc:  # noqa: BLE001 - DispatchAskError or any spawn error
-        release_lane_slot(node_id)
-        release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+        _release_both()
         return {"outcome": "failed", "node": node_id, "slug": slug or "", "detail": str(exc)[:200]}
+    except BaseException:
+        _release_both()
+        raise
     if cutover is not None:
         # Post-spawn only: a route decision is not a completed cutover.
         _emit_failover(node_id, cutover)

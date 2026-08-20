@@ -272,3 +272,88 @@ def test_resolve_no_node_no_brief_is_none(monkeypatch):
     out = json.loads(r.stdout)
     assert out["brief_source"] == "none"
     assert out["env"].get("TARGET_BRIEF") is None
+
+
+# --- Hold release on every exit --------------------------------------------
+#
+# `_dispatch_one` holds two things at once: a `dispatch:<id>` claim and a lane
+# slot. Only two hand-written spots used to release them, and neither caught a
+# `BaseException`, so a `GateRefused` (which subclasses `SystemExit`) or an
+# error in the provenance/cutover block between the acquisition and the spawn
+# leaked both. A leaked lane slot is a phantom worker against the cap; a leaked
+# `dispatch:<id>` refuses the node's own relaunch as `already-running`.
+
+
+def _dispatch_claim_state(node_id: str) -> str:
+    from fno.claims.core import claim_status
+
+    key = f"dispatch:{node_id}"
+    return claim_status(key, root=dispatch._claims_root_for(key))["state"]
+
+
+def test_gate_refusal_releases_both_holds_and_keeps_its_exit_code(monkeypatch, tmp_path):
+    """A `GateRefused` is a `SystemExit`, so `except Exception` never saw it.
+    Both holds must read free AFTER the refusal, and the refusal keeps its own
+    exit code rather than being flattened into a verdict."""
+    from fno.agents.spawn_gate import EXIT_NO_WAIT, GateRefused
+
+    def refuse():
+        raise GateRefused(EXIT_NO_WAIT)
+
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-7", "slug": "g", "cwd": str(tmp_path)}, spawn=refuse)
+
+    with pytest.raises(SystemExit) as exc:
+        dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert exc.value.code == EXIT_NO_WAIT
+    assert active_lane_count() == 0
+    assert _dispatch_claim_state("x-7") == "free"
+
+
+def test_provenance_error_before_the_spawn_releases_both_holds(monkeypatch, tmp_path):
+    """The lane slot is taken before the provenance/cutover block runs, and that
+    block used to sit outside every handler."""
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-8", "slug": "p", "cwd": str(tmp_path)})
+
+    def boom(nid, slug):
+        raise RuntimeError("provenance resolver exploded")
+
+    monkeypatch.setattr(dispatch, "resolve_provenance", boom)
+
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert v["outcome"] == "failed"
+    assert "provenance resolver exploded" in v["detail"]
+    assert active_lane_count() == 0
+    assert _dispatch_claim_state("x-8") == "free"
+
+
+def test_real_lanes_full_still_releases_only_the_reservation(monkeypatch, tmp_path):
+    """A genuine full cap is not a refusal: `acquire_lane_slot` returned None, so
+    no lane slot was ever taken and the verdict stays the exit-0 `lanes-full`.
+    Only the reservation needs releasing."""
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)}, max_lanes=1)
+    assert dispatch._dispatch_one(session="s", node=None, project=None)["outcome"] == "launched"
+    monkeypatch.setattr(dispatch, "_next_node", lambda project: {"id": "x-2", "slug": "b", "cwd": str(tmp_path)})
+
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert v["outcome"] == "lanes-full"
+    assert active_lane_count() == 1  # the first worker's slot, untouched
+    assert _dispatch_claim_state("x-2") == "free"
+
+
+def test_keyboard_interrupt_releases_both_holds_and_propagates(monkeypatch, tmp_path):
+    """`KeyboardInterrupt` is the other `BaseException` a live dispatch meets. It
+    must free the holds on the way out and still reach the caller."""
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-6", "slug": "k", "cwd": str(tmp_path)}, spawn=interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert active_lane_count() == 0
+    assert _dispatch_claim_state("x-6") == "free"
