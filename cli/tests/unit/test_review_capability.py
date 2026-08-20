@@ -240,17 +240,46 @@ def test_self_review_invocation_names_the_harness_verb():
 
     assert rc.harness_can_self_review("claude") is True
     assert rc.harness_can_self_review("codex") is True
+    assert rc.harness_can_self_review("opencode") is True
     assert rc.harness_can_self_review("gemini") is False
+    assert rc.harness_can_self_review("agy") is False
     assert rc.harness_can_self_review(None) is False
-    # AC5-UI: each harness is told its own verb. Codex is bare (prose after it
-    # flips codex to a no-merge-base target); claude carries its arg grammar.
+    # AC5-UI: each harness is told its own verb. Codex and opencode are bare
+    # (prose after the codex verb flips it to a no-merge-base target; opencode's
+    # grammar is unverified); claude carries its arg grammar.
     assert rc.self_review_invocation("codex") == "/review"
+    assert rc.self_review_invocation("opencode") == "/review-changes"
     assert rc.self_review_invocation("claude") == "/code-review medium --comment --fix"
-    # Unknown harness falls back to the claude default, not a guess.
-    assert rc.self_review_invocation(None) == "/code-review medium --comment --fix"
-    assert rc.self_review_invocation("unknown") == "/code-review medium --comment --fix"
+    # An unknown harness gets the portable fno review, NEVER claude's verb
+    # silently - a wrong answer where no answer was available.
+    assert rc.self_review_invocation("agy") == "/fno:review"
+    assert rc.self_review_invocation(None) == "/fno:review"
+    assert rc.self_review_invocation("unknown") == "/fno:review"
     # Codex stays bare even though claude carries args - no prose suffix leaks.
     assert " " not in rc.self_review_invocation("codex")
+    assert " " not in rc.self_review_invocation("opencode")
+
+
+def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(monkeypatch):
+    """The renderer is the surface refusal sites embed: its level must come
+    from diff_review_level (the level_for_diff sizing path), never the
+    builder's medium default, and a dead sizing read keeps the placeholder
+    instead of fabricating a level."""
+    import fno.review_capability as rc
+
+    sized = rc.level_for_diff(30, 3000)
+    monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
+    rendered = rc.render_self_review_invocation("claude", project_root=None)
+    assert rendered == f"/code-review {sized} --comment --fix"
+    assert "<level>" not in rendered
+
+    monkeypatch.setattr(rc, "diff_review_level", lambda root: None)
+    assert rc.render_self_review_invocation("claude") == "/code-review <level> --comment --fix"
+
+    # Harness-less invocation resolves the ambient session; sizing still rides
+    # the same path. A dead render never raises - it degrades to the placeholder.
+    monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
+    assert "<level>" not in rc.render_self_review_invocation()
 
 
 def test_level_for_diff_sizes_from_both_dimensions():
@@ -315,18 +344,51 @@ def test_satisfiable_verdict_carries_the_arg_grammar():
 
 def test_code_review_is_scoped_to_harnesses_with_a_verb():
     """code-review resolves per its invocations map, mirroring subagent-dispatch:
-    satisfiable on claude/codex (the only verbs that exist), unavailable on a
-    known harness with no verb (gemini/agy/opencode), unverifiable on unknown.
-    Resolving it satisfiable everywhere would floor the stop gate onto a reviewer
-    whose attestation nothing produces on three harnesses, wedging the loop."""
+    satisfiable on every harness with a recorded verb (claude, codex, opencode
+    natively; agy via the /fno:review fallback), unavailable on a known harness
+    with no verb (gemini), unverifiable on unknown. Resolving it satisfiable on
+    a harness with NO reachable verb would floor the stop gate onto a reviewer
+    whose attestation nothing there produces, wedging the loop."""
     def on(harness: str):
         s = SessionCapability(harness=harness, substrate="pane", attended=True)
         return resolve_reviewers(["code-review"], s)[0]
 
     assert on("claude").status == "satisfiable"
     assert on("codex").status == "satisfiable"
-    for unsupported in ("gemini", "agy", "opencode"):
-        v = on(unsupported)
-        assert v.status == "unavailable", f"{unsupported}: {v.reason}"
-        assert "scoped to" in v.reason
+    assert on("opencode").status == "satisfiable"
+    assert "run `/review-changes`" in on("opencode").reason
+    # agy has no native verb; its recorded fallback IS the fno review, so the
+    # verdict stays satisfiable with a runnable instruction.
+    assert on("agy").status == "satisfiable"
+    assert "run `/fno:review`" in on("agy").reason
+    v = on("gemini")
+    assert v.status == "unavailable", f"gemini: {v.reason}"
+    assert "scoped to" in v.reason
     assert on("unknown").status == "unverifiable"
+
+
+def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
+    """'fno target review-invocation' is the bridge the refusal sites call:
+    stdout is exactly one line, the render for the requested harness, sized by
+    the diff at the caller's root. Expected strings are built through the same
+    functions the verb uses, so no concrete level is spelled here."""
+    import fno.review_capability as rc
+    from typer.testing import CliRunner
+
+    monkeypatch.chdir(tmp_path)
+    sized = rc.level_for_diff(30, 3000)
+    monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
+
+    from fno.target_cli import target_app
+
+    out = CliRunner().invoke(target_app, ["review-invocation", "--harness", "claude"])
+    assert out.exit_code == 0, out.output
+    assert out.output.strip() == f"/code-review {sized} --comment --fix"
+
+    bare = CliRunner().invoke(target_app, ["review-invocation", "--harness", "codex"])
+    assert bare.exit_code == 0, bare.output
+    assert bare.output.strip() == "/review"
+
+    portable = CliRunner().invoke(target_app, ["review-invocation", "--harness", "agy"])
+    assert portable.exit_code == 0, portable.output
+    assert portable.output.strip() == "/fno:review"

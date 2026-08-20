@@ -233,6 +233,7 @@ def _coverage_refused_reason(
     cov: Optional[dict],
     head: Optional[str] = None,
     sources: Optional[list[str]] = None,
+    self_review_hint: Optional[str] = None,
 ) -> str:
     """Why a coverage guard refused, for the blocked receipt line.
 
@@ -246,6 +247,11 @@ def _coverage_refused_reason(
     Its absence is why the staleness branch cannot fire on an unobserved head:
     without it the reason falls back to the count, and the caller only refuses
     on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it prints.
+
+    ``self_review_hint`` is the sized invocation from
+    ``render_self_review_invocation``; None keeps the levelless line, so
+    direct-call tests and a broken render read identically to a build without
+    the hint.
     """
     if cov is None:
         # Name WHERE it looked, not just that it found nothing. The absence is
@@ -279,9 +285,11 @@ def _coverage_refused_reason(
         # no longer emits. The generic line prescribes the same action, and
         # for the legacy cohort it is also the honest story: the pass cannot
         # be scoped to this PR, so re-run the verb at HEAD.
+        suffix = f" - `{self_review_hint}`" if self_review_hint else ""
         return (
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"
+            f"{suffix}"
         )
     # Same rule as the Rust receipt, and this time the sameness is correct: the
     # rule no longer depends on which gate prints it. Never prescribe the local
@@ -321,7 +329,8 @@ def _coverage_refused_reason(
         )
     return (
         prefix
-        + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
+        + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD"
+        + (f" - `{self_review_hint}`)" if self_review_hint else ")")
     )
 
 

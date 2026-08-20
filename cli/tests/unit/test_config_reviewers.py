@@ -80,18 +80,23 @@ def test_sigma_needs_subagent_dispatch():
 
 def test_code_review_is_self_servable():
     """`/code-review` is self-servable: a session that wrote the diff runs its
-    own harness's review verb (claude /code-review, codex /review) and attests.
-    requires=none (not operator) is what keeps an unattended run from being
-    refused at init for naming it."""
+    own harness's review verb (claude /code-review, codex /review, opencode
+    /review-changes, agy /fno:review) and attests. requires=none (not
+    operator) is what keeps an unattended run from being refused at init for
+    naming it."""
     d = _RESOLVABLE_REVIEWERS["code-review"]
     assert d.kind == "local-attestation"
     assert d.requires == "none"
     # The claude value carries the arg grammar with the <level> placeholder;
     # self_review_invocation substitutes a validated level (never ultra).
+    # The scalar is the portable fallback an unknown harness receives.
     assert d.invocations == {
         "claude": "/code-review <level> --comment --fix",
         "codex": "/review",
+        "opencode": "/review-changes",
+        "agy": "/fno:review",
     }
+    assert d.invocation == "/fno:review"
 
 
 def test_descriptors_are_frozen():

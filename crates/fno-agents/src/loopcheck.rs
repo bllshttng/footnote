@@ -1108,18 +1108,23 @@ struct PrInfo {
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
 /// rendering. The self-review verb is the one case: `/code-review <level>
 /// --comment --fix` on claude (the Python builder sizes `<level>` from the
-/// diff; `ultra` is not issuable), `/review` bare on codex. The codex value
+/// diff; `ultra` is not issuable), `/review` bare on codex, `/review-changes`
+/// bare on opencode (its flag grammar is unverified against its docs, and an
+/// appended guess is the codex trap in a new coat). The codex value
 /// must stay bare - prose after the verb flips codex to a no-merge-base review
-/// target - so a no-whitespace check on it is a unit test. Kept honest against
-/// the Python descriptor's `invocations` map by
+/// target - so a no-whitespace check on it is a unit test. The scalar is the
+/// harness-portable fallback an UNKNOWN harness receives: `/fno:review`, never
+/// claude's verb silently (opencode/agy workers were handed `/code-review`, a
+/// verb their harness cannot run). agy has no native verb and takes the fno
+/// review. Kept honest against the Python descriptor's `invocations` map by
 /// check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
     (
         "code-review",
-        "/code-review",
+        "/fno:review",
         false,
-        "claude=/code-review <level> --comment --fix;codex=/review",
+        "claude=/code-review <level> --comment --fix;codex=/review;opencode=/review-changes;agy=/fno:review",
     ),
     ("declare", "/fno:review declare", true, ""),
 ];
@@ -1173,12 +1178,13 @@ fn is_documentation_path(path: &str) -> bool {
 }
 
 /// Whether the author harness has a self-review verb (claude `/code-review`,
-/// codex `/review`). The self-review floor only applies on these: gemini/agy/
-/// opencode have no native review verb, so flooring code-review would demand an
-/// attestation nothing produces and wedge the loop. Their path is route 3 (a
-/// spawned reviewer), which is deferred. Pure so a unit test pins the set.
+/// codex `/review`, opencode `/review-changes`). The self-review floor only
+/// applies on these: gemini/agy have no native review verb, so flooring
+/// code-review would demand an attestation nothing produces and wedge the
+/// loop. Their path is route 3 (a spawned reviewer), which is deferred. Pure
+/// so a unit test pins the set.
 fn harness_can_self_review(harness: Option<&str>) -> bool {
-    matches!(harness, Some("claude") | Some("codex"))
+    matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
 }
 
 /// Pure payload classifier: CODE iff any changed path is not documentation.
@@ -3233,13 +3239,24 @@ fn publish_coverage_status(
             ),
         )
     } else {
-        (
-            "failure",
-            format!(
-                "no covered review at {}; run the review verb at HEAD",
-                short_sha(pr_head_oid)
-            ),
-        )
+        // The sized invocation rides along when it fits: GitHub caps this
+        // description at 140 chars and rejects an overflow whole, which would
+        // lose the entire marker, not just the hint. Computed HERE, in the
+        // only arm that renders it: an eager call-site argument would spawn
+        // the fno bridge subprocess on covered, no-lane, and early-return
+        // paths that never show a hint.
+        let self_review_hint = ambient_self_review_hint(cwd);
+        let base = format!(
+            "no covered review at {}; run the review verb at HEAD",
+            short_sha(pr_head_oid)
+        );
+        let description = match self_review_hint.as_deref() {
+            Some(hint) if base.len() + hint.len() + 6 <= 140 => {
+                format!("{base} - `{hint}`")
+            }
+            _ => base,
+        };
+        ("failure", description)
     };
     post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
 }
@@ -5022,7 +5039,12 @@ fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
 /// task 3.1). Printed from the coverage value at print time, never from a
 /// remembered gate verdict (receipts have lied before).
-pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
+///
+/// `self_review_hint` is the sized invocation from `sized_self_review_hint`
+/// (the Python single source). None keeps the levelless line - the hint is
+/// advisory, and its absence must read identically to a build without the
+/// render, never as a different verdict.
+pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str>) -> String {
     match &rep.coverage {
         Coverage::Unknown => "review coverage: unknown (review read failed)".to_string(),
         Coverage::Covered(n) => {
@@ -5137,7 +5159,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                     stale.join(", ")
                 )
             } else {
-                "run the review verb at HEAD".to_string()
+                match self_review_hint {
+                    Some(hint) => format!("run the review verb at HEAD - `{hint}`"),
+                    None => "run the review verb at HEAD".to_string(),
+                }
             };
             // `stale` counts in the tally and is NAMED in the next action, like
             // `absent`. `refused` keeps its inline names, because a refusal is
@@ -6217,11 +6242,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
     // The floor only applies where a session can satisfy it: a harness with a
-    // self-review verb (claude /code-review, codex /review). Flooring
-    // gemini/agy/opencode would demand an attestation no verb there produces,
-    // wedging the loop; route 3 (a spawned reviewer) is those harnesses' path
-    // and is deferred. classify_payload forks git, so it runs only when the
-    // floor could apply - a configured lane makes it moot, and most fires have one.
+    // self-review verb (claude /code-review, codex /review, opencode
+    // /review-changes). Flooring gemini/agy would demand an attestation no
+    // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
+    // those harnesses' path and is deferred. classify_payload forks git, so it
+    // runs only when the floor could apply - a configured lane makes it moot,
+    // and most fires have one.
     let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
     let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
         let payload = classify_payload(&parsed.git_bin, &cwd);
@@ -7246,7 +7272,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         && pr_info.state != PrState::Merged
                         && !pr_info.coverage.coverage.is_covered()
                     {
-                        let cov_line = coverage_receipt_line(&pr_info.coverage);
+                        // The hint renders the exact sized invocation (Python
+                        // single source) so an unreviewed-green termination
+                        // names what to run, not just that something must be.
+                        let cov_line = coverage_receipt_line(
+                            &pr_info.coverage,
+                            sized_self_review_hint(
+                                &parsed.fno_bin,
+                                &cwd,
+                                author_harness.as_deref(),
+                            )
+                            .as_deref(),
+                        );
                         let done_msg = format!(
                             "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
                             pr_info.number, cov_line
@@ -8298,6 +8335,61 @@ fn classify_plan_fidelity(stdout: &[u8]) -> FidelityGate {
     }
 }
 
+/// The sized self-review invocation for this worker, via `fno target
+/// review-invocation`. The single construction site stays Python
+/// (`self_review_invocation` + `level_for_diff`); Rust is a dumb pipe for its
+/// stdout, so the invocation a held worker is told to run cannot drift from
+/// the builder the parity and single-source gates police. `--harness` is
+/// passed from the SAME `resolve_harness` the gate uses, so the render names
+/// the verb for the harness that will actually run it.
+///
+/// Fail-open on every error path (no fno, non-zero exit, empty or multi-line
+/// stdout, timeout): the hint is advisory text appended to refusal reasons,
+/// and a missing hint must never change a gate verdict - callers fall back to
+/// the levelless "run the review verb at HEAD" line. `fno_bin` resolved by the
+/// caller (from `FNO_LOOPCHECK_FNO_BIN`, default `fno`) so this is hermetically
+/// testable with a stub script, same as `evaluate_plan_fidelity`.
+fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> Option<String> {
+    let mut args: Vec<&str> = vec!["target", "review-invocation"];
+    if let Some(h) = harness {
+        args.push("--harness");
+        args.push(h);
+    }
+    match run_bounded(
+        std::ffi::OsStr::new(fno_bin),
+        &args,
+        cwd,
+        std::time::Duration::from_secs(10),
+    ) {
+        BoundedRun::Stdout(out) => {
+            let s = String::from_utf8_lossy(&out).trim().to_string();
+            // One sane line only: a wrapper's chatter or an error page must
+            // never end up embedded in a held reason as if it were an
+            // invocation. Empty means the render itself gave up. An unsized
+            // render (a repo whose default branch is neither main nor master)
+            // returns the `<level>` placeholder form - a non-runnable string
+            // in a copy-me slot, so it reads as no hint and the levelless
+            // line stands.
+            if s.is_empty() || s.contains('\n') || s.len() > 80 || s.contains("<level>") {
+                None
+            } else {
+                Some(s)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `sized_self_review_hint` with the ambient fno binary and author harness, for
+/// callers (publish_coverage_status's uncovered arm) that never threaded those
+/// through. Same resolution discipline as the `fno notify` bridge and the
+/// unattested-reviewer render: ambient markers over threading, so call sites
+/// stay single-arg.
+fn ambient_self_review_hint(cwd: &Path) -> Option<String> {
+    let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    sized_self_review_hint(&fno_bin, cwd, crate::claims::resolve_harness().as_deref())
+}
+
 /// Unwrap a YAML scalar to the string a YAML parser would produce.
 ///
 /// Decoding escapes is not cosmetic: the recommended block form routinely
@@ -8943,6 +9035,16 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             // rather than threaded through every caller, so the 20+ build_block_reason
             // call sites stay single-arg.
             let author_harness = crate::claims::resolve_harness();
+            // The sized render for the code-review verb, resolved once for the
+            // whole list. The map value carries a `<level>` placeholder this
+            // surface's reader has no renderer for; the bridge substitutes the
+            // diff-sized level. None keeps the placeholder form (fail-open,
+            // same as every other hint consumer).
+            let sized = sized_self_review_hint(
+                &std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".into()),
+                &std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()),
+                author_harness.as_deref(),
+            );
             let items: Vec<String> = pr
                 .unattested_reviewers
                 .iter()
@@ -8974,6 +9076,14 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                                 " [self-cert: asserts no review evidence]"
                             } else {
                                 ""
+                            };
+                            // The sized render replaces the placeholder-carrying
+                            // map value verbatim: it IS the same invocation with
+                            // the level substituted by the Python single source.
+                            let inv = if r.name == "code-review" {
+                                sized.as_deref().unwrap_or(inv)
+                            } else {
+                                inv
                             };
                             // code-review is a native harness verb that emits
                             // no attestation on its own; the session must also
@@ -10648,7 +10758,7 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&rep);
+        let line = coverage_receipt_line(&rep, None);
         // Counted in the tally, NAMED in the next action - the same split the
         // absent bucket uses, and the reason the line carries no empty `()`.
         assert!(line.contains("1 stale,"), "{line}");
@@ -10679,7 +10789,7 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&rep);
+        let line = coverage_receipt_line(&rep, None);
         assert!(
             line.contains("no review carries a reviewed commit"),
             "{line}"
@@ -10699,9 +10809,87 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&old_commit);
+        let line = coverage_receipt_line(&old_commit, None);
         assert!(line.contains("ask for a re-read"), "{line}");
         assert!(!line.contains("upgrade gh"), "{line}");
+    }
+
+    #[test]
+    fn coverage_receipt_embeds_the_sized_self_review_hint() {
+        // The refusal's whole job is to hand the worker the exact invocation
+        // (sized by the Python single source); the receipt line embeds whatever
+        // the bridge produced, verbatim and backticked, after the existing
+        // instruction so the phrase's other assertions keep holding.
+        let comments = vec![serde_json::json!({
+            "author": {"login": "chatgpt-codex-connector[bot]"},
+            "body": "You have reached your Codex usage limits for code reviews."
+        })];
+        let rep = classify_coverage(
+            &[],
+            &comments,
+            "",
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "89bc0b91",
+        );
+        let hint = "/verb-from-the-builder --flags";
+        let line = coverage_receipt_line(&rep, Some(hint));
+        assert!(line.contains("run the review verb at HEAD"), "{line}");
+        assert!(line.contains(&format!("`{hint}`")), "{line}");
+        // None must read identically to a build without the render.
+        let bare = coverage_receipt_line(&rep, None);
+        assert!(!bare.contains("verb-from-the-builder"), "{bare}");
+    }
+
+    #[test]
+    fn sized_hint_bridge_reads_one_clean_line_and_nothing_else() {
+        // The bridge is a dumb pipe for the Python render: one sane line in,
+        // Some(line) out; everything else (non-zero exit, chatter, an overlong
+        // blob, a missing binary) is None so the refusal falls back to the
+        // levelless line rather than embedding garbage as an invocation.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let stub = |body: &str| -> std::path::PathBuf {
+            let p = dir.join(format!("stub-{}", body.len()));
+            std::fs::write(&p, body).unwrap();
+            #[allow(clippy::permissions_set_readonly_false)]
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            p
+        };
+
+        let good = stub("#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n");
+        assert_eq!(
+            sized_self_review_hint(good.to_str().unwrap(), dir, Some("claude")).as_deref(),
+            Some("/code-review from-stub --comment --fix")
+        );
+
+        let failing = stub("#!/bin/sh\nexit 1\n");
+        assert_eq!(
+            sized_self_review_hint(failing.to_str().unwrap(), dir, None),
+            None
+        );
+
+        let chatty = stub("#!/bin/sh\nprintf 'line one\\nline two\\n'\n");
+        assert_eq!(
+            sized_self_review_hint(chatty.to_str().unwrap(), dir, None),
+            None
+        );
+
+        // An unsized render keeps its `<level>` placeholder; embedding that in
+        // a copy-me slot hands the reader a string it cannot run, so the
+        // filter reads it as no hint at all.
+        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment --fix\\n'\n");
+        assert_eq!(
+            sized_self_review_hint(placeholder.to_str().unwrap(), dir, None),
+            None
+        );
+
+        assert_eq!(sized_self_review_hint("/nonexistent/fno", dir, None), None);
     }
 
     fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
@@ -12903,8 +13091,9 @@ mod tests {
     #[test]
     fn reviewer_invocation_resolves_the_author_harness_verb() {
         // Per-harness: code-review names the harness's own verb. A codex author
-        // is told /review, a claude author /code-review; unknown harness and
-        // override-less reviewers fall back to the scalar default.
+        // is told /review, a claude author /code-review; unknown harness falls
+        // back to the scalar, which is the portable fno review - never
+        // claude's verb silently.
         assert_eq!(
             reviewer_invocation_for("code-review", Some("codex")),
             Some(("/review", false))
@@ -12914,19 +13103,33 @@ mod tests {
             Some(("/code-review <level> --comment --fix", false))
         );
         assert_eq!(
+            reviewer_invocation_for("code-review", Some("opencode")),
+            Some(("/review-changes", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("code-review", Some("agy")),
+            Some(("/fno:review", false))
+        );
+        assert_eq!(
             reviewer_invocation_for("code-review", None),
-            Some(("/code-review", false))
+            Some(("/fno:review", false))
         );
         assert_eq!(
             reviewer_invocation_for("sigma", Some("codex")),
             Some(("/fno:review sigma", false))
         );
-        // The codex self-review verb must stay bare: prose after it flips codex
-        // to a no-merge-base review target (a verified constraint, not a style).
+        // The codex and opencode self-review verbs must stay bare: prose after
+        // the codex verb flips it to a no-merge-base review target (a verified
+        // constraint, not a style), and opencode's grammar is unverified.
         let (codex_verb, _) = reviewer_invocation_for("code-review", Some("codex")).unwrap();
         assert!(
             !codex_verb.chars().any(|c| c.is_whitespace()),
             "codex self-review verb must be bare, got {codex_verb:?}"
+        );
+        let (opencode_verb, _) = reviewer_invocation_for("code-review", Some("opencode")).unwrap();
+        assert!(
+            !opencode_verb.chars().any(|c| c.is_whitespace()),
+            "opencode self-review verb must stay bare until its grammar is verified, got {opencode_verb:?}"
         );
     }
 
@@ -13038,10 +13241,45 @@ mod tests {
     fn self_review_gate_held_reason_names_code_review_and_its_verb() {
         // AC1-HP: a code payload that reaches the stop gate with no head-pinned
         // code-review attestation is held, and the reason names the reviewer
-        // and the verb served by the ambient harness.
+        // and the verb served by the ambient harness. Both render branches are
+        // pinned here, sequentially (one env write per branch, no thread race):
+        // a working bridge substitutes the sized render for the map value's
+        // `<level>` placeholder, and a missing binary keeps the placeholder.
+        // Without the pin the expectation would depend on whatever fno the
+        // host has installed.
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
         let mut pr = reviewers_gate_pr();
         pr.unattested_reviewers[0].name = "code-review".to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("fno-stub");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n",
+        )
+        .unwrap();
+        #[allow(clippy::permissions_set_readonly_false)]
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var(var, stub.to_str().unwrap());
+        let sized_reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            sized_reason.contains("`/code-review from-stub --comment --fix`"),
+            "got: {sized_reason}"
+        );
+        assert!(
+            !sized_reason.contains("<level>"),
+            "the placeholder must not survive a working bridge: {sized_reason}"
+        );
+
+        std::env::set_var(var, "/nonexistent-fno-for-this-test");
         let reason = build_block_reason(&pr, "abc", true);
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
         let harness = crate::claims::resolve_harness();
         let expected = reviewer_invocation_for("code-review", harness.as_deref())
             .expect("code-review descriptor")
@@ -13076,9 +13314,11 @@ mod tests {
         // reviewer) is the path for harnesses without one and is deferred.
         assert!(harness_can_self_review(Some("claude")));
         assert!(harness_can_self_review(Some("codex")));
+        // opencode carries a recorded native verb (/review-changes), so the
+        // floor is satisfiable there; agy/gemini have none and stay unfloored.
+        assert!(harness_can_self_review(Some("opencode")));
         assert!(!harness_can_self_review(Some("gemini")));
         assert!(!harness_can_self_review(Some("agy")));
-        assert!(!harness_can_self_review(Some("opencode")));
         assert!(!harness_can_self_review(None));
     }
 
