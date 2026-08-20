@@ -1941,6 +1941,10 @@ class SquadAwareRunner(FakeRunner):
             else:
                 scope = "UNSCOPED"
             self.tab_ls_scopes.append(scope)
+            if self.tabs_returncode != 0:
+                return subprocess.CompletedProcess(
+                    argv, self.tabs_returncode, "", self.tabs_stderr
+                )
             if scope == "UNSCOPED":
                 # CurrentRoute on the tab verbs = the squad being LOOKED at.
                 rows = self.squads.get(self.gazed_at, [])
@@ -4252,3 +4256,26 @@ def test_unanswered_run_recovered_pane_without_session_id_is_reaped(
     assert "reaped" in message
     assert load_registry() == []
     assert runner.kill_calls, "an unproven recovered pane must be reaped"
+
+
+def test_group_placement_failure_leaves_the_worker_alive(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The pane is created with the seed already in its argv, so by the time
+    grouping runs the worker is live and may have started. Grouping is cosmetic
+    by place_pane_in_group_tab's own account, so a transient `tab ls` non-zero
+    must not kill a running worker."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    runner = SquadAwareRunner(squads={1: [], 5: []}, pane_squad=1, pane_tab=1)
+    runner.tabs_returncode = 1
+    runner.tabs_stderr = "transient server hiccup"
+
+    # A failing tab read must not raise, and must not reap.
+    result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=runner)
+
+    assert not runner.kill_calls, "a live worker was killed over tab grouping"
+    err = capsys.readouterr().err
+    assert "left in its own tab" in err
+    assert "codex" in err

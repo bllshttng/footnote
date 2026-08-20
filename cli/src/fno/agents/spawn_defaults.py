@@ -1383,10 +1383,13 @@ def inject_spawn_defaults(
         # spawn on a value the caller never asked for. Every other
         # config-sourced field here degrades open with a named line, so this
         # one does too.
+        # --once/-o is in this list because cli.py refuses placement on
+        # `substrate != "pane" OR once`, so a one-shot spawn has no pane
+        # geometry either even though its substrate resolves to "pane".
         conflicting = next(
             (f for f in ("--split", "-x", "--at") if _flag_value(out[1:], f) is not None),
             None,
-        )
+        ) or next((f for f in ("--once", "-o") if f in out[1:]), None)
         if eff_substrate != "pane":
             print(
                 f"fno agents spawn: pane group skipped (resolved substrate "

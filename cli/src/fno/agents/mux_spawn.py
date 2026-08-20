@@ -3075,9 +3075,18 @@ def dispatch_spawn_pane(
             try:
                 place_pane_in_group_tab(session, pane_id, pane_group, runner)
             except DispatchAskError as exc:
-                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
-                suffix = "pane reaped" if reaped else f"cleanup failed: {cleanup_detail}"
-                raise DispatchAskError(f"{exc}; {suffix}", exit_code=exc.exit_code) from exc
+                # Do NOT reap. The pane was created with the seed already in its
+                # argv, so by this point the worker is live and may have started
+                # work. Grouping is cosmetic by this function's own account (it
+                # accepts an over-full tab rather than serialize spawns), and a
+                # transient `tab ls` non-zero or a `tab join` race is not worth
+                # killing a running worker over. The pane stays in its own tab
+                # and the operator gets a named line.
+                print(
+                    f"fno agents spawn: pane {pane_id} left in its own tab; "
+                    f"grouping into {pane_group!r} failed: {exc}",
+                    file=sys.stderr,
+                )
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
         from fno.agents.spawn_gate import _process_start_time

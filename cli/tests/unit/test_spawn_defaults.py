@@ -1572,3 +1572,22 @@ def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch)
         profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
     )
     assert out[out.index("--tab") + 1] == "codex"
+
+
+def test_config_pane_group_degrades_open_beside_once(monkeypatch):
+    """cli.py refuses placement on `substrate != "pane" OR once`, so a one-shot
+    spawn has no pane geometry even though its substrate resolves to pane. The
+    injected group must skip there too, or it fail-closes a spawn on a value the
+    caller never typed."""
+    err = io.StringIO()
+    # --once alone resolves the substrate to headless, which the substrate
+    # branch already catches. The gap is an EXPLICIT --substrate pane beside it:
+    # eff_substrate is then "pane" and only the --once scan can skip the group.
+    out = _inject(
+        ["spawn", "--name", "w", "--substrate", "pane", "--once", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "--once" in err.getvalue()

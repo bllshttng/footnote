@@ -214,25 +214,36 @@ def check_worktree_policy() -> list[str]:
 def _detected_harness() -> str:
     """Best-effort name of the harness running this shell, for the remedy line.
 
-    Ordered by how specific the marker is, NOT alphabetically. A claude session
-    that spawns a codex worker leaks ``CLAUDECODE`` and ``CLAUDE_CONFIG_DIR``
-    into the child's environment, so checking those first hands a codex worker
-    the claude remedy and points it at the wrong settings file. The per-session
-    id vars are set by the harness that owns the session, so they are checked
-    before any var that merely survives a fork.
+    Delegates to the canonical tables in :mod:`fno.harness_identity` rather than
+    listing markers here. A second copy drifted immediately: the first version of
+    this function checked ``CLAUDE_SESSION_ID``, which is the LEGACY marker, and
+    never ``CLAUDE_CODE_SESSION_ID``, which is what a live claude session
+    actually sets. A real claude session therefore fell through to the ambient
+    tier, where a ``CODEX_HOME`` exported in the shell profile - ordinary on a
+    machine that runs both - answered "codex" and pointed the remedy at the wrong
+    settings file.
+
+    Session-scoped markers are consulted first, then the legacy spellings, then
+    ambient vars that merely survive a fork. Only the ambient tier is local: it
+    is a remedy-line nicety, not an identity decision, so it does not belong in
+    the resolver's own precedence.
     """
     import os
 
-    for env, name in (
-        # Session-scoped: set by the harness actually running this shell.
-        ("CODEX_THREAD_ID", "codex"),
-        ("AGY_SESSION_ID", "agy"),
-        ("OPENCODE_SESSION_ID", "opencode"),
-        ("CLAUDE_SESSION_ID", "claude"),
-        # Ambient: survives a fork, so it only decides when nothing above did.
-        ("CODEX_HOME", "codex"),
+    from fno.harness_identity import (
+        HARNESS_SESSION_MARKERS,
+        LEGACY_HARNESS_SESSION_MARKERS,
+    )
+
+    ambient = (
         ("CLAUDECODE", "claude"),
         ("CLAUDE_CONFIG_DIR", "claude"),
+        ("CODEX_HOME", "codex"),
+    )
+    for env, name in (
+        *HARNESS_SESSION_MARKERS,
+        *LEGACY_HARNESS_SESSION_MARKERS,
+        *ambient,
     ):
         if os.environ.get(env):
             return name
