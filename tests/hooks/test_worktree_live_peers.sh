@@ -298,6 +298,43 @@ fi
 # Restore the default unrecorded shim for any later carrier checks.
 make_fno_shim '{"recorded":false,"record_reason":"lock-timeout"}'
 
+# The stranded refresh shares reconcile-throttle.sh's cross-platform mtime
+# implementation. If that helper is absent, cached reporting may continue but
+# refresh must stay disabled instead of starting a costly sweep every session.
+MISSING_THROTTLE_ROOT="$TMP_DIR/missing-throttle-root"
+MISSING_THROTTLE_LOG="$TMP_DIR/missing-throttle-fno.log"
+MISSING_THROTTLE_BIN="$TMP_DIR/missing-throttle-bin"
+mkdir -p "$MISSING_THROTTLE_ROOT/hooks/helpers" "$MISSING_THROTTLE_ROOT/.fno" "$MISSING_THROTTLE_BIN"
+cp "$CARRIER" "$MISSING_THROTTLE_ROOT/hooks/worktree-peers-session-start.sh"
+cat > "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$MISSING_THROTTLE_ROOT/hooks/helpers/worktree-live-peers.sh"
+cat > "$MISSING_THROTTLE_ROOT/.fno/.worktree-stranded-cache.json" <<'EOF'
+{"rows":[{"class":"UNKNOWN","node":"x-test","path":"/tmp/test-worktree"}]}
+EOF
+cat > "$MISSING_THROTTLE_BIN/fno" <<'EOF'
+#!/usr/bin/env bash
+printf 'stranded-called\n' >> "$FNO_STRANDED_LOG"
+printf '{"rows":[]}\n'
+EOF
+chmod +x "$MISSING_THROTTLE_BIN/fno"
+missing_throttle_out="$(
+  FNO_STRANDED_LOG="$MISSING_THROTTLE_LOG" PATH="$MISSING_THROTTLE_BIN:$PATH" \
+    bash "$MISSING_THROTTLE_ROOT/hooks/worktree-peers-session-start.sh" 2>/dev/null
+)"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [[ -s "$MISSING_THROTTLE_LOG" ]] && break
+  sleep 0.1
+done
+if [[ "$missing_throttle_out" == *"[fno-stranded-unknown]"* \
+      && ! -s "$MISSING_THROTTLE_LOG" ]]; then
+  pass "missing throttle helper preserves cache reporting without launching refresh"
+else
+  fail "missing throttle helper: out=[$missing_throttle_out] refresh=[$(cat "$MISSING_THROTTLE_LOG" 2>/dev/null)]"
+fi
+
 # Codex's existing wrapper calls the same helper from its hygiene block.
 WRAPPER_HOME="$TMP_DIR/home"
 WRAPPER_BIN="$TMP_DIR/bin"
