@@ -2,7 +2,7 @@
 
 `classify()` is pure, so the fixture table drives it directly with no git or
 subprocess involved. The one thing that must NOT be pure-fixture-tested is
-the unsound-probe regression: `x-fd2a` proved that a branch existing on
+the unsound-probe regression: a prior sweep proved that a branch existing on
 origin at an OLDER sha reads as healthy under a name-existence check, so
 that one drives a real temp git repo the same way test_worktree_reapable.py
 does, exercising the actual `wt_unpushed_count` shell function classify()'s
@@ -122,10 +122,10 @@ def test_resolved_id_with_no_graph_row_is_unknown():
 
 
 def test_resolve_by_directory_basename():
-    entries = {"x-fd2a": {"id": "x-fd2a", "status": "ready"}}
-    node, entry = resolve_node_id("/repo/.claude/worktrees/x-fd2a", "unrelated-branch-name", entries)
-    assert node == "x-fd2a"
-    assert entry == entries["x-fd2a"]
+    entries = {"x-ab12": {"id": "x-ab12", "status": "ready"}}
+    node, entry = resolve_node_id("/repo/.claude/worktrees/x-ab12", "unrelated-branch-name", entries)
+    assert node == "x-ab12"
+    assert entry == entries["x-ab12"]
 
 
 def test_resolve_by_branch_when_basename_misses():
@@ -224,6 +224,30 @@ def test_apply_sweep_only_acts_on_stranded_and_unknown(monkeypatch):
     assert not any("push" in args for args in calls)
 
 
+def test_apply_sweep_wake_false_still_records_unknown_but_skips_stranded(monkeypatch):
+    """A code-review finding: config.recovery.watchdog="report" must still
+    classify (so counts stay honest) but never push or file - the same
+    wake vs report split the fleet watchdog leg draws at apply_verdict.
+    Recording UNKNOWN is reporting, not acting, so it stays unconditional."""
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
+
+    rows = [
+        Row(STRANDED, "x-5", 5, "now", {"path": "/e", "branch": "b5"}),
+        Row(UNKNOWN, "x-4", 5, "now", {"path": "/d", "branch": "b4", "reason": "r"}),
+    ]
+    outcomes = apply_sweep(rows, wake=False)
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["node"] == "x-4"
+    assert not any("push" in args for args in calls)
+
+
 def test_act_on_stranded_stops_at_first_failure(monkeypatch):
     """A failed push must never reach the backlog-update or event acts -
     the next tick retries the whole row from scratch."""
@@ -245,7 +269,7 @@ def test_act_on_stranded_stops_at_first_failure(monkeypatch):
     assert not any("backlog" in args for args in calls)
 
 
-# --- regression: the unsound name-existence probe (x-fd2a shape) --------
+# --- regression: the unsound name-existence probe -----------------------
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -255,10 +279,10 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
-    """x-fd2a: `origin/feature/x` existing is not proof the local HEAD's
-    commits are on it. A branch-name-exists probe reads this worktree as
-    healthy; the sound probe (rev-list --not --remotes, what classify()'s
-    unpushed input actually comes from) must not."""
+    """A branch existing on origin is not proof the local HEAD's commits
+    are on it. A branch-name-exists probe reads this worktree as healthy;
+    the sound probe (rev-list --not --remotes, what classify()'s unpushed
+    input actually comes from) must not."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
 
@@ -271,9 +295,9 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
     (work / "f.txt").write_text("one\n")
     _git(work, "add", "f.txt")
     _git(work, "commit", "-q", "-m", "first")
-    _git(work, "push", "-q", "origin", "HEAD:refs/heads/feature/x-fd2a")
+    _git(work, "push", "-q", "origin", "HEAD:refs/heads/feature/x-ab12")
 
-    # Local moves ahead; origin/feature/x-fd2a stays at the older sha.
+    # Local moves ahead; origin/feature/x-ab12 stays at the older sha.
     (work / "f.txt").write_text("two\n")
     _git(work, "add", "f.txt")
     _git(work, "commit", "-q", "-m", "second, never pushed")

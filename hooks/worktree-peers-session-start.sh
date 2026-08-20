@@ -108,6 +108,10 @@ fi
 # fresh checkout sees nothing to report yet - the same as a clean sweep, by
 # design - rather than block on the one sweep that would tell it otherwise.
 CACHE_MAX_AGE_S=900
+# Generous over the ~100s measured sweep cost above: a claimed window with
+# still no cache file past this grace period means the last background
+# sweep hung, crashed, or was killed - not that it is still running.
+_SWEEP_GRACE_S=300
 _CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
 # A dedicated stamp, not the cache file's own mtime: the window must be
 # claimed (stamp touched) BEFORE the background sweep launches, the same
@@ -147,6 +151,8 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
           ;;
       esac
     done < <(jq -r '.rows[]? | select(.class=="UNKNOWN" or .class=="ABANDONED") | [.class, (.node // "?"), .path] | @tsv' "$_CACHE_FILE" 2>/dev/null)
+  elif [[ -f "$_STAMP_FILE" ]] && (( $(_cache_age) > _SWEEP_GRACE_S )); then
+    stranded_lines+=('- previous stranded sweep did not complete (timed out, crashed, or was killed). [fno-stranded-sweep-incomplete]')
   fi
 
   if (( $(_cache_age) > CACHE_MAX_AGE_S )); then

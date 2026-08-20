@@ -81,7 +81,7 @@ def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
     branch: Optional[str] = None
     detached = False
     bare = False
-    for line in out.stdout.splitlines() + [""]:
+    for line in out.stdout.splitlines():
         if line.startswith("worktree "):
             if wt_path and not bare:
                 rows.append((None if detached else branch, wt_path))

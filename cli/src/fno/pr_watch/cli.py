@@ -627,10 +627,14 @@ def tick() -> None:
                     )
                 from fno.worktree_stranded import STRANDED, UNKNOWN, apply_sweep, sweep
 
+                # "report" mode still classifies (so counts stay honest) but
+                # never pushes or files - the same wake vs report split the
+                # fleet watchdog leg above draws at apply_verdict.
+                wake = settings.recovery.watchdog == "wake"
                 stranded_n = unknown_n = acted_n = failed_n = 0
                 for root in _catchup_roots():
                     rows = sweep(repo=root)
-                    outcomes = apply_sweep(rows)
+                    outcomes = apply_sweep(rows, wake=wake)
                     stranded_n += sum(1 for r in rows if r.klass == STRANDED)
                     unknown_n += sum(1 for r in rows if r.klass == UNKNOWN)
                     acted_n += len(outcomes)

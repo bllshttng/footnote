@@ -109,7 +109,7 @@ def _basename_candidate(path: str) -> str:
 
 
 def _branch_candidate(branch: Optional[str]) -> Optional[str]:
-    """Last ``/``-delimited segment: `feature/x-fd2a` -> `x-fd2a`."""
+    """Last ``/``-delimited segment: `feature/x-ab12` -> `x-ab12`."""
     if not branch:
         return None
     return branch.rsplit("/", 1)[-1]
@@ -404,14 +404,22 @@ def _emit_sweep_event(
     return ev_p.returncode == 0
 
 
-def apply_sweep(rows: list[Row]) -> list[dict]:
+def apply_sweep(rows: list[Row], *, wake: bool = True) -> list[dict]:
     """Act on a classified sweep: STRANDED rows get pushed and filed,
     UNKNOWN rows get recorded, every other class stays quiet. Stops at the
-    first failed act per row; a later tick retries that row from scratch."""
+    first failed act per row; a later tick retries that row from scratch.
+
+    ``wake=False`` (the fleet watchdog's "report" posture) still records
+    every UNKNOWN row - recording is reporting, not acting, per this
+    module's own fail-open contract - but skips the STRANDED push+file, the
+    one genuinely mutating act here. The explicit ``fno worktree stranded
+    --apply`` verb is a direct user request, not a watchdog-mode read, so
+    it keeps the wake=True default and always acts."""
     outcomes: list[dict] = []
     for row in rows:
         if row.klass == STRANDED:
-            outcomes.append(act_on_stranded(row))
+            if wake:
+                outcomes.append(act_on_stranded(row))
         elif row.klass == UNKNOWN:
             outcomes.append(record_unknown(row))
     return outcomes
