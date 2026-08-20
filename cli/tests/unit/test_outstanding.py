@@ -675,6 +675,23 @@ def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
     assert still_open.exit_code == 0, still_open.output
     assert qid in still_open.output, "the question must survive its refused close"
 
+    # A batch refuses whole, never halfway. The refusal turns on the ambient
+    # identity and the one --authority value, both invocation-wide, so it
+    # fires on the first id before anything closes. Asserted rather than
+    # reasoned, because a partial batch is a data-integrity bug and the
+    # argument for why it cannot happen is exactly the kind that stops being
+    # true when someone moves the record_decision call.
+    qid2 = runner.invoke(
+        outstanding_app, ["ask", "second question?", "--node", "x-7d94"]
+    ).stdout.strip().splitlines()[-1]
+    batch = runner.invoke(
+        outstanding_app,
+        ["clear", qid, qid2, "--answer", "fold", "--authority", "operator"],
+    )
+    assert batch.exit_code != 0, batch.output
+    after = runner.invoke(outstanding_app, [])
+    assert qid in after.output and qid2 in after.output, "neither may close"
+
 
 def test_clear_with_answer_projects_the_decision_onto_the_node(
     root: Path, monkeypatch: pytest.MonkeyPatch
