@@ -49,7 +49,7 @@ A decision id is a lookup key. `fno decide list --subject d-1a2b3c4d` returns th
 
 Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
 
-The scan runs even when the exact subject DID answer. The case that cost a reader four rulings returned one row, not zero. A scan gated on an empty answer stays silent on exactly that case.
+Even where the exact subject DID answer, the scan still runs. The case that cost a reader four rulings returned one row, not zero. A scan gated on an empty answer stays silent on exactly that case.
 
 A miss never claims the store is empty. An argument shaped like a decision id that matches nothing is told it is shaped like one. Every miss is a statement about the query, never about the world.
 
