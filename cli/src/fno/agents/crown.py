@@ -472,10 +472,24 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
+            # Name the field, not just the value, and name a remedy that cannot
+            # contradict the refusal. This test reads the STORED status; `fno
+            # agents list` renders that column beside a freshly-computed
+            # `live_status`, and the two disagree exactly when a live row was
+            # stamped terminal by an earlier sweep. Pointing a caller at that
+            # reader (as this refusal used to) sends it to a column saying the
+            # row is live, with no way forward from there.
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: target status {target.status!r} "
-                "is terminal. `fno agents list` shows which rows are live; crown "
-                "one of those instead."
+                f"refusing to crown {target.name!r}: its STORED status is "
+                f"{target.status!r}, which is terminal. That is a recorded "
+                "snapshot, not a live probe, so it can be stale for a session "
+                "that is still running. Two ways out:\n"
+                "  target is alive    run `fno agents register` IN the target "
+                "session (it restamps the row idle in place), then retry\n"
+                "  target really died `fno agents reconcile`, then crown a live "
+                "row instead; `fno agents list` shows stored status beside the "
+                "computed live_status, and a disagreement means the stored one "
+                "is stale"
             )
 
         # A row that already holds a crown is re-scoped, not refused: the

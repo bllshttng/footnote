@@ -554,6 +554,37 @@ def test_in_place_crown_refuses_a_terminal_target_without_mutation(
 
     assert result.exit_code == 2
     assert status in result.output
+    # AC2-shaped: the refusal names the way out, and never points at a reader
+    # that contradicts it. The old text sent the caller to `fno agents list`,
+    # whose computed live_status says "live" for exactly the stale-stored row
+    # this branch refuses - measured against a real session on 2026-08-20.
+    assert "STORED status" in result.output
+    assert "fno agents register" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_terminal_target_refusal_names_the_stale_snapshot_not_a_live_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live session whose row an earlier sweep stamped `orphaned` is the case
+    that stalled a real coronation: the refusal read the stored field and then
+    named `fno agents list`, whose freshly-computed live_status disagreed. The
+    refusal must say the value is a snapshot and name what restamps it."""
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status="orphaned")],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "snapshot, not a live probe" in result.output
+    assert "fno agents register" in result.output
+    assert "fno agents reconcile" in result.output
     assert [asdict(row) for row in load_registry()] == before
 
 
