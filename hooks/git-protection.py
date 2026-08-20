@@ -1399,13 +1399,21 @@ def _file_trailer_claims(path, ids):
     """True when the file at `path` has a last trailer line naming every id.
 
     Reads the LAST `Backlog-Closure:` line only, and accepts whitespace or a
-    comma either side of an id, both mirroring check-pr-node-closure.sh. An
-    unreadable path is not a claim; the caller then falls through to deny.
+    comma either side of an id, both mirroring check-pr-node-closure.sh.
+
+    An unreadable path returns True, not False. A PreToolUse hook runs BEFORE
+    the command, so the usual spelling - compose into a file, then pass it -
+    presents a path that does not exist yet: `printf '%s\\n' "$BODY" >
+    .fno/pr-body.md` and `gh pr create --body-file .fno/pr-body.md` in one call.
+    Reading that as "no claim" denied a body composed correctly one line later,
+    the false DENY this gate's contract rules out. Unreadable means the hook
+    cannot judge, and an unjudgeable body-file falls to the false-ALLOW side
+    that CI still catches.
     """
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
+        return True
     lines = re.findall(r"(?im)^Backlog-Closure:[ \t]*(.*)$", text)
     if not lines:
         return False
@@ -1432,15 +1440,24 @@ def _closure_trailer_refusal(command=""):
     `--body-file` names a real path, so that spelling is judged on the file's
     own trailer instead of on a marker. Either way the only failure mode is a
     false ALLOW, which CI still catches; a composed body is never denied.
+
+    The ids come from `--head` when the command names one, and only otherwise
+    from the checkout. The PR closes the node its HEAD ref names, which is what
+    the CI gate reads; judging `gh pr create --head chore/docs` against a
+    node-bearing local branch denied a PR that closes nothing, and told the
+    author to claim a node the PR does not ship.
     """
     if os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
         return None
-    ids = _branch_node_ids(get_current_branch())
+    head = re.search(r"--head(?:=|\s+)(\S+)", command)
+    ids = _branch_node_ids(
+        head.group(1).strip("'\"") if head else get_current_branch()
+    )
     if not ids:
         return None
     if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
         return None
-    for path in re.findall(r"--body-file(?:=|\s+)(\S+)", command):
+    for path in re.findall(r"(?:--body-file(?:=|\s+)|(?:^|\s)-F\s+)(\S+)", command):
         if _file_trailer_claims(path.strip("'\""), ids):
             return None
     return (

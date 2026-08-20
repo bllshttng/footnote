@@ -69,6 +69,14 @@ run "Backlog-Closure: x-cdef" "feature/x-cdef-1234" \
   && pass "all-hex suffix never invents a second candidate" \
   || fail "all-hex suffix should not invent a bogus second candidate"
 
+# slash-spanning: a path component and the next one must never re-glue into a
+# candidate. "feat/cafe" names no node - the producer
+# (fno.pr.closure.branch_node_ids) needs a literal '-' and writes no trailer for
+# it - so demanding "feat-cafe" red a PR over a line nothing could generate.
+run "no trailer here" "feat/cafe" \
+  && pass "slash-spanning segments never glue into a candidate" \
+  || fail "a candidate must never span a '/'"
+
 # no-space-after-colon: the runtime parser (fno.pr.closure) accepts zero
 # spaces after "Backlog-Closure:" - the gate must too (round-7 review fix:
 # reproduced live pre-fix, where this well-formed trailer read as missing).

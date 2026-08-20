@@ -319,7 +319,10 @@ Derive from commits:
 
 ### Create PR
 ```bash
-gh pr create --title "title" --body "body"
+# The body must carry the exact `Backlog-Closure:` trailer when the branch names
+# a node, or check-pr-node-closure reds the PR. Compose it into a file (see the
+# step-5 block above) rather than passing a bare --body.
+gh pr create --title "title" --body-file .fno/pr-body.md
 ```
 
 ### Get Detailed Commit Log

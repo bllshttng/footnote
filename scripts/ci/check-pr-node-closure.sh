@@ -42,31 +42,42 @@ source "${_script_dir}/../lib/node-id.sh"
 node_id_re="${_NODE_ID_FNO_RE#^}"
 node_id_re="${node_id_re%\$}"
 
-# Extract every delimiter-bounded candidate segment from the head ref. IFS
-# splits on '/' and '-' so each candidate is compared whole, not as a
-# substring of a longer token (mirrors `_branch_matches_node`'s
-# delimiter-bounded match, never a bare substring).
+# Extract every delimiter-bounded candidate segment from the head ref. Split on
+# '/' FIRST, then on '-' inside each path component, so each candidate is
+# compared whole, not as a substring of a longer token (mirrors
+# `_branch_matches_node`'s delimiter-bounded match, never a bare substring).
+#
+# The two splits stay separate because the re-glue below joins with a literal
+# '-'. A single `IFS='/-'` split forgot WHICH delimiter it consumed, so it
+# re-glued two segments that a '/' separated and demanded an id the branch
+# never names: "feat/cafe" asked for "feat-cafe", "target/deadbeef" for
+# "target-deadbeef". Those refs name no node, and the producer
+# (fno.pr.closure.branch_node_ids, which requires a literal '-') writes no
+# trailer for them - so the gate red a PR over a line nothing could generate.
 candidates=()
-IFS='/-' read -ra _segments <<< "$PR_HEAD_REF"
-i=0
-while [[ $i -lt ${#_segments[@]} ]]; do
-  # Re-glue two adjacent segments (the id's own prefix/suffix straddle the
-  # '-' IFS split point: "x" and "59a6" from "feature/x-59a6").
-  if [[ $((i + 1)) -lt ${#_segments[@]} ]]; then
-    pair="${_segments[$i]}-${_segments[$((i + 1))]}"
-    if [[ "$pair" =~ ^${node_id_re}$ ]]; then
-      candidates+=("$pair")
-      # Skip BOTH consumed segments, not just one: a real id's all-hex
-      # suffix (e.g. "cdef" in "x-cdef") is itself a valid node-id PREFIX
-      # shape, so sliding by one would re-glue it with the next segment
-      # ("cdef-1234") and invent a second, bogus candidate. Reproduced
-      # live: PR_HEAD_REF="feature/x-cdef-1234" used to demand a
-      # "Backlog-Closure: cdef-1234" line that names nothing real.
-      i=$((i + 2))
-      continue
+IFS='/' read -ra _paths <<< "$PR_HEAD_REF"
+for _path in "${_paths[@]}"; do
+  IFS='-' read -ra _segments <<< "$_path"
+  i=0
+  while [[ $i -lt ${#_segments[@]} ]]; do
+    # Re-glue two adjacent segments (the id's own prefix/suffix straddle the
+    # '-' IFS split point: "x" and "59a6" from "feature/x-59a6").
+    if [[ $((i + 1)) -lt ${#_segments[@]} ]]; then
+      pair="${_segments[$i]}-${_segments[$((i + 1))]}"
+      if [[ "$pair" =~ ^${node_id_re}$ ]]; then
+        candidates+=("$pair")
+        # Skip BOTH consumed segments, not just one: a real id's all-hex
+        # suffix (e.g. "cdef" in "x-cdef") is itself a valid node-id PREFIX
+        # shape, so sliding by one would re-glue it with the next segment
+        # ("cdef-1234") and invent a second, bogus candidate. Reproduced
+        # live: PR_HEAD_REF="feature/x-cdef-1234" used to demand a
+        # "Backlog-Closure: cdef-1234" line that names nothing real.
+        i=$((i + 2))
+        continue
+      fi
     fi
-  fi
-  i=$((i + 1))
+    i=$((i + 1))
+  done
 done
 
 if [[ ${#candidates[@]} -eq 0 ]]; then

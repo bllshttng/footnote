@@ -133,6 +133,19 @@ def test_produced_body_passes_the_real_gate(head_ref):
     assert _gate(ensure_closure_trailer(body, head_ref), head_ref) == 0
 
 
+@pytest.mark.parametrize(
+    "head_ref", ["feat/cafe", "fix/abc123", "target/deadbeef", "chore/fee1dead"]
+)
+def test_the_gate_never_demands_an_id_spanning_a_slash(head_ref):
+    # The producer requires a literal '-' between prefix and hex, so it writes
+    # no trailer for these refs. The gate used to re-glue across '/' and demand
+    # "feat-cafe" / "target-deadbeef" - reddening a PR over a line nothing on
+    # the producer side could generate, which is the whole defect this pair
+    # exists to close.
+    assert branch_node_ids(head_ref) == []
+    assert _gate(ensure_closure_trailer("Summary.", head_ref), head_ref) == 0
+
+
 # ---- Call site: fno worker ship ----
 
 def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
@@ -279,11 +292,43 @@ def test_hook_denies_a_body_file_missing_the_claim(monkeypatch, tmp_path):
     assert reason is not None and "Backlog-Closure: x-49ec" in reason
 
 
-def test_hook_denies_an_unreadable_body_file(monkeypatch, tmp_path):
+def test_hook_allows_a_body_file_the_same_command_is_about_to_write(monkeypatch, tmp_path):
+    # A PreToolUse hook runs BEFORE the command, so the documented spelling
+    # (compose into a file, then pass it) names a path that does not exist yet.
+    # Denying it is the false DENY the docstring rules out; an unjudgeable
+    # body-file falls to the false-ALLOW side CI still catches.
     assert _hook_decision(
-        f"gh pr create --title t --body-file {tmp_path / 'gone.md'}", "feature/x-49ec",
+        f"printf '%s' \"$B\" > {tmp_path / 'gone.md'}\n"
+        f"gh pr create --title t --body-file {tmp_path / 'gone.md'}",
+        "feature/x-49ec",
         monkeypatch=monkeypatch,
-    ) is not None
+    ) is None
+
+
+def test_hook_reads_the_short_body_file_flag(monkeypatch, tmp_path):
+    # `-F` is gh's own short spelling of --body-file. Judging only the long one
+    # denied a fully composed body - the one-spelling-guard shape.
+    body = tmp_path / "pr-body.md"
+    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
+    assert _hook_decision(
+        f"gh pr create --title t -F {body}", "feature/x-49ec", monkeypatch=monkeypatch,
+    ) is None
+
+
+def test_hook_judges_the_explicit_head_ref_not_the_checkout(monkeypatch):
+    # The PR closes what its HEAD ref names, which is what the CI gate reads.
+    assert _hook_decision(
+        'gh pr create --head chore/tidy-docs --body "$BODY"', "feature/x-49ec",
+        monkeypatch=monkeypatch,
+    ) is None
+
+
+def test_hook_still_denies_an_explicit_node_head_ref(monkeypatch):
+    reason = _hook_decision(
+        'gh pr create --head feature/x-1111 --body "$BODY"', "chore/tidy-docs",
+        monkeypatch=monkeypatch,
+    )
+    assert reason is not None and "Backlog-Closure: x-1111" in reason
 
 
 def test_hook_escape_hatch_clears_the_gate(monkeypatch):
