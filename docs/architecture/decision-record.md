@@ -17,7 +17,7 @@ fno decide reindex                 # backfill records written before the index
 
 ## Two producers, both explicit
 
-`fno decide` records a ruling that has no question on file. `fno outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
+`fno decide` records a ruling that has no question on file. `fno inbox outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
 
@@ -108,7 +108,7 @@ Both sides expand, not just the query. A subject that names a node answers to ev
 
 A subject that names no node matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
 
-A decision with no subject at all is reachable only through `fno decide list` with no `--subject`. When the question names no node, that is what `fno outstanding clear --answer` writes.
+A decision with no subject at all is reachable only through `fno decide list` with no `--subject`. When the question names no node, that is what `fno inbox outstanding clear --answer` writes.
 
 ## Supersession
 

@@ -1,4 +1,4 @@
-"""`fno outstanding` - what is piled up waiting on a human.
+"""`fno inbox outstanding` - what is piled up waiting on a human.
 
 Read-only over two stores that already exist: the carve-out ledger and the
 operator-question events. This package never writes graph.json or

@@ -860,7 +860,7 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
     } else {
         default_events
     };
-    // `fno outstanding ask` appends to the CANONICAL checkout's
+    // `fno inbox outstanding ask` appends to the CANONICAL checkout's
     // `.fno/events.jsonl` (never a linked worktree's), while the default
     // project journal above is cwd-relative and this verb inherits the
     // caller's cwd. Without the canonical journal in the set, a question

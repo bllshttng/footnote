@@ -67,21 +67,23 @@ def test_removed_inbox_spelling_names_its_replacement() -> None:
 
 
 def test_a_deep_tombstone_does_not_claim_the_bare_top_level_name() -> None:
-    """`fno inbox` must not answer for `fno backlog inbox`.
+    """`fno briefs` must not answer for `fno backlog briefs`.
 
     The tombstone lookup matches on suffix so a subgroup that cannot see its
     own path still teaches. At the ROOT the full path IS known, so suffix
-    matching there let the `backlog inbox` entry claim a bare `fno inbox` -
-    a different removal entirely (`fno mail`'s retired inbox namespace), and
-    a confidently wrong answer to a name nobody removed.
+    matching there let the `backlog briefs` entry claim a bare `fno briefs` -
+    a different removal entirely, and a confidently wrong answer to a name
+    nobody removed. (`inbox` itself no longer fits this test: x-afa6 minted
+    it as a real top-level root, so a bare `fno inbox` now resolves for real
+    instead of exercising the suffix-match guard this test is for.)
     """
     from fno.cli import app
 
-    res = runner.invoke(app, ["inbox", "unread"])
+    res = runner.invoke(app, ["briefs", "ls"])
     assert res.exit_code != 0
     combined = res.stdout + (res.stderr or "")
     assert "backlog capture" not in combined, combined
-    assert "No such command 'inbox'" in combined, combined
+    assert "No such command 'briefs'" in combined, combined
 
 
 def test_a_subgroup_does_not_claim_a_top_level_removal() -> None:

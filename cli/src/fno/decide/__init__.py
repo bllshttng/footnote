@@ -641,7 +641,7 @@ def list_decisions(
     complete.
 
     ``subject=None`` returns every decision, which is the only way to reach a
-    record written with no subject at all - what ``fno outstanding clear
+    record written with no subject at all - what ``fno inbox outstanding clear
     --answer`` writes for a question that names no node.
     """
     rows, damaged = _read_index(_index_path())

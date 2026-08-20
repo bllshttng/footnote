@@ -79,6 +79,14 @@ event
 event emit
 fno-agents
 help
+inbox approvals decide !--db
+inbox approvals ls !--db
+inbox approvals show !--db
+inbox board
+inbox notify
+inbox outstanding ask
+inbox outstanding clear
+inbox outstanding reindex
 king board
 king escalate
 king init

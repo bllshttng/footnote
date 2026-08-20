@@ -32,7 +32,7 @@ carveout_app = typer.Typer(
         "while `backfill` is handled by /fno:pr merged. That harvest is "
         "manual: `fno retro sweep-carveouts --apply` is the only thing that "
         "clears the ledger, so every row you file is a chore for a human. "
-        "See `fno outstanding` for what has piled up."
+        "See `fno inbox outstanding` for what has piled up."
     ),
 )
 

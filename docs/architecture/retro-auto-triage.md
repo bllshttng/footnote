@@ -101,7 +101,7 @@ The five `deferred` rows filed alongside it were harvested within a day.
 That contrast is the whole argument.
 The kind with a gate cleared, and the kind without one did not.
 
-`fno outstanding` is the missing half of this trade.
+`fno inbox outstanding` is the missing half of this trade.
 It is a read-only fold over the ledger's size, its kind split, and the age of its oldest row.
 It names `fno retro sweep-carveouts` as the thing that clears them.
 `hooks/outstanding-session-start.sh` renders it where the operator already reads.

@@ -5,7 +5,7 @@ touches no file, emits no event, and dies with the context. This verb is the
 explicit write path because automatic recording would require classifying a
 ruling from a truncated view.
 
-Machine-first, mirroring `fno outstanding`: stdout carries the value (the new
+Machine-first, mirroring `fno inbox outstanding`: stdout carries the value (the new
 decision id, or the decision history as JSON), guidance goes to stderr.
 """
 from __future__ import annotations
@@ -119,7 +119,7 @@ def record(
         typer.echo(
             f"decide: refused. This session is agent {exc.agent_handle}, so it "
             "cannot record under operator authority. If only the operator can "
-            "settle this, use `fno outstanding ask`. If ruling as an agent, "
+            "settle this, use `fno inbox outstanding ask`. If ruling as an agent, "
             "drop --authority operator; it records agent coordination.",
             err=True,
         )

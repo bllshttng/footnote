@@ -7976,7 +7976,7 @@ fn is_idle_row(a: &AgentRow) -> bool {
 /// leg-1 and leg-2 never share a band, so the two orderings never mix). Same
 /// declaration-order `Ord` trick as [`PaneState`]. `Decision` (x-e3be) is fed
 /// by three `needs.rs` fold arms - `operator_question` (a live open question,
-/// `fno outstanding ask`), `carveout_stale` (an aged unharvested carve-out
+/// `fno inbox outstanding ask`), `carveout_stale` (an aged unharvested carve-out
 /// pile), `stale_claims` (an aged orphaned `node:` claim pile) - all read from
 /// durable on-disk state rather than a recent event, so none of them are
 /// windowed by the fold's 24h `since` bound.

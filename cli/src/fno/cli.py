@@ -73,6 +73,15 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
+    "inbox": (
+        "fno.inbox.cli:inbox_app",
+        "What is waiting on a human: approvals, notify, outstanding, king board.",
+        {"hidden": True},
+    ),
+    # Moved to `inbox` (VERB_MOVES). The old top-level registration stays for
+    # one release - unreachable via resolve_command (the move intercepts
+    # first), kept only so `fno help --all` can list it under "Moved
+    # spellings" and menu-caps still sees a hidden, not a phantom, root.
     "approvals": (
         "fno.approvals.cli:approvals_app",
         "Inspect and decide pending approvals for consequential effects.",

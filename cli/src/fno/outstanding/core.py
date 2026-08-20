@@ -217,7 +217,7 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
             if missing_hint:
                 print(
                     f"outstanding: question index {path} is missing; run "
-                    "`fno outstanding reindex` to recover project questions.",
+                    "`fno inbox outstanding reindex` to recover project questions.",
                     file=sys.stderr,
                 )
             return []
@@ -793,7 +793,7 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
             lines.append(
                 f"  Showing {len(shown)} of {len(outstanding.questions)} open questions."
             )
-        lines.append("  Answer with: fno outstanding clear <id> --answer \"...\"")
+        lines.append("  Answer with: fno inbox outstanding clear <id> --answer \"...\"")
         lines.append("")
 
     if outstanding.captures:

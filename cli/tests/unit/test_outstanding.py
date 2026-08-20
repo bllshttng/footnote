@@ -834,7 +834,7 @@ def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: py
 
     assert result.exit_code == 1
     assert "q-feedface" in result.output
-    assert "fno outstanding reindex" in result.output
+    assert "fno inbox outstanding reindex" in result.output
     durable = json.loads(
         (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )
@@ -862,7 +862,7 @@ def test_question_close_index_failure_names_id_and_reindex(
 
     assert result.exit_code == 1
     assert qid in result.output
-    assert "fno outstanding reindex" in result.output
+    assert "fno inbox outstanding reindex" in result.output
     project_close = json.loads(
         (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
     )
@@ -876,7 +876,7 @@ def test_missing_question_index_reports_empty_with_reindex_hint(root: Path):
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["questions"] == []
-    assert "fno outstanding reindex" in result.stderr
+    assert "fno inbox outstanding reindex" in result.stderr
 
 
 def test_unreadable_question_index_is_a_failed_read(root: Path):
@@ -1425,7 +1425,7 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     assert "6 open question" in out
     assert out.count("question number") == 6
     # Every rendered row carries an id, so the clear instruction has an operand.
-    assert "fno outstanding clear" in out
+    assert "fno inbox outstanding clear" in out
     assert out.count("q-") >= 6
 
 

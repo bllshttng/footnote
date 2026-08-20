@@ -20,7 +20,7 @@ command -v fno >/dev/null 2>&1 || exit 0
 source "$WT_LIB" 2>/dev/null || exit 0
 
 rc=0
-body=$(with_timeout 3 fno outstanding 2>/dev/null) || rc=$?
+body=$(with_timeout 3 fno inbox outstanding 2>/dev/null) || rc=$?
 
 # Empty output on success is the correct steady state, and silence renders it.
 [[ $rc -eq 0 ]] && { [[ -n "$body" ]] && printf '%s' "$body"; exit 0; }
@@ -33,5 +33,5 @@ body=$(with_timeout 3 fno outstanding 2>/dev/null) || rc=$?
 # or an unreadable store (1).
 [[ $rc -eq 2 ]] && exit 0
 
-printf '## Outstanding for you\n\ncould not be read (fno outstanding exit %s). Run it directly.\n' "$rc"
+printf '## Outstanding for you\n\ncould not be read (fno inbox outstanding exit %s). Run it directly.\n' "$rc"
 exit 0

@@ -3024,7 +3024,7 @@ fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool 
     })
 }
 
-/// Best-effort `fno notify TITLE BODY`. Spawned detached and never waited on;
+/// Best-effort `fno inbox notify TITLE BODY`. Spawned detached and never waited on;
 /// any failure (missing binary, non-zero exit) is non-fatal - the terminal
 /// completes on the durable event row alone (AC2-FR). Suppressed under
 /// `FNO_LOOPCHECK_NO_NOTIFY=1` so unit tests never spawn a real notifier.
@@ -3035,7 +3035,9 @@ fn best_effort_notify(title: &str, body: &str) {
     // var_os avoids a lossy UTF-8 conversion on a path/binary env value and
     // hands the raw OsString straight to Command (gemini review).
     let fno_bin = std::env::var_os("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|| "fno".into());
-    let _ = Command::new(fno_bin).args(["notify", title, body]).spawn();
+    let _ = Command::new(fno_bin)
+        .args(["inbox", "notify", title, body])
+        .spawn();
 }
 
 /// Post a bot's review trigger to the PR once, returning true on success (x-b167
@@ -8382,7 +8384,7 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
 
 /// `sized_self_review_hint` with the ambient fno binary and author harness, for
 /// callers (publish_coverage_status's uncovered arm) that never threaded those
-/// through. Same resolution discipline as the `fno notify` bridge and the
+/// through. Same resolution discipline as the `fno inbox notify` bridge and the
 /// unattested-reviewer render: ambient markers over threading, so call sites
 /// stay single-arg.
 fn ambient_self_review_hint(cwd: &Path) -> Option<String> {
