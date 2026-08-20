@@ -816,7 +816,11 @@ def _select_profile_lane(
         lane = lanes[index]
         vendor = _lane_vendor(lane)
         cap = caps.get(vendor) if vendor else None
-        if cap is None:
+        if vendor is None or cap is None:
+            # A lane with no routed vendor has no cap to be at. The `vendor is
+            # None` arm is what the guard below actually relies on: it was
+            # implied by `cap is None` and invisible to the type checker, which
+            # is how `provider_live_count(vendor)` came to take a `str | None`.
             return lane, index
         try:
             current = provider_live_count(vendor)
@@ -1044,7 +1048,7 @@ def inject_spawn_defaults(
 
     # A lane is a COMPLETE routing coordinate, so the two fields that select
     # where a worker bills do not fall through to a lower rung when a lane was
-    # chosen. Per-field fallback let a `provider = "codex"` lane inherit
+    # chosen. Per-field fallback let a codex-harness lane inherit
     # `agents.profiles.<verb>.route = "zai/..."`, putting `--harness codex` and
     # `--route zai/...` in one argv - which cli.py then refuses outright with
     # "requires the claude harness". That is the exact migration the routing doc

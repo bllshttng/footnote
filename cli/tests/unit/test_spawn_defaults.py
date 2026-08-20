@@ -1651,7 +1651,7 @@ def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
         err=err,
         max_lanes={"zai": 2},
         profiles={"target": {"lanes": [
-            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+            _lane("claude", route="zai/glm-5.3[1m]"),
         ]}},
     )
     assert "already names the lane" in err.getvalue()
@@ -1668,7 +1668,7 @@ def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
         err=err,
         profiles={"target": {
             "route": "zai/glm-5.3[1m]",
-            "lanes": [{"provider": "codex"}],
+            "lanes": [_lane("codex")],
         }},
     )
     assert out[out.index("--harness") + 1] == "codex"

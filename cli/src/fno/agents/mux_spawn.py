@@ -1641,11 +1641,17 @@ def _group_tab_rows(
             f"cannot resolve pane group {group!r}: unparseable tab list",
             exit_code=1,
         ) from exc
-    return {
-        row.get("name"): row
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
+    by_name: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        # Bound once and checked once: the comprehension form called .get twice
+        # and left the key typed `Any | None`, so nothing tied the isinstance
+        # guard to the value actually used as the key.
+        if isinstance(name, str):
+            by_name[name] = row
+    return by_name
 
 
 def place_pane_in_group_tab(
