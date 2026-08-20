@@ -265,14 +265,23 @@ def whoami_command(
     # must never gain a failure mode, and a fresh SessionStart stays byte-for-byte
     # unchanged (the inject block carries a real number exactly on a post-compaction
     # resume, where re-orientation matters).
+    from fno.agents.crown import current_crown
     from fno.context_probe import probe_context
 
     context_reading = probe_context()
+    # Registry-derived identity, like `mail` and `agent_self` above: resolved
+    # once and rendered by both branches. `current_crown` never raises, so an
+    # attended human shell (no agent identity, no registry row) answers None
+    # and both branches below omit the line/key entirely - byte-for-byte
+    # unchanged from before this session gained a crown to report.
+    crown = current_crown()
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
         payload["model"] = _session_model()
+        if crown is not None:
+            payload["crown"] = crown["text"]
         if context_reading is not None:
             payload["context_used_pct"] = context_reading.used_pct
             payload["context_used_tokens"] = context_reading.used_tokens
@@ -334,6 +343,8 @@ def whoami_command(
     # unchanged. The focused, complete answer remains `fno agents whoami`.
     if agent_self:
         typer.echo(f"agent:    {agent_self} (mesh)")
+    if crown is not None:
+        typer.echo(f"crown:    {crown['text']}")
     _emit_warnings(state)
 
 

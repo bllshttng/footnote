@@ -126,6 +126,44 @@ def calling_agent_row():
     return row
 
 
+def crown_reading(row) -> Optional[dict[str, Any]]:
+    """The one rendering of a crown, or ``None`` when ``row`` holds none.
+
+    Reads ``row.crown_label`` (``registry.AgentEntry.crown_label``) rather than
+    re-deriving the "L{level} {scope}" string, so ``fno whoami``, ``fno agents
+    whoami`` and ``fno agents top`` cannot drift into three different renderings
+    of the same fact. Safe on the :func:`calling_agent_row` sentinels and on
+    ``None``: neither carries ``crown_label``, so ``getattr`` answers ``None``
+    rather than raising.
+    """
+    label = getattr(row, "crown_label", None)
+    if label is None:
+        return None
+    grantor = getattr(row, "crown_grantor", None) or "human"
+    level = getattr(row, "crown_level", None)
+    scope = getattr(row, "crown_scope", None)
+    return {
+        "level": level,
+        "scope": scope,
+        "grantor": grantor,
+        "label": label,
+        "text": f"{label} (by {grantor})",
+    }
+
+
+def current_crown() -> Optional[dict[str, Any]]:
+    """This session's crown reading, or ``None`` - never raises.
+
+    ``fno whoami`` must render byte-for-byte unchanged for an attended human
+    shell (AC8-EDGE), so any failure resolving the caller's identity or
+    registry row degrades to "no crown" rather than surfacing.
+    """
+    try:
+        return crown_reading(calling_agent_row())
+    except Exception:
+        return None
+
+
 def canonical_scope(scopes: list[str]) -> str:
     """The stored form: one name, or sorted unique members joined.
 

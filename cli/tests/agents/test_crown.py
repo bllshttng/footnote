@@ -317,6 +317,30 @@ def test_top_rows_join_the_crown_by_name() -> None:
     assert _rows([worker("king-epic")], {})[0]["crown"] is None
 
 
+def test_top_rows_join_the_crown_through_session_id_when_names_differ(monkeypatch) -> None:
+    """AC3-HP: a foreign claude row is labelled by the FIRST 8 hex of its
+    session uuid, while the registry crown map is keyed by the handle the
+    registry itself uses (the LAST 8) - the exact mismatch that read as
+    `None` for a crowned session before the join went through session_id."""
+    from fno.agents import top
+    from fno.agents.spawn_gate import LiveWorker
+
+    monkeypatch.setattr(
+        top, "_registry_handles", lambda: {"full-session-uuid": "last8reg"}
+    )
+    w = LiveWorker(
+        source="claude",
+        name="first8row",
+        harness="claude",
+        substrate="pane",
+        pid=1,
+        status="live",
+        session_id="full-session-uuid",
+    )
+    rows = top._rows([w], {"last8reg": "L2 epic-x"})
+    assert rows[0]["crown"] == "L2 epic-x"
+
+
 # --- attended in-place crown promotion --------------------------------------
 
 

@@ -36,12 +36,20 @@ def _rss_mb(pid: Optional[int]) -> Optional[int]:
 
 
 def _crown_map() -> dict[str, str]:
-    """name -> crown_label for crowned registry rows (US9). Best-effort: a read
-    failure degrades to no crowns rather than breaking the process view."""
+    """name -> crown label for crowned registry rows (US9), sourced from
+    :func:`crown_reading` so this view and ``fno whoami`` cannot drift into two
+    renderings of the same fact. Best-effort: a read failure degrades to no
+    crowns rather than breaking the process view."""
     try:
+        from fno.agents.crown import crown_reading
         from fno.agents.registry import load_registry
 
-        return {e.name: e.crown_label for e in load_registry() if e.crown_label}
+        out: dict[str, str] = {}
+        for e in load_registry():
+            reading = crown_reading(e)
+            if reading is not None:
+                out[e.name] = reading["label"]
+        return out
     except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
         return {}
 
@@ -123,6 +131,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         # Null when this session has no registry row (a foreign claude session
         # that fno never adopted), which is a real answer, not a lookup miss.
         handle = handles.get(w.session_id or "")
+        # The registry keys a foreign claude row by the LAST 8 hex of the
+        # session uuid and this view labels it by the FIRST 8, so the crown
+        # must join through the session id the handle column already
+        # resolves - not through the display name, which reads None for
+        # exactly the row `handle` above exists to bridge.
+        reg_name = handle or w.name
         rows.append(
             {
                 "source": w.source,
@@ -139,7 +153,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
                 "progress": progress.get(w.name),
-                "crown": crowns.get(w.name),  # US9: null when uncrowned
+                "crown": crowns.get(reg_name),  # US9: null when uncrowned
             }
         )
     # Heaviest first: the row the operator is looking for when RAM is tight.

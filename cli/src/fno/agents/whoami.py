@@ -262,10 +262,10 @@ def resolve_self(
         except Exception:  # noqa: BLE001 — best-effort, silent
             node = None
 
-    crown: Optional[str] = None
-    if row is not None and row.crown_label is not None:
-        by = row.crown_grantor or "human"
-        crown = f"{row.crown_label} (by {by})"
+    from fno.agents.crown import crown_reading
+
+    reading = crown_reading(row)
+    crown: Optional[str] = reading["text"] if reading is not None else None
 
     return WhoamiResult(
         registered=True,
