@@ -49,7 +49,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import typer
 
@@ -1396,6 +1396,56 @@ def _verdict(
         "rust_installed_rev": rust_installed_rev,
         "rust_source_rev": rust_source_rev,
     }
+
+
+def _blockers(result: dict[str, Any]) -> list[str]:
+    """The findings that mean the fleet will misbehave, in the order a new
+    user should act on them. Pure: reads only the assembled result dict.
+
+    The set is not a taste call. Three of these already flip doctor's exit
+    code (staleness, dead LaunchAgents, archive id collisions). The other
+    three fail silently: a low fd limit starves every spawned worker while
+    the login shell reads healthy, a hook that cannot launch fails open with
+    no signal, and a stale plugin cache runs pre-HEAD hook bytes. Everything
+    else doctor prints is advisory and stays in the advisory stream.
+    """
+    blockers: list[str] = []
+
+    if result.get("status") == "stale":
+        blockers.append(
+            "installed fno is behind source; hooks run pre-HEAD bytes. "
+            "Fix: fno doctor --fix"
+        )
+
+    for agent in (result.get("launch_agents") or {}).get("dead") or []:
+        blockers.append(
+            f"LaunchAgent {agent.get('label')} last exited {agent.get('exit')}."
+        )
+
+    collisions = result.get("archive_id_collisions") or {}
+    if collisions.get("unreadable"):
+        blockers.append("archive is unreadable; id collisions cannot be counted.")
+    elif collisions.get("count"):
+        blockers.append(
+            f"{collisions['count']} node id(s) collide with the archive."
+        )
+
+    fd_limit = result.get("fd_limit") or {}
+    if fd_limit.get("verdict") == "low":
+        blockers.append(
+            f"open-file limit is low (launchd soft {fd_limit.get('launchd_soft')}); "
+            "reaches spawned workers only, not this shell."
+        )
+
+    plugin_hooks = result.get("plugin_hooks") or {}
+    if plugin_hooks.get("failed"):
+        blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
+
+    plugin_cache = result.get("plugin_cache") or {}
+    if plugin_cache.get("status") == "stale":
+        blockers.append("deployed plugin cache is stale; hooks run pre-HEAD bytes.")
+
+    return blockers
 
 
 def _emit_human(
@@ -3130,12 +3180,143 @@ def _pre_push_hook_report(src: Optional[Path]) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+def build_report(source: Optional[Path] = None) -> dict[str, Any]:
+    """Assemble the full doctor result dict: the staleness verdict plus every
+    advisory report. The one place that reads the machine, so `fno doctor`
+    and the setup wizard (`report_machine_blockers` in `setup_cli.py`) stay
+    two callers of one authority instead of two implementations that drift
+    (x-75dc)."""
+    from fno import update as _update
+
+    src = _resolve_source(source)
+    source_rev = _source_rev(src) if src is not None else None
+    marker = _read_marker()
+    capture_present = _probe_installed_verb()
+    rust = _rust_report()
+
+    rust_src_rev = _rust_source_rev(src)
+    cargo_bin_present = _cargo_bin_present()
+
+    deployed_config_keys = _deployed_config_keys()
+    source_config_keys = _source_config_keys(src)
+    content_drift = _python_content_drift(src)
+
+    result = _verdict(
+        source_resolved=src is not None,
+        source_rev=source_rev,
+        marker=marker,
+        capture_present=capture_present,
+        rust_binary=rust["binary"],
+        rust_installed_rev=rust["revision"],
+        rust_source_rev=rust_src_rev,
+        cargo_bin_present=cargo_bin_present,
+        deployed_config_keys=deployed_config_keys,
+        source_config_keys=source_config_keys,
+        content_drift_count=content_drift,
+    )
+    # Advisory front-door fields (x-c267); never change status/exit.
+    result.update(_mux_front_door_report())
+    # Advisory process-freshness (x-e6dd): a long-running mux server still on the
+    # OLD proto after an upgrade. Binary staleness is above; this is the running
+    # PROCESS. Never changes status/exit.
+    result["mux_server_stale"] = _update.stale_mux_servers()
+
+    # Advisory orphan-file check (Group 3 GC); never changes status/exit.
+    result["orphan_files"] = _orphan_report()
+
+    # Advisory PR-watch liveness (x-e106): enabled-but-dead ran silently for
+    # weeks with zero signal; the verdict derives from tick recency (ground
+    # truth), never from config alone. Never changes status/exit.
+    result["pr_watch"] = _pr_watch_liveness()
+
+    # Advisory open-file limit visibility: a launchd child starves at 256 while
+    # a login shell reads 1048576 and both are correct. Never changes
+    # status/exit.
+    result["fd_limit"] = _fd_limit_report()
+
+    # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
+    # mail to a dead handle are silent quicksand. Never changes status/exit.
+    result["dead_letter"] = _dead_letter_report()
+
+    # Advisory codex app-server daemon socket: the live-mail prerequisite for a
+    # codex peer. Names the fix for hand-started sessions no spawn preflight
+    # reaches. Never changes status/exit.
+    try:
+        result["codex_app_server"] = _codex_app_server_report()
+    except Exception:
+        pass
+
+    # Advisory managed-block staleness (US8): a host AGENTS.md/CLAUDE.md footnote
+    # block older than the current template. Never changes status/exit.
+    result["managed_block"] = _managed_block_report()
+
+    # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
+    # surfaces `fno update` does not cover. Never changes status/exit.
+    result["harness_surface"] = _harness_surface_report()
+
+    # Advisory plugin hook launch probe (x-d991): a hook command that cannot
+    # resolve fails open in Codex with no signal. This launches every configured
+    # hook through the real ``$SHELL -lc`` path and reports any that cannot
+    # start. Loud on failure; never changes the staleness exit code.
+    result["plugin_hooks"] = _plugin_hooks_launch_report()
+
+    # Advisory legacy pre-push hook: gates on the pushing checkout's branch,
+    # so it refuses every push from a canonical checkout on main. Never
+    # changes status/exit.
+    result["pre_push_hook"] = _pre_push_hook_report(src)
+
+    # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
+    # LaunchAgent DOES change the exit code - an installed-but-dead agent is
+    # exactly the silence this check exists to break.
+    result["groom"] = _groom_health()
+    result["archive_id_collisions"] = _archive_id_collisions()
+    result["post_merge_sync"] = _post_merge_sync_health()
+    result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
+    # silently producing inaction + default-on/armed switches silently merging.
+    # Never changes status/exit. The plugin-cache report is computed ONCE and
+    # shared with the silent-switch pass (its unknown-manifest cause reads it):
+    # two invocations would run the registry read and the git probes twice and
+    # could disagree about the same cache within one report.
+    plugin_cache = _plugin_cache_report()
+    result["silent_switches"] = _silent_switch_report(plugin_cache=plugin_cache)
+
+    # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
+    # sessions actually run. Never changes status/exit.
+    result["plugin_cache"] = plugin_cache
+
+    return result
+
+
+def _emit_blockers(
+    blockers: list[str],
+    *,
+    err: bool = False,
+    echo_fn: Optional[Callable[[str], None]] = None,
+) -> None:
+    """The one place that formats the blocker block, so `--blockers`, the
+    normal human path, and the setup wizard (`report_machine_blockers` in
+    setup_cli.py) can never print two different shapes of the same list."""
+    out = echo_fn or ((lambda m: typer.echo(m, err=True)) if err else typer.echo)
+    out(f"fno doctor: {len(blockers)} BLOCKER(S) - these will make the fleet misbehave:")
+    for i, line in enumerate(blockers, start=1):
+        out(f"  {i}. {line}")
+
+
 def doctor_command(
     fix: bool = typer.Option(
         False,
         "--fix",
         help="If stale, run `fno update` for Python staleness (honors the IN_PROGRESS guard). "
         "For rust-only staleness, calls the rust refresh helper directly (no full Python reinstall).",
+    ),
+    blockers_only: bool = typer.Option(
+        False,
+        "--blockers",
+        help="Print only the findings that will make the fleet misbehave, and exit 1 if "
+        "any exist (0 otherwise). The machine-readable-enough entry point for a new-user "
+        "first run - see `report_machine_blockers` in setup_cli.py.",
     ),
     json_out: bool = typer.Option(
         False,
@@ -3283,111 +3464,32 @@ def doctor_command(
 
     from fno import update
 
+    result = build_report(source)
+    blockers = _blockers(result)
+
+    if blockers_only:
+        _emit_blockers(blockers, err=False)
+        raise typer.Exit(1 if blockers else 0)
+
+    # _emit_human/--fix below only need `src` and the rust binary path, not
+    # the full advisory assembly build_report already did - recompute the
+    # cheap pieces rather than thread extra return values through build_report's
+    # `-> dict[str, Any]` contract (the wizard's caller shape, x-75dc).
     src = _resolve_source(source)
-    source_rev = _source_rev(src) if src is not None else None
-    marker = _read_marker()
-    capture_present = _probe_installed_verb()
-    rust = _rust_report()
-
-    rust_src_rev = _rust_source_rev(src)
+    rust = {"binary": result.get("rust_binary")}
     cargo_bin_present = _cargo_bin_present()
-
-    deployed_config_keys = _deployed_config_keys()
-    source_config_keys = _source_config_keys(src)
-    content_drift = _python_content_drift(src)
-
-    result = _verdict(
-        source_resolved=src is not None,
-        source_rev=source_rev,
-        marker=marker,
-        capture_present=capture_present,
-        rust_binary=rust["binary"],
-        rust_installed_rev=rust["revision"],
-        rust_source_rev=rust_src_rev,
-        cargo_bin_present=cargo_bin_present,
-        deployed_config_keys=deployed_config_keys,
-        source_config_keys=source_config_keys,
-        content_drift_count=content_drift,
-    )
-    # Advisory front-door fields (x-c267); never change status/exit.
-    result.update(_mux_front_door_report())
-    # Advisory process-freshness (x-e6dd): a long-running mux server still on the
-    # OLD proto after an upgrade. Binary staleness is above; this is the running
-    # PROCESS. Never changes status/exit.
-    from fno import update as _update
-
-    result["mux_server_stale"] = _update.stale_mux_servers()
-
-    # Advisory orphan-file check (Group 3 GC); never changes status/exit.
-    result["orphan_files"] = _orphan_report()
-
-    # Advisory PR-watch liveness (x-e106): enabled-but-dead ran silently for
-    # weeks with zero signal; the verdict derives from tick recency (ground
-    # truth), never from config alone. Never changes status/exit.
-    result["pr_watch"] = _pr_watch_liveness()
-
-    # Advisory open-file limit visibility: a launchd child starves at 256 while
-    # a login shell reads 1048576 and both are correct. Never changes
-    # status/exit.
-    result["fd_limit"] = _fd_limit_report()
-
-    # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
-    # mail to a dead handle are silent quicksand. Never changes status/exit.
-    result["dead_letter"] = _dead_letter_report()
-
-    # Advisory codex app-server daemon socket: the live-mail prerequisite for a
-    # codex peer. Names the fix for hand-started sessions no spawn preflight
-    # reaches. Never changes status/exit.
-    try:
-        result["codex_app_server"] = _codex_app_server_report()
-    except Exception:
-        pass
-
-    # Advisory managed-block staleness (US8): a host AGENTS.md/CLAUDE.md footnote
-    # block older than the current template. Never changes status/exit.
-    result["managed_block"] = _managed_block_report()
-
-    # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
-    # surfaces `fno update` does not cover. Never changes status/exit.
-    result["harness_surface"] = _harness_surface_report()
-
-    # Advisory plugin hook launch probe (x-d991): a hook command that cannot
-    # resolve fails open in Codex with no signal. This launches every configured
-    # hook through the real ``$SHELL -lc`` path and reports any that cannot
-    # start. Loud on failure; never changes the staleness exit code.
-    result["plugin_hooks"] = _plugin_hooks_launch_report()
-
-    # Advisory legacy pre-push hook: gates on the pushing checkout's branch,
-    # so it refuses every push from a canonical checkout on main. Never
-    # changes status/exit.
-    result["pre_push_hook"] = _pre_push_hook_report(src)
-
-    # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
-    # LaunchAgent DOES change the exit code - an installed-but-dead agent is
-    # exactly the silence this check exists to break.
-    result["groom"] = _groom_health()
-    result["archive_id_collisions"] = _archive_id_collisions()
-    result["post_merge_sync"] = _post_merge_sync_health()
-    result["launch_agents"] = _launch_agent_failures()
-
-    # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
-    # silently producing inaction + default-on/armed switches silently merging.
-    # Never changes status/exit. The plugin-cache report is computed ONCE and
-    # shared with the silent-switch pass (its unknown-manifest cause reads it):
-    # two invocations would run the registry read and the git probes twice and
-    # could disagree about the same cache within one report.
-    plugin_cache = _plugin_cache_report()
-    result["silent_switches"] = _silent_switch_report(plugin_cache=plugin_cache)
-
-    # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
-    # sessions actually run. Never changes status/exit.
-    result["plugin_cache"] = plugin_cache
 
     if json_out:
         # Single JSON object on stdout; human text to stderr (LLM-caller contract).
         typer.echo(json.dumps(result))
+        if blockers:
+            _emit_blockers(blockers, err=True)
+            typer.echo("fno doctor: advisory findings follow.", err=True)
         _emit_human(result, src, rust, err=True, cargo_present=cargo_bin_present)
     else:
+        if blockers:
+            _emit_blockers(blockers, err=False)
+            typer.echo("fno doctor: advisory findings follow.")
         _emit_human(result, src, rust, err=False, cargo_present=cargo_bin_present)
         if not fix:
             preamble_line = _preamble_budget_line(src)
