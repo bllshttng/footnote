@@ -445,14 +445,14 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # so the receipt can name what changed hands.
         vacated_scope = target.crown_scope
         vacated_level = target.crown_level
-        if vacated_level is not None and vacated_scope is None:
-            # A level with no scope is unstampable by crown_validation_error,
-            # so no legal writer produces it; overwrite would erase the
-            # corruption signal instead of surfacing it.
+        if (vacated_level is None) != (vacated_scope is None):
+            # Half a crown is unstampable by crown_validation_error, so no
+            # legal writer produces it; overwrite would erase the corruption
+            # signal instead of surfacing it.
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: it holds partial crown "
-                f"metadata (level {vacated_level} with no scope), which no "
-                "legal crown produces. fno agents stop the row and "
+                f"refusing to crown {target.name!r}: it holds half a crown "
+                f"(level={vacated_level!r}, scope={vacated_scope!r}), which "
+                "no legal crown produces. fno agents stop the row and "
                 "fno agents rm it, then crown the re-registered session."
             )
 
@@ -523,13 +523,15 @@ def _stranded_subordinates(
     after its grantor moves away. Two deliberate answers beyond the list:
 
     ``[]`` on a no-op, widening, or FIRST-crown move, where no territory
-    actually left the new scope. ``None`` when the check could not run (graph
-    unreadable, or an external tracker backend) - which is not the same answer
-    as ``[]``, or the receipt would read as "verified no strands" on a machine
-    it could not check. Computed by the caller AFTER the registry write
-    returns, over a rows snapshot taken inside the write's lock window, so
-    no graph I/O runs under the lock and no concurrent grant can appear in
-    the scan.
+    actually left the new scope. ``None`` when the check could not run at all
+    (graph unreadable, or an external tracker backend) - which is not the same
+    answer as ``[]``, or the receipt would read as "verified no strands" on a
+    machine it could not check. A row whose epic id the graph no longer holds
+    is LISTED rather than nulled: containment for it is unknowable, and one
+    stale crowned row must not silence the determinate answers for every
+    other row. Computed by the caller AFTER the registry write returns, over
+    the persisted rows, so no graph I/O runs under the lock and no concurrent
+    grant can appear in the scan.
     """
     if vacated is None or _same_territory(vacated, new_scope):
         return []
@@ -555,18 +557,21 @@ def _stranded_subordinates(
         members = split_scope(row.crown_scope)
         # A single-member scope that names no project is an epic id, whose
         # containment lives in the graph. If the graph does not hold it,
-        # containment is UNKNOWABLE for this row, and letting
-        # scope_contains answer False would print [] ("verified no
-        # strands") about a row the check never evaluated.
-        if (
+        # containment is UNKNOWABLE for this row. It is listed anyway rather
+        # than nulling the report: one stale crowned row must not silence
+        # the determinate answers for every other row, and naming a row
+        # that turns out fine costs an operator a glance, while a missing
+        # name costs the move's audit trail.
+        unresolvable = (
             len(members) == 1
             and members[0] not in by_id
             and _canonical_project(members[0]) is None
+        )
+        if unresolvable or (
+            scope_contains(
+                vacated, row.crown_scope, graph_entry=by_id.get
+            ) and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get)
         ):
-            return None
-        if scope_contains(
-            vacated, row.crown_scope, graph_entry=by_id.get
-        ) and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get):
             stranded.append(row.name)
     return stranded
 
