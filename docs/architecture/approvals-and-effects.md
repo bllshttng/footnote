@@ -20,8 +20,7 @@ Approval is not execution.
 Execution is not acknowledgment.
 Acknowledgment is not aggregate delivery.
 
-Each is a separate record with its own event, so no consumer can collapse them.
-`fno inbox approvals decide --approve` records a decision and dispatches nothing, and its output says so in both human and JSON form.
+Each is a separate record with its own event, so no consumer can collapse them. `fno inbox approvals decide --approve` records a decision and dispatches nothing, and its output says so in both human and JSON form.
 
 ## Component graph
 
