@@ -87,7 +87,8 @@ def verify(
         "reads red AND unsettled. checks.total counts the whole rollup: "
         "checks.check_runs and checks.statuses split it, because "
         "`gh api .../check-runs` returns only the first kind. A served answer "
-        "carries cached/cached_at/cached_age_seconds/cached_head; "
+        "carries cached, cached_at and cached_age_seconds beside the head "
+        "it was computed at; "
         "--refresh bypasses the cache for one live read."
     ),
 )

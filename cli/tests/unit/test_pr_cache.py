@@ -382,7 +382,10 @@ def test_a_served_row_names_its_age_and_the_head_it_was_computed_at(
     out = json.loads(capsys.readouterr().out)
     assert out["cached"] is True
     assert calls["n"] == 1, "the second call must be a hit, not a live read"
-    assert out["cached_head"] == "a" * 40
+    # `head` IS the computed-at head. There is deliberately no second field
+    # carrying the same value under another name.
+    assert out["head"] == "a" * 40
+    assert "cached_head" not in out
     assert isinstance(out["cached_age_seconds"], int)
     assert out["cached_at"].endswith("Z")
 

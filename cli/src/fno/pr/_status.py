@@ -619,12 +619,17 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
 
 def main(argv: Sequence[str]) -> int:
+    known = {"--refresh", "--no-cache"}
+    flags = {str(a) for a in argv if str(a).startswith("--")}
     args = [a for a in argv if not str(a).startswith("--")]
-    refresh = any(str(a) in ("--refresh", "--no-cache") for a in argv)
-    if not args:
+    refresh = bool(flags & known)
+    # An unrecognised flag is REFUSED, never dropped: `--refresh` exists for a
+    # caller who distrusts a cached verdict, so silently ignoring `--refesh`
+    # would hand back the very row they were trying to bypass.
+    if not args or not flags <= known:
         import sys
 
-        sys.stderr.write("usage: fno pr status <pr-number> [--refresh]\n")
+        sys.stderr.write("usage: fno pr status <pr-number> [--refresh|--no-cache]\n")
         return 2
     try:
         from fno.pr._cache import cached_status

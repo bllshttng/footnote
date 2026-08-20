@@ -133,6 +133,11 @@ def _serve(row: dict, *, stale: bool) -> int:
     row's own `head` is the head the verdict was computed at; on the
     head-unreadable path that can be a head the PR has since moved past, and
     `cached_age_seconds` is the number that says how far past.
+
+    Deliberately NO `cached_head`: it was a verbatim copy of `head` under a
+    second name, which adds no fact a reader did not have and gives the one
+    fact two places to drift apart. `head` already documents itself as the
+    commit this verdict describes.
     """
     out = dict(row.get("output") or {})
     if not out:
@@ -167,7 +172,6 @@ def _serve(row: dict, *, stale: bool) -> int:
         code = 3
     out["cached"] = True
     ts = _num(row, "ts")
-    out["cached_head"] = out.get("head")
     out["cached_at"] = (
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
     )
@@ -294,7 +298,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 # refusal it is waiting out" this module refuses to be.
                 prior_until = _num(row or {}, "backoff_until")
                 held = refresh and prior_until > now
-                fails = int((row or {}).get("fail_count") or 0) + (0 if held else 1)
+                fails = int(_num(row or {}, "fail_count")) + (0 if held else 1)
                 backoff = (
                     prior_until - now
                     if held
