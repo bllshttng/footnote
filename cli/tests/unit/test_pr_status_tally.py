@@ -194,6 +194,26 @@ def test_a_failing_job_beside_a_failing_status_stays_ci_red():
     assert "ci_red" in _blockers(rollup)
 
 
+def test_an_unattributable_red_is_never_named_a_commit_status():
+    """The name asserts a POSITIVE fact, never the absence of a failing job.
+
+    A rollup row with neither key still classifies as a fail and lands in
+    neither sub-count, so `fail_check_runs == 0` on its own is two different
+    situations: a status failed, or nothing nameable did. Reading the absence
+    named a `commit_status_red` on a rollup carrying no status at all.
+    """
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"state": "FAILURE"},
+    ]
+    _verdict, _code, counts = _status.verdict_for(rollup)
+    assert counts["fail"] == 1
+    assert counts["fail_check_runs"] == 0 and counts["fail_statuses"] == 0
+    blockers = _blockers(rollup)
+    assert "commit_status_red" not in blockers, blockers
+    assert "ci_red" in blockers
+
+
 def test_pending_and_unknown_keep_their_ci_names():
     """Only a RED splits. A pending or unknown read is not an attribution
     problem, and renaming it would churn a string for nothing."""

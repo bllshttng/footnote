@@ -221,25 +221,25 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
         "unsettled": 0,
     }
     for c in deduped:
-        counts[_classify(c)] += 1
+        kind = _classify(c)
+        counts[kind] += 1
         if not _has_settled_marker(c):
             counts["unsettled"] += 1
         if c.get("name") not in (None, ""):
             counts["check_runs"] += 1
-            if _classify(c) == "fail":
+            if kind == "fail":
                 counts["fail_check_runs"] += 1
         elif c.get("context") not in (None, ""):
             counts["statuses"] += 1
-            if _classify(c) == "fail":
+            if kind == "fail":
                 counts["fail_statuses"] += 1
-    real_check_runs = counts["check_runs"]
     if not deduped:
         return ("unknown", 3, counts)
     if counts["fail"]:
         return ("red", 1, counts)
     if counts["pending"]:
         return ("pending", 2, counts)
-    if not real_check_runs:
+    if not counts["check_runs"]:
         # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
         # real CI still rides the legacy commit-status API (no GitHub Actions,
         # no Checks-API app) would never clear this and would hold forever
@@ -313,8 +313,9 @@ def _ready_blockers(
     unresolved optional finding, coverage unknown or uncovered) and a reader
     cannot tell them apart; the list is the positive marker that names what is
     holding. A red is split by the KIND of row that failed: ``ci_<verdict>``
-    when a real check-run failed, ``commit_status_red`` when every failing row
-    is a commit StatusContext and no job failed at all. ``unknown`` coverage blocks and is named as its own blocker: the
+    when a real check-run failed, ``commit_status_red`` when a commit
+    StatusContext failed and no job failed at all.
+    ``unknown`` coverage blocks and is named as its own blocker: the
     reason a read returned unknown is a separate question (x-b56a), this only
     reports that the answer is missing. Fail-closed everywhere: an unset
     unresolved count blocks as ``optional_reviews_unknown``, and the coverage
@@ -356,7 +357,18 @@ def _ready_blockers(
         # so on some PRs a status-only red is the ONLY red there is - dropping
         # the blocker would silence a real gate to de-duplicate a different
         # one. Both still block, and the verdict stays red either way.
-        if verdict == "red" and counts and not counts.get("fail_check_runs"):
+        #
+        # The predicate is POSITIVE (a status provably failed), never the
+        # absence of a failing job. A rollup row carrying neither `name` nor
+        # `context` still classifies as a fail and lands in NEITHER sub-count,
+        # so "no job failed" alone would name a commit status that does not
+        # exist. An unattributable red keeps the generic name.
+        if (
+            verdict == "red"
+            and counts
+            and counts.get("fail_statuses")
+            and not counts.get("fail_check_runs")
+        ):
             blockers.append("commit_status_red")
         else:
             blockers.append(f"ci_{verdict}")
