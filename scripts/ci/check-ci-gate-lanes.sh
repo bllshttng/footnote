@@ -72,9 +72,9 @@ self_test() {
     # filter names a file - the decorative case the whole gate exists to catch.
     printf 'on:\n  push:\n    paths:\n      - scripts/ci/check-mentioned.sh\njobs:\n  a:\n    steps:\n      - run: bash scripts/ci/check-ok.sh\n' \
         > "$tmp/.github/workflows/w.yml"
-    printf 'check-ok.sh\tci\t.github/workflows/w.yml\t\n' > "$tmp/scripts/ci/ci-gate-lanes.tsv"
-    printf 'check-mentioned.sh\tci\t.github/workflows/w.yml\t\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
-    printf 'check-gone.sh\tci\t.github/workflows/w.yml\t\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-ok.sh\tci\t.github/workflows/w.yml\tfixture, stays ci on purpose\n' > "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-mentioned.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-gone.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
 
     out="$(CI_GATE_LANES_ROOT="$tmp" bash "$0" 2>&1)"
     rc=$?
@@ -143,43 +143,63 @@ while IFS=$'\t' read -r script lane invoker note; do
         *) note_fail "$script: lane '$lane' is not one of local, ci, post-push, entrypoint"; continue ;;
     esac
 
+    # The invoker column is a COMMA-SEPARATED LIST, because a gate really can
+    # sit on more than one path and the manifest has to be able to say so. A
+    # gate wired into both guards.yml (which has no paths filter, so it covers
+    # a docs-only PR) and preflight.sh (which fires before the push) has two
+    # invokers, and collapsing that to one would make the file lie about the
+    # coverage it is supposed to describe.
+    has_early=0
+    has_ci=0
     if [ "$lane" = entrypoint ]; then
         [ "$invoker" = "-" ] || note_fail "$script: an entrypoint is invoked by a person, so its invoker column is '-', not '$invoker'"
     else
-        if [ ! -f "$REPO_ROOT/$invoker" ]; then
-            note_fail "$script: declared invoker '$invoker' does not exist"
-        elif ! invokes "$REPO_ROOT/$invoker" "$script"; then
-            note_fail "$script: '$invoker' does not invoke it - a row may not assert an invoker it does not have"
-        fi
+        old_ifs="$IFS"; IFS=','
+        for one in $invoker; do
+            IFS="$old_ifs"
+            if [ ! -f "$REPO_ROOT/$one" ]; then
+                note_fail "$script: declared invoker '$one' does not exist"
+            elif ! invokes "$REPO_ROOT/$one" "$script"; then
+                note_fail "$script: '$one' does not invoke it - a row may not assert an invoker it does not have"
+            else
+                case "$one" in
+                    cli/src/fno/test_cmd.py|scripts/ci/preflight.sh) has_early=1 ;;
+                    .github/workflows/*) has_ci=1 ;;
+                    scripts/ci/*)
+                        # One level of indirection: a gate run by another gate
+                        # is reachable only if that one is. Its row is the
+                        # authority.
+                        parent_lane="$(grep -v '^[[:space:]]*#' "$MANIFEST" \
+                            | awk -F'\t' -v k="${one#scripts/ci/}" '$1 == k {print $2}')"
+                        case "$parent_lane" in
+                            ci|post-push) has_ci=1 ;;
+                            local) has_early=1 ;;
+                            *) note_fail "$script: invoker '$one' is not itself reachable (its lane reads '${parent_lane:-no row}')" ;;
+                        esac
+                        ;;
+                    *) note_fail "$script: '$one' is not a lane-bearing invoker - use a workflow, test_cmd.py, preflight.sh, or another listed gate" ;;
+                esac
+            fi
+            IFS=','
+        done
+        IFS="$old_ifs"
     fi
 
     case "$lane" in
         local)
-            case "$invoker" in
-                cli/src/fno/test_cmd.py|scripts/ci/preflight.sh) ;;
-                *) note_fail "$script: lane 'local' means it fires before the push, so its invoker must be cli/src/fno/test_cmd.py or scripts/ci/preflight.sh, not '$invoker'" ;;
-            esac
+            [ "$has_early" -eq 1 ] || note_fail "$script: lane 'local' means it fires before the push, so at least one invoker must be cli/src/fno/test_cmd.py or scripts/ci/preflight.sh"
             ;;
         ci|post-push)
-            case "$invoker" in
-                .github/workflows/*) ;;
-                scripts/ci/*)
-                    # One level of indirection: a gate run by another gate is
-                    # reachable only if that one is. Its row is the authority.
-                    parent_lane="$(grep -v '^[[:space:]]*#' "$MANIFEST" \
-                        | awk -F'\t' -v k="${invoker#scripts/ci/}" '$1 == k {print $2}')"
-                    case "$parent_lane" in
-                        ci|post-push) ;;
-                        *) note_fail "$script: invoker '$invoker' is not itself reachable from a workflow (its lane reads '${parent_lane:-no row}')" ;;
-                    esac
-                    ;;
-                *) note_fail "$script: lane '$lane' must be reached from .github/workflows or another listed gate, not '$invoker'" ;;
-            esac
+            [ "$has_ci" -eq 1 ] || note_fail "$script: lane '$lane' must be reached from .github/workflows or another listed gate"
+            [ "$has_early" -eq 0 ] || note_fail "$script: lane '$lane' contradicts its invokers - it already fires before the push, so its lane is 'local'"
             ;;
     esac
 
+    # Every lane that is not 'local' owes a reason. "Not yet moved" is not one:
+    # the note has to name a runtime, a network dependency, or the PR artifact
+    # the gate needs, so a row cannot sit in a late lane by default.
     case "$lane" in
-        post-push|entrypoint)
+        ci|post-push|entrypoint)
             [ -n "${note// /}" ] || note_fail "$script: lane '$lane' needs a note saying why it cannot fire before the push"
             ;;
     esac

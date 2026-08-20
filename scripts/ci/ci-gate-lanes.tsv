@@ -7,61 +7,71 @@
 # Adding a script to scripts/ci needs a row here, in the same PR. A script with
 # no row is a red check, not a review catch somebody has to remember to make.
 #
+# The invoker column is a COMMA-SEPARATED LIST. A gate really can sit on more
+# than one path, and the manifest has to be able to say so: guards.yml carries
+# no paths filter, so it is the lane that covers a docs-only PR, while
+# preflight.sh is the lane that fires before the push. Every listed invoker is
+# verified to really invoke the script.
+#
 # lane says WHEN it fires, which is the thing a document kept getting wrong:
 #   local       fires before the push, because cli/src/fno/test_cmd.py or
-#               scripts/ci/preflight.sh runs it and both CI and preflight run
-#               `fno-py test smoke`. One registration, two lanes.
-#   ci          only a workflow runs it, so it can only fail after the push.
-#               Every one of these is a candidate to move local.
+#               scripts/ci/preflight.sh runs it. Needs no note.
+#   ci          only a workflow runs it, so it can only fail after the push,
+#               though it could run earlier. Requires a note naming the cost.
 #   post-push   needs a PR, a remote or a merge to exist, so it cannot fire
 #               earlier by nature. Requires a note saying which artifact.
 #   entrypoint  a runner a person invokes, not a gate. Invoker column is '-'.
 #               Requires a note.
 #
-# Measured 2026-08-20 on this tree: 15 local, 27 ci, 1 entrypoint.
-apply-merge-ruleset.sh	ci	scripts/ci/check-merge-coverage-audit.sh	
-check-autonomy-registry.sh	ci	.github/workflows/guards.yml	
-check-axis-vocabulary.sh	ci	.github/workflows/guards.yml	
+# Any lane but local owes a reason, and "not yet moved" is not one. The note
+# names a runtime, a network dependency, or the PR artifact the gate needs.
+#
+# Measured 2026-08-20. Before this pass: 15 local, 27 ci, 1 entrypoint, and 2
+# scripts reachable from nothing at all. After: 31 local, 4 ci, 10 post-push,
+# 1 entrypoint, 0 unreachable.
+apply-merge-ruleset.sh	post-push	scripts/ci/check-merge-coverage-audit.sh	reads and writes the live GitHub branch ruleset; nothing to check before a remote exists
+check-autonomy-registry.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+check-axis-vocabulary.sh	ci	.github/workflows/guards.yml	37s serial on this tree, too slow for the pre-push leg; the baseline it ratchets changes rarely
 check-ci-gate-lanes.sh	local	cli/src/fno/test_cmd.py	
 check-comment-restates-docstring.sh	local	cli/src/fno/test_cmd.py	
 check-company-boundaries.sh	local	cli/src/fno/test_cmd.py	
 check-company-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
 check-config-schema-drift.sh	local	cli/src/fno/test_cmd.py	
-check-coverage-context-parity.sh	ci	.github/workflows/coverage-context-parity.yml	
-check-disposable-rm.sh	ci	.github/workflows/guards.yml	
-check-import-paths.sh	ci	.github/workflows/cli-ci.yml	
-check-mail-inject-callers.sh	ci	.github/workflows/guards.yml	
-check-markdown-style.sh	ci	.github/workflows/guards.yml	
-check-merge-coverage-audit.sh	ci	.github/workflows/merge-coverage-audit.yml	
+check-coverage-context-parity.sh	local	.github/workflows/coverage-context-parity.yml,scripts/ci/preflight.sh	
+check-disposable-rm.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+check-import-paths.sh	ci	.github/workflows/cli-ci.yml	62s serial, the slowest structural gate measured; cli-ci already runs it as its own step
+check-mail-inject-callers.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+check-markdown-style.sh	ci	.github/workflows/guards.yml	21s and it needs a diff base; the pre-push obligation for markdown is fno lint style --diff-base origin/main
+check-merge-coverage-audit.sh	post-push	.github/workflows/merge-coverage-audit.yml	audits merges since a ref through the GitHub API; needs merges that already landed
 check-no-direct-graphql-pr-read.sh	local	cli/src/fno/test_cmd.py	
 check-no-hardcoded-paths.sh	local	cli/src/fno/test_cmd.py	
-check-no-internal-refs.sh	ci	.github/workflows/internal-refs.yml	
-check-no-session-urls.sh	ci	.github/workflows/guards.yml	
-check-no-skill-local-evals.sh	ci	.github/workflows/guards.yml	
+check-no-internal-refs.sh	local	.github/workflows/internal-refs.yml,scripts/ci/preflight.sh	
+check-no-session-urls.sh	post-push	.github/workflows/guards.yml	needs PR_BASE_SHA to scope the commit scan
+check-no-skill-local-evals.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-no-stale-skill-refs.sh	local	cli/src/fno/test_cmd.py	
 check-no-stale-spec-refs.sh	local	cli/src/fno/test_cmd.py	
-check-oos-tracked.sh	ci	.github/workflows/guards.yml	
+check-oos-tracked.sh	post-push	.github/workflows/guards.yml	reads the PR body
 check-pitfalls.sh	local	cli/src/fno/test_cmd.py	
 check-placement-rule.sh	local	cli/src/fno/test_cmd.py	
-check-plan-rung-authority.sh	ci	.github/workflows/guards.yml	
+check-plan-rung-authority.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-plugins-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
-check-pr-body-length.sh	ci	.github/workflows/guards.yml	
-check-pr-node-closure-selftest.sh	ci	.github/workflows/pr-node-closure.yml	
-check-pr-node-closure.sh	ci	.github/workflows/pr-node-closure.yml	
-check-pr-style.sh	ci	.github/workflows/guards.yml	
+check-pr-body-length.sh	post-push	.github/workflows/guards.yml	reads the PR body
+check-pr-node-closure-selftest.sh	local	.github/workflows/pr-node-closure.yml,scripts/ci/preflight.sh	
+check-pr-node-closure.sh	post-push	.github/workflows/pr-node-closure.yml	needs PR_HEAD_REF
+check-pr-style.sh	post-push	.github/workflows/guards.yml	reads the PR body
 check-preamble-budget.sh	local	cli/src/fno/test_cmd.py	
-check-proto-version-bump.sh	ci	.github/workflows/rust-ci.yml	
+check-proto-version-bump.sh	local	.github/workflows/rust-ci.yml,scripts/ci/preflight.sh	
 check-registry-schema-parity.sh	local	cli/src/fno/test_cmd.py	
-check-review-app-parity.sh	ci	.github/workflows/rust-ci.yml	
-check-review-invocation-single-source.sh	ci	.github/workflows/guards.yml	
+check-review-app-parity.sh	local	.github/workflows/rust-ci.yml,scripts/ci/preflight.sh	
+check-review-invocation-single-source.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-reviewer-descriptor-parity.sh	local	cli/src/fno/test_cmd.py	
 check-skill-snippets.sh	local	cli/src/fno/test_cmd.py	
-check-stacked-base.sh	ci	.github/workflows/stacked-base-guard.yml	
+check-stacked-base.sh	post-push	.github/workflows/stacked-base-guard.yml	needs a PR number and head sha, and posts commit statuses to other open PRs
 check-tracker-consumers.sh	local	scripts/ci/preflight.sh	
 check-tracker-partition.sh	local	scripts/ci/preflight.sh	
-check-uv-install-compiles-bytecode.sh	ci	.github/workflows/guards.yml	
-check-workflow-manifest.sh	ci	.github/workflows/guards.yml	
-control-plane-doc-colocation.sh	ci	.github/workflows/guards.yml	
-coverage-carry.sh	ci	.github/workflows/review-coverage-gate.yml	
-loc-ratchet.sh	ci	.github/workflows/guards.yml	
+check-uv-install-compiles-bytecode.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+check-workflow-manifest.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+control-plane-doc-colocation.sh	ci	.github/workflows/guards.yml	needs BASE_REF and is advisory without a PR base, so it reports nothing actionable before the push
+coverage-carry.sh	post-push	.github/workflows/review-coverage-gate.yml	needs repo, context and the before/head shas of a real PR
+loc-ratchet.sh	post-push	.github/workflows/guards.yml	needs a base ref and reads the loc-exception line out of the PR body
 preflight.sh	entrypoint	-	the local rehearsal a person runs before pushing; it invokes gates, it is not one
