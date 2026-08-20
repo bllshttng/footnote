@@ -767,7 +767,27 @@ def _lane_vendor(lane: object) -> Optional[str]:
     return vendor.strip() if sep and vendor.strip() else None
 
 
-def _select_profile_lane(profile: object, verb: str, agents: object, err: IO[str]) -> tuple[Optional[object], Optional[int]]:
+def _select_profile_lane(
+    profile: object,
+    verb: str,
+    agents: object,
+    err: IO[str],
+    *,
+    explicit_lane: bool = False,
+) -> tuple[Optional[object], Optional[int]]:
+    """Pick the delivery lane for ``verb`` by round-robin, skipping a capped vendor.
+
+    ``explicit_lane`` says the caller already named the lane on the command line
+    (``--harness``/``-P``/``--route``). It changes ONLY the all-capped terminal.
+    A cap names a VENDOR's concurrency, and a caller who typed
+    ``--harness codex`` is not spending a capped zai lane's budget, so refusing
+    that spawn stops work the cap was never about. With a lane named, the
+    all-capped case degrades to no-lane and the profile/defaults rungs answer.
+    With no lane named, the refusal stands: that terminal is the operator ruling
+    this function exists to carry.
+    """
+    import os
+
     path = f"agents.profiles.{verb}.lanes"
     lanes = _validated_lanes(getattr(profile, "lanes", []), path, err)
     if not lanes:
@@ -783,6 +803,13 @@ def _select_profile_lane(profile: object, verb: str, agents: object, err: IO[str
     ]
     start = len(live_rows) % len(lanes)
     caps = dict(getattr(agents, "max_lanes", {}) or {})
+    # FNO_SPAWN_GATE=0 is the documented operator/test bypass for live-slot
+    # admission (spawn_gate.run_gate), and its contract is that it never BLOCKS
+    # a spawn. This seam counts the same live rows, so it honors the same
+    # escape - but only on the refusing terminals below. Cap-SKIPPING still
+    # runs: steering a spawn onto a free lane blocks nothing, and dropping it
+    # under the bypass would send every test spawn at a saturated vendor.
+    gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
     blocked: list[tuple[str, int, int]] = []
     for offset in range(len(lanes)):
         index = (start + offset) % len(lanes)
@@ -794,6 +821,14 @@ def _select_profile_lane(profile: object, verb: str, agents: object, err: IO[str
         try:
             current = provider_live_count(vendor)
         except ProviderCountUnavailable as exc:
+            if gate_bypassed:
+                print(
+                    f"fno agents spawn: config.{path}[{index}] provider count "
+                    f"unavailable for {vendor}: {exc}; FNO_SPAWN_GATE=0, so the "
+                    "lane is taken uncapped",
+                    file=err,
+                )
+                return lane, index
             print(
                 f"fno agents spawn: config.{path}[{index}] provider count unavailable "
                 f"for {vendor}: {exc}; refusing; no worker launched",
@@ -806,6 +841,18 @@ def _select_profile_lane(profile: object, verb: str, agents: object, err: IO[str
         print(f"fno agents spawn: {vendor} lane skipped at {current} of {cap}", file=err)
 
     details = ", ".join(f"{vendor} {current} of {cap}" for vendor, current, cap in blocked)
+    if explicit_lane or gate_bypassed:
+        why = (
+            "the command line already names the lane"
+            if explicit_lane
+            else "FNO_SPAWN_GATE=0"
+        )
+        print(
+            f"fno agents spawn: every configured lane is at cap ({details}); "
+            f"{why}, so no lane value is applied and the spawn continues",
+            file=err,
+        )
+        return None, None
     print(f"fno agents spawn: every configured lane is at cap ({details}); refusing; no worker launched", file=err)
     raise SystemExit(2)
 
@@ -980,7 +1027,14 @@ def inject_spawn_defaults(
     lane: Optional[object] = None
     lane_index: Optional[int] = None
     if profile is not None and verb is not None:
-        lane, lane_index = _select_profile_lane(profile, verb, agents, err)
+        # Scanned BEFORE lane selection: an all-capped refusal must know whether
+        # the caller named the lane themselves, and that fact lives in the argv.
+        _explicit_lane = bool(
+            _scan(out[1:])[0] or _flag_value(list(out[1:]), "--route") is not None
+        )
+        lane, lane_index = _select_profile_lane(
+            profile, verb, agents, err, explicit_lane=_explicit_lane
+        )
 
     def field(name: str) -> Tuple[str, Optional[str]]:
         """Effective value + source rung: lane > profile > defaults."""

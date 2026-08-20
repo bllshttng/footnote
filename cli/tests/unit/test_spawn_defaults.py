@@ -406,6 +406,10 @@ def test_profile_only_lane_at_cap_refuses(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
 
+    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
+    # contract is that it never BLOCKS a spawn - so it disables exactly the
+    # refusal under test here. Opt back in, or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
     monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
     err = io.StringIO()
@@ -426,6 +430,10 @@ def test_profile_capped_lane_refuses_when_count_unavailable(monkeypatch):
     import fno.agents.spawn_defaults as spawn_defaults
     import fno.agents.spawn_gate as spawn_gate
 
+    # The hermetic suite sets FNO_SPAWN_GATE=0 (hermetic.py), and that escape's
+    # contract is that it never BLOCKS a spawn - so it disables exactly the
+    # refusal under test here. Opt back in, or this asserts nothing.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
     monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
     monkeypatch.setattr(
         spawn_gate,
@@ -1433,3 +1441,96 @@ def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
             },
         )
     ]
+
+
+def test_capped_lane_does_not_refuse_a_spawn_that_names_its_own_lane(monkeypatch):
+    """A cap names a VENDOR's concurrency. A caller who typed --harness codex is
+    not spending the capped zai lane's budget, so refusing that spawn stops work
+    the cap was never about."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--harness", "codex", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            {"provider": "claude", "route": "zai/glm-5.3[1m]", "substrate": "bg"},
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "already names the lane" in err.getvalue()
+    # The lane's other fields must not ride in either: no lane was applied.
+    assert "--substrate" not in out or out[out.index("--substrate") + 1] != "bg"
+
+
+def test_gate_bypass_disables_the_cap_refusal_but_not_the_skip(monkeypatch):
+    """FNO_SPAWN_GATE=0 is the admission escape and its contract is that it never
+    blocks a spawn. Cap-SKIPPING still runs: steering onto a free lane blocks
+    nothing, and dropping it would send every bypassed spawn at a saturated
+    vendor."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+
+    # Two lanes, one capped: the free lane is still chosen rather than refused.
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+            {"provider": "codex"},
+        ]}},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "zai lane skipped at 2 of 2" in err.getvalue()
+
+    # Only lane capped: no refusal under the bypass.
+    err2 = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err2,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+        ]}},
+    )
+    assert "FNO_SPAWN_GATE=0" in err2.getvalue()
+
+
+def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
+    """Live config lanes arrive as raw TOML dicts, not objects. Every other lane
+    test builds objects, which take the getattr branch, so the Mapping-only
+    unknown-field and non-string refusals were never executed."""
+    import fno.agents.spawn_defaults as spawn_defaults
+
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        spawn_defaults._validated_lanes(
+            [{"provider": "claude", "nonsense": "x"}], "agents.profiles.target.lanes", err
+        )
+    assert exc.value.code == 2
+    assert "unknown field 'nonsense'" in err.getvalue()
+
+    err2 = io.StringIO()
+    with pytest.raises(SystemExit) as exc2:
+        spawn_defaults._validated_lanes(
+            [{"provider": 7}], "agents.profiles.target.lanes", err2
+        )
+    assert exc2.value.code == 2
+    assert "must be a string" in err2.getvalue()
+
+    err3 = io.StringIO()
+    with pytest.raises(SystemExit) as exc3:
+        spawn_defaults._validated_lanes([{}], "agents.profiles.target.lanes", err3)
+    assert exc3.value.code == 2
+    assert "is empty" in err3.getvalue()

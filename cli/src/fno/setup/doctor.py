@@ -212,17 +212,27 @@ def check_worktree_policy() -> list[str]:
 
 
 def _detected_harness() -> str:
-    """Best-effort name of the harness running this shell, for the remedy line."""
+    """Best-effort name of the harness running this shell, for the remedy line.
+
+    Ordered by how specific the marker is, NOT alphabetically. A claude session
+    that spawns a codex worker leaks ``CLAUDECODE`` and ``CLAUDE_CONFIG_DIR``
+    into the child's environment, so checking those first hands a codex worker
+    the claude remedy and points it at the wrong settings file. The per-session
+    id vars are set by the harness that owns the session, so they are checked
+    before any var that merely survives a fork.
+    """
     import os
 
     for env, name in (
-        ("CLAUDE_SESSION_ID", "claude"),
-        ("CLAUDECODE", "claude"),
-        ("CLAUDE_CONFIG_DIR", "claude"),
+        # Session-scoped: set by the harness actually running this shell.
         ("CODEX_THREAD_ID", "codex"),
-        ("CODEX_HOME", "codex"),
         ("AGY_SESSION_ID", "agy"),
         ("OPENCODE_SESSION_ID", "opencode"),
+        ("CLAUDE_SESSION_ID", "claude"),
+        # Ambient: survives a fork, so it only decides when nothing above did.
+        ("CODEX_HOME", "codex"),
+        ("CLAUDECODE", "claude"),
+        ("CLAUDE_CONFIG_DIR", "claude"),
     ):
         if os.environ.get(env):
             return name
@@ -265,15 +275,25 @@ def check_state_root_writable() -> list[str]:
     import os
     import tempfile
 
+    # A diagnostic must not create the state it reports on. FNO_TEST_MODE runs
+    # in sandboxes with no writable $HOME, where this probe would fail doctor
+    # for a reason unrelated to the user's config.
+    if os.environ.get("FNO_TEST_MODE") == "1":
+        return []
     try:
         from fno.claims.io import claims_dir, global_claims_root
 
         store = claims_dir(global_claims_root())
     except Exception as exc:
         return [f"could not resolve the claim store: {exc}"]
+    # Probe the nearest EXISTING ancestor rather than creating the store: a
+    # worker creates the store itself on first claim, and the question is
+    # whether this session can write there, not whether doctor can.
+    target = store
+    while not target.is_dir() and target != target.parent:
+        target = target.parent
     try:
-        store.mkdir(parents=True, exist_ok=True)
-        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(store))
+        fd, probe_path = tempfile.mkstemp(prefix=".doctor-probe-", dir=str(target))
         os.close(fd)
         os.unlink(probe_path)
     except OSError as exc:
@@ -323,13 +343,6 @@ def check_agent_profiles(settings: object) -> list[str]:
                 problems.append(
                     f"{path}.substrate = {substrate!r} is incompatible with "
                     f"resolved provider {provider!r}"
-                )
-            if provider == "codex" and not permission:
-                problems.append(
-                    f"{path}.permission_mode is empty for codex, so the lane "
-                    "runs on the default workspace-write sandbox. fno now grants "
-                    "the state root through --add-dir, so claims work; anything "
-                    "this lane writes OUTSIDE its cwd and that grant still fails"
                 )
     return problems
 

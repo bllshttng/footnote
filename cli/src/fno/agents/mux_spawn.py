@@ -1191,9 +1191,11 @@ def build_pane_argv(
         if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
             # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
             # whenever a hook is new or changed, and the approvals bypass
-            # above does not clear it. `submit_keys` is unsupported for
-            # codex, so fno cannot answer the modal by keystroke - this flag
-            # is the only lever. Sandboxed postures never opt in. Gated on
+            # above does not clear it. Answering it by keystroke would need a
+            # modal-specific response mapping, which no harness declares - the
+            # `submit_keys` contract submits a composed turn and says nothing
+            # about a modal. So this flag is the only lever. Sandboxed
+            # postures never opt in. Gated on
             # the installed version: an older codex's clap parser rejects an
             # unrecognized flag outright, and an older codex predates the
             # modal anyway, so omitting the flag there costs nothing.
@@ -2819,6 +2821,22 @@ def dispatch_spawn_pane(
     pane_group: Optional[str] = None
     if tab:
         tab_selector, pane_group = _resolve_group_tab(tab)
+        if pane_group and (split or at):
+            # Act-then-place moves the pane's OWN tab into the group. With
+            # --split or --at the pane lands inside a tab it does not own, so
+            # that move would drag the operator's unrelated panes into the
+            # delivery group and inflate the pane_group_max count against them.
+            # An explicit selector still composes: it places before the spawn
+            # and never moves a tab.
+            raise DispatchAskError(
+                f"--tab {tab!r} is a pane GROUP, which is placed by moving the "
+                "pane's own tab. It cannot combine with --split/--at, which put "
+                "the pane in a tab it does not own; the move would take that "
+                "tab's other panes with it. Pass an explicit --tab "
+                "active|new|id:<n>|name:<s> to place into a specific tab, or "
+                "drop --split/--at to use the group.",
+                exit_code=2,
+            )
     # Resolve the monitor BEFORE the argv build. happy OWNS the claude session
     # id: claudeLocal() extracts `--session-id` out of the caller's argv and only
     # re-adds it on its `!hookSettingsPath` branch, which a normal `happy` launch

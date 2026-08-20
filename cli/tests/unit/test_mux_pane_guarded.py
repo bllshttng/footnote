@@ -22,6 +22,8 @@ demote to, so it keeps reporting on bytes written.
 
 from types import SimpleNamespace
 
+import pytest
+
 import fno.agents.dispatch as dispatch
 
 
@@ -168,9 +170,15 @@ def test_mail_delivery_with_no_resolvable_transcript_fails_closed(monkeypatch):
     assert dispatch._mux_pane_send(_entry(), "hi", guarded=False, confirm=True) is False
 
 
-def test_non_claude_recipient_refuses_unpinned_submit_contract(monkeypatch):
+@pytest.mark.parametrize("harness", ["gemini", "agy", "opencode"])
+def test_non_claude_recipient_refuses_unpinned_submit_contract(harness, monkeypatch):
     """A successful byte write is not delivery when the harness-specific
-    submit sequence is unknown. Refuse before touching a non-Claude pane."""
+    submit sequence is unknown. Refuse before touching that pane.
+
+    codex used to be this test's example and no longer can: its contract is
+    pinned to ["enter"], measured against 0.148.0. The three left are unpinned
+    because nothing has been measured for them.
+    """
 
     def _boom(_entry):
         raise AssertionError("a non-claude pane has no claude transcript to poll")
@@ -178,6 +186,6 @@ def test_non_claude_recipient_refuses_unpinned_submit_contract(monkeypatch):
     monkeypatch.setattr(dispatch, "_mux_recipient_transcript", _boom)
     calls = _install_fake_run(monkeypatch, [0, 0, 0, 0])
 
-    entry = _entry(harness="codex")
+    entry = _entry(harness=harness)
     assert dispatch._mux_pane_send(entry, "hi", guarded=False, confirm=True) is False
     assert _verbs(calls) == []

@@ -1061,10 +1061,10 @@ def test_build_pane_argv_codex_hook_trust_bypass_on_bypass_posture_only(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Codex 0.148 parks a fresh pane on a `Hooks need review` modal that the
-    approvals bypass alone does not clear, and `submit_keys` is unsupported
-    for codex so fno cannot answer it by keystroke - only
-    --dangerously-bypass-hook-trust does, and only on a bypass posture on a
-    codex new enough to support it."""
+    approvals bypass alone does not clear. No harness declares a modal response
+    mapping - `submit_keys` submits a composed turn and says nothing about a
+    modal - so only --dangerously-bypass-hook-trust clears it, and only on a
+    bypass posture on a codex new enough to support it."""
     from fno.agents import mux_spawn
     from fno.agents.mux_spawn import build_pane_argv
 

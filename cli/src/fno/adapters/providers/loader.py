@@ -261,6 +261,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "happy_routed_panes",
         "max_lanes",
         "max_live",
+        "pane_group_max",
         "min_free_gb",
         "profiles",
         "silence_deadline_seconds",

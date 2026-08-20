@@ -192,7 +192,9 @@ def test_capabilities_query_ignores_dispatch_substrate_config():
     out = json.loads(result.stdout)
     assert out["harness"] == "codex"
     assert out["ready_marker"] == "idle_prompt"
-    assert out["submit_keys"] == ["unsupported"]
+    # codex pins ["enter"] (measured against 0.148.0); this test is about the
+    # capability query ignoring dispatch substrate config, not the value.
+    assert out["submit_keys"] == ["enter"]
     assert out["resume_strategy"]["forms"]["headless_resume"]["tokens"] == [
         "codex", "exec", "resume", "{session_id}"
     ]

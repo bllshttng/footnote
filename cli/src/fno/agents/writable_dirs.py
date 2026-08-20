@@ -16,8 +16,25 @@ the set per spawn and passes it through the existing cell. It does NOT write
 into any harness settings file. A per-spawn grant cannot reach a hand-started
 session either way, so ``fno doctor`` carries the advisory half.
 
-The set is by need, never blanket: ``--add-dir`` is a WRITE grant, so a blanket
-list hands a code worker the operator's notes.
+The set is by need rather than blanket: ``--add-dir`` is a WRITE grant, and a
+blanket list hands a code worker the operator's notes.
+
+**What the state-root grant actually covers, stated rather than implied.**
+``--add-dir`` is recursive, so granting the state root grants everything under
+it. On the default layout that includes ``worktrees_base``
+(``~/.fno/worktrees``), which is every sibling worker's checkout. That is wider
+than "the claim store" sounds.
+
+It cannot be narrowed to subdirectories. ``graph.json`` and ``ledger.json`` sit
+directly at the state root, and both are written with
+``tempfile.mkstemp(dir=path.parent)`` followed by ``os.replace``
+(``fno/graph/store.py``). An atomic replace needs write access to the
+DIRECTORY, not the file, so a worker that mutates the graph needs the root
+itself. Granting the children instead would leave every graph write refused.
+
+A project that does not want the sibling-worktree reach moves them out with
+``config.paths.worktrees_base``; the harness-native default already places them
+at ``<repo>/.claude/worktrees`` rather than under the state root.
 """
 
 from __future__ import annotations
