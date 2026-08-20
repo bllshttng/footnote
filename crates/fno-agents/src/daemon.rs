@@ -5490,6 +5490,86 @@ fn mux_pane_is_absent(detail: &str) -> bool {
                 || detail.contains("connection refused")))
 }
 
+/// What a read-only look at the pane referent proved. `Unknown` is the
+/// fail-closed posture: a probe that cannot prove absence changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneProbe {
+    Present,
+    Absent,
+    Unknown,
+}
+
+/// Probe whether the pane a registry row's mux ref names still exists, without
+/// touching it: a one-line `pane read` against that session. The absence
+/// vocabulary is the same `mux_pane_is_absent` set the kill cascade trusts, so
+/// "absent" means the mux layer itself said the pane is gone.
+fn run_mux_pane_probe(session: &str, pane_id: u64) -> PaneProbe {
+    let pane = pane_id.to_string();
+    let mut child = match std::process::Command::new("fno")
+        .args([
+            "mux",
+            "pane",
+            "read",
+            "--session",
+            session,
+            "--lines",
+            "1",
+            &pane,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return PaneProbe::Unknown,
+    };
+    let deadline = std::time::Instant::now() + CASCADE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => {
+                if exit.success() {
+                    return PaneProbe::Present;
+                }
+                let output = child.wait_with_output().ok();
+                let detail = output
+                    .as_ref()
+                    .map(|o| {
+                        let mut text = String::from_utf8_lossy(&o.stderr).to_ascii_lowercase();
+                        text.push_str(&String::from_utf8_lossy(&o.stdout).to_ascii_lowercase());
+                        text
+                    })
+                    .unwrap_or_default();
+                if mux_pane_is_absent(&detail) {
+                    return PaneProbe::Absent;
+                }
+                return PaneProbe::Unknown;
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return PaneProbe::Unknown;
+            }
+            Err(_) => return PaneProbe::Unknown,
+        }
+    }
+}
+
+/// A row whose ONE live ref is a mux pane is as live as that pane: the stored
+/// enum only records what fno last wrote, so the gate must test the referent.
+/// Proof of absence comes only from the probe's `Absent` verdict.
+fn pane_provably_absent(
+    mux: Option<&state::MuxRef>,
+    probe: &(dyn Fn(&str, u64) -> PaneProbe + Sync),
+) -> bool {
+    match mux {
+        Some(mux) => probe(&mux.session, mux.pane_id) == PaneProbe::Absent,
+        None => false,
+    }
+}
+
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
     handle_rm_with(
         ctx,
@@ -5497,6 +5577,7 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         &crate::claude_roster::read_all_agents,
         &run_claude_rm,
         &run_mux_pane_kill,
+        &run_mux_pane_probe,
     )
     .await
 }
@@ -5507,6 +5588,7 @@ async fn handle_rm_with(
     read_claude_agents: &(dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot + Sync),
     claude_rm: &(dyn Fn(&str) -> Result<(), String> + Sync),
     mux_pane_kill: &(dyn Fn(&str, u64) -> Result<bool, String> + Sync),
+    mux_pane_probe: &(dyn Fn(&str, u64) -> PaneProbe + Sync),
 ) -> Response {
     let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
@@ -5556,16 +5638,17 @@ async fn handle_rm_with(
             ),
         );
     }
-    // The stored enum is what fno last WROTE, not what is true: a claude
-    // session torn down by hand with `claude stop`/`claude rm` never
-    // updates it. A claude row absent from the `claude agents --json --all`
-    // roster is provably gone, whoever removed it. Anything less than proof
-    // keeps refusing. This reconciliation is claude-only (codex/opencode
-    // support is unimplemented, self-review finding): `provably_gone`
-    // is unconditionally `false` for those harnesses, so they still hit the
-    // pre-fix stale-status refusal below with `--force` as the only escape.
+    // The stored enum is what fno last WROTE, not what is true: a session torn
+    // down by hand never updates it. Two truths prove the row gone, each with
+    // its own fail-closed posture. A claude row absent from the `claude agents
+    // --json --all` roster is provably gone, whoever removed it (claude-only;
+    // `claude_row_provably_absent` is unconditionally false elsewhere). A pane
+    // row whose pane the probe cannot find is provably gone, because the pane
+    // is that row's ONE live ref. Anything less than proof keeps refusing, and
+    // `--force` remains the only escape for a row that cannot prove either.
     let provably_gone =
-        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref());
+        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref())
+            || pane_provably_absent(entry.mux.as_ref(), mux_pane_probe);
     if entry.status == AgentStatus::Live && !force && !provably_gone {
         let row = harness_row_id
             .clone()
@@ -7361,6 +7444,7 @@ mod tests {
                 Ok(())
             },
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7396,6 +7480,7 @@ mod tests {
             },
             &|_| Ok(()),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7438,6 +7523,7 @@ mod tests {
             },
             &|_| Ok(()),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7475,9 +7561,14 @@ mod tests {
         let request = Request::new(1, "agent.rm", json!({"name": "pane-worker"}));
         let snapshots = claude_row_then_absent("aaaccc22", "stopped");
 
-        let response = handle_rm_with(&ctx, &request, &snapshots, &|_| Ok(()), &|_, _| {
-            Err("permission denied".into())
-        })
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &snapshots,
+            &|_| Ok(()),
+            &|_, _| Err("permission denied".into()),
+            &|_, _| PaneProbe::Unknown,
+        )
         .await;
 
         let message = &response.error().unwrap().message;
@@ -7517,6 +7608,7 @@ mod tests {
             },
             &|_| Err("claude rm exited 1".into()),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7548,6 +7640,7 @@ mod tests {
             },
             &|_| Err("claude rm exited 1".into()),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
         assert_eq!(forced_response.result().unwrap()["harness_removed"], false);
@@ -7579,6 +7672,7 @@ mod tests {
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
             &|_| Ok(()),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7623,6 +7717,7 @@ mod tests {
                 Ok(())
             },
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7662,6 +7757,7 @@ mod tests {
             },
             &|_| Err("x".repeat(crate::events::MAX_EVENT_PAYLOAD_BYTES * 2)),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7693,6 +7789,7 @@ mod tests {
                 Ok(())
             },
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7729,6 +7826,7 @@ mod tests {
             },
             &|_| panic!("blocked row must not reach claude rm"),
             &|_, _| panic!("blocked row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7768,6 +7866,7 @@ mod tests {
                 Ok(())
             },
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7803,6 +7902,7 @@ mod tests {
             &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
             &|_| panic!("row already absent from the roster must not reach claude rm"),
             &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7836,6 +7936,7 @@ mod tests {
             &|| crate::claude_roster::ClaudeAgentsSnapshot::unknown("list timed out"),
             &|_| panic!("an unknown roster must not reach claude rm"),
             &|_, _| panic!("an unknown roster must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7879,6 +7980,7 @@ mod tests {
             },
             &|_| panic!("a genuinely live row must not reach claude rm"),
             &|_, _| panic!("a genuinely live row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7922,6 +8024,7 @@ mod tests {
                 killed.lock().unwrap().push((session.to_string(), pane_id));
                 Ok(true)
             },
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7954,6 +8057,7 @@ mod tests {
             &|| panic!("non-Claude row must not read the Claude list"),
             &|_| panic!("non-Claude row must not call claude rm"),
             &|_, _| Ok(false),
+            &|_, _| PaneProbe::Unknown,
         )
         .await;
 
@@ -7966,6 +8070,175 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_clears_a_stored_live_pane_row_whose_pane_is_provably_absent() {
+        // The fleet-reap deadlock: the row still reads live while the pane it
+        // names is gone. The gate must test the referent, so the probe's
+        // Absent verdict clears the row without --force.
+        let home = short_home("rmpanegone");
+        let mut row = ask_row("dead-pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("opencode".into());
+        row.status = AgentStatus::Live;
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 76,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "dead-pane-worker"}));
+        let probed = std::sync::Mutex::new(Vec::new());
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("non-Claude row must not read the Claude list"),
+            &|_| panic!("non-Claude row must not call claude rm"),
+            &|session, pane_id| {
+                assert_eq!((session, pane_id), ("main", 76));
+                Ok(false)
+            },
+            &|session, pane_id| {
+                probed.lock().unwrap().push((session.to_string(), pane_id));
+                PaneProbe::Absent
+            },
+        )
+        .await;
+
+        assert_eq!(probed.into_inner().unwrap(), vec![("main".to_string(), 76)]);
+        assert_eq!(response.result().unwrap()["removed"], true);
+        assert_eq!(response.result().unwrap()["pane_removed"], false);
+        assert_eq!(
+            response.result().unwrap()["pane_reason"],
+            "mux pane already absent"
+        );
+        assert!(state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_still_refuses_a_stored_live_pane_row_when_the_probe_is_unknown() {
+        // Fail-closed: a probe that errored, timed out, or parsed badly proves
+        // nothing. The refusal and the row both stay.
+        let home = short_home("rmpaneunknown");
+        let mut row = ask_row("maybe-pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("opencode".into());
+        row.status = AgentStatus::Live;
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 76,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "maybe-pane-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("non-Claude row must not read the Claude list"),
+            &|_| panic!("non-Claude row must not call claude rm"),
+            &|_, _| panic!("a refused row must not reach the pane kill"),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        let error = response.error().expect("a stored-live row must be refused");
+        assert!(error.message.contains("still live"), "{}", error.message);
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_still_refuses_a_stored_live_pane_row_when_the_pane_is_present() {
+        // A live pane is a live worker; the refusal must stand.
+        let home = short_home("rmpanepresent");
+        let mut row = ask_row("live-pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("opencode".into());
+        row.status = AgentStatus::Live;
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 76,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "live-pane-worker"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| panic!("non-Claude row must not read the Claude list"),
+            &|_| panic!("non-Claude row must not call claude rm"),
+            &|_, _| panic!("a refused row must not reach the pane kill"),
+            &|_, _| PaneProbe::Present,
+        )
+        .await;
+
+        let error = response.error().expect("a stored-live row must be refused");
+        assert!(error.message.contains("still live"), "{}", error.message);
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
+        // The refusal string and the parser drift independently: the refusal
+        // once printed `main:76` while the parser demanded a bare number, so
+        // the instrument named a way out that errored with EXIT_USAGE. Hold
+        // both sides in one test: extract the command this handler really
+        // printed and feed it to the real parse_pane_args, no hardcoded
+        // expected string anywhere.
+        let home = short_home("stoprefusal");
+        let mut row = ask_row("pane-worker", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("opencode".into());
+        row.status = AgentStatus::Live;
+        row.mux = Some(state::MuxRef {
+            session: "main".into(),
+            pane_id: 76,
+        });
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.stop", json!({"name": "pane-worker"}));
+
+        let response = handle_stop(&ctx, &request).await;
+
+        let error = response.error().expect("a pane row must be refused");
+        let printed = error
+            .message
+            .split("Kill the pane: `")
+            .nth(1)
+            .expect("refusal names the kill command")
+            .split('`')
+            .next()
+            .expect("the printed command is backtick-closed");
+        let selector = printed
+            .strip_prefix("fno mux pane kill ")
+            .expect("the printed command is the pane kill verb");
+        let args: Vec<std::ffi::OsString> = vec!["kill".into(), selector.into()];
+        let parsed =
+            fno::mux_cli::parse_pane_args(&args).expect("the refusal's own command must parse");
+        assert_eq!(parsed.session.as_deref(), Some("main"));
+        assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76 });
         std::fs::remove_dir_all(home.root()).ok();
     }
 

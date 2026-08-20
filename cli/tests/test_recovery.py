@@ -1622,9 +1622,13 @@ class TestRedispatch:
 
     def test_pane_refusal_runs_the_named_pane_kill_then_rotates(self, monkeypatch):
         # The daemon refuses `agents stop` on a pane row and NAMES the pane-kill
-        # verb with the row's own ref. The failover honors it and keeps
-        # rotating; treating the refusal as "may still be live" would degrade
-        # every pane-worker failover to a nudge.
+        # verb with the row's own ref. The printed `main:10` selector is the
+        # mux parser's own grammar, so a human can paste it as-is; the failover
+        # still translates it to the flag form, which predates the selector and
+        # parses identically. Treating the refusal as "may still be live" would
+        # degrade every pane-worker failover to a nudge. The daemon-side
+        # round-trip test in daemon.rs feeds this wording's real producer to
+        # the real parser, so the two sides cannot drift apart.
         self._patch_resolve(monkeypatch)
         refusal = (
             b'agent w is a pane worker; `stop` reaches no pane and would report '

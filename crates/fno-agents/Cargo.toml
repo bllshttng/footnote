@@ -98,3 +98,7 @@ serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Tests feed a refusal's printed `fno mux pane kill ...` command to the real
+# parser rather than a copy of its grammar, so the two cannot drift apart.
+# Dev-only: fno never links fno-agents, it shells the binary at runtime.
+fno = { path = "../fno" }
