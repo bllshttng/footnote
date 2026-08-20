@@ -77,22 +77,34 @@ self_test() {
     tmp="$(mktemp -d)" || { echo "ci-gate-lanes: mktemp failed" >&2; exit 2; }
     trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/scripts/ci" "$tmp/.github/workflows"
+    mkdir -p "$tmp/.github/actions/used-action" "$tmp/.github/actions/orphan-action"
     echo 'exit 0' > "$tmp/scripts/ci/check-ok.sh"
     echo 'exit 0' > "$tmp/scripts/ci/check-unlisted.sh"
     echo 'exit 0' > "$tmp/scripts/ci/check-mentioned.sh"
     echo 'exit 0' > "$tmp/scripts/ci/check-underdeclared.sh"
+    echo 'exit 0' > "$tmp/scripts/ci/check-via-used-action.sh"
+    echo 'exit 0' > "$tmp/scripts/ci/check-via-orphan-action.sh"
+    # Two composite actions that both really invoke a gate. The ONLY difference
+    # is that a workflow `uses:` one of them. Granting the ci lane on the path
+    # shape alone made these two indistinguishable.
+    printf 'runs:\n  steps:\n    - run: bash scripts/ci/check-via-used-action.sh\n' \
+        > "$tmp/.github/actions/used-action/action.yml"
+    printf 'runs:\n  steps:\n    - run: bash scripts/ci/check-via-orphan-action.sh\n' \
+        > "$tmp/.github/actions/orphan-action/action.yml"
     # check-ok.sh is RUN. check-mentioned.sh is only NAMED, the way a paths:
     # filter names a file - the decorative case the whole gate exists to catch.
     # check-underdeclared.sh is run by w2.yml and its row names only w.yml,
     # which is the case the undeclared-invoker scan exists for.
     printf 'on:\n  push:\n    paths:\n      - scripts/ci/check-mentioned.sh\njobs:\n  a:\n    steps:\n      - run: bash scripts/ci/check-ok.sh\n      - run: bash scripts/ci/check-underdeclared.sh\n' \
         > "$tmp/.github/workflows/w.yml"
-    printf 'jobs:\n  b:\n    steps:\n      - run: bash scripts/ci/check-underdeclared.sh\n' \
+    printf 'jobs:\n  b:\n    steps:\n      - run: bash scripts/ci/check-underdeclared.sh\n      - uses: ./.github/actions/used-action\n' \
         > "$tmp/.github/workflows/w2.yml"
     printf 'check-ok.sh\tci\t.github/workflows/w.yml\tfixture, stays ci on purpose\n' > "$tmp/scripts/ci/ci-gate-lanes.tsv"
     printf 'check-mentioned.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
     printf 'check-gone.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
     printf 'check-underdeclared.sh\tci\t.github/workflows/w.yml\tfixture\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-via-used-action.sh\tci\t.github/actions/used-action/action.yml\tfixture, a workflow uses this action\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
+    printf 'check-via-orphan-action.sh\tci\t.github/actions/orphan-action/action.yml\tfixture, nothing uses this action\n' >> "$tmp/scripts/ci/ci-gate-lanes.tsv"
 
     out="$(CI_GATE_LANES_ROOT="$tmp" bash "$0" 2>&1)"
     rc=$?
@@ -123,6 +135,17 @@ self_test() {
         echo "ci-gate-lanes: self-test FAILED - the undeclared-invoker scan did not report w2.yml" >&2
         echo "$out" >&2; exit 1 ;;
     esac
+    # Composite-action reachability, BOTH directions. The orphan must be
+    # refused, and the used one must not be - a check that only asserted the
+    # refusal would pass just as well if the arm rejected every action.
+    if ! printf '%s\n' "$out" | grep -q "check-via-orphan-action.sh: invoker '.github/actions/orphan-action/action.yml' is a composite action no workflow uses"; then
+        echo "ci-gate-lanes: self-test FAILED - an unreferenced composite action was accepted as a CI lane" >&2
+        echo "$out" >&2; exit 1
+    fi
+    if printf '%s\n' "$out" | grep -q "check-via-used-action.sh: invoker"; then
+        echo "ci-gate-lanes: self-test FAILED - a composite action a workflow really uses was refused" >&2
+        echo "$out" >&2; exit 1
+    fi
     # Positive control on the matcher: the fixture's one real invocation must
     # NOT be reported, or the gate is refusing everything and the assertions
     # above pass for the wrong reason.
@@ -191,10 +214,25 @@ while IFS=$'\t' read -r script lane invoker note; do
             else
                 case "$one" in
                     cli/src/fno/test_cmd.py|scripts/ci/preflight.sh) has_early=1 ;;
-                    # A composite action counts as a CI surface: a gate invoked
-                    # from one is really reached in CI, and refusing to record
-                    # that would leave the row unable to name a real invoker.
-                    .github/workflows/*|.github/actions/*) has_ci=1 ;;
+                    .github/workflows/*) has_ci=1 ;;
+                    .github/actions/*)
+                        # A composite action counts as a CI surface only if a
+                        # workflow really `uses:` it. Granting the lane
+                        # unconditionally let an unreferenced action certify a
+                        # gate that nothing runs - the same transitive-
+                        # reachability hole the scripts/ci/* arm below closes,
+                        # and exactly the decorative guard this file refuses.
+                        # The row names the action FILE
+                        # (.github/actions/<name>/action.yml); a workflow
+                        # `uses:` its DIRECTORY.
+                        action_dir="$(dirname "$one")"
+                        if grep -REq "uses:[[:space:]]*\./${action_dir}(@|[[:space:]]|$)" \
+                            "$REPO_ROOT/.github/workflows" 2>/dev/null; then
+                            has_ci=1
+                        else
+                            note_fail "$script: invoker '$one' is a composite action no workflow uses - nothing in CI reaches it"
+                        fi
+                        ;;
                     scripts/ci/*)
                         # One level of indirection: a gate run by another gate
                         # is reachable only if that one is. Its row is the

@@ -63,6 +63,7 @@ check-pr-node-closure-selftest.sh	local	.github/workflows/pr-node-closure.yml,sc
 check-pr-node-closure.sh	post-push	.github/workflows/pr-node-closure.yml	needs PR_HEAD_REF
 check-pr-style.sh	post-push	.github/workflows/guards.yml	reads the PR body
 check-preamble-budget.sh	local	.github/workflows/guards.yml,cli/src/fno/test_cmd.py	
+check-preflight-scope-parity.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	awk over three files, milliseconds; the drift it catches is silent and only surfaces as an evidence gate that can never clear
 check-proto-version-bump.sh	ci	.github/workflows/rust-ci.yml	runs an unconditional git fetch, so it cannot run in the hermetic pre-push leg with an empty HOME
 check-registry-schema-parity.sh	local	.github/workflows/rust-ci.yml,cli/src/fno/test_cmd.py	
 check-review-app-parity.sh	local	.github/workflows/rust-ci.yml,scripts/ci/preflight.sh	

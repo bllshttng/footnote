@@ -171,7 +171,8 @@ chmod +x "$FIX/scripts/ci/check-tracker-partition.sh" "$FIX/scripts/ci/check-tra
 for _sg in check-autonomy-registry check-coverage-context-parity \
            check-disposable-rm check-mail-inject-callers check-no-internal-refs \
            check-no-skill-local-evals check-plan-rung-authority \
-           check-pr-node-closure-selftest check-review-app-parity \
+           check-pr-node-closure-selftest check-preflight-scope-parity \
+           check-review-app-parity \
            check-review-invocation-single-source \
            check-uv-install-compiles-bytecode check-workflow-manifest; do
     cat > "$FIX/scripts/ci/$_sg.sh" <<EOF

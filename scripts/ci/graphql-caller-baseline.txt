@@ -8,17 +8,23 @@
 # blanket-allow buckets accept anything by path, so a count is the only
 # tripwire on a new raw caller landing there.
 #
-# Prose is not counted. That means the `documentation` disposition, and it also
-# means any .md row whatever its disposition: the disposition rule only catches
-# a #- or //-prefixed line in a code file, so markdown slipped through it. All
-# 11 worker-proxy-or-hook rows measured on this tree were prose in skills/*.md,
-# which is why that bucket has no row here. A real executable caller under
-# skills/ would make the disposition appear with no baseline row, and the gate
-# refuses an unknown disposition rather than accepting it.
+# Prose is not counted, on three tests. The `documentation` disposition; any
+# .md row whatever its disposition (the #-or-//-prefix rule cannot see markdown,
+# and all 11 worker-proxy-or-hook rows measured here were prose in skills/*.md,
+# which is why that bucket has no row); and a match inside a Python DOCSTRING,
+# which the prefix rule also cannot see. That last one was the remaining hole:
+# writing `gh pr view` into any docstring under cli/src raised fno-process-proxy
+# and reded a ceiling pinned at its exact value, for a caller that never
+# existed - the same prose-edit false red the sha256 pin was retired for. 28 of
+# the 110 rows previously counted were docstring prose, hence the drop to 82.
+# Docstrings ONLY, never every string literal: a real caller is a string handed
+# to a subprocess, so excluding all literals would hide what this gate hunts.
+# A real executable caller under skills/ would make that disposition appear with
+# no baseline row, and the gate refuses an unknown disposition.
 #
 # KNOWN BLIND SPOT, stated rather than discovered later. A count cannot see a
 # same-PR swap: delete one routed call site under cli/src and add a raw one,
-# and fno-process-proxy is still 110, so this passes. The sha256 inventory pin
+# and fno-process-proxy is still 82, so this passes. The sha256 inventory pin
 # this replaced did catch that shape, and it was dropped anyway because it went
 # red on every comment reword over 194 rows, which is how it ended up ignored
 # and unwired. The unclassified assertion still catches a raw caller in any
@@ -28,7 +34,7 @@
 #
 # Raising a number is a deliberate act: say in the PR body why the new caller
 # is routed rather than raw.
-fno-process-proxy 110
+fno-process-proxy 82
 fixed-purpose-adapter 19
 operator-guard-definition 5
 quota-soak-broker 1
