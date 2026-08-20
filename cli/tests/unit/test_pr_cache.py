@@ -496,3 +496,32 @@ def test_a_refused_refresh_never_deepens_the_backoff_window(
     assert after["fail_count"] == 1, "a refused refresh must not escalate"
     assert after["backoff_until"] == pytest.approx(window, abs=1.0)
     assert after["output"] == opened["output"], "the last good verdict survives"
+
+
+def test_an_unknown_flag_is_refused_whatever_its_dash_count(monkeypatch):
+    """The refusal must cover EVERY flag shape, not only the two-dash one.
+
+    A guard on one of the reachable spellings reads as protection and ships
+    green while the rest stay broken. Split on `--` alone, `-x` fell into
+    neither the flag set nor the argument list, so it was read as the PR
+    number and spent a live `gh` read - the silent drop the refusal exists to
+    refuse.
+    """
+    monkeypatch.setattr(
+        _cache, "cached_status",
+        lambda *a, **k: pytest.fail("an unknown flag must never reach the cache"),
+    )
+    assert _status.main(["-x", "42"]) == 2
+    assert _status.main(["--refesh", "42"]) == 2
+    assert _status.main(["--refresh"]) == 2
+
+
+def test_a_known_flag_still_parses_to_the_pr_number(cache_env, monkeypatch, capsys):
+    """The refusal above must not eat the flags that do exist."""
+    cache_dir, head = cache_env
+    fetch, calls = _fetch_spy([_GREEN, _GREEN])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _status.main(["42", "--no-cache"]) == 0
+    assert _status.main(["--refresh", "42"]) == 0
+    capsys.readouterr()
+    assert calls["n"] == 2, "both spellings must bypass the row"

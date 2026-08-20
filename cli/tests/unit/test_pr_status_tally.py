@@ -220,3 +220,23 @@ def test_pending_and_unknown_keep_their_ci_names():
     pending = [{"name": "ci", "status": "IN_PROGRESS", "conclusion": ""}]
     assert "ci_pending" in _blockers(pending)
     assert "ci_unknown" in _blockers([])
+
+
+def test_a_status_red_beside_an_unattributable_red_keeps_the_ci_name():
+    """`not fail_check_runs` is still an ABSENCE when an unkeyed row failed.
+
+    A failing status beside a failing row that carries neither key satisfies
+    "no job failed" while a second, un-nameable red is also holding. Naming
+    that `commit_status_red` tells a reader the only thing wrong is a status
+    they can go look at. The honest test is that EVERY failing row is a status.
+    """
+    rollup = [
+        {"context": "fno/review-coverage", "state": "FAILURE"},
+        {"state": "FAILURE"},
+    ]
+    _verdict, _code, counts = _status.verdict_for(rollup)
+    assert counts["fail"] == 2
+    assert counts["fail_statuses"] == 1 and counts["fail_check_runs"] == 0
+    blockers = _blockers(rollup)
+    assert "commit_status_red" not in blockers, blockers
+    assert "ci_red" in blockers

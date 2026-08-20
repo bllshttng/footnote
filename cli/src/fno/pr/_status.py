@@ -362,12 +362,15 @@ def _ready_blockers(
         # absence of a failing job. A rollup row carrying neither `name` nor
         # `context` still classifies as a fail and lands in NEITHER sub-count,
         # so "no job failed" alone would name a commit status that does not
-        # exist. An unattributable red keeps the generic name.
+        # exist. An unattributable red keeps the generic name - and so does a
+        # MIXED red, where a status failed beside an unkeyed row: `not
+        # fail_check_runs` reads true there too, and the honest test is that
+        # EVERY failing row is a status, not merely that no job was among them.
         if (
             verdict == "red"
             and counts
             and counts.get("fail_statuses")
-            and not counts.get("fail_check_runs")
+            and counts.get("fail_statuses") == counts.get("fail")
         ):
             blockers.append("commit_status_red")
         else:
@@ -632,12 +635,14 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
 
 def main(argv: Sequence[str]) -> int:
     known = {"--refresh", "--no-cache"}
-    flags = {str(a) for a in argv if str(a).startswith("--")}
-    args = [a for a in argv if not str(a).startswith("--")]
+    flags = {str(a) for a in argv if str(a).startswith("-")}
+    args = [a for a in argv if not str(a).startswith("-")]
     refresh = bool(flags & known)
     # An unrecognised flag is REFUSED, never dropped: `--refresh` exists for a
     # caller who distrusts a cached verdict, so silently ignoring `--refesh`
-    # would hand back the very row they were trying to bypass.
+    # would hand back the very row they were trying to bypass. The split is on
+    # ONE leading dash, not two: with `--` alone, `-x` fell into neither set
+    # and was read as the PR number, which is the silent drop this refuses.
     if not args or not flags <= known:
         import sys
 
