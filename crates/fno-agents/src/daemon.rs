@@ -5122,6 +5122,11 @@ const WORKER_ACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fire-and-forget `worker.shutdown` to a worker that must not be left running
 /// (a spawn that failed or lost a name race): connect, ask it to tear down, and
 /// move on. Best-effort by design — the caller is already on an error path.
+///
+/// Same write+read bound as [`stop_worker_confirmed`]'s step 1 (<=35s worst
+/// case), paid on the `agent.adopt_stream` spawn-error paths that call this.
+/// Those paths return well before [`crate::client::RESPONSE_DEADLINE`], so
+/// this worst case needs no separate line in that constant's budget comment.
 async fn best_effort_worker_shutdown(sock: &std::path::Path) {
     if let Ok(mut conn) = UnixStream::connect(sock).await {
         let _ = tokio::time::timeout(
@@ -5527,6 +5532,9 @@ async fn handle_rm_with(
             Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
         };
     let name = entry.name.clone();
+    // Computed once (self-review finding): every other reference in this
+    // handler reuses this allocation instead of re-deriving the same short id.
+    let harness_row_id = claude_row_id(&entry);
     let claude_agents = if entry.harness_name() == "claude" {
         Some(read_claude_agents())
     } else {
@@ -5534,7 +5542,7 @@ async fn handle_rm_with(
     };
     if claude_agents
         .as_ref()
-        .and_then(|snapshot| claude_row_id(&entry).and_then(|id| snapshot.find(&id)))
+        .and_then(|snapshot| harness_row_id.as_deref().and_then(|id| snapshot.find(id)))
         .and_then(|row| row.state.as_deref())
         == Some("blocked")
     {
@@ -5555,10 +5563,9 @@ async fn handle_rm_with(
     // is unconditionally `false` for those harnesses, so they still hit the
     // pre-fix stale-status refusal below with `--force` as the only escape.
     let provably_gone =
-        claude_row_provably_absent(claude_agents.as_ref(), claude_row_id(&entry).as_deref());
+        claude_row_provably_absent(claude_agents.as_ref(), harness_row_id.as_deref());
     if entry.status == AgentStatus::Live && !force && !provably_gone {
-        let row_id = claude_row_id(&entry);
-        let row = row_id
+        let row = harness_row_id
             .clone()
             .unwrap_or_else(|| "(no harness row id)".into());
         let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
@@ -5567,7 +5574,7 @@ async fn handle_rm_with(
                 "agent {name} is still live. Stop it with `fno agents stop {name}`, or pass \
                  --force."
             )
-        } else if row_id.is_none() {
+        } else if harness_row_id.is_none() {
             // claude_row_provably_absent short-circuits to `false` (not
             // provably gone) whenever the row id is None, independent of the
             // roster -- so presence was never actually checked here, and the
@@ -5596,7 +5603,6 @@ async fn handle_rm_with(
         };
         return Response::err(req.id, ErrorCode::Busy, detail);
     }
-    let harness_row_id = claude_row_id(&entry);
     let harness_outcome = cascade_harness_session_result_with(
         &entry,
         claude_agents.as_ref(),
