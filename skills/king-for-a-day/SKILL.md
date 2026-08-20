@@ -52,7 +52,9 @@ You never pass a level.
 Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
-So a crown is externally verifiable, not a claim a session makes about itself: `fno agents list`/`top` mark crowned rows (a minion resolves who to escalate to, and a second live crown over one scope is detectable), and `fno whoami` prints your own crown line so you recover your authority after a compaction.
+
+A crown is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark crowned rows, so a minion resolves who to escalate to. `fno agents court` names every live crown, whether the registry and the graph agree, and any scope two live rows hold at once. `fno whoami` prints a `crown:` line, present only when the session holds one, so you recover your own authority after a compaction.
+
 Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
 
 **Abdicate.**
@@ -201,7 +203,8 @@ This is the difference between a track that walks and one that silently wedges, 
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 
 **Orient yourself after a compaction.**
-`fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail).
+
+`fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail). `fno agents court` answers whether the coronations worked - every live crown, and whether the registry and the graph agree.
 Run these instead of grepping state files.
 `fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your crown, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
 Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the king Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.
