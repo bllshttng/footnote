@@ -1384,27 +1384,55 @@ def _find_pr_create_segments(segments):
     return out
 
 
-def _segment_has_closure_hatch(seg):
-    """True when FNO_PR_CLOSURE_OK=1 prefixes this segment's own command.
+def _pr_create_signals(seg):
+    """The closure-relevant facts of one `gh pr create` segment, from its tokens.
 
-    Position, never presence. A whole-command substring search read the string
-    out of any quoted argument, so `gh pr create --body "we set
-    FNO_PR_CLOSURE_OK=1 here"` opened the gate - the marker-substring false
-    allow this guard was written to close, reintroduced by its own fix.
-    Walk only the leading run of assignments and wrappers, exactly where a
-    shell would apply one.
+    Returns (hatch, head, body_files). All three by POSITION, never presence:
+    a whole-command regex read every one of them out of quoted prose. A --body
+    merely QUOTING the words "--head chore/tidy-docs" retargeted the gate; one
+    naming a --body-file path in prose satisfied it; and the string
+    FNO_PR_CLOSURE_OK=1 anywhere in a commit message opened it. That is the
+    marker-substring false allow this guard exists to close, on three flags.
+    Argv position is the only thing separating a flag from a word, and shlex
+    has already collapsed each quoted argument into one token.
     """
-    for tok in seg:
+    hatch, head, body_files = False, None, []
+    i, n = 0, len(seg)
+    # The leading assignment / wrapper run, exactly where a shell applies one.
+    while i < n:
+        tok = seg[i]
         if tok == "(":
+            i += 1
             continue
         if _ASSIGN_RE.match(tok):
             if tok == "FNO_PR_CLOSURE_OK=1":
-                return True
+                hatch = True
+            i += 1
             continue
         if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
+            i += 1
             continue
         break
-    return False
+    while i < n:
+        tok = seg[i]
+        if tok in ("--head", "-H") and i + 1 < n:
+            head = seg[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--head="):
+            head = tok[len("--head="):]
+            i += 1
+            continue
+        if tok in ("--body-file", "-F") and i + 1 < n:
+            body_files.append(seg[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--body-file="):
+            body_files.append(tok[len("--body-file="):])
+            i += 1
+            continue
+        i += 1
+    return hatch, head, body_files
 
 
 # Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
@@ -1453,7 +1481,7 @@ def _file_trailer_claims(path, ids):
     )
 
 
-def _closure_trailer_refusal(command="", hatch=False):
+def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     """Deny reason for a `gh pr create` that shows no composed closure trailer.
 
     Measured 2026-08-19: five PRs in one evening red on
@@ -1487,16 +1515,18 @@ def _closure_trailer_refusal(command="", hatch=False):
     # it from a substring search over the command.
     if hatch or os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
         return None
-    head = re.search(r"(?:--head(?:=|\s+)|(?:^|\s)-H\s+)(\S+)", command)
-    ids = _branch_node_ids(
-        head.group(1).strip("'\"") if head else get_current_branch()
-    )
+    ids = _branch_node_ids(head if head else get_current_branch())
     if not ids:
         return None
+    # The one remaining whole-command read, and it stays one on purpose: this
+    # is the "did the composition step run" heuristic for an unexpandable
+    # "$BODY", so a marker in prose costs a false ALLOW that CI still catches.
+    # The three POSITION-read signals above are what a false allow would have
+    # bypassed silently.
     if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
         return None
-    for path in re.findall(r"(?:--body-file(?:=|\s+)|(?:^|\s)-F\s+)(\S+)", command):
-        if _file_trailer_claims(path.strip("'\""), ids):
+    for path in body_files:
+        if _file_trailer_claims(path, ids):
             return None
     return (
         f"[fno closure trailer] branch names {', '.join(ids)}, so "
@@ -1976,16 +2006,20 @@ def main():
         # legacy fallback: unbalanced quotes, so match the whole command.
         pr_create_segs = re.findall(r"gh\s+pr\s+create", command, re.IGNORECASE)
     if pr_create_segs:
-        # Position-checked, and only on the real segment list. The legacy
-        # fallback below has no tokens to check, so it cannot honor an inline
-        # hatch - deny-leaning there, matching that path's stated posture.
-        hatch = segments is not None and any(
-            _segment_has_closure_hatch(seg) for seg in pr_create_segs
-        )
-        closure_reason = _closure_trailer_refusal(command, hatch=hatch)
-        if closure_reason:
-            _emit("deny", closure_reason)
-            sys.exit(0)
+        # Judge each create segment on ITS OWN tokens. The legacy fallback
+        # below has no tokens at all, so it reads none of the three signals -
+        # deny-leaning there, matching that path's stated posture.
+        for seg in pr_create_segs:
+            if segments is not None:
+                seg_hatch, seg_head, seg_body_files = _pr_create_signals(seg)
+            else:
+                seg_hatch, seg_head, seg_body_files = False, None, []
+            closure_reason = _closure_trailer_refusal(
+                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files
+            )
+            if closure_reason:
+                _emit("deny", closure_reason)
+                sys.exit(0)
 
     # ==========================================
     # gh pr merge - allow only with two-factor (state + artifact) verification.

@@ -275,67 +275,6 @@ def test_hook_allows_a_literal_trailer_in_the_command(monkeypatch):
     ) is None
 
 
-def test_hook_reads_a_body_file_and_allows_a_real_trailer(monkeypatch, tmp_path):
-    # A --body-file names a real path, so this spelling is judged on the file
-    # rather than on a marker. Denying it would be the false DENY the docstring
-    # says cannot happen.
-    body = tmp_path / "pr-body.md"
-    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
-    assert _hook_decision(
-        f"gh pr create --title t --body-file {body}", "feature/x-49ec",
-        monkeypatch=monkeypatch,
-    ) is None
-
-
-def test_hook_denies_a_body_file_missing_the_claim(monkeypatch, tmp_path):
-    body = tmp_path / "pr-body.md"
-    body.write_text("Summary.\n\nBacklog-Closure: x-1111\n")
-    reason = _hook_decision(
-        f"gh pr create --title t --body-file {body}", "feature/x-49ec",
-        monkeypatch=monkeypatch,
-    )
-    assert reason is not None and "Backlog-Closure: x-49ec" in reason
-
-
-def test_hook_allows_a_body_file_the_same_command_is_about_to_write(monkeypatch, tmp_path):
-    # A PreToolUse hook runs BEFORE the command, so the documented spelling
-    # (compose into a file, then pass it) names a path that does not exist yet.
-    # Denying it is the false DENY the docstring rules out; an unjudgeable
-    # body-file falls to the false-ALLOW side CI still catches.
-    assert _hook_decision(
-        f"printf '%s' \"$B\" > {tmp_path / 'gone.md'}\n"
-        f"gh pr create --title t --body-file {tmp_path / 'gone.md'}",
-        "feature/x-49ec",
-        monkeypatch=monkeypatch,
-    ) is None
-
-
-def test_hook_reads_the_short_body_file_flag(monkeypatch, tmp_path):
-    # `-F` is gh's own short spelling of --body-file. Judging only the long one
-    # denied a fully composed body - the one-spelling-guard shape.
-    body = tmp_path / "pr-body.md"
-    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
-    assert _hook_decision(
-        f"gh pr create --title t -F {body}", "feature/x-49ec", monkeypatch=monkeypatch,
-    ) is None
-
-
-def test_hook_judges_the_explicit_head_ref_not_the_checkout(monkeypatch):
-    # The PR closes what its HEAD ref names, which is what the CI gate reads.
-    assert _hook_decision(
-        'gh pr create --head chore/tidy-docs --body "$BODY"', "feature/x-49ec",
-        monkeypatch=monkeypatch,
-    ) is None
-
-
-def test_hook_still_denies_an_explicit_node_head_ref(monkeypatch):
-    reason = _hook_decision(
-        'gh pr create --head feature/x-1111 --body "$BODY"', "chore/tidy-docs",
-        monkeypatch=monkeypatch,
-    )
-    assert reason is not None and "Backlog-Closure: x-1111" in reason
-
-
 @pytest.mark.parametrize("domain", ["code", "docs", "front-end"])
 def test_a_batch_branch_never_parses_as_node_bearing(domain):
     # <word>-<hex> IS the node-id grammar, so every batch-code-a1b2c3 branch
@@ -344,19 +283,6 @@ def test_a_batch_branch_never_parses_as_node_bearing(domain):
     ref = f"feature/batch-{domain}.a1b2c3"
     assert branch_node_ids(ref) == []
     assert _gate(ensure_closure_trailer("Batch body.", ref), ref) == 0
-
-
-def test_hook_reads_the_short_head_flag(monkeypatch):
-    # `-H` is gh's short --head. The same one-spelling gap the -F fix closed.
-    assert _hook_decision(
-        'gh pr create -H chore/tidy-docs --body "$BODY"',
-        "feature/x-49ec", monkeypatch=monkeypatch,
-    ) is None
-    reason = _hook_decision(
-        'gh pr create -H feature/x-1111 --body "$BODY"',
-        "chore/tidy-docs", monkeypatch=monkeypatch,
-    )
-    assert reason is not None and "Backlog-Closure: x-1111" in reason
 
 
 def test_hook_docstrings_do_not_claim_creation_is_ungated():
@@ -435,6 +361,81 @@ def test_hook_ignores_a_hatch_that_is_not_an_assignment_prefix(command, node_bra
     # its own fix.
     payload = _hook_main(command, node_branch_repo)
     assert payload["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A --body that merely QUOTES the words "--head <ref>" retargeted the
+        # gate at a ref this PR does not ship.
+        'gh pr create --body "see --head chore/tidy-docs for context"',
+        # A --body naming a --body-file path in prose satisfied the file read.
+        'gh pr create --body "pass --body-file .fno/pr-body.md next time"',
+    ],
+)
+def test_hook_ignores_flags_quoted_inside_an_argument(command, node_branch_repo):
+    # Same defect as the hatch, on the two neighbouring flags. Fixing one of
+    # three instances is the decorative guard this whole node exists to close:
+    # a reader sees a position check on the hatch and assumes its neighbours
+    # got the same treatment. shlex collapses a quoted argument into ONE token,
+    # so argv position is what separates a flag from a word.
+    payload = _hook_main(command, node_branch_repo)
+    assert payload["permissionDecision"] == "deny"
+
+
+# --head and --body-file are POSITION-read from the segment's argv, so every
+# case for them runs through main() with a real segment list.
+
+def test_hook_judges_the_explicit_head_ref_not_the_checkout(node_branch_repo):
+    # The PR closes what its HEAD ref names, which is what the CI gate reads.
+    payload = _hook_main(
+        'gh pr create --head chore/tidy-docs --body "$BODY"', node_branch_repo
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_reads_the_short_head_flag(node_branch_repo):
+    # `-H` is gh's short --head, the same one-spelling gap the -F fix closed.
+    payload = _hook_main(
+        'gh pr create -H chore/tidy-docs --body "$BODY"', node_branch_repo
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_still_denies_a_node_bearing_explicit_head(node_branch_repo):
+    payload = _hook_main(
+        'gh pr create --head feature/x-1111 --body "$BODY"', node_branch_repo
+    )
+    assert payload["permissionDecision"] == "deny"
+    assert "Backlog-Closure: x-1111" in payload["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("flag", ["--body-file", "-F"])
+def test_hook_reads_a_body_file_under_either_spelling(flag, node_branch_repo, tmp_path):
+    body = tmp_path / "pr-body.md"
+    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
+    payload = _hook_main(f"gh pr create --title t {flag} {body}", node_branch_repo)
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_denies_a_body_file_missing_the_claim(node_branch_repo, tmp_path):
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary.\n\nBacklog-Closure: x-1111\n")
+    payload = _hook_main(f"gh pr create --title t --body-file {body}", node_branch_repo)
+    assert payload["permissionDecision"] == "deny"
+    assert "Backlog-Closure: x-49ec" in payload["permissionDecisionReason"]
+
+
+def test_hook_allows_a_body_file_the_same_command_is_about_to_write(node_branch_repo, tmp_path):
+    # A PreToolUse hook runs BEFORE the command, so the documented spelling
+    # names a path that does not exist yet. Denying it is the false DENY the
+    # docstring rules out.
+    target = tmp_path / "not-yet.md"
+    payload = _hook_main(
+        f"printf '%s' \"$B\" > {target}\ngh pr create --title t --body-file {target}",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
 
 
 def test_hook_denies_the_full_pretooluse_payload(node_branch_repo):
