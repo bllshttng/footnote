@@ -376,3 +376,61 @@ def test_resume_lane_reads_the_published_value_rather_than_recomputing(
     assert published_worker_writable_dirs() == [str(fake_state)]
     published = git_writable_config_args(tmp_path)
     assert str(fake_state) in "".join(published)
+
+
+def test_python_and_rust_agree_on_tier3_token_ORDER_not_just_content(
+    one_grant: str,
+) -> None:
+    """The Rust HarnessFlags::push_onto emits the operator's --add-dir, then the
+    other three cells, THEN the computed set. Nothing caught a drift here: the
+    Rust test filters to --add-dir pairs, and the Python parity assertions pass
+    cwd=None so the computed half is empty on both sides."""
+    from fno.agents.harnesses.claude import _tier3_tokens
+
+    assert _tier3_tokens(
+        "/op", "rev", "Read", "Bash", computed_dirs=["/a", "/b"]
+    ) == [
+        "--add-dir", "/op",
+        "--agent", "rev",
+        "--allowedTools", "Read",
+        "--disallowedTools", "Bash",
+        "--add-dir", "/a",
+        "--add-dir", "/b",
+    ]
+
+
+@pytest.mark.parametrize("verb", ["spawn", "resume", "ask"])
+def test_every_worker_launching_verb_publishes_the_grant(
+    verb: str, fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Publishing only for `spawn` left the resume grant inert: its readers run
+    in a different process, where the variable was never set. `writable_roots` is
+    a whole-value override, so an unset variable there does not merely skip the
+    grant, it ships a roots list without the state root."""
+    import fno.agents.rust_runtime as rr
+    from fno.agents.writable_dirs import WORKER_ADD_DIRS_ENV
+
+    monkeypatch.delenv(WORKER_ADD_DIRS_ENV, raising=False)
+    assert verb in ("spawn",) + rr._WORKER_DIR_VERBS
+
+
+def test_seam_cwd_scan_reads_the_short_spelling_and_stops_at_the_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`-c` is cmd_spawn's own short form for --cwd, and a fenced provider token
+    is not fno's flag. A hand-rolled scan got both wrong."""
+    import fno.agents.rust_runtime as rr
+
+    seen: list[Path] = []
+    monkeypatch.setattr(
+        "fno.agents.writable_dirs.export_worker_writable_dirs",
+        lambda cwd, env: seen.append(cwd),
+    )
+
+    rr._export_worker_dirs_at_seam(["spawn", "-c", str(tmp_path), "x"])
+    assert seen[-1] == tmp_path
+
+    # A fenced provider `--cwd` is a seed token, never fno's flag.
+    seen.clear()
+    rr._export_worker_dirs_at_seam(["spawn", "w", "--", "codex", "--cwd", "/x"])
+    assert seen[-1] != Path("/x")

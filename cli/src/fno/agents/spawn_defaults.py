@@ -1029,19 +1029,41 @@ def inject_spawn_defaults(
     if profile is not None and verb is not None:
         # Scanned BEFORE lane selection: an all-capped refusal must know whether
         # the caller named the lane themselves, and that fact lives in the argv.
+        # -P/--provider counts: it names the VENDOR, which is the axis a cap is
+        # about, so a caller who typed it is not spending a capped lane's budget
+        # either. `_scan`'s provider slot only reads --harness/-H, and both this
+        # function's docstring and the shipped routing doc promise -P as well.
         _explicit_lane = bool(
-            _scan(out[1:])[0] or _flag_value(list(out[1:]), "--route") is not None
+            _scan(out[1:])[0]
+            or _flag_value(list(out[1:]), "--route") is not None
+            or _flag_value(list(out[1:]), "--provider", "-P") is not None
         )
         lane, lane_index = _select_profile_lane(
             profile, verb, agents, err, explicit_lane=_explicit_lane
         )
 
+    # A lane is a COMPLETE routing coordinate, so the two fields that select
+    # where a worker bills do not fall through to a lower rung when a lane was
+    # chosen. Per-field fallback let a `provider = "codex"` lane inherit
+    # `agents.profiles.<verb>.route = "zai/..."`, putting `--harness codex` and
+    # `--route zai/...` in one argv - which cli.py then refuses outright with
+    # "requires the claude harness". That is the exact migration the routing doc
+    # describes: an existing profile-level route plus newly added lanes. The
+    # other fields still fall through, because substrate/permission/account are
+    # postures a lane can legitimately leave to the profile.
+    _LANE_EXCLUSIVE = ("route", "model")
+
     def field(name: str) -> Tuple[str, Optional[str]]:
-        """Effective value + source rung: lane > profile > defaults."""
+        """Effective value + source rung: lane > profile > defaults.
+
+        ``route`` and ``model`` stop at the lane when one was selected; see
+        ``_LANE_EXCLUSIVE`` above."""
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
                 return lv, f"agents.profiles.{verb}.lanes[{lane_index}]"
+            if name in _LANE_EXCLUSIVE:
+                return "", None
         if profile is not None:
             pv = (getattr(profile, name, "") or "").strip()
             if pv:

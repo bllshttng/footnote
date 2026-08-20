@@ -1633,3 +1633,43 @@ def test_config_pane_group_skips_on_a_glued_short_placement_flag(monkeypatch):
     assert "--tab" not in out
     assert "pane group skipped" in err.getvalue()
     assert "-x" in err.getvalue()
+
+
+def test_capped_lane_escape_also_honours_the_vendor_flag(monkeypatch):
+    """A cap names a VENDOR, and -P names the vendor, so a caller who typed it is
+    not spending a capped lane's budget. Both this function's docstring and the
+    shipped routing doc promise -P alongside --harness."""
+    import fno.agents.spawn_defaults as spawn_defaults
+    import fno.agents.spawn_gate as spawn_gate
+
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(spawn_defaults, "_read_registry_rows", lambda: [])
+    monkeypatch.setattr(spawn_gate, "provider_live_count", lambda vendor: 2)
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "/fno:target x-1"],
+        err=err,
+        max_lanes={"zai": 2},
+        profiles={"target": {"lanes": [
+            {"provider": "claude", "route": "zai/glm-5.3[1m]"},
+        ]}},
+    )
+    assert "already names the lane" in err.getvalue()
+    assert out  # the spawn continues rather than exiting 2
+
+
+def test_a_selected_lane_does_not_inherit_a_route_it_never_named(monkeypatch):
+    """A lane is a COMPLETE routing coordinate. Per-field fallback let a codex
+    lane inherit the profile's zai route, producing `--harness codex --route
+    zai/...` in one argv, which cli.py refuses outright."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": {
+            "route": "zai/glm-5.3[1m]",
+            "lanes": [{"provider": "codex"}],
+        }},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert "--route" not in out

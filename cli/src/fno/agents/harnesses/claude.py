@@ -178,8 +178,14 @@ def _tier3_tokens(
     def _unreachable(flag: str) -> object:  # pragma: no cover - claude maps every cell
         raise AssertionError(f"claude has no {flag} mapping")
 
+    # Order matches the Rust HarnessFlags::push_onto exactly: the operator's
+    # own --add-dir, then --agent/--allowedTools/--disallowedTools, then the
+    # computed set last. The parity claim in this docstring is only true if the
+    # INTERLEAVING matches too, and nothing catches a drift here - the Rust test
+    # filters to --add-dir pairs and the Python parity assertions pass cwd=None,
+    # so the computed half is empty on both sides of every existing comparison.
     out: list[str] = add_dir_tokens(
-        "claude", add_dir, computed_dirs, unsupported=_unreachable
+        "claude", add_dir, (), unsupported=_unreachable
     )
     for flag, value in (
         ("--agent", agent),
@@ -188,6 +194,7 @@ def _tier3_tokens(
     ):
         if value:
             out += [flag, value]
+    out += add_dir_tokens("claude", None, computed_dirs, unsupported=_unreachable)
     return out
 
 
