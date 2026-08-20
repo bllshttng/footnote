@@ -94,6 +94,7 @@ notify
 observer
 outstanding ask
 outstanding clear
+outstanding reindex
 paths
 phase
 plan
