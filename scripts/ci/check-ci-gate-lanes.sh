@@ -38,11 +38,26 @@ note_fail() { echo "ci-gate-lanes: $*" >&2; FAIL=1; }
 #   a `paths:` filter entry names the file and runs nothing;
 #   "bash tests/ci/test_preflight.sh" is not an invocation of preflight.sh, so
 #   the path prefix must end in / or a quote, or be absent entirely.
+#
+# No pipeline here, deliberately. The first draft was
+#   grep -v '^[[:space:]]*#' "$file" | grep -Eq "$re"
+# and under `set -o pipefail` it reported 0, 0, 0, 2, 1 violations across five
+# identical runs: `grep -q` exits on the first match, the upstream grep takes
+# SIGPIPE, and pipefail promotes 141 to the status of the whole test. An
+# intermittently lying guard is worse than no guard, and this file exists to
+# make that class visible. One grep, then a plain loop.
 invokes() {
-    local file="$1" name="$2" esc
+    local file="$1" name="$2" esc matched ln trimmed
     [ -f "$file" ] || return 1
     esc="${name//./\\.}"
-    grep -v '^[[:space:]]*#' "$file" 2>/dev/null | grep -Eq "${LEAD}${RUN}${esc}"
+    matched=$(grep -E "${LEAD}${RUN}${esc}" "$file" 2>/dev/null) || return 1
+    [ -n "$matched" ] || return 1
+    while IFS= read -r ln; do
+        trimmed="${ln#"${ln%%[![:space:]]*}"}"
+        case "$trimmed" in '#'*|'//'*) continue ;; esac
+        return 0
+    done <<< "$matched"
+    return 1
 }
 
 self_test() {
