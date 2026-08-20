@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Commit-time salvage ref (x-f4e9, plan section 4).
+# Commit-time salvage ref (plan section 4).
 #
 # A provider-killed worker never reaches a stop gate, so commit time is the
 # only moment guaranteed to occur before the kill. This drives a real

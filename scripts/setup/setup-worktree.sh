@@ -1346,7 +1346,7 @@ link_dir ".codex"
 link_dir ".codex-plugin"
 link_dir ".gemini"
 
-# Salvage-ref post-commit hook (x-f4e9): makes every worktree's commits
+# Salvage-ref post-commit hook: makes every worktree's commits
 # gc-proof and enumerable at commit time, the one moment guaranteed to
 # occur before a worker is killed. Worktrees share one git-common-dir hooks
 # directory, so this installs (or, if a post-commit hook already exists and
@@ -1372,7 +1372,7 @@ if [[ -n "$_common_hooks_dir" ]]; then
   if [[ ! -e "$_post_commit" ]]; then
     {
       echo "#!/usr/bin/env bash"
-      echo "# Installed by scripts/setup/setup-worktree.sh (x-f4e9). Dispatches to the"
+      echo "# Installed by scripts/setup/setup-worktree.sh. Dispatches to the"
       echo "# COMMITTING worktree's own checked-out salvage-ref hook, never a fixed"
       echo "# worktree's copy - see hooks/worktree-salvage-ref.sh for the real logic."
       printf '%s\n' "$_salvage_dispatcher_body"
@@ -1384,7 +1384,7 @@ if [[ -n "$_common_hooks_dir" ]]; then
     # way, so `exec` here is exactly as safe as in the create path above.
     {
       echo ""
-      echo "# Appended by scripts/setup/setup-worktree.sh (x-f4e9)."
+      echo "# Appended by scripts/setup/setup-worktree.sh."
       printf '%s\n' "$_salvage_dispatcher_body"
     } >> "$_post_commit"
     echo "setup-worktree: appended salvage-ref call to existing post-commit hook at $_post_commit"

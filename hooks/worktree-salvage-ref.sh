@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # worktree-salvage-ref.sh - post-commit hook: make a commit gc-proof and
-# enumerable before anything can kill the worker that made it (x-f4e9).
+# enumerable before anything can kill the worker that made it.
 #
 # The founding case: a worker killed mid-run never reaches a stop gate, so
 # commit time is the only moment guaranteed to occur before a kill. The

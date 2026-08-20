@@ -609,7 +609,7 @@ def tick() -> None:
             except Exception as exc:  # noqa: BLE001 - never let the watchdog break pr-watch
                 log.warning("pr-watch: watchdog sweep failed: %s", exc)
 
-        # Stranded-worktree recovery (x-f4e9), same arming gate as the fleet
+        # Stranded-worktree recovery, same arming gate as the fleet
         # watchdog above: this is a second read of the same "is recovery
         # armed" decision, not a second dispatcher - config.recovery.watchdog
         # + recovery.enabled + autonomy.enabled all still gate whether

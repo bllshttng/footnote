@@ -61,7 +61,7 @@ def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
     A row only appended on a `branch refs/heads/` line drops every detached
     worktree from the output - three of the previously reported stranded
     rows were detached, so the surface structurally could not show the
-    cases that matter most (x-f4e9). Emit those too, with `branch: None`.
+    cases that matter most. Emit those too, with `branch: None`.
 
     A `bare` entry (the main admin directory of a bare-repo-as-worktree-
     container setup) carries neither a `branch` nor a `detached` line, so
