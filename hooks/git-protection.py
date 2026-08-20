@@ -1798,13 +1798,15 @@ def main():
         kind, pr = graphql_reads[0]
         if kind == "info":
             reason = (
-                f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability; "
-                "stop retrying `gh pr view --json` this quota window."
+                f"[fno GraphQL reserve] use `fno pr info {pr}` for state/head/mergeability. "
+                "This refusal is unconditional: the direct read is ROUTED, never "
+                "rationed, so waiting for a quota reset changes nothing."
             )
         elif kind == "list":
             reason = (
-                "[fno GraphQL reserve] use `fno pr list` for a REST-backed listing; "
-                "stop retrying `gh pr list` this quota window."
+                "[fno GraphQL reserve] use `fno pr list` for a REST-backed listing. "
+                "This refusal is unconditional: the direct read is ROUTED, never "
+                "rationed, so waiting for a quota reset changes nothing."
             )
         elif kind == "status":
             reason = (
@@ -1814,8 +1816,8 @@ def main():
         else:
             reason = (
                 "[fno GraphQL reserve] direct `gh api graphql` is discretionary; route it "
-                "through `fno pr graphql-exec --purpose discretionary -- ...` and stop "
-                "retrying until the quota reset."
+                "through `fno pr graphql-exec --purpose discretionary -- ...`. This "
+                "refusal is unconditional, so waiting for a quota reset changes nothing."
             )
         _emit("deny", reason)
         sys.exit(0)
