@@ -32,6 +32,7 @@ check-import-paths.sh	ci	.github/workflows/cli-ci.yml
 check-mail-inject-callers.sh	ci	.github/workflows/guards.yml	
 check-markdown-style.sh	ci	.github/workflows/guards.yml	
 check-merge-coverage-audit.sh	ci	.github/workflows/merge-coverage-audit.yml	
+check-no-direct-graphql-pr-read.sh	local	cli/src/fno/test_cmd.py	
 check-no-hardcoded-paths.sh	local	cli/src/fno/test_cmd.py	
 check-no-internal-refs.sh	ci	.github/workflows/internal-refs.yml	
 check-no-session-urls.sh	ci	.github/workflows/guards.yml	

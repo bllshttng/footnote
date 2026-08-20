@@ -6,7 +6,12 @@ import re
 import subprocess
 from pathlib import Path
 
-ROOTS = ("cli/src", "crates/fno-agents/src", "hooks", "skills", "scripts")
+# The whole crates tree, not just fno-agents: a raw poller written in the mux
+# crate was invisible to this instrument, and a guard that covers some of the
+# reachable paths reads as protection while the rest stay open. Files outside
+# the two named adapters fall through _disposition to "unclassified", which is
+# the fail-closed answer.
+ROOTS = ("cli/src", "crates", "hooks", "skills", "scripts")
 SKIP_PARTS = {"tests", "target", ".git"}
 SKIP_NAMES = {
     "check-no-direct-graphql-pr-read.sh",

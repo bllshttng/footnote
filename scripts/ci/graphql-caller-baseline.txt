@@ -1,0 +1,21 @@
+# scripts/ci/graphql-caller-baseline.txt
+#
+# Per-disposition ceiling for check-no-direct-graphql-pr-read.sh. One row:
+# <disposition> <max callers>. Measured 2026-08-20.
+#
+# Read as a ceiling, never equality. Removing a caller passes. Adding one
+# raises a count and goes red, which is the case worth a human read: the two
+# blanket-allow buckets (fno-process-proxy for cli/src, worker-proxy-or-hook
+# for skills/) accept anything by path, so a count is the only tripwire on a
+# new raw caller landing there.
+#
+# The `documentation` disposition is deliberately absent. A comment naming
+# `gh pr view` is not a caller, and counting prose made every reword red.
+#
+# Raising a number is a deliberate act: say in the PR body why the new caller
+# is routed rather than raw.
+fno-process-proxy 110
+fixed-purpose-adapter 19
+worker-proxy-or-hook 11
+operator-guard-definition 7
+quota-soak-broker 1
