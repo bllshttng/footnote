@@ -14,6 +14,11 @@ from fno.paths import github_cli_proxy_dir
 PROXY_EXEC_LINE = 'exec fno-gh-proxy "$@"'
 _WRAPPER = f"#!/bin/sh\n{PROXY_EXEC_LINE}\n"
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
+# The proxy stamps this into the env it hands `os.execve`, so its own successor
+# can recognize itself. It is good for that one hop only. Anything else building
+# a gh environment drops it, or a descendant inherits a marker it never earned
+# and the proxy refuses a first-and-only entry.
+PROXY_DEPTH_ENV = "FNO_GH_PROXY_DEPTH"
 _WHICH = shutil.which
 
 
@@ -88,6 +93,7 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
         if delegate.is_file() and _is_wrapper(delegate):
             env[_PROXY_DIR_ENV] = str(delegate.parent.resolve())
             env.pop("FNO_REAL_GH", None)
+            env.pop(PROXY_DEPTH_ENV, None)
             return env
     except OSError:
         pass
@@ -104,4 +110,5 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     env["PATH"] = str(result.proxy.parent) + (os.pathsep + old_path if old_path else "")
     env[_PROXY_DIR_ENV] = str(result.proxy.parent.resolve())
     env.pop("FNO_REAL_GH", None)
+    env.pop(PROXY_DEPTH_ENV, None)
     return env

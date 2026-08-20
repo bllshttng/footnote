@@ -10,7 +10,7 @@ from typing import Callable, Optional, Sequence
 
 from fno.paths import github_cli_proxy_dir, graphql_quota_lock
 from fno.pr._proc import Result, run
-from fno.setup.github_cli import PROXY_EXEC_LINE
+from fno.setup.github_cli import PROXY_DEPTH_ENV, PROXY_EXEC_LINE
 
 GRAPHQL_RESERVE = 200
 REFUSED = 75
@@ -93,6 +93,10 @@ def delegate_environment() -> dict[str, str]:
     )
     env.pop("FNO_REAL_GH", None)
     env.pop(_PROXY_DIR_ENV, None)
+    # `delegate` re-stamps this immediately for its own execve. Every other
+    # caller runs the real gh directly, and its descendants must not inherit a
+    # marker that makes a later first entry look like a loop.
+    env.pop(PROXY_DEPTH_ENV, None)
     return env
 
 

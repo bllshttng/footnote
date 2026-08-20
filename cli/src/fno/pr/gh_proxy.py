@@ -12,7 +12,7 @@ from fno.pr import _quota
 # pid never moves. Nothing outside this program can see the repeat. A marker in
 # the environment we hand to execve is the only way the successor can know it is
 # us again.
-_REENTRY_ENV = "FNO_GH_PROXY_DEPTH"
+_REENTRY_ENV = _quota.PROXY_DEPTH_ENV
 
 
 class Action(str, Enum):

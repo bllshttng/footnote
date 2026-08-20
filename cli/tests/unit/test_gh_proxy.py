@@ -273,3 +273,24 @@ def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, c
     with pytest.raises(SystemExit, match="2"):
         gh_proxy.main()
     assert "cannot identify its own install directory" in capsys.readouterr().err
+
+
+def test_worker_environment_drops_an_inherited_reentry_marker(monkeypatch, tmp_path):
+    # A delegated gh runs git, a git hook runs fno, and fno builds a worker env
+    # from os.environ. The marker rides along and the worker's first, only gh
+    # call would refuse. Same reason FNO_REAL_GH is dropped one line above.
+    real = tmp_path / "real"
+    real.mkdir()
+    gh = real / "gh"
+    gh.write_text("#!/bin/sh\necho real\n")
+    gh.chmod(0o755)
+    env = worker_environment(
+        {"PATH": str(real), "FNO_GH_PROXY_DEPTH": "1", "FNO_GH_PROXY_DIR": str(tmp_path / "proxy")}
+    )
+    assert "FNO_GH_PROXY_DEPTH" not in env
+
+
+def test_delegate_environment_drops_the_marker_before_running_the_real_gh(monkeypatch):
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert "FNO_GH_PROXY_DEPTH" not in gh_proxy._quota.delegate_environment()
