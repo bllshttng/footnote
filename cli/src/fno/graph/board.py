@@ -78,9 +78,18 @@ def _age_from_iso(value: object, now: datetime) -> str:
 
 
 def _age_from_epoch(ts: object, now: datetime) -> str:
-    try:
-        ts_f = float(ts)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    # The SAME guard the cache applies to the SAME row. This path reads a
+    # pr-status row through `newest_row_offline`, and a bare `float()` here
+    # crashed on the `Infinity` / `NaN` that `json.loads` accepts by default:
+    # `inf` raised OverflowError and `nan` raised ValueError from the `int()`
+    # inside `_format_age`, which sits outside the try that used to be here.
+    # One guard, every reader of the row - not one guard and a docstring.
+    from fno.pr._cache import finite_or_zero
+
+    if ts is None:
+        return "unknown age"
+    ts_f = finite_or_zero(ts)
+    if not ts_f:
         return "unknown age"
     return _format_age(now.timestamp() - ts_f)
 

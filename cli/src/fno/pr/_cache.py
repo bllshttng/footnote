@@ -110,26 +110,38 @@ def _write_row_locked(p: Path, row: dict) -> None:
     os.replace(tmp, p)
 
 
-def _num(row: dict, key: str) -> float:
-    """A numeric row field, 0.0 when absent, unparseable, or NOT FINITE.
+def finite_or_zero(value: object) -> float:
+    """`value` as a finite float, 0.0 when absent, unparseable or not finite.
 
-    A row written by a different schema (a concurrent fno install polling the
-    same PR) must read as a miss, never crash a caller - the same discipline
-    `_serve` already applies to a corrupt exit code. Every numeric read of a
-    row goes through here so no one path keeps the raw `float()`.
+    Public because a cache row is read on more than one path and the guard has
+    to travel with it. `fno.graph.board` reads the same row's `ts` through
+    `newest_row_offline`, and while this lived as a private row-keyed helper
+    that path kept a bare `float()` and crashed on the same values - a guard
+    on one of two reachable paths, under a docstring claiming it covered both.
 
-    The finite check is not belt-and-braces. `json.loads` accepts a bare
-    `NaN` / `Infinity` by default, so a row carrying `"ts": Infinity` parsed
-    cleanly, survived `float()`, and then raised `OverflowError` out of
-    `time.gmtime` - the crash this helper's own docstring promised to stop,
-    on the one path it claimed to cover. A guard that still raises where its
-    stated invariant reaches is decorative.
+    `json.loads` accepts a bare `NaN` / `Infinity` by default, so a row
+    carrying `"ts": Infinity` parses cleanly and survives `float()`.
     """
     try:
-        v = float(row.get(key) or 0)
+        v = float(value or 0)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.0
     return v if math.isfinite(v) else 0.0
+
+
+def _num(row: dict, key: str) -> float:
+    """A numeric field of a cache ROW, guarded by `finite_or_zero`.
+
+    A row written by a different schema (a concurrent fno install polling the
+    same PR) must read as a miss, never crash a caller - the same discipline
+    `_serve` already applies to a corrupt exit code.
+
+    Finite is necessary and NOT sufficient, which is why callers that hand the
+    result to `time` still guard the conversion. `1e18` is perfectly finite
+    and still raises out of `time.gmtime`, so a value passing here can fail
+    one caller and satisfy another.
+    """
+    return finite_or_zero(row.get(key))
 
 
 def _serve(row: dict, *, stale: bool) -> int:
@@ -181,9 +193,18 @@ def _serve(row: dict, *, stale: bool) -> int:
         code = 3
     out["cached"] = True
     ts = _num(row, "ts")
-    out["cached_at"] = (
-        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
-    )
+    # A finite `ts` can still be outside the platform's time_t range: 1e18
+    # raises OSError and 1e300 raises OverflowError out of `gmtime`. Finite is
+    # what the row guard can promise, and it is not what `time` requires, so
+    # the conversion is guarded where it happens rather than by widening
+    # `finite_or_zero` into a timestamp validator it is not.
+    try:
+        out["cached_at"] = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
+        )
+    except (OSError, OverflowError, ValueError):
+        out["cached_at"] = None
+        ts = 0.0
     out["cached_age_seconds"] = int(max(0.0, time.time() - ts)) if ts else None
     sys.stdout.write(json.dumps(out) + "\n")
     # A degraded-coverage note must survive the coalescing this module exists

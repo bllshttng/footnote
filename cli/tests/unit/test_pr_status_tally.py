@@ -240,3 +240,13 @@ def test_a_status_red_beside_an_unattributable_red_keeps_the_ci_name():
     blockers = _blockers(rollup)
     assert "commit_status_red" not in blockers, blockers
     assert "ci_red" in blockers
+
+
+def test_an_extra_positional_is_refused_never_dropped():
+    """`main(["42","43"])` answered for 42 and discarded 43 in silence.
+
+    Same shape as the unknown flag one line above it in the parser: a caller
+    asked something the parser did not answer, and got no signal back.
+    """
+    assert _status.main(["42", "43"]) == 2
+    assert _status.main([]) == 2

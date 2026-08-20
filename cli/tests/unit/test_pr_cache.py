@@ -600,3 +600,36 @@ def test_a_window_expiring_during_the_read_still_holds_the_refresh(
     after = json.loads(p.read_text())
     assert after["fail_count"] == 1, "a refused refresh must not escalate"
     assert after["backoff_until"] <= row["backoff_until"], "nor extend the window"
+
+
+def test_an_out_of_range_finite_ts_reads_as_a_miss_not_a_crash(cache_env, monkeypatch, capsys):
+    """Finite is what the row guard promises. It is not what `time` requires.
+
+    1e18 raises OSError and 1e300 raises OverflowError out of `time.gmtime`,
+    so the non-finite fix closed one number and left the next one open. Same
+    crash, one guard narrower.
+    """
+    assert _cache.finite_or_zero(1e18) == 1e18, "finite stays finite"
+    for ts in (1e18, 1e300):
+        row = {"ts": ts, "exit": 0, "output": {"verdict": "green", "head": "a"}}
+        code = _cache._serve(row, stale=False)
+        assert code == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["cached_at"] is None, "an unconvertible stamp reads as absent"
+        assert out["cached_age_seconds"] is None
+
+
+def test_the_row_guard_is_shared_with_every_reader_of_the_row():
+    """`fno.graph.board` reads the SAME row and used to keep a bare float().
+
+    A guard on one of two reachable paths, under a docstring claiming it
+    covered both. The claim is now true because the guard is shared, not
+    because the docstring was reworded.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph import board
+
+    now = datetime.now(timezone.utc)
+    for bad in (float("inf"), float("nan")):
+        assert board._age_from_epoch(bad, now) == "unknown age"

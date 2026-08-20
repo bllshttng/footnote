@@ -643,7 +643,12 @@ def main(argv: Sequence[str]) -> int:
     # would hand back the very row they were trying to bypass. The split is on
     # ONE leading dash, not two: with `--` alone, `-x` fell into neither set
     # and was read as the PR number, which is the silent drop this refuses.
-    if not args or not flags <= known:
+    # An EXTRA POSITIONAL is refused for the same reason an unknown flag is.
+    # `main(["42", "43"])` answered for 42 and dropped 43 silently, which is
+    # the same shape one line up: a caller asked something the parser did not
+    # answer and got no signal. Typer rejects it today, and `main` is the
+    # module entry that the next caller inherits.
+    if len(args) != 1 or not flags <= known:
         import sys
 
         sys.stderr.write("usage: fno pr status <pr-number> [--refresh|--no-cache]\n")
