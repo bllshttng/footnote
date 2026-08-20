@@ -345,7 +345,7 @@ Append feature-level metrics to `.fno/ledger.json`. Per-wave cost estimates use 
 
 The full pre-promise sequence is mandatory and must run in order: calculate session cost → handoff artifact → completion summary → task registry update → plan stamp → plan graduate → cross-project ship recap → promise output. See [references/pre-promise.md](references/pre-promise.md).
 
-**Record any decision this run made that a later session would ask about.** `fno decide --subject <node|pr-N|area> --decision "<what>" --rationale "<why>"`, one call per decision; `fno decide list --subject <same>` reads it back. A ruling you took in the ship phase (what to defer, which of two designs won, why a finding was waived) lives only in this transcript, and the next session gets a compacted copy or none. Full contract: `docs/architecture/decision-record.md` in the repo root.
+**Record any decision this run made that a later session would ask about.** `fno backlog decide <node|pr-N|area> "<what>" --rationale "<why>"`, one call per decision; `fno backlog decisions <same>` reads it back. A ruling you took in the ship phase (what to defer, which of two designs won, why a finding was waived) lives only in this transcript, and the next session gets a compacted copy or none. Full contract: `docs/architecture/decision-record.md` in the repo root.
 
 The cross-project completion-gate variant (all projects must have status COMPLETE + pr_url + pr_number) and the post-promise behavior contract (STOP IMMEDIATELY, no AskUserQuestion, ignore late notifications) are in the same reference.
 

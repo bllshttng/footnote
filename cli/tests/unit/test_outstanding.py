@@ -705,7 +705,7 @@ def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
 def test_clear_with_answer_projects_the_decision_onto_the_node(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The clear-path decision has both halves a `fno decide` record has:
+    """The clear-path decision has both halves a `fno backlog decide` record has:
     findable by subject through the graph projection, not merely greppable
     in the journal."""
     graph = root / "graph.json"

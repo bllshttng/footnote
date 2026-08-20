@@ -5,19 +5,21 @@ A ruling stated in chat dies with the context. The operator then asks, weeks lat
 ## The verb
 
 ```bash
-fno decide --subject pr-1234 --decision "recall moves to a machine-wide index" \
+fno backlog decide pr-1234 "recall moves to a machine-wide index" \
   --rationale "the global journal rotates and a union read is 793 MB" \
   --option "global journal" --option "machine-wide index"
 
-fno decide list --subject pr-1234  # newest first, superseded rows marked
-fno decide list --lane law         # only operator-entitled rulings
-fno decide list                    # the recent decisions across every subject
-fno decide reindex                 # backfill records written before the index
+fno backlog decisions pr-1234  # newest first, superseded rows marked
+fno backlog decisions --lane law         # only operator-entitled rulings
+fno backlog decisions                    # the recent decisions across every subject
+fno backlog decide-reindex                 # backfill records written before the index
 ```
+
+The old `fno decide` spelling remains as a one-release compatibility shim. It prints the new `fno backlog` spelling to stderr and is removed next release.
 
 ## Two producers, both explicit
 
-`fno decide` records a ruling that has no question on file. `fno inbox outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
+`fno backlog decide` records a ruling that has no question on file. `fno outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
 
@@ -27,7 +29,7 @@ Every read derives an authority lane in the engine. `operator` authority is `law
 
 `--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
 
-The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno decide reindex` reject them, which drops recall for real rulings.
+The closed set is NOT in `schema.yaml`. The index already holds those invented spellings. A schema enum makes `fno backlog decide-reindex` reject them, which drops recall for real rulings.
 
 ## Which field a reader can trust
 
@@ -47,11 +49,11 @@ Three caller states decide which of those get written, and the third fails close
 
 Law is never DEFAULTED, in any state. A caller who wants the operator lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
 
-State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno decide --authority operator` was enough to forge an attested row in the law lane.
+State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno backlog decide --authority operator` was enough to forge an attested row in the law lane.
 
 Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging law THROUGH THIS VERB now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident.
 
-That claim is scoped to the verb on purpose. The index is an append-only file that nothing authenticates. One raw line written into `~/.fno/decisions.jsonl` reads as law, and `fno decide reindex` re-emits a forged journal row verbatim. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
+That claim is scoped to the verb on purpose. The index is an append-only file that nothing authenticates. One raw line written into `~/.fno/decisions.jsonl` reads as law, and `fno backlog decide-reindex` re-emits a forged journal row verbatim. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
 
 On 2026-08-19 an agent passed `--decided-by "J.N. Choi"`, and that name landed in `decided_by`. Five workers had been told to verify their orders by reading that field. Each did it correctly and got a fabricated yes.
 
@@ -59,7 +61,7 @@ The split closes that without deleting the honest case. An agent relaying a real
 
 ## Looking one up
 
-A decision id is a lookup key. `fno decide list --subject d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
+A decision id is a lookup key. `fno backlog decisions d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
 
 Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
 
@@ -79,9 +81,9 @@ There is no new recording gate, and none is needed. `crates/fno-agents/src/loopc
 | Decision index | Recall. The reader's only source | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
 
-One `fno decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
+One `fno backlog decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
 
-It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno decide reindex` as the recovery.
+It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno backlog decide-reindex` as the recovery.
 
 A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
 
@@ -108,7 +110,7 @@ Both sides expand, not just the query. A subject that names a node answers to ev
 
 A subject that names no node matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
 
-A decision with no subject at all is reachable only through `fno decide list` with no `--subject`. When the question names no node, that is what `fno inbox outstanding clear --answer` writes.
+A decision with no subject at all is reachable only through `fno backlog decisions` with no `--subject`. When the question names no node, that is what `fno outstanding clear --answer` writes.
 
 ## Supersession
 
@@ -118,7 +120,7 @@ The graph projection stamps that mark at write time under the lock. The index is
 
 ## Backfill
 
-`fno decide reindex` makes the index a superset of what already exists. It folds the journals first, then every `decisions` array on the machine-wide graph, and appends anything whose `decision_id` the index does not already hold.
+`fno backlog decide-reindex` makes the index a superset of what already exists. It folds the journals first, then every `decisions` array on the machine-wide graph, and appends anything whose `decision_id` the index does not already hold.
 
 Journals win a tie because a journal holds the event as written. A projection row is derived and can be lossier: the oldest one on this machine dropped `subject`, the one field a recall query reads. A projection row with no subject falls back to the node it sits on.
 

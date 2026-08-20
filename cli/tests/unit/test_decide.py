@@ -22,6 +22,123 @@ from fno.decide.cli import decide_app
 runner = CliRunner()
 
 
+def test_backlog_decide_records_with_positional_subject_and_decision(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.graph.cli import cli as backlog_app
+
+    result = runner.invoke(
+        backlog_app,
+        [
+            "decide",
+            "x-7d94",
+            "move the decision record under backlog",
+            "--rationale",
+            "subjects are nodes or PRs",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    decision_id = result.stdout.strip().splitlines()[-1]
+    assert decision_id.startswith("d-")
+
+
+def test_backlog_decisions_reads_a_positional_subject_and_filters_lane(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.graph.cli import cli as backlog_app
+
+    written = runner.invoke(
+        backlog_app,
+        ["decide", "x-7d94", "coordinate the migration", "--authority", "crown"],
+    )
+    assert written.exit_code == 0, written.output
+
+    listed = runner.invoke(
+        backlog_app, ["decisions", "x-7d94", "--lane", "coord", "--json"]
+    )
+    assert listed.exit_code == 0, listed.output
+    payload = json.loads(listed.stdout)
+    assert payload["decisions"][0]["lane"] == "coord"
+
+
+def test_old_decide_spelling_warns_and_preserves_stdout(
+    root: Path, tmp_graph: Path, index: Path
+):
+    result = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "compatibility ruling"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "fno decide is now `fno backlog decide`" in result.output
+    assert result.stdout.strip().splitlines()[-1].startswith("d-")
+
+
+def test_old_decide_json_shim_keeps_stdout_machine_readable(
+    root: Path, tmp_graph: Path, index: Path
+):
+    written = runner.invoke(
+        decide_app,
+        ["--subject", "x-7d94", "--decision", "json compatibility ruling"],
+    )
+    assert written.exit_code == 0, written.output
+
+    result = runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["decisions"][0]["decision"] == (
+        "json compatibility ruling"
+    )
+    assert "fno decide is now" in result.stderr
+
+
+def test_backlog_decide_keeps_subject_and_decision_flag_aliases(
+    root: Path, tmp_graph: Path, index: Path
+):
+    from fno.graph.cli import cli as backlog_app
+
+    result = runner.invoke(
+        backlog_app,
+        [
+            "decide",
+            "--subject",
+            "x-7d94",
+            "--decision",
+            "flag alias ruling",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip().splitlines()[-1].startswith("d-")
+    assert "deprecated" in result.output
+
+
+def test_both_decision_surfaces_preserve_engine_authority_refusal(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fno import decide as decide_engine
+    from fno.graph.cli import cli as backlog_app
+
+    def refuse(**_kwargs):
+        raise decide_engine.RefusedAuthorityError("agent-test")
+
+    monkeypatch.setattr(decide_engine, "record_decision", refuse)
+
+    new_surface = runner.invoke(backlog_app, ["decide", "x-7d94", "new ruling"])
+    old_surface = runner.invoke(
+        decide_app, ["--subject", "x-7d94", "--decision", "old ruling"]
+    )
+
+    assert new_surface.exit_code == 3, new_surface.output
+    assert old_surface.exit_code == 3, old_surface.output
+    assert "agent-test" in new_surface.output
+    assert "agent-test" in old_surface.output
+
+
 def _node(nid: str, **over) -> dict:
     base = {
         "id": nid,
@@ -32,6 +149,12 @@ def _node(nid: str, **over) -> dict:
     }
     base.update(over)
     return base
+
+
+def test_top_level_decide_lazy_entry_points_to_the_shim():
+    from fno.cli import LAZY_SUBCOMMANDS
+
+    assert LAZY_SUBCOMMANDS["decide"][0] == "fno.decide.cli:shim_app"
 
 
 @pytest.fixture
@@ -640,7 +763,7 @@ def test_a_damaged_index_row_is_skipped_but_never_skipped_silently(
     err = capsys.readouterr().err
     assert [r["decision"] for r in rows] == ["merged"], "one bad row costs no others"
     assert "1 damaged row(s)" in err
-    assert "fno decide reindex" in err
+    assert "fno backlog decide-reindex" in err
 
 
 def test_reindex_drops_the_damaged_row_so_the_warning_can_clear(
@@ -699,7 +822,7 @@ def test_a_failed_index_write_names_reindex_and_never_a_retry(
     monkeypatch.setattr(events_mod, "append_event", boom)
     res = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     assert res.exit_code == 1
-    assert "fno decide reindex" in res.output
+    assert "fno backlog decide-reindex" in res.output
     assert "Do NOT re-run decide" in res.output
     assert "recorded d-" in res.output, "the id it already holds"
 
@@ -821,7 +944,7 @@ def test_the_second_producer_also_refuses_to_ask_for_a_retry(
     monkeypatch.setattr(events_mod, "append_event", boom)
     res = runner.invoke(outstanding_app, ["clear", qid, "--answer", "the dispatcher"])
     assert res.exit_code == 1
-    assert "fno decide reindex" in res.output
+    assert "fno backlog decide-reindex" in res.output
     assert "records the same ruling a second time" in res.output
 
 
@@ -1009,13 +1132,13 @@ def test_reindex_refuses_to_report_done_on_an_unreadable_graph(
 
     res = runner.invoke(decide_app, ["reindex"])
     assert res.exit_code == 1, res.output
-    assert "decide reindex: failed" in res.output
+    assert "backlog decide-reindex: failed" in res.output
 
 
 def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """`fno decide reindex` is what an IndexWriteError sends people to. One
+    """`fno backlog decide-reindex` is what an IndexWriteError sends people to. One
     legacy row the schema will never accept must not make it exit 1 forever."""
     import fno.events as events_mod
 
@@ -1335,7 +1458,7 @@ def test_a_torn_archive_also_stops_the_backfill(
 
     res = runner.invoke(decide_app, ["reindex"])
     assert res.exit_code == 1, res.output
-    assert "decide reindex: failed" in res.output
+    assert "backlog decide-reindex: failed" in res.output
 
 
 def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
@@ -1387,13 +1510,15 @@ def test_an_install_with_no_index_is_told_to_backfill(
     would be the absence-reads-as-success shape on this verb's own rollout."""
     assert not index.exists()
 
-    listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
-    assert listed.exit_code == 0, listed.output
-    assert "fno decide reindex" in listed.output
+    from fno.graph.cli import cli as backlog_app
 
-    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    after = runner.invoke(decide_app, ["list", "--subject", "x-nope"])
-    assert "fno decide reindex" not in after.output, "only while the index is missing"
+    listed = runner.invoke(backlog_app, ["decisions", "x-7d94"])
+    assert listed.exit_code == 0, listed.output
+    assert "fno backlog decide-reindex" in listed.output
+
+    runner.invoke(backlog_app, ["decide", "pr-923", "merged"])
+    after = runner.invoke(backlog_app, ["decisions", "x-nope"])
+    assert "fno backlog decide-reindex" not in after.output, "only while the index is missing"
 
 
 def test_operator_decision_retention_is_durable_by_an_explicit_key():
@@ -1661,7 +1786,7 @@ def test_an_unknown_decision_id_is_named_as_one_not_denied_as_a_ruling(
     res = runner.invoke(decide_app, ["list", "--subject", "d-deadbeef"])
     assert res.exit_code == 0, res.output
     assert "shaped like a decision id" in res.output
-    assert "fno decide list" in res.output
+    assert "fno backlog decisions" in res.output
 
 
 def test_a_near_miss_subject_names_what_it_nearly_matched(
