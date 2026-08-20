@@ -777,12 +777,19 @@ def test_widening_rescope_keeps_contained_subordinates_out_of_the_report(
     assert json.loads(result.stdout)["stranded_subordinates"] == []
 
 
-def test_in_place_crown_refuses_partial_crown_metadata(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    "half",
+    [
+        {"crown_level": 1},
+        {"crown_scope": "alpha"},
+    ],
+)
+def test_in_place_crown_refuses_half_a_crown(
+    tmp_path: Path, monkeypatch, half: dict
 ) -> None:
-    """A level with no scope is unstampable by crown_validation_error, so no
-    legal writer produces it; the re-scope must surface the corruption, not
-    silently overwrite it."""
+    """Level without scope or scope without level is unstampable by
+    crown_validation_error, so no legal writer produces either shape; the
+    re-scope must surface the corruption, not silently overwrite it."""
     from fno.agents.registry import load_registry
 
     _prepare_crown_cli(
@@ -793,17 +800,81 @@ def test_in_place_crown_refuses_partial_crown_metadata(
                 "worker",
                 harness_session_id="worker-session",
                 status="idle",
-                crown_level=1,
+                **half,
             )
         ],
     )
     before = [asdict(row) for row in load_registry()]
 
-    result = _invoke_crown("worker", "--scope", "alpha")
+    result = _invoke_crown("worker", "--scope", "beta")
 
     assert result.exit_code == 2
-    assert "partial crown metadata" in result.output
+    assert "half a crown" in result.output
     assert [asdict(row) for row in load_registry()] == before
+
+
+def test_unreadable_graph_reads_null_on_the_strand_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """None is the could-not-check answer and must never collapse to []: a
+    regression there would print verified-no-strands on machines whose graph
+    the scan cannot read."""
+    from fno.tracker import metadata
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="busy",
+                crown_level=1,
+                crown_scope="beta",
+                crown_grantor="human",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")),
+    )
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["stranded_subordinates"] is None
+
+
+def test_stale_epic_row_is_listed_conservatively(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live row crowned over an epic the graph no longer holds is listed
+    rather than nulled or dropped: containment for it is unknowable, and one
+    stale row must not silence the determinate answers for other rows."""
+    king = _entry(
+        "king",
+        harness_session_id="king-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    stale = _entry(
+        "stale",
+        harness_session_id="stale-session",
+        status="busy",
+        crown_level=2,
+        crown_scope="e-gone",
+        crown_grantor="king",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [king, stale])
+
+    result = _invoke_crown("king", "--scope", "beta")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["stranded_subordinates"] == ["stale"]
 
 
 def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
