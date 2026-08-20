@@ -1,12 +1,13 @@
 """Unit smoke tests for the fno wrappers introduced in the consolidation pass:
-fno tokens, fno codemap, fno worktree.
+fno codemap, fno worktree.
 
 These verify only the wiring (subcommand registers, --help renders, the
 canonical scripts get located, missing-script paths fail loudly). The heavy
-behavior (token-burn analysis, AST/PageRank traversal, lifecycle git ops)
-lives in the canonical scripts under scripts/diagnostics/ and scripts/lib/,
-and (for codemap) in the engine shipped beside fno.codemap_cli; each is
-exercised by its own callers.
+behavior (AST/PageRank traversal, lifecycle git ops) lives in the canonical
+scripts under scripts/diagnostics/ and scripts/lib/, and (for codemap) in
+the engine shipped beside fno.codemap_cli; each is exercised by its own
+callers. The former `fno tokens` wrapper was deleted by the verb audit;
+`fno whoami context` / `fno whoami cost` cover the diagnosis.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ def _run_fno(*args: str, extra_env: dict[str, str] | None = None) -> subprocess.
 
 
 def test_fno_top_level_lists_demoted_verbs() -> None:
-    """`fno help --all` exposes tokens, codemap, worktree.
+    """`fno help --all` exposes codemap, worktree.
 
     x-71b6 In-N-Out tiering hides these from the curated `fno --help`; the
     full-surface door lists them (they remain invocable either way).
@@ -41,14 +42,8 @@ def test_fno_top_level_lists_demoted_verbs() -> None:
     result = _run_fno("help", "--all")
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout + result.stderr
-    for verb in ("tokens", "codemap", "worktree"):
+    for verb in ("codemap", "worktree"):
         assert verb in out, f"fno help --all missing '{verb}': {out[-1000:]}"
-
-
-def test_fno_tokens_help_renders() -> None:
-    result = _run_fno("tokens", "--help")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "session" in result.stdout.lower() or "token" in result.stdout.lower()
 
 
 def test_fno_codemap_help_renders() -> None:
@@ -68,7 +63,6 @@ def test_fno_worktree_help_renders_subcommands() -> None:
 
 def test_canonical_scripts_exist_at_expected_paths() -> None:
     """The wrappers shell out to these paths; missing files would 404 at runtime."""
-    assert (REPO_ROOT / "scripts" / "diagnostics" / "token-diagnose.py").is_file()
     assert (REPO_ROOT / "scripts" / "lib" / "worktree-lifecycle.sh").is_file()
 
 

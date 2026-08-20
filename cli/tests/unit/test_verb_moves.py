@@ -1,0 +1,272 @@
+"""Tests for the VERB_MOVES forwarding shim and the four deletes beside it.
+
+A move is not a break: the old spelling stays registered for one release,
+forwards in-process once the destination root exists, and prints one stderr
+line naming the new spelling. Until the destination is minted the OLD
+registration serves the call, announced rather than silent - except a hot
+leaf in ``silent_leaves``, which stays quiet forever. The four deleted verbs
+(executor, posture, tokens, upgrade) are tombstones, not moves: the
+capability is gone, so the refusal names where it went instead of forwarding.
+
+The synthetic-app tests pin the forwarding mechanism end to end through the
+real ``LazyTypeGroup.resolve_command``; the real-app tests pin the wiring on
+the actual registry (destinations for ``outstanding`` and ``pr`` mint in
+later waves, so on this table the old registrations serve, announced).
+"""
+from __future__ import annotations
+
+import re
+
+import click
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from fno._lazy_group import make_lazy_group_cls
+from fno.verb_moves import VERB_MOVES, deprecation_line, move_for
+
+runner = CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# deprecation_line: the policy, pure
+# ---------------------------------------------------------------------------
+
+
+def test_deprecated_entry_announces_the_bare_destination():
+    move = VERB_MOVES["outstanding"]
+    assert (
+        deprecation_line("outstanding", [], move)
+        == "fno outstanding is now fno inbox outstanding"
+    )
+    # Arguments of an entry without silent_leaves are values, not subcommands
+    # to teach, so the line stays bare rather than echoing them.
+    assert (
+        deprecation_line("outstanding", ["list"], move)
+        == "fno outstanding is now fno inbox outstanding"
+    )
+
+
+def test_silent_leaf_prints_nothing():
+    move = VERB_MOVES["pr"]
+    for leaf in ("status", "merge", "rebase"):
+        assert deprecation_line("pr", [leaf, "993"], move) is None
+
+
+def test_cold_leaf_announces_the_leaf_qualified_destination():
+    move = VERB_MOVES["pr"]
+    assert (
+        deprecation_line("pr", ["create"], move)
+        == "fno pr create is now fno do pr create"
+    )
+
+
+def test_flag_first_argument_announces_the_bare_destination():
+    # `fno pr --help` must announce (the shim was reached) without echoing a
+    # flag into the teaching line.
+    move = VERB_MOVES["pr"]
+    assert deprecation_line("pr", ["--help"], move) == "fno pr is now fno do pr"
+
+
+def test_alias_kind_never_prints():
+    from fno.verb_moves import Move
+
+    move = Move(kind="alias", to="do pr")
+    assert deprecation_line("pr", [], move) is None
+    assert deprecation_line("pr", ["create"], move) is None
+
+
+# ---------------------------------------------------------------------------
+# The forwarding mechanism, through the real LazyTypeGroup dispatch
+# ---------------------------------------------------------------------------
+
+
+def _app_with_old_registration(with_dest: bool) -> typer.Typer:
+    """A scratch root app registering the moved spellings and (optionally)
+    their destinations, on the same lazy-group class the real CLI uses."""
+    app = typer.Typer(cls=make_lazy_group_cls({}))
+
+    @app.callback()
+    def _cb() -> None: ...
+
+    old = typer.Typer(help="old outstanding")
+
+    @old.command("list")
+    def _old_list() -> None:
+        typer.echo("OLD-PATH")
+
+    app.add_typer(old, name="outstanding", hidden=True)
+
+    if with_dest:
+        inbox = typer.Typer(help="inbox")
+        outstanding = typer.Typer(help="outstanding")
+
+        @outstanding.command("list")
+        def _inbox_outstanding_list() -> None:
+            typer.echo("NEW-PATH")
+
+        inbox.add_typer(outstanding, name="outstanding")
+        app.add_typer(inbox, name="inbox", hidden=True)
+    return app
+
+
+def test_missing_destination_serves_the_old_registration_announced():
+    app = _app_with_old_registration(with_dest=False)
+    result = runner.invoke(app, ["outstanding", "list"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "OLD-PATH\n"
+    err = result.stderr or ""
+    assert err.count("is now") == 1, f"expected exactly one announce line: {err!r}"
+    assert "fno inbox outstanding" in err
+
+
+def test_registered_destination_forwards_byte_identical():
+    app = _app_with_old_registration(with_dest=True)
+    direct = runner.invoke(app, ["inbox", "outstanding", "list"])
+    forwarded = runner.invoke(app, ["outstanding", "list"])
+    assert direct.exit_code == 0 and forwarded.exit_code == 0
+    # stdout of the old spelling is byte-identical to the new path: callers
+    # parse stdout, so the shim must not edit it.
+    assert forwarded.stdout == direct.stdout == "NEW-PATH\n"
+    err = forwarded.stderr or ""
+    assert err.count("is now") == 1
+    assert "fno inbox outstanding" in err
+    assert "is now" not in (direct.stderr or "")
+
+
+def test_hot_leaf_forwards_silently_through_the_destination():
+    app = typer.Typer(cls=make_lazy_group_cls({}))
+
+    @app.callback()
+    def _cb() -> None: ...
+
+    old_pr = typer.Typer(help="old pr")
+
+    @old_pr.command("merge")
+    def _old_merge(number: str) -> None:
+        typer.echo(f"OLD-MERGE {number}")
+
+    @old_pr.command("create")
+    def _old_create() -> None:
+        typer.echo("OLD-CREATE")
+
+    app.add_typer(old_pr, name="pr", hidden=True)
+
+    do = typer.Typer(help="do")
+    pr = typer.Typer(help="pr")
+
+    @pr.command("merge")
+    def _new_merge(number: str) -> None:
+        typer.echo(f"NEW-MERGE {number}")
+
+    @pr.command("create")
+    def _new_create() -> None:
+        typer.echo("NEW-CREATE")
+
+    do.add_typer(pr, name="pr")
+    app.add_typer(do, name="do", hidden=True)
+
+    merged = runner.invoke(app, ["pr", "merge", "993"])
+    assert merged.exit_code == 0, merged.output
+    assert merged.stdout == "NEW-MERGE 993\n"
+    assert "is now" not in (merged.stderr or "")
+
+    created = runner.invoke(app, ["pr", "create"])
+    assert created.exit_code == 0, created.output
+    assert created.stdout == "NEW-CREATE\n"
+    err = created.stderr or ""
+    assert "fno pr create is now fno do pr create" in err
+
+
+# ---------------------------------------------------------------------------
+# The wiring on the real registry
+# ---------------------------------------------------------------------------
+
+
+def test_real_outstanding_serves_announced_until_inbox_mints():
+    from fno.cli import app
+
+    result = runner.invoke(app, ["outstanding", "--help"])
+    assert result.exit_code == 0, result.output
+    err = result.stderr or ""
+    assert "fno outstanding is now fno inbox outstanding" in err
+    assert err.count("is now") == 1
+
+
+def test_real_pr_hot_leaf_help_stays_silent():
+    from fno.cli import app
+
+    result = runner.invoke(app, ["pr", "merge", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "is now" not in (result.stderr or "")
+
+
+def test_real_pr_cold_leaf_help_announces():
+    from fno.cli import app
+
+    # `verify` is a real cold leaf (not in silent_leaves); `check` is not a
+    # pr subcommand at all, which would prove the print but not the serving.
+    result = runner.invoke(app, ["pr", "verify", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "fno pr verify is now fno do pr verify" in (result.stderr or "")
+
+
+def test_every_moved_spelling_is_hidden():
+    import typer.main
+
+    from fno.cli import app
+
+    assert VERB_MOVES, "the table must be populated for this test to mean anything"
+    root = typer.main.get_command(app)
+    ctx = click.Context(root)
+    for name in VERB_MOVES:
+        cmd = root.get_command(ctx, name)
+        assert cmd is not None, f"moved spelling {name!r} must stay registered"
+        assert getattr(cmd, "hidden", False), (
+            f"moved spelling {name!r} must be hidden or menu-caps counts it as a root"
+        )
+
+
+def test_help_all_lists_moved_spellings_under_their_own_heading():
+    from fno.cli import app
+
+    result = runner.invoke(app, ["help", "--all"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Moved spellings" in out
+    assert "now fno inbox outstanding" in out
+    assert "now fno do pr" in out
+    commands_part = out.split("Moved spellings")[0]
+    for name in VERB_MOVES:
+        assert not re.search(rf"^  {re.escape(name)}\s", commands_part, re.MULTILINE), (
+            f"moved spelling {name!r} must not render among the roots"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The four deletes: tombstones that teach, not "No such command"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("verb", "needle"),
+    [
+        ("executor", "skills/do/scripts/resolve-executor.sh"),
+        ("posture", "`fno config set`"),
+        ("tokens", "`fno whoami context`"),
+        ("upgrade", "`fno update`"),
+    ],
+)
+def test_deleted_verb_refuses_naming_its_replacement(verb: str, needle: str):
+    from fno.cli import app
+
+    result = runner.invoke(app, [verb])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    assert f"`fno {verb}` was removed" in combined
+    assert needle in combined, f"{verb} tombstone must name {needle}: {combined!r}"
+
+
+def test_move_for_is_none_for_a_verb_that_still_exists():
+    assert move_for("backlog") is None
+    assert move_for("executor") is None, "a delete is a tombstone, never a move"

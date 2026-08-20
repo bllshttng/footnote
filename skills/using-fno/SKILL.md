@@ -34,7 +34,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
 | `fno pr merge\|verify\|rebase` | PR ops with canonical guards. |
 | `fno plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
-| `fno executor resolve` / `fno phase kill-check` | Executor chain / kill criteria. |
+| `fno phase kill-check` | Plan kill-criteria evaluation. |
 | `fno notify TITLE BODY` | OS notification. |
 | `fno state` | State files. Only legal post-init target-manifest write: first-fill of empty `plan_path` via `fno state set --field plan_path` (else exit 5). |
 | `fno-agents loop run --driver target` | The unified Rust loop; front door `scripts/run-target-loop.sh`. |

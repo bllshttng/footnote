@@ -154,11 +154,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Phase utilities (kill-check via the fno-agents binary)",
         {"hidden": True},
     ),
-    "executor": (
-        "fno.executor:executor_app",
-        "Executor resolution (locked-decision parser + surface inference)",
-        {"hidden": True},
-    ),
     "roles": (
         "fno.roles.cli:roles_app",
         "Inspect bounded business-role definitions and resolutions.",
@@ -172,17 +167,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "paths": ("fno.paths_cli:app", "Path resolution helpers", {"hidden": True}),
     "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard"),
-    "tokens": ("fno.tokens:app", "Token usage tracking", {"hidden": True}),
     "codemap": ("fno.codemap_cli:app", "Codebase map management", {"hidden": True}),
     "worktree": ("fno.worktree_cli:app", "Worktree management", {"hidden": True}),
     "route": (
         "fno.route_cli:route_app",
         "Provider route lanes: ls / set / unset / env (GLM build lane).",
-        {"hidden": True},
-    ),
-    "posture": (
-        "fno.posture_cli:posture_app",
-        "Apply attended/autonomous stance as ordinary config keys (generator, not a layer).",
         {"hidden": True},
     ),
     "evals": (
@@ -245,11 +234,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code.",
     ),
     "update": ("fno.update:update_command", "Reinstall fno from its source directory."),
-    "upgrade": (
-        "fno.update:update_command",
-        "Reinstall fno from its source directory.",
-        {"hidden": True},
-    ),
     "restart": (
         "fno.restart:restart_command",
         "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.",
@@ -405,17 +389,26 @@ class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[m
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         super().format_help(ctx, formatter)
+        from fno.verb_moves import move_for
+
         names = self.list_commands(ctx)
         visible = 0
         for n in names:
             cmd = self.get_command(ctx, n)
             if cmd is not None and not getattr(cmd, "hidden", False):
                 visible += 1
+        moved = sum(1 for n in names if move_for(n) is not None)
+        moved_note = (
+            f", plus {moved} moved spelling{'s' if moved != 1 else ''} that still work"
+            if moved
+            else ""
+        )
         formatter.write_paragraph()
         formatter.write_text(
-            f"Showing {visible} of {len(names)} top-level verbs, plus the Rust "
-            f"front's `mux` and `version`. Hidden verbs are invocable: run "
-            f"`fno help --all` for every command, `fno mux` for pane control."
+            f"Showing {visible} of {len(names) - moved} top-level verbs{moved_note}, "
+            f"plus the Rust front's `mux` and `version`. Hidden verbs are "
+            f"invocable: run `fno help --all` for every command, `fno mux` "
+            f"for pane control."
         )
 
 
@@ -559,10 +552,22 @@ def _render_full_menu() -> str:
     (AC3-UI). Scope is the TOP LEVEL only: a sub-app's own (hidden) verbs are
     one import away and would break the no-import guarantee, so they live behind
     the scoped door `fno help <group> --all` instead.
+
+    A spelling registered in VERB_MOVES is a signpost, not a root: it forwards
+    to its new home and prints the new spelling on use. Listing it among the
+    roots would make the ten-root taxonomy read as false while the reorg is
+    mid-flight, so moved spellings render under their own trailing heading.
     """
+    from fno.verb_moves import move_for
+
     rows = dict(_EAGER_COMMAND_HELP)
+    moved_rows: dict[str, str] = {}
     for name, entry in LAZY_SUBCOMMANDS.items():
-        rows[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
+        short = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
+        if move_for(name) is not None:
+            moved_rows[name] = short
+        else:
+            rows[name] = short
     width = max(len(n) for n in rows)
     lines = [
         "fno-py full top-level surface - every fno-py command, including hidden.",
@@ -575,6 +580,14 @@ def _render_full_menu() -> str:
         "Commands:",
     ]
     lines.extend(f"  {name.ljust(width)}  {rows[name]}" for name in sorted(rows))
+    if moved_rows:
+        mwidth = max(len(n) for n in moved_rows)
+        lines.append("")
+        lines.append("Moved spellings (still work; each prints its new home on use):")
+        lines.extend(
+            f"  {name.ljust(mwidth)}  now fno {move_for(name).to}"
+            for name in sorted(moved_rows)
+        )
     return "\n".join(lines)
 
 
