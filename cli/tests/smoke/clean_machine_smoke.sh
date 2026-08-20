@@ -102,7 +102,6 @@ check_help() {  # name + argv: must exit 0
   fi
 }
 check_help plan "$FNO" plan stamp --help
-check_help executor "$FNO" executor resolve --help
 check_help phase-kill-check "$FNO" phase kill-check --help
 check_help cost "$FNO" cost --help
 

@@ -186,8 +186,10 @@ TOMBSTONES: dict[str, str] = {
     # capability moved nowhere, it was already where the replacement names).
     "executor": (
         "`skills/do/scripts/resolve-executor.sh` - the live resolver on the "
-        "do path. The locked-decision parser and surface inference stay "
-        "in-package: `python3 -m fno.executor._locked` / `_surface`"
+        "do path (TASK_EXEC, PLAN_EXEC, TASK_FILES env vars). The old flags "
+        "map to the in-package modules that stay: --plan-path -> "
+        "`python3 -m fno.executor._locked`, --task-files -> "
+        "`python3 -m fno.executor._surface`"
     ),
     "posture": (
         "`fno config set` - it writes the same stance keys "

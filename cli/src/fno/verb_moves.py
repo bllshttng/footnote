@@ -13,17 +13,22 @@ announced rather than silent.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import NamedTuple
 
 
-@dataclass(frozen=True)
-class Move:
+class Move(NamedTuple):
     """One moved top-level spelling.
 
     ``kind="deprecated"`` forwards, prints the new spelling to stderr, and
     is removed one release out. ``kind="alias"`` forwards silently and is
     permanent. ``silent_leaves`` carves hot leaves out of the deprecation
     print, so a busy spelling stays quiet while its siblings announce.
+
+    NamedTuple rather than dataclass: this module imports on every
+    invocation with arguments, ``typing`` is already warm there, and
+    ``dataclasses`` is not (a cold ~0.5ms module load to consult a
+    two-entry table). Frozen semantics and keyword construction are the
+    same.
     """
 
     kind: str

@@ -416,7 +416,11 @@ class LazyTypeGroup(typer.core.TyperGroup):
         # destination root being registered, so a wave can seed VERB_MOVES
         # before it mints the destination; until then the OLD registration
         # serves the call, announced rather than silent (silent for a hot
-        # leaf, which is the point of ``silent_leaves``).
+        # leaf, which is the point of ``silent_leaves``). The gate is a
+        # registry membership test, not get_command: a probe would import
+        # fno.tombstones and build a stub only to throw it away, on the hot
+        # leaf path, and would raise the tombstone refusal should a
+        # destination name ever be removed.
         if args:
             from fno.verb_moves import deprecation_line, move_for
 
@@ -426,7 +430,7 @@ class LazyTypeGroup(typer.core.TyperGroup):
                 if line is not None:
                     print(line, file=sys.stderr)
                 dest = move.to.split()
-                if self.get_command(ctx, dest[0]) is not None:
+                if dest[0] in self.commands or dest[0] in self._lazy:
                     args = [*dest, *args[1:]]
         try:
             return super().resolve_command(ctx, args)
