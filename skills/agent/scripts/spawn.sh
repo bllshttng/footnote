@@ -289,9 +289,9 @@ is_code_payload() {
     build) return 0 ;;  # node-id dispatch: /target|/fno:target|$fno:target <id>
     passthrough)        # explicit slash command; isolate only code verbs
       case "$MESSAGE" in
-        /target|/target\ *|/execute|/execute\ *|/fix|/fix\ *) return 0 ;;
-        /fno:target|/fno:target\ *|/fno:execute|/fno:execute\ *|/fno:fix|/fno:fix\ *) return 0 ;;
-        '$fno:target'|'$fno:target '*|'$fno:execute'|'$fno:execute '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
+        /target|/target\ *|/execute|/execute\ *|/do|/do\ *|/fix|/fix\ *) return 0 ;;
+        /fno:target|/fno:target\ *|/fno:execute|/fno:execute\ *|/fno:do|/fno:do\ *|/fno:fix|/fno:fix\ *) return 0 ;;
+        '$fno:target'|'$fno:target '*|'$fno:execute'|'$fno:execute '*|'$fno:do'|'$fno:do '*|'$fno:fix'|'$fno:fix '*) return 0 ;;
         *) return 1 ;;
       esac ;;
     *) return 1 ;;      # seed | handoff

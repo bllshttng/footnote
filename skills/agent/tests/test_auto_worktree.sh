@@ -263,6 +263,21 @@ err14="$(cat "$TMP/err14")"
 no   "opencode /fno:think no worktree note" "$err14" "auto-worktree:"
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-think" ]] && { FAIL=$((FAIL+1)); echo "FAIL: /fno:think got a worktree"; } || PASS=$((PASS+1))
 
+# The one-release /do compatibility spellings remain code payloads. Retiring
+# them here early would let legacy callers write on a protected checkout.
+out22="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-legacy-do" \
+  --provider claude --payload-mode passthrough --message "/do task 1.1" \
+  --cwd "$REPO" 2>"$TMP/err22")"
+has "legacy /do worktree'd" "$(cat "$TMP/err22")" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-legacy-do"
+out23="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-legacy-fno-do" \
+  --provider opencode --payload-mode passthrough --message "/fno:do task 1.1" \
+  --cwd "$REPO" 2>"$TMP/err23")"
+has "legacy /fno:do worktree'd" "$(cat "$TMP/err23")" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-legacy-fno-do"
+out24="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-legacy-codex-do" \
+  --provider codex --payload-mode passthrough --message '$fno:do task 1.1' \
+  --cwd "$REPO" 2>"$TMP/err24")"
+has "legacy \$fno:do worktree'd" "$(cat "$TMP/err24")" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-legacy-codex-do"
+
 # --- delegation: a claude /target isolates itself, so spawn.sh must NOT (x-6c22)
 # The session's PROJECT is fixed at launch cwd with no rename hook, so launching
 # in a pre-created worktree mints a throwaway ~/.claude/projects/ dir per spawn.

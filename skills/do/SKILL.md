@@ -2,10 +2,13 @@
 name: do
 description: "Renamed to execute. Preserves the old spelling for one release."
 argument-hint: "[flat|waves|operator] <plan-path>"
+requires:
+  binaries:
+    - "fno >= 0.1"
 ---
 
 # Do
 
 This skill is now `/fno:execute`. Nothing else changed: the routes (`flat`, `waves`, `operator`) and the plan-path argument are the same.
 
-Invoke `Skill(execute)` with the arguments you were given, and say once that `/fno:do` is the old spelling and is removed next release. Do nothing else here.
+Print once that `/fno:do` is the old spelling, `/fno:execute` is the new spelling, and the old spelling is removed next release. Then stop. Do not invoke another skill or execute the plan from this compatibility shim.
