@@ -509,10 +509,7 @@ const PREFLIGHT_BASE_SCOPE: [&str; 5] = [
 ];
 
 // Legs preflight adds when the tree calls for them: allowed, never required.
-const PREFLIGHT_OPTIONAL_SCOPE: [&str; 2] = [
-    "squads-leak-guard:fno",
-    "tracker-gates:fno",
-];
+const PREFLIGHT_OPTIONAL_SCOPE: [&str; 2] = ["squads-leak-guard:fno", "tracker-gates:fno"];
 
 fn gate_eligible_receipt(event: &Value) -> bool {
     let Some(data) = event.get("data") else {
