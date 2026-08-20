@@ -420,6 +420,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         ) from exc
 
     receipt: dict[str, Any] = {}
+    snapshot: list = []
 
     def _stamp(rows: list) -> list:
         target = next((row for row in rows if row.name == target_name), None)
@@ -484,17 +485,22 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
         )
+        # Snapshot the rows INSIDE the lock window: the strand scan runs
+        # after the write returns, and a post-release re-read could see a
+        # concurrent grant over the just-freed scope and mislabel that heir
+        # as stranded. The scan's graph I/O still runs outside the lock.
+        snapshot.extend(rows)
         return rows
 
     update_registry(_stamp)
     receipt["stranded_subordinates"] = _stranded_subordinates(
-        receipt["vacated_scope"], scope, target_name
+        receipt["vacated_scope"], scope, target_name, snapshot
     )
     return receipt
 
 
 def _stranded_subordinates(
-    vacated: Optional[str], new_scope: str, target_name: str
+    vacated: Optional[str], new_scope: str, target_name: str, rows: list
 ) -> Optional[list[str]]:
     """Live rows whose crown the vacated scope contained and the new one does not.
 
@@ -507,13 +513,15 @@ def _stranded_subordinates(
     unreadable, or an external tracker backend) - which is not the same answer
     as ``[]``, or the receipt would read as "verified no strands" on a machine
     it could not check. Computed by the caller AFTER the registry write
-    returns, so no graph I/O runs under the registry lock.
+    returns, over a rows snapshot taken inside the write's lock window, so
+    no graph I/O runs under the lock and no concurrent grant can appear in
+    the scan.
     """
     if vacated is None or _same_territory(vacated, new_scope):
         return []
     from fno.tracker.metadata import read_entries
 
-    from fno.agents.registry import TERMINAL_STATUSES, load_registry
+    from fno.agents.registry import TERMINAL_STATUSES
 
     try:
         # One parse serves both the availability probe and every per-row
@@ -521,7 +529,6 @@ def _stranded_subordinates(
         # tracker backend, where containment checks would silently degrade
         # to "not contained".
         entries = read_entries("agents.crown")
-        rows = load_registry()
     except Exception:
         return None
     by_id = {
