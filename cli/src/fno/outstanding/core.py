@@ -10,6 +10,7 @@ which blocks nothing, ever. So the fix is a surface, not a wire.
 
 Read-only by construction: this module imports no graph or state writer.
 """
+
 from __future__ import annotations
 
 import json
@@ -50,6 +51,22 @@ class Question:
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     node: Optional[str] = None
+    asker: Optional[str] = None
+    ask: Optional[str] = None
+    options: tuple[str, ...] = ()
+    blocks: tuple[str, ...] = ()
+
+    @property
+    def live(self) -> bool:
+        if not self.asker:
+            return False
+        try:
+            from fno.agents.discover import resolve_reachable
+
+            reachable, ambiguous = resolve_reachable(self.asker)
+        except Exception:  # noqa: BLE001 - unreadable discovery is stale, never live
+            return False
+        return reachable is not None and not ambiguous
 
     def as_dict(self) -> "dict[str, Any]":
         return {
@@ -59,6 +76,11 @@ class Question:
             "session_id": self.session_id,
             "cwd": self.cwd,
             "node": self.node,
+            "asker": self.asker,
+            "ask": self.ask,
+            "options": list(self.options),
+            "blocks": list(self.blocks),
+            "live": self.live,
         }
 
 
@@ -209,6 +231,10 @@ def read_open_questions(root: Path) -> "list[Question]":
                 session_id=data.get("session_id") or None,
                 cwd=data.get("cwd") or None,
                 node=data.get("node") or None,
+                asker=data.get("asker") or None,
+                ask=data.get("ask") or None,
+                options=tuple(data.get("options") or ()),
+                blocks=tuple(data.get("blocks") or ()),
             )
         elif rec.get("type") == QUESTION_CLOSED_EVENT:
             qid = data.get("question_id")
@@ -489,13 +515,30 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
         lines.append(f"{_plural(len(outstanding.questions), 'open question')} awaiting you.")
 
         shown = (mine + theirs)[:RENDER_CAP]
-        for q in shown:
+
+        def append_question(q: Question, *, stale_row: bool = False) -> None:
             label = "[this session] " if q in mine else ""
-            # cwd/node are captured so a cross-project question names its
-            # origin. Rendering them is the whole reason they are recorded.
             where = q.node or (Path(q.cwd).name if q.cwd else None)
-            suffix = f"  ({where})" if where else ""
+            details = [where] if where else []
+            if stale_row:
+                age = _age_days(q.ts)
+                details.append(f"{_plural(age, 'day')} old" if age is not None else "age unknown")
+            suffix = f"  ({'; '.join(details)})" if details else ""
             lines.append(f"  {label}{q.id}  {q.question}{suffix}")
+            if q.ask:
+                lines.append(f"    Action: {q.ask}")
+
+        last_live: Optional[bool] = None
+        has_stale = False
+        for q in shown:
+            is_live = q.live
+            if is_live != last_live:
+                lines.append("  Live open questions:" if is_live else "  Stale questions:")
+                last_live = is_live
+            append_question(q, stale_row=not is_live)
+            has_stale = has_stale or not is_live
+        if has_stale:
+            lines.append("  Answering a stale question records the decision but reaches nobody.")
         dropped = len(outstanding.questions) - len(shown)
         if dropped:
             lines.append(f"  ... and {dropped} more.")

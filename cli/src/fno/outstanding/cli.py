@@ -4,6 +4,7 @@ Machine-first, mirroring `fno carveout`: stdout carries the value (the report,
 or a new question id), guidance and warnings go to stderr, and exit codes are
 predictable (0 ok / 1 read or write failure).
 """
+
 from __future__ import annotations
 
 import json
@@ -77,8 +78,13 @@ def report(
 
 @outstanding_app.command("ask")
 def ask(
-    question: str = typer.Argument(
-        ..., help="What you need the operator to decide or answer."
+    question: str = typer.Argument(..., help="What you need the operator to decide or answer."),
+    ask: str = typer.Option(None, "--ask", help="One action that closes the question."),
+    option: List[str] = typer.Option(
+        [], "--option", help="A choice the operator can make; repeatable."
+    ),
+    blocks: List[str] = typer.Option(
+        [], "--blocks", help="A backlog node blocked by the question; repeatable."
     ),
     node: str = typer.Option(
         None, "--node", help="Backlog node the question is about, when there is one."
@@ -92,10 +98,13 @@ def ask(
     answering some mail.
     """
     from fno.events import append_event, operator_question
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
     from fno.outstanding.core import events_path
 
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
+    ident = resolve_harness_identity()
+    asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
     try:
         append_event(
             operator_question(
@@ -104,6 +113,10 @@ def ask(
                 session_id=session_id,
                 cwd=str(Path.cwd()),
                 node=node,
+                asker=asker,
+                ask=ask,
+                options=option or None,
+                blocks=blocks or None,
             ),
             events_path=events_path(_storage_root()),
         )
@@ -173,7 +186,7 @@ def clear(
                     subject=record.node,
                     question_id=qid,
                     question=record.question,
-                    asked_by=record.session_id,
+                    asked_by=record.asker or record.session_id,
                     asked_at=record.ts or None,
                     events_root=root,
                 )["decision_id"]

@@ -10,6 +10,7 @@ absence has two explanations (the real outcome, or the instrument never ran)
 and a test built on one cannot tell them apart; test_hook_block_positive_control
 is the pair that closes that gap for the silent-on-zero case.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,8 +21,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno.harness_identity import HarnessIdentity
 from fno.outstanding.cli import outstanding_app
-from fno.outstanding.core import RENDER_CAP
+from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
 
 runner = CliRunner()
 
@@ -85,6 +87,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 # --- 2.1 both legs -----------------------------------------------------------
 
+
 def test_both_legs_report_a_count_each(root: Path):
     _write_carveouts(
         root,
@@ -140,6 +143,7 @@ def test_carveout_leg_reports_the_age_of_the_oldest_row(root: Path):
 
 # --- 2.2 an unreadable ledger is a stated failure ----------------------------
 
+
 def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
     ledger = root / ".fno" / "carveouts.jsonl"
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +162,7 @@ def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
 
 
 # --- 2.3 ask then clear ------------------------------------------------------
+
 
 def test_ask_clear_round_trip_and_idempotence(root: Path):
     asked = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
@@ -200,6 +205,140 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert len(closed) == 1
     assert closed[0]["data"]["answer"] == "the codex lane"
     assert closed[0]["data"]["question_id"] == qid
+
+
+def test_asker_ask_field_options_and_blocks_are_recorded(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("fno.outstanding.cli._session_id", lambda: "ledger-run-id")
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: HarnessIdentity(session_id="01234567-full-session", harness="codex"),
+    )
+
+    asked = runner.invoke(
+        outstanding_app,
+        [
+            "ask",
+            "which implementation should land?",
+            "--ask",
+            "pick one",
+            "--option",
+            "index",
+            "--option",
+            "journal",
+            "--blocks",
+            "x-one",
+            "--blocks",
+            "x-two",
+        ],
+    )
+
+    assert asked.exit_code == 0, asked.output
+    event = json.loads((root / ".fno" / "events.jsonl").read_text().splitlines()[-1])
+    assert event["data"]["asker"] == "01234567"
+    assert event["data"]["ask"] == "pick one"
+    assert event["data"]["options"] == ["index", "journal"]
+    assert event["data"]["blocks"] == ["x-one", "x-two"]
+    assert event["data"]["session_id"] == "ledger-run-id"
+    assert "live" not in event["data"], "liveness is computed, never stored"
+
+    monkeypatch.setattr(
+        "fno.agents.discover.resolve_reachable",
+        lambda asker: (object(), []) if asker == "01234567" else (None, []),
+    )
+    question = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"][0]
+    assert question == {
+        "id": event["data"]["question_id"],
+        "ts": event["ts"],
+        "question": "which implementation should land?",
+        "session_id": "ledger-run-id",
+        "cwd": str(Path.cwd()),
+        "node": None,
+        "asker": "01234567",
+        "ask": "pick one",
+        "options": ["index", "journal"],
+        "blocks": ["x-one", "x-two"],
+        "live": True,
+    }
+
+
+def test_live_is_computed_for_json_and_missing_asker_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seen: list[str] = []
+
+    def resolve(asker: str):
+        seen.append(asker)
+        return (object(), []) if asker == "live-ask" else (None, [])
+
+    monkeypatch.setattr("fno.agents.discover.resolve_reachable", resolve)
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question("q-live", "2026-08-19T00:00:00Z", "live?", asker="live-ask"),
+            Question("q-stale", "2026-08-18T00:00:00Z", "stale?", asker="gone-ask"),
+            Question("q-legacy", "2026-08-17T00:00:00Z", "legacy?"),
+        ],
+        captures=[],
+    )
+
+    payload = report.as_dict()["questions"]
+
+    assert [row["live"] for row in payload] == [True, False, False]
+    assert seen == ["live-ask", "gone-ask"]
+
+
+def test_stale_questions_render_under_visible_heading_with_age(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr("fno.agents.discover.resolve_reachable", lambda _asker: (None, []))
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report = Outstanding(
+        carveout_total=0,
+        carveout_by_kind={},
+        carveout_oldest_ts=None,
+        questions=[
+            Question(
+                "q-stale",
+                stale_ts,
+                "which lane?",
+                asker="gone-ask",
+                ask="pick a lane",
+            )
+        ],
+        captures=[],
+    )
+
+    output = render(report)
+
+    assert "Stale questions" in output
+    assert "2 days old" in output
+    assert "records the decision but reaches nobody" in output
+
+
+def test_clear_preserves_asker_as_the_best_answer_provenance(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: HarnessIdentity(session_id="89abcdef-full-session", harness="codex"),
+    )
+    qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
+    recorded: dict[str, object] = {}
+
+    def record_decision(**kwargs):
+        recorded.update(kwargs)
+        return {"decision_id": "d-recorded"}
+
+    monkeypatch.setattr("fno.decide.record_decision", record_decision)
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coord"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert recorded["asked_by"] == "89abcdef"
 
 
 def test_clear_with_answer_emits_operator_decision(root: Path):
@@ -347,6 +486,7 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
 
 
 # --- 3rd leg: the capture fold -----------------------------------------------
+
 
 def _write_inbox(root: Path, lines: list[str]) -> Path:
     inbox = root / "internal" / "fno" / "backlog" / "inbox.md"
@@ -538,6 +678,7 @@ def test_capture_leg_prints_its_counting_rule_beside_the_count(capture_roots):
 
 # --- 2.5 the SessionStart block ---------------------------------------------
 
+
 def test_hook_block_is_silent_on_zero(root: Path):
     result = runner.invoke(outstanding_app, [])
     assert result.exit_code == 0
@@ -558,6 +699,7 @@ def test_hook_block_positive_control(root: Path):
 
 # --- 3.3 output modes --------------------------------------------------------
 
+
 def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
     _write_carveouts(root, [_carveout("cv-1", "deferred")])
     runner.invoke(outstanding_app, ["ask", "a question"])
@@ -568,6 +710,7 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 
 
 # --- 5.2 the asking session's own questions lead -----------------------------
+
 
 def test_own_first(root: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CLAUDECODE_SESSION_ID", "sess-mine")
