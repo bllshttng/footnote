@@ -343,6 +343,34 @@ def test_real_lanes_full_still_releases_only_the_reservation(monkeypatch, tmp_pa
     assert _dispatch_claim_state("x-2") == "free"
 
 
+def test_a_release_that_raises_never_strands_the_other_hold(monkeypatch, tmp_path):
+    """The guard must not leak on a release fault. A raising lane release used
+    to re-enter through `except Exception` and release a second time, which can
+    free a slot another spawner has since taken - and a second raise escapes the
+    handler entirely, leaking both holds. One bad hold never blocks the other."""
+    _wire(monkeypatch, tmp_path, next_node={"id": "x-5", "slug": "r", "cwd": str(tmp_path)})
+
+    calls: list[str] = []
+
+    def bad_lane(node_id):
+        calls.append("lane")
+        raise RuntimeError("claims store briefly unreadable")
+
+    monkeypatch.setattr(dispatch, "release_lane_slot", bad_lane)
+
+    def boom(nid, slug):
+        raise RuntimeError("provenance resolver exploded")
+
+    monkeypatch.setattr(dispatch, "resolve_provenance", boom)
+
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+
+    assert v["outcome"] == "failed"
+    assert calls == ["lane"], "released once, not twice"
+    # The reservation is the hold that CAN still be freed, and it must be.
+    assert _dispatch_claim_state("x-5") == "free"
+
+
 def test_keyboard_interrupt_releases_both_holds_and_propagates(monkeypatch, tmp_path):
     """`KeyboardInterrupt` is the other `BaseException` a live dispatch meets. It
     must free the holds on the way out and still reach the caller."""

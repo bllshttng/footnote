@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -597,9 +598,36 @@ def _dispatch_one(
     #    fno/agents/cli.py. A BaseException is re-raised rather than folded into
     #    a verdict, so a refusal keeps its own exit code and an interrupt still
     #    interrupts.
+    #    Idempotent and best-effort per hold, for two reasons that both end in
+    #    a leak. It is called from an early return INSIDE the try and from the
+    #    handlers, so a release that raises on the early-return path re-enters
+    #    through `except Exception` and releases a second time - and a second
+    #    release can free a slot another spawner has since taken. A raise on
+    #    the way out of the handler escapes it entirely and leaks both holds,
+    #    which is the failure this whole guard exists to prevent. So the flag
+    #    makes the second call a no-op, and one broken hold never blocks the
+    #    other's release. A release that genuinely fails is reported, never
+    #    swallowed silently: the TTL is the backstop and a human needs the line.
+    released = False
+
     def _release_both() -> None:
-        release_lane_slot(node_id)
-        release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+        nonlocal released
+        if released:
+            return
+        released = True
+        for label, release in (
+            ("lane slot", lambda: release_lane_slot(node_id)),
+            ("dispatch reservation",
+             lambda: release_claim(dispatch_key, dispatch_holder, root=dispatch_root)),
+        ):
+            try:
+                release()
+            except Exception as exc:  # noqa: BLE001 - one bad hold never strands the other
+                print(
+                    f"dispatch one: could not release the {label} for {node_id}: "
+                    f"{exc}. It will hold until its TTL expires",
+                    file=sys.stderr,
+                )
 
     try:
         workdir = Path(cwd) if cwd else Path.cwd()
