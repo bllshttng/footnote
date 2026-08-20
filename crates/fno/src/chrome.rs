@@ -382,21 +382,41 @@ fn esc_segs() -> Vec<Seg> {
         .collect()
 }
 
-/// (x-020d) Where the "esc" letters of a chip built by [`esc_segs`] land in
-/// the FULL framed row once `inner` (with the chip already appended) is
-/// wrapped by [`edge_row`]: `pos_in_inner` is `inner.len()` right before
-/// `inner.extend(chip)`, so `+1` skips the row's own left border and `+1`
-/// again skips the chip's leading padding space - the same "past the left
-/// border" shift [`frame`] already applies to the footer's close span.
-fn esc_chip_hit(pos_in_inner: usize) -> (usize, usize, usize) {
-    (ESC_CLOSE_HIT, pos_in_inner + 2, "esc".chars().count())
+/// (x-020d) Right-align an esc chip onto `inner` (whatever prefix the caller
+/// already built - a title's segs for the Full top border, nothing for a
+/// Bare border), fill the gap with border rules, wrap with `edge_row`, and
+/// stamp the chip's `ESC_CLOSE_HIT` hit span. The ONE place both callers
+/// share, so the chip's placement math and its clickable span can never
+/// drift apart between the Full title bar and a Bare menu's inline hint.
+///
+/// The hit offset: `chip_pos` is `inner.len()` right before the chip segs are
+/// appended, so `+1` skips the row's own left border (added by `edge_row`)
+/// and `+1` again skips the chip's leading padding space - the same "past
+/// the left border" shift [`frame`] already applies to the footer's close
+/// span.
+fn chip_border_row(left: char, right: char, mut inner: Vec<Seg>, inner_w: usize) -> FramedLine {
+    let chip = esc_segs();
+    let used = inner.len();
+    let reserve = chip.len();
+    for _ in used..inner_w.saturating_sub(reserve) {
+        inner.push(('─', Role::Border));
+    }
+    let chip_pos = inner.len();
+    inner.extend(chip);
+    let mut row = edge_row(left, right, '─', inner, inner_w);
+    row.hits
+        .push((ESC_CLOSE_HIT, chip_pos + 2, "esc".chars().count()));
+    row
 }
 
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
         Level::Bare => edge_row('┌', '┐', '─', Vec::new(), inner_w),
+        // `┌─ Title ──── esc ─┐`: title left (after `─`), esc chip right. A
+        // Left click on the chip closes the modal, identical to pressing esc
+        // - the title bar's chip was decorative chrome; only the footer's
+        // ever carried a hit target (x-10ec fixed that one).
         Level::Full => {
-            // `┌─ Title ──── esc ─┐`: title left (after `─`), esc chip right.
             let mut inner: Vec<Seg> = vec![('─', Role::Border)];
             if !chrome.title.is_empty() {
                 inner.push((' ', Role::Title));
@@ -406,21 +426,7 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
                 inner.push((' ', Role::Title));
                 inner.push(('─', Role::Border));
             }
-            // Right-align the chip, then fill the gap with border rules.
-            let chip = esc_segs();
-            let used = inner.len();
-            let reserve = chip.len();
-            for _ in used..inner_w.saturating_sub(reserve) {
-                inner.push(('─', Role::Border));
-            }
-            let chip_pos = inner.len();
-            inner.extend(chip);
-            let mut row = edge_row('┌', '┐', '─', inner, inner_w);
-            // (x-020d) A Left click on the chip closes the modal, identical to
-            // pressing esc - the title bar's chip was decorative chrome only
-            // the footer's ever carried a hit target (x-10ec fixed that one).
-            row.hits.push(esc_chip_hit(chip_pos));
-            row
+            chip_border_row('┌', '┐', inner, inner_w)
         }
     }
 }
@@ -428,23 +434,9 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
 fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
         Level::Full => edge_row('└', '┘', '─', Vec::new(), inner_w),
-        // Bare: `└─ esc ─┘` - the esc hint rides the bottom border at zero row.
-        Level::Bare => {
-            let mut inner: Vec<Seg> = vec![('─', Role::Border)];
-            let chip = esc_segs();
-            let used = inner.len();
-            let reserve = chip.len();
-            for _ in used..inner_w.saturating_sub(reserve) {
-                inner.push(('─', Role::Border));
-            }
-            let chip_pos = inner.len();
-            inner.extend(chip);
-            let mut row = edge_row('└', '┘', '─', inner, inner_w);
-            // (x-020d) Same clickable chip as the Full title bar, for an
-            // anchored menu's inline esc hint.
-            row.hits.push(esc_chip_hit(chip_pos));
-            row
-        }
+        // Bare: `└─ esc ─┘` - the esc hint rides the bottom border at zero
+        // row, the same clickable chip as the Full title bar.
+        Level::Bare => chip_border_row('└', '┘', vec![('─', Role::Border)], inner_w),
     }
 }
 
