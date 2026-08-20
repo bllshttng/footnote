@@ -259,7 +259,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         if not isinstance(binding, dict) or set(binding) != {"strategy", "required", "timeout_ms"}:
             raise _contract_error(harness, "session_binding", "malformed strategy")
         if binding["strategy"] not in {
-            "preassigned-or-session-start", "rollout-fd", "rollout-fd-or-daemon",
+            "preassigned-or-session-start", "rollout-fd-or-daemon",
             "preassigned", "store-lookup", "unsupported",
         }:
             raise _contract_error(harness, "session_binding", "unknown strategy")

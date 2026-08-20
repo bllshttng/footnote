@@ -172,7 +172,7 @@ def _codex_daemon_threads_raw() -> Optional[list[dict]]:
     None covers every failure mode (missing/stale binary, unavailable daemon,
     incompatible response, timeout) so a caller can tell "cannot answer" apart
     from "answered with zero threads" - the pane-binding daemon oracle needs
-    that distinction (x-e336). :func:`_discover_from_codex_daemon` collapses
+    that distinction. :func:`_discover_from_codex_daemon` collapses
     both to ``[]``, which is right for discovery but wrong for a bind
     correlation that must not treat an unreachable daemon as "nothing new".
     """
