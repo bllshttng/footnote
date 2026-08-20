@@ -13,6 +13,7 @@ announced rather than silent.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import NamedTuple
 
 
@@ -51,6 +52,11 @@ VERB_MOVES: dict[str, Move] = {
 def move_for(verb: str) -> Move | None:
     """The move registered for a top-level spelling, if any."""
     return VERB_MOVES.get(verb)
+
+
+def destination_is_registered(move: Move, roots: Collection[str]) -> bool:
+    """Whether a move's top-level destination exists in this registry."""
+    return move.to.split(maxsplit=1)[0] in roots
 
 
 def deprecation_line(verb: str, rest: list[str], move: Move) -> str | None:

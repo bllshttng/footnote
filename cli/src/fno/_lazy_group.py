@@ -415,23 +415,23 @@ class LazyTypeGroup(typer.core.TyperGroup):
         # would, so stdout is byte-identical. The forward is gated on the
         # destination root being registered, so a wave can seed VERB_MOVES
         # before it mints the destination; until then the OLD registration
-        # serves the call, announced rather than silent (silent for a hot
-        # leaf, which is the point of ``silent_leaves``). The gate is a
+        # serves the call without advertising a command that cannot resolve.
+        # The gate is a
         # registry membership test, not get_command: a probe would import
         # fno.tombstones and build a stub only to throw it away, on the hot
         # leaf path, and would raise the tombstone refusal should a
         # destination name ever be removed.
         if args:
-            from fno.verb_moves import deprecation_line, move_for
+            from fno.verb_moves import deprecation_line, destination_is_registered, move_for
 
             move = move_for(args[0])
-            if move is not None:
+            roots = {*self.commands, *self._lazy}
+            if move is not None and destination_is_registered(move, roots):
                 line = deprecation_line(args[0], args[1:], move)
                 if line is not None:
                     print(line, file=sys.stderr)
                 dest = move.to.split()
-                if dest[0] in self.commands or dest[0] in self._lazy:
-                    args = [*dest, *args[1:]]
+                args = [*dest, *args[1:]]
         try:
             return super().resolve_command(ctx, args)
         except click.UsageError as exc:

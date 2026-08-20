@@ -110,14 +110,12 @@ def _app_with_old_registration(with_dest: bool) -> typer.Typer:
     return app
 
 
-def test_missing_destination_serves_the_old_registration_announced():
+def test_missing_destination_serves_old_registration_without_false_announcement():
     app = _app_with_old_registration(with_dest=False)
     result = runner.invoke(app, ["outstanding", "list"])
     assert result.exit_code == 0, result.output
     assert result.stdout == "OLD-PATH\n"
-    err = result.stderr or ""
-    assert err.count("is now") == 1, f"expected exactly one announce line: {err!r}"
-    assert "fno inbox outstanding" in err
+    assert "is now" not in (result.stderr or "")
 
 
 def test_registered_destination_forwards_byte_identical():
@@ -201,14 +199,14 @@ def test_real_pr_hot_leaf_help_stays_silent():
     assert "is now" not in (result.stderr or "")
 
 
-def test_real_pr_cold_leaf_help_announces():
+def test_real_pr_cold_leaf_help_does_not_name_unregistered_destination():
     from fno.cli import app
 
-    # `verify` is a real cold leaf (not in silent_leaves); `check` is not a
-    # pr subcommand at all, which would prove the print but not the serving.
+    # `do` is not registered yet, so the old root must serve without teaching
+    # a destination that exits with "No such command".
     result = runner.invoke(app, ["pr", "verify", "--help"])
     assert result.exit_code == 0, result.output
-    assert "fno pr verify is now fno do pr verify" in (result.stderr or "")
+    assert "fno do pr" not in (result.stderr or "")
 
 
 def test_every_moved_spelling_is_hidden():
@@ -235,9 +233,10 @@ def test_help_all_lists_moved_spellings_under_their_own_heading():
     out = result.output
     assert "Moved spellings" in out
     assert "now fno inbox outstanding" in out
-    assert "now fno do pr" in out
+    assert "now fno do pr" not in out
     commands_part = out.split("Moved spellings")[0]
-    for name in VERB_MOVES:
+    assert re.search(r"^  pr\s", commands_part, re.MULTILINE)
+    for name in VERB_MOVES.keys() - {"pr"}:
         assert not re.search(rf"^  {re.escape(name)}\s", commands_part, re.MULTILINE), (
             f"moved spelling {name!r} must not render among the roots"
         )

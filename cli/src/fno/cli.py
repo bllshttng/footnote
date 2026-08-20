@@ -398,10 +398,15 @@ class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[m
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         super().format_help(ctx, formatter)
-        from fno.verb_moves import move_for
+        from fno.verb_moves import destination_is_registered, move_for
 
         names = self.list_commands(ctx)
-        moved_names = {n for n in names if move_for(n) is not None}
+        moved_names = {
+            n
+            for n in names
+            if (move := move_for(n)) is not None
+            and destination_is_registered(move, names)
+        }
         # Moved spellings are excluded from BOTH counts, so the fraction
         # stays possible even if a moved entry ever loses its hidden flag
         # (the test suite pins that flag; this is the runtime backstop).
@@ -582,7 +587,7 @@ def _render_full_menu() -> str:
     roots would make the ten-root taxonomy read as false while the reorg is
     mid-flight, so moved spellings render under their own trailing heading.
     """
-    from fno.verb_moves import Move, move_for
+    from fno.verb_moves import Move, destination_is_registered, move_for
 
     # Eager inline commands classify too, not only lazy entries: a later
     # wave moves `cost`, which is an eager @app.command, and a move on an
@@ -595,7 +600,7 @@ def _render_full_menu() -> str:
     moved_rows: dict[str, tuple[str, Move]] = {}
     for name, short in candidates.items():
         move = move_for(name)
-        if move is None:
+        if move is None or not destination_is_registered(move, candidates):
             rows[name] = short
         else:
             moved_rows[name] = (short, move)
