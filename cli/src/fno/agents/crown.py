@@ -264,13 +264,8 @@ def scope_contains(
     callable), so a caller scanning many rows pays one graph parse instead of
     one per row.
     """
-    def _canon(members: list[str]) -> set[str]:
-        # Alias-normalize both sides, or a portfolio stored as `alpha` fails to
-        # contain a project the caller spelled `a`.
-        return {(_canonical_project(m) or m) for m in members}
-
-    outer_members = _canon(split_scope(outer))
-    inner_members = _canon(split_scope(inner))
+    outer_members = _canonical_members(outer)
+    inner_members = _canonical_members(inner)
     if not outer_members or not inner_members:
         return False
     if inner_members == outer_members:
@@ -366,13 +361,21 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
     return None
 
 
+def _canonical_members(scope: Optional[str]) -> set:
+    """Alias-normalized member set of a stored scope; empty for None/blank.
+
+    Shared by containment (``scope_contains``) and equality
+    (``_same_territory``) on purpose: the strand scan relies on both
+    answering from ONE normalization, so a copy that drifts would let a
+    scope read as "same territory" to one and "strictly contained" to the
+    other.
+    """
+    return {(_canonical_project(m) or m) for m in split_scope(scope)}
+
+
 def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     """Do two stored scopes name the same territory, aliases normalized?"""
-
-    def _canon(scope: Optional[str]) -> set:
-        return {(_canonical_project(m) or m) for m in split_scope(scope)}
-
-    left, right = _canon(a), _canon(b)
+    left, right = _canonical_members(a), _canonical_members(b)
     return bool(left) and left == right
 
 
@@ -420,7 +423,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         ) from exc
 
     receipt: dict[str, Any] = {}
-    snapshot: list = []
 
     def _stamp(rows: list) -> list:
         target = next((row for row in rows if row.name == target_name), None)
@@ -443,6 +445,16 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # so the receipt can name what changed hands.
         vacated_scope = target.crown_scope
         vacated_level = target.crown_level
+        if vacated_level is not None and vacated_scope is None:
+            # A level with no scope is unstampable by crown_validation_error,
+            # so no legal writer produces it; overwrite would erase the
+            # corruption signal instead of surfacing it.
+            raise CrownPromotionError(
+                f"refusing to crown {target.name!r}: it holds partial crown "
+                f"metadata (level {vacated_level} with no scope), which no "
+                "legal crown produces. fno agents stop the row and "
+                "fno agents rm it, then crown the re-registered session."
+            )
 
         holder = next(
             (
@@ -485,17 +497,19 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
         )
-        # Snapshot the rows INSIDE the lock window: the strand scan runs
-        # after the write returns, and a post-release re-read could see a
-        # concurrent grant over the just-freed scope and mislabel that heir
-        # as stranded. The scan's graph I/O still runs outside the lock.
-        snapshot.extend(rows)
         return rows
 
-    update_registry(_stamp)
-    receipt["stranded_subordinates"] = _stranded_subordinates(
-        receipt["vacated_scope"], scope, target_name, snapshot
-    )
+    # The persisted rows ARE the lock-window snapshot the strand scan needs:
+    # a post-release re-read could see a concurrent grant over the
+    # just-freed scope and mislabel that heir as stranded.
+    rows_after = update_registry(_stamp)
+    try:
+        receipt["stranded_subordinates"] = _stranded_subordinates(
+            receipt["vacated_scope"], scope, target_name, rows_after
+        )
+    except Exception:
+        # Advisory receipt data must never crash a crown that committed.
+        receipt["stranded_subordinates"] = None
     return receipt
 
 
