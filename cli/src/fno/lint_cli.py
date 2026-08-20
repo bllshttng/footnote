@@ -433,15 +433,11 @@ def style(
         typer.echo(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
-        if exempted:
-            # Named, not counted. A skipped file still counts as changed while
-            # adding nothing to inspected, so the line above reads identically
-            # whether the file had nothing to inspect or was never read at all.
-            # Naming it lets a reader judge the exception; a count cannot.
-            typer.echo(
-                f"style: skipped {len(exempted)} file(s) by style-exception, "
-                "so no line in them was read:\n  " + "\n  ".join(exempted)
-            )
+        # Named, not counted. A skipped file still counts as changed while
+        # adding nothing to inspected, so the line above reads identically
+        # whether the file had nothing to inspect or was never read at all.
+        # Naming it lets a reader judge the exception; a count cannot.
+        _style_skip_receipt(exempted)
         if unexplained:
             # Reported AFTER the violations below, never instead of them.
             # Raising here discarded every real finding in the same run: a PR
@@ -468,15 +464,19 @@ def style(
 
         text = sys.stdin.read()
         if style_mod.has_exception(text):
+            _style_skip_receipt(["<stdin>"])
             raise typer.Exit(0)
         violations = style_mod.check(text, surface=surface)
     elif files:
         violations = []
+        skipped: list[str] = []
         for path in files:
             text = path.read_text(encoding="utf-8")
             if style_mod.has_exception(text):
+                skipped.append(str(path))
                 continue
             violations.extend(style_mod.check(text, surface=surface))
+        _style_skip_receipt(skipped)
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
         raise typer.Exit(2)
@@ -637,6 +637,21 @@ def _existed_at_base(rel: str, diff_base: str, repo: Path) -> bool:
     return probe.returncode == 0
 
 
+def _style_skip_receipt(names: list[str]) -> None:
+    """Name what a style-exception skipped, on every branch that can skip.
+
+    A skipped input reads exactly like a clean one: silence and exit 0. The
+    guarantee is worth nothing on the one branch that happens to print it, so
+    all three callers route through here.
+    """
+    if not names:
+        return
+    typer.echo(
+        f"style: skipped {len(names)} input(s) by style-exception, "
+        "so no line in them was read:\n  " + "\n  ".join(names)
+    )
+
+
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
 ) -> "tuple[list, int, int, list[str], list[str]]":
@@ -740,6 +755,13 @@ def _style_added_lines(
     for rel in changed:
         full = repo / rel
         if not full.is_file():
+            # git lists it as changed, and it is absent from the working tree.
+            # A deletion in the diff is a legitimate zero, so it stays silent.
+            # A file git says ADDED lines to is the dirty-tree loss: those lines
+            # are never read, and `continue` used to jump past the count guard
+            # written for exactly that. Route it there instead of swallowing it.
+            if added_by_path.get(rel, 0):
+                unexplained.append(rel)
             continue
         whole = full.read_text(encoding="utf-8")
         if style_mod.has_exception(whole):

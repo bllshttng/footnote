@@ -974,3 +974,138 @@ def test_a_file_skipped_by_its_exception_marker_is_named_not_just_uncounted(
     # from the exempted file is a skip rather than a scan that read nothing.
     assert inspected == 1, "the plain file's one added line must still be read"
     assert changed == 2, "both files changed; only one of them was read"
+
+
+def test_a_file_git_says_added_lines_to_but_gone_from_the_tree_is_flagged(
+    tmp_path: Path,
+) -> None:
+    """The second silent skip must not jump past the count-mismatch guard.
+
+    `if not full.is_file(): continue` covered two cases with one silence. A
+    deletion in the diff is a legitimate zero. A file git says ADDED lines to,
+    absent from the working tree, is the dirty-tree loss: its lines are never
+    read, and the guard written for exactly that never ran.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "docs" / "gone.md").write_text("Alpha.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    (repo / "docs" / "gone.md").write_text("Alpha.\nBeta added here.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a line")
+    # Committed with an added line, then removed from the working tree only.
+    (repo / "docs" / "gone.md").unlink()
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert unexplained == ["docs/gone.md"], (
+        "git counted an added line the gate never read, so the instrument "
+        "guard must fire instead of the loop skipping in silence"
+    )
+
+
+def test_a_deleted_file_stays_a_silent_legitimate_zero(tmp_path: Path) -> None:
+    """Positive control for the test above: only the LOSS is flagged.
+
+    Without this, flagging every absent file would pass that test while
+    failing every ordinary deletion.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "docs" / "bye.md").write_text("Alpha.\n", encoding="utf-8")
+    (repo / "docs" / "stay.md").write_text("Alpha.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    (repo / "docs" / "bye.md").unlink()
+    (repo / "docs" / "stay.md").write_text("Alpha.\nBeta.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete one, extend the other")
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert unexplained == [], "a deletion adds no lines, so it is an explained zero"
+    assert inspected == 1, "positive control: the surviving file's added line was read"
+
+
+def test_the_skip_receipt_fires_on_the_files_branch_too(tmp_path: Path) -> None:
+    """The guarantee must hold on every branch that can skip.
+
+    `--files` without `--diff-base` used to `continue` past an exempted file and
+    print nothing, so the command exited 0 and silent for a file it never read.
+    """
+    exempt = tmp_path / "exempt.md"
+    exempt.write_text("<!-- style-exception: fixture -->\nOne line.\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["style", "--surface", "markdown", "--files", str(exempt)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "style-exception" in result.output and "exempt.md" in result.output, (
+        "a --files run that read nothing must say so, not exit 0 in silence"
+    )
+
+
+def test_the_skip_receipt_fires_on_the_stdin_branch_too(tmp_path: Path) -> None:
+    """Same guarantee on --stdin, which check-pr-style.sh pipes a PR body through.
+
+    A body carrying the marker used to pass with an empty log.
+    """
+    result = runner.invoke(
+        app,
+        ["style", "--surface", "pr-body", "--stdin"],
+        input="<!-- style-exception: fixture -->\nOne line.\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "style-exception" in result.output and "<stdin>" in result.output, (
+        "a --stdin run that read nothing must say so"
+    )
+
+
+def test_a_normal_files_run_prints_no_skip_receipt(tmp_path: Path) -> None:
+    """Positive control: the receipt must fire only on an actual skip.
+
+    Without this, a receipt printed unconditionally passes both tests above
+    while telling every clean run it skipped something.
+    """
+    plain = tmp_path / "plain.md"
+    plain.write_text("One line.\n", encoding="utf-8")
+    result = runner.invoke(
+        app, ["style", "--surface", "markdown", "--files", str(plain)]
+    )
+    assert "style-exception" not in result.output, (
+        "a file that was actually read must not be reported as skipped"
+    )
