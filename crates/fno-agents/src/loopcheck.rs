@@ -3126,31 +3126,57 @@ fn is_code_review_reviewer(name: &str) -> bool {
 /// Whether the PR carries the `coverage-override` label. The label is durable
 /// shared state: EVERY writer of the coverage status re-reads it before
 /// posting, so a green stamped by the gate workflow's labeled arm survives a
-/// later stop-hook or verb fire instead of being clobbered red. One gh read;
-/// `None` means the read itself failed, which the caller must treat as "do
-/// not post" - an unreadable label state is neither held nor absent.
+/// later stop-hook or verb fire instead of being clobbered red. `None` means
+/// all three reads failed; the caller then checks the current status
+/// description before deciding whether an override green needs protection.
 fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
+    for attempt in 1..=3 {
+        let out = Command::new(gh_bin)
+            .args([
+                "pr",
+                "view",
+                &pr_number.to_string(),
+                "--json",
+                "labels",
+                "--jq",
+                "[.labels[].name] | index(\"coverage-override\") != null",
+            ])
+            .current_dir(cwd)
+            .output();
+        if let Ok(output) = out {
+            if output.status.success() {
+                match String::from_utf8_lossy(&output.stdout).trim() {
+                    "true" => return Some(true),
+                    "false" => return Some(false),
+                    _ => {}
+                }
+            }
+        }
+        if attempt < 3 {
+            eprintln!(
+                "review-coverage status: override label read attempt {attempt} failed; retrying"
+            );
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    }
+    None
+}
+
+fn current_coverage_status_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<String> {
+    let target = format!("repos/:owner/:repo/commits/{head}/status");
     let out = Command::new(gh_bin)
         .args([
-            "pr",
-            "view",
-            &pr_number.to_string(),
-            "--json",
-            "labels",
+            "api",
+            target.as_str(),
             "--jq",
-            "[.labels[].name] | index(\"coverage-override\") != null",
+            "[.statuses[] | select(.context == \"fno/review-coverage\")] | first | .description // \"\"",
         ])
         .current_dir(cwd)
-        .output();
-    let o = out.ok()?;
-    if !o.status.success() {
-        return None;
-    }
-    match String::from_utf8_lossy(&o.stdout).trim() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    }
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The one POST shape every coverage-status writer uses.
@@ -3193,6 +3219,9 @@ fn publish_coverage_status(
     // garbage path, or worse to the canonical checkout's default-branch tip -
     // a red marker on a commit whose coverage was never evaluated.
     if pr_number <= 0 || !crate::verify_evidence::full_sha(pr_head_oid) {
+        eprintln!(
+            "review-coverage status: not posting for invalid target pr={pr_number} head={pr_head_oid}"
+        );
         return;
     }
     // The lane predicate is the gate's, not a local variant: bots and
@@ -3202,6 +3231,9 @@ fn publish_coverage_status(
     // posting opposite states.
     let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
     if !lane {
+        eprintln!(
+            "review-coverage status: not posting for {pr_head_oid}: no review lane configured"
+        );
         return;
     }
     // The verdict describes event_head. A marker on pr_head_oid built from a
@@ -3210,14 +3242,17 @@ fn publish_coverage_status(
     // described; the refresher owns head moves, this writer only speaks for
     // the head it evaluated.
     if event_head != pr_head_oid {
+        eprintln!(
+            "review-coverage status: not posting for PR head {pr_head_oid}: event describes {event_head}"
+        );
         return;
     }
     // The override first, mirroring the Python publisher: the label outranks
     // the verdict, and its green must not be clobbered by this writer. The
     // actor is named by the workflow's labeled arm, which sees the event.
-    // An unreadable label state posts NOTHING: falling through to the
-    // uncovered verdict would clobber the green the labeled arm stamped on
-    // this same head.
+    // A label read that remains unavailable after retrying consults the
+    // current description. Only an existing override marker stays protected;
+    // any other marker is stale relative to the fresh computed verdict below.
     match pr_has_override_label(gh_bin, cwd, pr_number) {
         Some(true) => {
             post_coverage_status(
@@ -3229,7 +3264,25 @@ fn publish_coverage_status(
             );
             return;
         }
-        None => return,
+        None => match current_coverage_status_description(gh_bin, cwd, pr_head_oid) {
+            Some(description) if description.starts_with("coverage-override") => {
+                eprintln!(
+                    "review-coverage status: not posting for {pr_head_oid}: protected existing coverage-override status"
+                );
+                return;
+            }
+            Some(description) => {
+                eprintln!(
+                    "review-coverage status: override label unreadable; current description '{}' is not an override, publishing computed verdict for {pr_head_oid}",
+                    description
+                );
+            }
+            None => {
+                eprintln!(
+                    "review-coverage status: override label and current description unreadable; publishing computed verdict for {pr_head_oid}"
+                );
+            }
+        },
         Some(false) => {}
     }
     let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
@@ -3243,6 +3296,9 @@ fn publish_coverage_status(
             }));
     let (state, description) = if covered {
         let Coverage::Covered(n) = coverage.coverage else {
+            eprintln!(
+                "review-coverage status: not posting for {pr_head_oid}: covered predicate had no Covered count"
+            );
             return;
         };
         (
@@ -9865,6 +9921,13 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 /// arguments. stdout is always one JSON object.
 pub fn run_review_coverage(args: &[String]) -> i32 {
     let (code, json) = decide_review_coverage(args);
+    if code != 0 {
+        if let Ok(payload) = serde_json::from_str::<Value>(&json) {
+            if let Some(error) = payload.get("error").and_then(Value::as_str) {
+                eprintln!("review-coverage: {error}");
+            }
+        }
+    }
     println!("{json}");
     code
 }
@@ -9999,6 +10062,19 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             )
         }
     };
+    if let Some(explicit) = head.as_deref() {
+        if !crate::verify_evidence::full_sha(explicit) {
+            return (
+                2,
+                serde_json::json!({
+                    "error": format!(
+                        "--head value '{explicit}' must be a full 40-hex git sha"
+                    )
+                })
+                .to_string(),
+            );
+        }
+    }
 
     let inputs = resolve_review_inputs(
         &cwd,
