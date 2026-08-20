@@ -3168,7 +3168,6 @@ fn publish_coverage_status(
     required_bots: &[String],
     optional_bots: &[String],
     reviewers: &[String],
-    self_review_hint: Option<&str>,
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
     // HEAD, the "unknown" sentinel from a failed git read) would POST to a
@@ -3242,12 +3241,16 @@ fn publish_coverage_status(
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
-        // lose the entire marker, not just the hint.
+        // lose the entire marker, not just the hint. Computed HERE, in the
+        // only arm that renders it: an eager call-site argument would spawn
+        // the fno bridge subprocess on covered, no-lane, and early-return
+        // paths that never show a hint.
+        let self_review_hint = ambient_self_review_hint(cwd);
         let base = format!(
             "no covered review at {}; run the review verb at HEAD",
             short_sha(pr_head_oid)
         );
-        let description = match self_review_hint {
+        let description = match self_review_hint.as_deref() {
             Some(hint) if base.len() + hint.len() + 6 <= 140 => {
                 format!("{base} - `{hint}`")
             }
@@ -6239,11 +6242,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
     // The floor only applies where a session can satisfy it: a harness with a
-    // self-review verb (claude /code-review, codex /review). Flooring
-    // gemini/agy/opencode would demand an attestation no verb there produces,
-    // wedging the loop; route 3 (a spawned reviewer) is those harnesses' path
-    // and is deferred. classify_payload forks git, so it runs only when the
-    // floor could apply - a configured lane makes it moot, and most fires have one.
+    // self-review verb (claude /code-review, codex /review, opencode
+    // /review-changes). Flooring gemini/agy would demand an attestation no
+    // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
+    // those harnesses' path and is deferred. classify_payload forks git, so it
+    // runs only when the floor could apply - a configured lane makes it moot,
+    // and most fires have one.
     let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
     let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
         let payload = classify_payload(&parsed.git_bin, &cwd);
@@ -7953,7 +7957,6 @@ fn run_done(
             required_bots,
             optional_bots,
             reviewers,
-            ambient_self_review_hint(cwd).as_deref(),
         );
     }
     Ok(info)
@@ -8374,7 +8377,7 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
 }
 
 /// `sized_self_review_hint` with the ambient fno binary and author harness, for
-/// callers (run_done, the standalone coverage verb) that never threaded those
+/// callers (publish_coverage_status's uncovered arm) that never threaded those
 /// through. Same resolution discipline as the `fno notify` bridge and the
 /// unattested-reviewer render: ambient markers over threading, so call sites
 /// stay single-arg.
@@ -10024,7 +10027,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &inputs.required_bots,
                     &inputs.optional_bots,
                     &required_reviewers,
-                    ambient_self_review_hint(&cwd).as_deref(),
                 );
             }
             (
@@ -10083,9 +10085,6 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &inputs.required_bots,
                         &inputs.optional_bots,
                         &required_reviewers,
-                        // The unknown arm prescribes a RETRY, never the
-                        // self-review verb, so there is no hint to name.
-                        None,
                     );
                 }
                 // The persisted row above is schema-gated (the pr_num == 0
