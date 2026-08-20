@@ -292,7 +292,15 @@ def _spawn_guard_decision(
             # recovery has been TRIED and failed. A probe takes no recovery, so
             # it says the wedge is recoverable-untried instead and the caller
             # goes on to the real spawn, which recovers or refuses for real.
-            wedged = state == "suspect" and not in_launch_window
+            # `state` is the PRE-recovery reading, so re-read it here: a node
+            # re-claimed by a live worker while the reclaim ran would otherwise
+            # render as a wedge with force-release advice against a claim that
+            # is now genuinely held.
+            try:
+                current = claim_status(node_key, root=claims_root_for(node_key)).get("state")
+            except Exception:  # noqa: BLE001 - an unreadable probe keeps the first reading
+                current = state
+            wedged = current == "suspect" and not in_launch_window
             recovery = "not-attempted" if wedged and no_reserve else None
             return {
                 "verdict": "already-running",

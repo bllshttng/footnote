@@ -903,6 +903,11 @@ class TestCliProbeWiring:
         assert "would reap 0" in r.output
         assert "suspect (roster not consulted)" in r.output
 
+    def _transcript_says(self, monkeypatch, finished):
+        monkeypatch.setattr(
+            "fno.claims.cli._transcript_says_finished", lambda *_a, **_kw: finished
+        )
+
     def test_the_holder_found_and_finished_reaps(self, tmp_path, monkeypatch):
         """Abandonment is proven by FINDING the holder and seeing it stopped."""
         from fno.agents.watchdog import Row
@@ -915,8 +920,30 @@ class TestCliProbeWiring:
             monkeypatch,
             rows=[Row(row_id="sid-gone", name="t-gone", state="done", node="x-abandoned", cwd="")],
         )
+        self._transcript_says(monkeypatch, True)
         r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
         assert "would reap 1" in r.output
+
+    def test_a_terminal_row_whose_transcript_is_alive_is_never_reaped(
+        self, tmp_path, monkeypatch
+    ):
+        """The row state alone cannot authorize a reap. `_TERMINAL_STATES`
+        carries its own warning that the roster called a WORKING session done
+        on 2026-08-15, and archiving on it hands a live worker's node to the
+        next dispatcher - the `reaped_a_live_worker` kill criterion."""
+        from fno.agents.watchdog import Row
+
+        acquire_claim(
+            key="node:x-lying", holder="target-session:sid-busy", ttl_ms=3_600_000,
+            pid=_dead_pid(), root=tmp_path,
+        )
+        self._fake_roster(
+            monkeypatch,
+            rows=[Row(row_id="sid-busy", name="t-busy", state="done", node="x-lying", cwd="")],
+        )
+        self._transcript_says(monkeypatch, False)
+        r = runner.invoke(cli, ["reap", "--root", str(tmp_path)])
+        assert "would reap 0" in r.output
 
     def test_the_holder_found_and_working_keeps(self, tmp_path, monkeypatch):
         from fno.agents.watchdog import Row

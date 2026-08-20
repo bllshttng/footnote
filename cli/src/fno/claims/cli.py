@@ -255,7 +255,7 @@ def acquire(
         from .core import RebindRefused, compare_and_rebind
 
         try:
-            claim, _mode = compare_and_rebind(
+            claim, mode = compare_and_rebind(
                 key,
                 handover_from,
                 new_holder=holder,
@@ -272,12 +272,18 @@ def acquire(
         except RebindRefused:
             pass
         else:
-            typer.echo(
-                json.dumps(claim.model_dump(mode="json"))
-                if json_output
-                else f"acquired {key} (handover from {handover_from})"
-            )
-            return
+            # The MODE decides, not the absence of an exception. A rebind that
+            # declined the rename returns `idempotent` with the prior holder
+            # still on the claim, and reporting that as `acquired` exits 0 while
+            # somebody else holds the key. Fall through to the ordinary acquire,
+            # which applies its own rules and refuses a live foreign claim.
+            if mode == "handover":
+                typer.echo(
+                    json.dumps(claim.model_dump(mode="json"))
+                    if json_output
+                    else f"acquired {key} (handover from {handover_from})"
+                )
+                return
     try:
         claim = acquire_claim(
             key=key,
@@ -1099,9 +1105,41 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         if row is None:
             # Not found is not gone. See the docstring.
             return None
-        return row.get("state") in _finished_row_states()
+        if row.get("state") not in _finished_row_states():
+            return False
+        # The row state alone does NOT authorize a reap. `_TERMINAL_STATES`
+        # carries its own warning: the roster called a WORKING session done on
+        # 2026-08-15, and occupancy stopped keying on it for exactly that
+        # reason. Reaping on a field known to lie in this direction archives a
+        # live worker's claim, which is the `reaped_a_live_worker` kill
+        # criterion. So the row narrows the candidates and the transcript
+        # decides, which is the instrument the watchdog itself trusts.
+        return _transcript_says_finished(session_id, row.get("cwd") or "")
 
     return _probe
+
+
+def _transcript_says_finished(session_id: str, cwd: str) -> bool:
+    """Has this session gone quiet with a tail that is not engaged?
+
+    ``finished_with_the_tree`` is the one question the occupancy tally and the
+    reap predicate both ask, so asking it here cannot drift from either. Every
+    unreadable input answers False, and False keeps the claim.
+    """
+    try:
+        import time
+
+        from fno.agents.watchdog import (
+            REAP_QUIET_AFTER_S,
+            finished_with_the_tree,
+            tail_facts,
+        )
+
+        return finished_with_the_tree(
+            tail_facts(session_id, cwd), time.time(), REAP_QUIET_AFTER_S
+        )
+    except Exception:  # noqa: BLE001 - an unreadable transcript proves nothing
+        return False
 
 
 def _holder_session_id(holder: str) -> Optional[str]:

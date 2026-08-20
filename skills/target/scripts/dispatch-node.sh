@@ -585,22 +585,12 @@ for id in "${NODES[@]}"; do
   # could leak onto stdout), then parse the verdict.
   guard_json="$(printf '%s\n' "$guard_out" | grep -F '"verdict"' | head -1)"
   verdict="$(printf '%s' "$guard_json" | jq -r '.verdict // empty' 2>/dev/null)"
-  # An untried wedge is DISPATCHABLE as far as this loop is concerned, and it is
-  # rewritten here rather than handled inside the case.
-  #
-  # The probe takes no recovery, so a wedge it reports has not been tried yet.
-  # The only path that clears the claim is the real spawn below, which runs the
-  # same guard WITH a reservation. Refusing here is what made that recovery
-  # unreachable for a batch.
-  #
-  # Rewriting the verdict, rather than breaking out of the case, is what keeps
-  # the rest of the arm's contract: the `dispatchable` arm still parks a
-  # `claimed` node for manual recovery, and the dry-run branch below still
-  # previews rather than claiming a launch.
-  if [[ "$verdict" == "already-running" && "$DRY_RUN" -ne 1 ]] \
-     && [[ "$(printf '%s' "$guard_json" | jq -r '.recovery // empty' 2>/dev/null)" == "not-attempted" ]]; then
-    verdict="dispatchable"
-  fi
+  # NO untried-wedge rewrite here, unlike spawn.sh, and the asymmetry is the
+  # point. This probe runs only under --dry-run or for a `claimed` node. A dry
+  # run must preview, never launch, and a `claimed` node is parked for manual
+  # recovery by the arm below. Every other node skips the probe entirely and
+  # goes straight to the real spawn, which is where the recovery already
+  # happens. A rewrite would be dead code wearing a safety comment.
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"

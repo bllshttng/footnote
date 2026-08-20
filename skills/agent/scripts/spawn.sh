@@ -474,9 +474,19 @@ if [[ "$spawn_rc" -ne 0 ]]; then
   if [[ -n "$NODE" ]] && printf '%s' "$spawn_err" | grep -qF "node dispatch refused:"; then
     guard_reason="$(printf '%s' "$spawn_err" | sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q')"
     case "$guard_reason" in
-      live-claim|suspect-claim)
+      live-claim)
         printf 'result=already-running name=%s action=%s reason="shared family-2 guard refused node:%s; no worker launched"\n' "$NAME" "$guard_reason" "$NODE"
         exit 0 ;;
+      suspect-claim)
+        # THE wedge, and this is the arm that fires on one. Recovery ran here,
+        # inside the real spawn, and could not prove the holder dead, so nobody
+        # is building this node and nobody will until an operator intervenes.
+        # `already-running` plus exit 0 told a caller reading the exit code that
+        # the launch worked, which is the x-05be defect on the one path that
+        # actually reaches it. The remedy goes to stderr; this file's contract
+        # is ONE line on stdout.
+        printf '%s' "$spawn_err" | grep -E '^  (Clear it|Override): ' >&2 || true
+        fail "suspect worker claim holds node:$NODE; no worker launched" ;;
       reservation-held|duplicate-claim)
         printf 'result=already-running name=%s action=duplicate-claim reason="skipped: duplicate-claim (peer dispatcher holds dispatch:%s); no worker launched"\n' "$NAME" "$NODE"
         exit 0 ;;

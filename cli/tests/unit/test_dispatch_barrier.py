@@ -234,8 +234,13 @@ def test_an_abandoned_node_claim_is_cleared_and_the_node_dispatches(
     )
     assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
     # The holder's OWN row, found and finished. Abandonment is proven by finding
-    # the holder, never by failing to find it.
+    # the holder, never by failing to find it - and the row narrows the
+    # candidates while the transcript decides, because the row state alone is
+    # documented to call a working session done.
     _fake_roster(monkeypatch, rows=[_row_for("sid-dead", "t-dead", "done", "N")])
+    monkeypatch.setattr(
+        "fno.claims.cli._transcript_says_finished", lambda *_a, **_kw: True
+    )
 
     verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
     assert verdict["verdict"] == "dispatchable", verdict

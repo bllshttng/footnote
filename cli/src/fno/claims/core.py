@@ -648,6 +648,11 @@ def compare_and_rebind(
             and existing.holder.startswith(HANDOVER_HOLDER_PREFIX)
         )
         effective_new_holder = new_holder if handover_allowed else None
+        # The reason and the harness tag describe the OWNER, so they travel with
+        # the rename or not at all. Applying them to a refused handover let a
+        # caller rewrite another holder's fields while leaving the holder alone.
+        effective_new_reason = new_reason if handover_allowed else None
+        effective_new_harness = new_harness if handover_allowed else None
         if state == ClaimState.LIVE and handover_allowed:
             # A HANDOVER, and a live prior pid does not refuse it. The
             # concurrent-writer rule below protects one symbolic owner from two
@@ -664,7 +669,7 @@ def compare_and_rebind(
             # one substrate that blocks.
             rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=new_reason, new_harness=new_harness,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
             )
             _atomic_replace(path, serialize_claim(rebound))
             if emit:
@@ -683,7 +688,7 @@ def compare_and_rebind(
                 # Idempotent: already bound to this process; refresh lease only.
                 rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=new_reason, new_harness=new_harness,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
             )
                 _atomic_replace(path, serialize_claim(rebound))
                 if emit:
@@ -720,7 +725,7 @@ def compare_and_rebind(
         # Local same-holder, prior PID dead: the resume rebind.
         rebound = _rebound_claim(
                 existing, npid, ttl_ms, new_holder=effective_new_holder,
-                new_reason=new_reason, new_harness=new_harness,
+                new_reason=effective_new_reason, new_harness=effective_new_harness,
             )
         _atomic_replace(path, serialize_claim(rebound))
         if emit:
