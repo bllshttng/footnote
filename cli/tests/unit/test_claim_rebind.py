@@ -219,15 +219,21 @@ def test_a_live_handover_needs_a_launch_window_holder(tmp_path):
     prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,
                    holder="target-session:sid-live")
     _write(tmp_path, prior)
-    claim, mode = compare_and_rebind(
-        KEY, "target-session:sid-live", new_holder="target-session:sid-thief",
-        new_pid=os.getpid(), root=tmp_path, emit=False,
-    )
-    # The rename is dropped on every path, not only the handover branch: this
-    # call lands on the idempotent one, which used to apply new_holder too.
-    assert mode == "idempotent"
-    assert claim.holder == "target-session:sid-live"
-    assert claim_status(KEY, root=tmp_path)["holder"] == "target-session:sid-live"
+    before = claim_status(KEY, root=tmp_path)
+    with pytest.raises(RebindRefused):
+        compare_and_rebind(
+            KEY, "target-session:sid-live", new_holder="target-session:sid-thief",
+            new_pid=os.getpid(), root=tmp_path, emit=False,
+        )
+    # REFUSED, not quietly downgraded. Dropping only the rename let the call
+    # fall into the same-holder rebind, which rewrote the victim's pid and
+    # republished their claim as LIVE under the caller - unreapable, because
+    # `sweep_verdict` short-circuits on LIVE, and benign-looking to every
+    # dispatcher. Nothing on disk may change.
+    after = claim_status(KEY, root=tmp_path)
+    assert after["holder"] == "target-session:sid-live"
+    assert after["pid"] == before["pid"]
+    assert after.get("expires_at") == before.get("expires_at")
 
 
 def test_a_live_launch_window_holder_still_hands_over(tmp_path):

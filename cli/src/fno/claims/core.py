@@ -663,6 +663,20 @@ def compare_and_rebind(
             and new_holder != existing.holder
             and existing.holder.startswith(HANDOVER_HOLDER_PREFIX)
         )
+        if new_holder and new_holder != existing.holder and not handover_allowed:
+            # REFUSE, never fall through. Gating only the RENAME left this call
+            # dropping into the same-holder rebind below, which rewrote the
+            # victim's pid/host/expires_at and republished their claim as LIVE
+            # under THIS process. That is worse than the takeover the gate was
+            # added to stop: the claim then reads live to every dispatcher and
+            # `sweep_verdict` short-circuits on LIVE, so nothing can reap it.
+            raise RebindRefused(
+                f"holder {existing.holder!r} is not a launch-window holder; "
+                "only a spawn-side handover claim can be taken over",
+                state=classify(existing).value,
+                holder=existing.holder,
+                pid=existing.pid,
+            )
         effective_new_holder = new_holder if handover_allowed else None
         # The reason and the harness tag describe the OWNER, so they travel with
         # the rename or not at all. Applying them to a refused handover let a

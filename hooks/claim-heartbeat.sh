@@ -201,10 +201,12 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 # reflects state, so an `||` here would one day run BOTH calls and print two
 # JSON objects. `jq .holder` then emits two lines, the gate below never matches,
 # and a live session silently stops refreshing its claim.
-# BOUNDED, like the refresh below it. This runs on the PreToolUse path, and the
+# BOUNDED, like the refresh below it. This runs on the PostToolUse path, and the
 # unflagged fallback pays the roster cross-check - a full `claude agents --json
 # --all` enumeration - so an unbounded call would hang a tool call on a slow
 # fleet. A bound that fires reads as no claim, which only skips one heartbeat.
+# A kill also trips the empty-output retry below, so the worst case is two
+# bounded calls rather than one; the alternative is a hook that hangs.
 _STATUS_TIMEOUT="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
 _status_json() {
   local out

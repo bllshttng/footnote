@@ -824,7 +824,14 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
     index: dict = {}
     by_session: dict = {}
     for r in rows:
-        entry = {"name": r.name, "state": r.state, "cwd": r.cwd}
+        entry = {
+            "name": r.name,
+            "state": r.state,
+            "cwd": r.cwd,
+            # The session id travels with the row so a reader can ask the
+            # TRANSCRIPT whether a finished-looking row really finished.
+            "row_id": str(r.row_id or ""),
+        }
         if r.node:
             index.setdefault(r.node, []).append(entry)
         if r.row_id:
@@ -898,7 +905,25 @@ def _roster_verdict_line(info: dict) -> str:
         return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
     finished = _finished_row_states()
-    engaged = [w for w in workers if w["state"] not in finished]
+
+    def _really_finished(w: dict) -> bool:
+        # The row narrows, and the transcript may OVERRULE it - one direction
+        # only. The roster called a WORKING session done on 2026-08-15, which is
+        # why `_TERMINAL_STATES` carries its own warning, so a transcript that
+        # is positively still moving beats a row that says done.
+        #
+        # An UNREADABLE transcript leaves the row's answer standing, which is
+        # the opposite of what the reap probe does with the same reading. The
+        # asymmetry is deliberate and it follows the cost: a wrong reap archives
+        # a live worker's claim, while a wrong line here is an alarm on a node
+        # nobody is on - and an alarm that fires on every finished session whose
+        # transcript has aged out is the permanent noise that teaches operators
+        # to ignore the alarm entirely.
+        if w.get("state") not in finished:
+            return False
+        return _transcript_activity(w.get("row_id") or "", w.get("cwd") or "") is not False
+
+    engaged = [w for w in workers if not _really_finished(w)]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         return f"UNCLAIMED but a live worker is on this node: {rendered}"
@@ -1158,6 +1183,31 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
         return _transcript_says_finished(session_id, row.get("cwd") or "")
 
     return _probe
+
+
+def _transcript_activity(session_id: str, cwd: str):
+    """Tri-state: True finished, False still moving, None unreadable.
+
+    ``_transcript_says_finished`` folds "unreadable" into False because its
+    caller reaps, and there the safe answer is "still working". A reader that
+    only wants to OVERRULE a row needs the third value, or an aged-out
+    transcript reads as a live worker forever.
+    """
+    try:
+        import time
+
+        from fno.agents.watchdog import (
+            REAP_QUIET_AFTER_S,
+            finished_with_the_tree,
+            tail_facts,
+        )
+
+        facts = tail_facts(session_id, cwd)
+        if facts is None:
+            return None
+        return finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S)
+    except Exception:  # noqa: BLE001 - an unreadable transcript answers nothing
+        return None
 
 
 def _transcript_says_finished(session_id: str, cwd: str) -> bool:

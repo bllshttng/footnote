@@ -17,6 +17,25 @@
 # No side effects. Pure reads. Stop-hook is the only thing that should archive
 # stale state.
 
+# The claim's own `state`, never a substring match on the whole payload.
+#
+# `fno claim status` on a node key can append `roster_workers`, and every entry
+# in it carries its own `"state"` - one of which can read `live` for a worker
+# that is merely CO-RESIDENT in the tree. A `grep`-shaped test then answered
+# "this claim is live" from somebody else's row. jq reads the top-level key and
+# nothing under it; with no jq the sed fallback takes the FIRST state, which is
+# the top-level one because the roster fields are appended after it.
+_target_guard_state() {
+    local payload="$1"
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$payload" | jq -r '.state // empty' 2>/dev/null
+        return 0
+    fi
+    printf '%s' "$payload" \
+        | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' \
+        | head -1
+}
+
 # Return 0 if the named field value is YAML-null / empty.
 _target_guard_is_empty_yaml() {
     local v="$1"
@@ -82,9 +101,10 @@ target_is_active() {
     # Keyed on EMPTY OUTPUT, never on the exit code: an `||` chain would one day
     # run both calls and concatenate two JSON objects into one string.
     [ -n "$claim_json" ] || claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
-    case "$claim_json" in
+    [[ -n "$claim_json" ]] || return 0
+    case "$(_target_guard_state "$claim_json")" in
+        live|suspect) return 0 ;;
         "") return 0 ;;
-        *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -123,8 +143,8 @@ target_claim_is_live() {
         claim_json=$(fno claim status "$claim_key" -J 2>/dev/null); rc=$?
     fi
     [ "$rc" -eq 0 ] || return 1
-    case "$claim_json" in
-        *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
+    case "$(_target_guard_state "$claim_json")" in
+        live|suspect) return 0 ;;
         *) return 1 ;;
     esac
 }

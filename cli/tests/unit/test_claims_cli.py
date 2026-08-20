@@ -884,6 +884,33 @@ def test_an_unanticipated_warning_degrades_by_default(cwd_tmp, fake_roster):
     assert "roster not consulted" in r.output
 
 
+def test_a_lying_done_row_still_raises_the_alarm(cwd_tmp, fake_roster, monkeypatch):
+    """The roster called a WORKING session done on 2026-08-15, which is the
+    incident `_TERMINAL_STATES` carries a warning about. A transcript that is
+    positively still moving overrules the row, so an operator deciding whether
+    to staff this node is told a worker is on it."""
+    monkeypatch.setattr(
+        "fno.claims.cli._transcript_activity", lambda *_a, **_kw: False
+    )
+    fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "UNCLAIMED but a live worker is on this node" in r.output
+
+
+def test_an_aged_out_transcript_leaves_the_row_standing(cwd_tmp, fake_roster, monkeypatch):
+    """The other direction, and it is deliberately NOT what the reap probe does.
+    A wrong reap archives a live worker's claim; a wrong line here is an alarm
+    on an empty node, and one that fires on every finished session whose
+    transcript has aged out teaches operators to ignore the alarm."""
+    monkeypatch.setattr(
+        "fno.claims.cli._transcript_activity", lambda *_a, **_kw: None
+    )
+    fake_roster(rows=[_row("t-x76d1-rmtruth", "done", "x-76d1")])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "no live worker found" in r.output
+    assert "UNCLAIMED but a live worker" not in r.output
+
+
 def test_roster_read_failure_never_renders_a_clean_free(cwd_tmp, fake_roster):
     """An instrument that did not run must not render as an answer."""
     fake_roster(rows=[], warnings=["claude binary not found on PATH"])
