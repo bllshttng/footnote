@@ -156,17 +156,29 @@ jobs:
           # The description our context currently carries on this head, via
           # the COMBINED endpoint (one entry per context, the latest - no
           # same-second tie to break; the same read the post-merge audit
-          # uses). Empty means no status yet. A FAILED read fails the run
-          # (set -e), exactly like the label read below: an unreadable
-          # description must never masquerade as "no status", or the
-          # invalidate arms would clobber a green verdict on a transient
-          # 5xx - the same transient class post() retries for.
+          # uses). Empty means no status yet. Retries the same 3x/5s backoff
+          # as coverage-carry.sh's status_read and the audit's coverage_field
+          # before giving up, so a transient 5xx does not abort this run one
+          # call earlier than either sibling would. A read that still fails
+          # after retrying fails the run (set -e): an unreadable description
+          # must never masquerade as "no status", or the invalidate arms
+          # would clobber a green verdict on the same transient class post()
+          # retries for.
           # No `-R` here: gh api has no repo flag, and the URL path already
           # names the repository (pr view above needs -R; api never did).
           current_desc() {
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
-              --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\""
+            local attempt out
+            for attempt in 1 2 3; do
+              if out="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+                --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\"")"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              echo "review-coverage-gate: status read attempt ${attempt} failed; retrying after a backoff" >&2
+              sleep 5
+            done
+            return 1
           }
           # The LIVE label state, read by NAME. A grep over the raw JSON blob
           # also sees each label's description and colour, so an unrelated
