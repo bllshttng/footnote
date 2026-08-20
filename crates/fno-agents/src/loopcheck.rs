@@ -8922,9 +8922,14 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         }
     };
     if !pr.state.is_open_or_merged() {
+        let guidance = match pr.state {
+            PrState::Closed => "PR is closed - reopen it or create a new PR: `git push` and `gh pr create`",
+            _ => "PR state is not open or merged - check GitHub for the PR status"
+        };
         return format!(
-            "no PR for HEAD (pr_state={}); keep working",
-            pr.state.as_str()
+            "no open/merged PR for HEAD (pr_state={}). {}",
+            pr.state.as_str(),
+            guidance
         );
     }
 
@@ -8955,7 +8960,13 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             CiConclusion::Failure(Some(name)) => name.as_str(),
             _ => "CI",
         };
-        return format!("CI red on PR #{}: {} failed", pr.number, check_name);
+        return format!(
+            "CI red on PR #{}: {} failed. Re-read the check logs and fix the failing code: \
+             `fno pr checks --watch {}`",
+            pr.number,
+            check_name,
+            pr.number
+        );
     }
 
     if !pr.reviewed {
@@ -9109,7 +9120,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 n => format!(" ({n} unparseable attestation line(s) ignored)"),
             };
             return format!(
-                "PR #{}: reviewers gate unmet - no head-pinned review_attestation at {} for {}{}. \
+                "PR #{}: reviewers gate unmet at {} - missing attestation for: {}{}. \
                  This is local work to DO, not a wait: no GitHub reviewer posts these, \
                  so do not arm a watcher.",
                 pr.number,
@@ -9223,7 +9234,8 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     .map(|(b, _)| format!("{b}{}", read_note(b))),
             );
             return format!(
-                "PR #{}: {} has not reviewed.{}",
+                "PR #{}: {} has not reviewed. \
+                 Not nudgeable - manually trigger review, or move to config.review.optional_apps.{}",
                 pr.number,
                 names.join(", "),
                 hint("review")
@@ -9233,9 +9245,10 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
         return format!(
-            "PR #{} not yet reviewed and no reviewer is outstanding; \
-             re-check config.review (required_bots / reviewers) - nothing here will \
-             arrive on its own.",
+            "PR #{} not yet reviewed (no required reviewers configured). \
+             To require review: set config.review.required_bots (GitHub App logins) or \
+             config.review.reviewers (local reviewers like sigma). \
+             Nothing will arrive on its own without a configured gate.",
             pr.number
         );
     }
