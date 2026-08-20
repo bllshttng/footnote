@@ -647,15 +647,20 @@ def tick() -> None:
                             roots_done, left, _STRANDED_FLOOR_S,
                         )
                         break
-                    rows = sweep(repo=root)
-                    outcomes = apply_sweep(rows, wake=wake)
+                    try:
+                        rows = sweep(repo=root)
+                        outcomes = apply_sweep(rows, wake=wake)
+                    except Exception as exc:  # noqa: BLE001 - one bad repo never stops the rest
+                        log.warning("pr-watch: stranded sweep failed for %s: %s", root, exc)
+                        continue
                     stranded_n += sum(1 for r in rows if r.klass == STRANDED)
                     unknown_n += sum(1 for r in rows if r.klass == UNKNOWN)
                     acted_n += len(outcomes)
                     failed_n += sum(1 for o in outcomes if o["stopped_at"])
                     roots_done += 1
                 typer.echo(
-                    f"stranded sweep: stranded={stranded_n} unknown={unknown_n} "
+                    f"stranded sweep ({'wake' if wake else 'report'}): "
+                    f"stranded={stranded_n} unknown={unknown_n} "
                     f"acted={acted_n} failed={failed_n}"
                 )
             except _WatchdogBudgetSpent as exc:
