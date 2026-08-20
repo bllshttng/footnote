@@ -3854,6 +3854,18 @@ def _external_open_status(*, pr_number: Optional[int], plan_path: Optional[str])
     return "ready" if plan_path else "idea"
 
 
+def _read_external_node_and_sidecar(id: str):
+    """Exact-id tracker read plus sidecar load, shared by every external-backend
+    single-node renderer. Raises the tracker's ``NodeNotFound`` unchanged so
+    each caller keeps its own not-found message and exit code."""
+    from fno.tracker import get_tracker
+    from fno.tracker import sidecar as sidecar_store
+
+    node = get_tracker().read(id)
+    sc = sidecar_store.load(id)
+    return node, sc
+
+
 class _ExternalSelectionError(RuntimeError):
     """A tracker or required sidecar read failed during joined selection.
 
@@ -3863,7 +3875,7 @@ class _ExternalSelectionError(RuntimeError):
     """
 
 
-def _joined_open_candidates(tracker=None) -> list[dict]:
+def _joined_open_candidates() -> list[dict]:
     """The transient joined selection model: ``list_open()`` exactly once, one
     sidecar load per OPEN id, never the closed history (AC4's bound: 48 live
     rows, not the ~2,000 inactive archive).
@@ -3885,7 +3897,7 @@ def _joined_open_candidates(tracker=None) -> list[dict]:
     from fno.tracker import get_tracker
     from fno.tracker import sidecar as sidecar_store
 
-    tracker = tracker or get_tracker()
+    tracker = get_tracker()
     try:
         candidates = tracker.list_open()
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
@@ -4699,12 +4711,10 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
     """`backlog get` under an external backend: exact-id tracker read plus the
     sidecar, joined FOR DISPLAY ONLY (a render, not a stored convenience
     record). Byte-compatibility binds the graph mode above, not this branch."""
-    from fno.tracker import get_tracker
-    from fno.tracker import sidecar as sidecar_store
     from fno.tracker.types import NodeNotFound
 
     try:
-        node = get_tracker().read(id)
+        node, sc = _read_external_node_and_sidecar(id)
     except NodeNotFound:
         typer.echo(
             f"fno backlog get: no node matches '{id}' "
@@ -4713,7 +4723,6 @@ def _render_external_get(id: str, field: Optional[str]) -> None:
             err=True,
         )
         raise typer.Exit(code=1)
-    sc = sidecar_store.load(id)
     state = str(node.state.value)
     joined: dict = {
         "id": node.id,
@@ -5038,11 +5047,10 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
     from fno.tracker.types import NodeNotFound
 
     try:
-        node = get_tracker().read(id)
+        node, sc = _read_external_node_and_sidecar(id)
     except NodeNotFound:
         typer.echo(f"No node matching '{id}' (external backend; exact ids)", err=True)
         raise typer.Exit(code=1)
-    sc = sidecar_store.load(id)
 
     def _title_of(nid: Optional[str]) -> Optional[str]:
         if not nid:
@@ -7680,9 +7688,8 @@ def _done_via_seam(
     from fno.tracker import sidecar as sidecar_store
     from fno.tracker.types import NodeNotFound
 
-    tracker = get_tracker()
     try:
-        tnode = tracker.read(task_id)
+        tnode, sc = _read_external_node_and_sidecar(task_id)
     except NodeNotFound:
         typer.echo(f"Error: feature {task_id} not found", err=True)
         raise typer.Exit(code=1)
@@ -7690,7 +7697,7 @@ def _done_via_seam(
         typer.echo(f"{task_id} is already done", err=True)
         return
 
-    sc = sidecar_store.load(task_id)
+    tracker = get_tracker()
     row = {
         "id": task_id, "title": tnode.title, "cwd": sc.cwd,
         "plan_path": sc.plan_path, "pr_number": sc.pr_number,
