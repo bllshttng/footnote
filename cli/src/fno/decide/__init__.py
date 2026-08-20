@@ -84,6 +84,21 @@ class RefusedAuthorityError(RuntimeError):
         self.agent_handle = agent_handle
 
 
+class UnattributedAuthorityError(RuntimeError):
+    """A caller with no identity and no terminal tried to record law.
+
+    Separate from :class:`RefusedAuthorityError` because the remedy differs: an
+    agent is told to drop the flag and rule as an agent, while this caller is
+    told to name itself. There is no handle to put in the message.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "no session identity and no terminal, so operator authority "
+            "cannot be established"
+        )
+
+
 def mint_decision_id() -> str:
     """A stable handle in the q-/fu- family: d-<hex>."""
     return f"d-{secrets.token_hex(4)}"
@@ -98,9 +113,36 @@ class Provenance(NamedTuple):
     """
 
     decided_by: str
-    authority_source: str
+    authority_source: str | None
     attested_by: str | None
     relayed_by: str | None
+
+
+def _attended_terminal() -> bool:
+    """Is a person at a terminal on the other end of this process?
+
+    A positive marker rather than an absence, which is why it replaced reading
+    attendedness off missing session markers: `env -u CLAUDE_CODE_SESSION_ID`
+    was enough to forge an attested row in the law lane.
+
+    STATE THE LIMIT PLAINLY, because the honest claim is narrower than the rule
+    it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` makes this
+    return True from a context with no person in it. So this raises the cost of
+    forging the operator lane, and does not prevent it. It is one signal, never
+    proof, and it never stands alone: it opens the operator lane, the lane
+    still needs an explicit `--authority operator`, and the fail-closed third
+    state catches everything else.
+
+    No local signal can prove a human is present, because a caller that owns
+    the process owns every local signal. Proof needs an out-of-band attestation
+    this verb cannot mint for itself.
+
+    A closed stdin raises rather than answering, and that is not a terminal.
+    """
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def _resolve_decider(
@@ -122,6 +164,15 @@ def _resolve_decider(
     a real operator answer it obtained by asking is an honest record worth
     keeping (d-ab302914). Splitting the columns keeps it and still makes the
     trusted one unforgeable.
+
+    Three states, and the third fails closed:
+
+    1. a session identity resolves -> stamp that handle, agent lane
+    2. no identity, a terminal on stdin -> the operator lane is open
+    3. no identity, no terminal -> operator authority is REFUSED
+
+    State 3 exists because state 2 used to be everything that was not state 1,
+    which made it an absence. Scrubbing the environment was enough to reach it.
     """
     from fno.harness_identity import canonical_handle, resolve_harness_identity
 
@@ -134,14 +185,31 @@ def _resolve_decider(
     if agent and authority_source == "operator":
         raise RefusedAuthorityError(agent)
     if agent:
-        # Relayed only when it says something the stamp does not. A caller
-        # passing its own handle relayed nothing.
+        # State 1. Relayed only when it says something the stamp does not. A
+        # caller passing its own handle relayed nothing.
         relayed = decided_by if decided_by and decided_by != agent else None
         return Provenance(agent, authority_source or "agent", None, relayed)
-    # No ambient identity: a human at an attended terminal. The name they state
-    # IS the record, and attested_by marks it as one a person stood behind.
-    decider = decided_by or "operator"
-    return Provenance(decider, authority_source or "operator", decider, None)
+
+    if _attended_terminal():
+        # State 2. A person is at a terminal. The name they state IS the
+        # record, and attested_by marks it as one a person stood behind.
+        #
+        # Authority is NOT defaulted to operator here. Law is never inherited
+        # by silence, in any state: a caller who wants the operator lane says
+        # so. Forging law then costs two deliberate acts rather than one.
+        decider = decided_by or "operator"
+        return Provenance(decider, authority_source, decider, None)
+
+    # State 3, and it fails closed. No session identity and no terminal, so
+    # nothing here positively marks anyone. Law is refused rather than
+    # inherited by silence, the authority stays unset so the reader's existing
+    # `unattributed` lane covers it, and any name the caller stated is a claim
+    # it made, recorded as one.
+    if authority_source == "operator":
+        raise UnattributedAuthorityError()
+    return Provenance(
+        "unattributed-caller", authority_source, None, decided_by or None
+    )
 
 
 def record_decision(

@@ -36,8 +36,20 @@ A row is quoted far more often than it is read in the list, and a quoted row car
 | Field | Who writes it | What it means |
 |---|---|---|
 | `decided_by` | stamped from the ambient session, always, when one resolves | who recorded the ruling. This is the field to trust. It cannot be typed. |
-| `attested_by` | only an attended caller, where no session identity resolved | a name a person stood behind, rather than a handle a process stamped |
-| `relayed_by` | filled from `--decided-by` when a session IS resolved | a name the caller supplied for someone else. A claim, not a stamp. |
+| `attested_by` | only a caller with no session identity AND a terminal on stdin | a name a person stood behind, rather than a handle a process stamped |
+| `relayed_by` | filled from `--decided-by` when the caller is not the decider | a name the caller supplied for someone else. A claim, not a stamp. |
+
+Three caller states decide which of those get written, and the third fails closed.
+
+1. A session identity resolves. The handle is stamped into `decided_by`, and the row reads as coordination.
+2. No identity, and a terminal on stdin. `attested_by` is written, and `--authority operator` is accepted.
+3. No identity, and no terminal. Operator authority is REFUSED. `decided_by` says `unattributed-caller`.
+
+Law is never DEFAULTED, in any state. A caller who wants the operator lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
+
+State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno decide --authority operator` was enough to forge an attested row in the law lane.
+
+Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
 
 On 2026-08-19 an agent passed `--decided-by "J.N. Choi"`, and that name landed in `decided_by`. Five workers had been told to verify their orders by reading that field. Each did it correctly and got a fabricated yes.
 

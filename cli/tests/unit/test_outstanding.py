@@ -595,9 +595,42 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     assert data["question"] == "fold or migrate?"
     assert data["subject"] == "x-7d94"
     assert data["decision_id"].startswith("d-")
-    assert data["authority_source"] == "operator"
     assert data["asked_at"], "asked_at must inherit the question's timestamp"
     assert data["decided_by"]
+    # NOT authority_source == "operator". This runs with no session identity
+    # and no terminal, which is the fail-closed third state: the answer is
+    # recorded and claims no authority, rather than inheriting law by silence.
+    # Answering a question does not by itself prove the operator answered it.
+    assert "authority_source" not in data
+
+
+def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
+    root: Path, monkeypatch
+):
+    """The operator lane stays reachable on this path; only the silent default
+    closed. An agent clearing a question on the operator's behalf must not be
+    indistinguishable from the operator answering it."""
+    from fno import decide as decide_mod
+
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
+
+    asked = runner.invoke(
+        outstanding_app, ["ask", "fold or migrate?", "--node", "x-7d94"]
+    )
+    qid = asked.stdout.strip().splitlines()[-1]
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "fold"])
+    assert cleared.exit_code == 0, cleared.output
+
+    lines = [
+        json.loads(line)
+        for line in (root / ".fno" / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    data = [e for e in lines if e["type"] == "operator_decision"][0]["data"]
+    assert data["decided_by"] == "operator"
+    assert data["attested_by"] == "operator", "a person was at the terminal"
 
     # A withdrawal (no --answer) decides nothing: positive control is the
     # closed event itself, the decision count stays at one from the ask above.

@@ -82,6 +82,7 @@ def record(
         AUTHORITY_SOURCES,
         IndexWriteError,
         RefusedAuthorityError,
+        UnattributedAuthorityError,
         record_decision,
     )
 
@@ -120,6 +121,16 @@ def record(
             "cannot record under operator authority. If only the operator can "
             "settle this, use `fno outstanding ask`. If ruling as an agent, "
             "drop --authority operator; it records agent coordination.",
+            err=True,
+        )
+        raise typer.Exit(3)
+    except UnattributedAuthorityError:
+        typer.echo(
+            "decide: refused. This process has no session identity and no "
+            "terminal, so nothing here shows the operator ruled. Operator "
+            "authority is never inherited by silence. Run it from a terminal, "
+            "join the session so a handle can be stamped, or drop --authority "
+            "operator to record it in the unattributed lane.",
             err=True,
         )
         raise typer.Exit(3)
@@ -234,15 +245,20 @@ def list_cmd(
 
     if as_json:
         # matched_by tells a machine reader WHICH key answered, so an id lookup
-        # is never mistaken for a subject hit. near_misses is the same fact the
-        # human block prints, from the same function, so the two cannot drift.
-        matched_by = "subject"
-        if subject and decisions and looks_like_decision_id(subject):
+        # is never mistaken for a subject hit. A LIST, because the read is a
+        # union: `--subject d-XXXX` returns that decision AND any ruling filed
+        # about it, so a single value would deny that the subject key answered.
+        # Computed over `found`, never the --limit slice, or a cap silently
+        # drops one of the two keys from the answer.
+        matched: "list[str]" = []
+        if subject:
             want = subject.strip().casefold()
+            if any(str(d.get("decision_id") or "").casefold() == want for d in found):
+                matched.append("decision_id")
             if any(
-                str(d.get("decision_id") or "").casefold() == want for d in decisions
+                str(d.get("decision_id") or "").casefold() != want for d in found
             ):
-                matched_by = "decision_id"
+                matched.append("subject")
         typer.echo(
             json.dumps(
                 {
@@ -253,7 +269,7 @@ def list_cmd(
                     # This surface is machine-first, so an under-count that
                     # looks complete is the same lie "truncated" prevents.
                     "damaged": damaged,
-                    "matched_by": matched_by if subject else None,
+                    "matched_by": matched if subject else None,
                     "near_misses": [{"subject": s, "count": n} for s, n in near],
                 },
                 separators=(",", ":"),
@@ -272,32 +288,33 @@ def list_cmd(
         # empty answer names the backfill whenever the index is missing.
         from fno.decide import _index_path
 
-        if lane == "law" and _index_path().exists():
-            _, legacy, _ = list_decisions(subject, limit=None, lane="unattributed")
-            if legacy:
-                noun = "decision remains" if len(legacy) == 1 else "decisions remain"
-                typer.echo(
-                    f"decide list: 0 law decisions for '{label}'; "
-                    f"{len(legacy)} pre-cutover {noun} unattributed. "
-                    "Use --lane unattributed to inspect them.",
-                    err=True,
-                )
-                return
-
         if lane is not None and _index_path().exists():
             # The LANE emptied the answer, not the store. Saying nothing is
             # indexed under this subject would be false, and the reader acts on
-            # it. Only `law` had this branch; every other lane printed the lie.
+            # it.
+            #
+            # ONE branch for every lane. `law` used to have its own, naming
+            # only the pre-cutover rows, so a subject with 2 unattributed and 3
+            # coord rulings heard about the 2 and never the 3: the more
+            # specific branch gave the less complete answer.
             _, unfiltered, _ = list_decisions(subject, limit=None)
             if unfiltered:
                 noun = "decision" if len(unfiltered) == 1 else "decisions"
-                lanes = ", ".join(
-                    sorted({str(d.get("lane") or "unattributed") for d in unfiltered})
-                )
+                counts: "dict[str, int]" = {}
+                for d in unfiltered:
+                    key = str(d.get("lane") or "unattributed")
+                    counts[key] = counts.get(key, 0) + 1
+                lanes = ", ".join(f"{n} {k}" for k, n in sorted(counts.items()))
+                hint = ""
+                if lane == "law" and counts.get("unattributed"):
+                    hint = (
+                        " The unattributed ones are pre-cutover, recorded "
+                        "before authority was an earned value."
+                    )
                 typer.echo(
                     f"decide list: 0 {lane} decisions for '{label}', but "
-                    f"{len(unfiltered)} {noun} sit under it in: {lanes}. "
-                    "Drop --lane to read them.",
+                    f"{len(unfiltered)} {noun} sit under it: {lanes}."
+                    f"{hint} Drop --lane to read them.",
                     err=True,
                 )
                 return

@@ -135,7 +135,10 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     assert data["decision_id"] == did
     assert data["subject"] == "x-7d94"
     assert data["decision"] == "fold every project's inbox"
-    assert data["authority_source"]
+    # decided_by, not authority_source. Authority is legitimately ABSENT for a
+    # caller with no session identity and no terminal: that state refuses to
+    # claim one, and the reader's `unattributed` lane covers it.
+    assert data["decided_by"]
 
     entry = json.loads(tmp_graph.read_text())["entries"][0]
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
@@ -498,7 +501,11 @@ def test_legacy_operator_rows_stay_byte_identical_and_empty_law_is_positive(
     )
     assert law.exit_code == 0, law.output
     assert "0 law decisions" in law.output
-    assert "1 pre-cutover decision remains unattributed" in law.output
+    # The law-only branch was merged into the general lane one, so this now
+    # counts EVERY lane the subject holds rather than the pre-cutover rows
+    # alone. The more specific branch was giving the less complete answer.
+    assert "1 unattributed" in law.output
+    assert "pre-cutover" in law.output
     assert index.read_bytes() == before
 
 
@@ -1054,12 +1061,18 @@ def test_resolve_agent_identity_defaults_decider_and_authority(
     assert decision["authority_source"] == "agent"
 
 
-def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
+def test_no_identity_at_a_terminal_names_the_operator_but_claims_no_authority(
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Rewritten twice, not deleted. It first asserted that ANY caller with no
+    session identity is the operator, which made attendedness an absence:
+    scrubbing the environment reached it. A terminal is now required, and even
+    at one the law lane is never DEFAULTED, because a tty is obtainable
+    (`script -q /dev/null`) and law must never be inherited by silence."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
@@ -1067,6 +1080,7 @@ def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
         "resolve_harness_identity",
         lambda: harness_identity.HarnessIdentity(None, None),
     )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
     payload = json.loads(
@@ -1074,7 +1088,53 @@ def test_resolve_no_identity_defaults_decider_and_authority_to_operator(
     )
     decision = payload["decisions"][0]
     assert decision["decided_by"] == "operator"
-    assert decision["authority_source"] == "operator"
+    assert decision["attested_by"] == "operator", "a person was at the terminal"
+    assert "authority_source" not in decision, "law is never defaulted, only stated"
+    assert decision["lane"] == "unattributed"
+
+
+def test_no_identity_and_no_terminal_refuses_operator_authority(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The forgery this closes: `env -u CLAUDE_CODE_SESSION_ID fno decide
+    --authority operator` resolved no identity, took the attended branch, and
+    landed a row in the law lane. Absence is not attendance."""
+    from fno import decide as decide_mod
+    from fno import harness_identity
+
+    monkeypatch.setattr(
+        harness_identity,
+        "resolve_harness_identity",
+        lambda: harness_identity.HarnessIdentity(None, None),
+    )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: False)
+
+    refused = runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "law", "--authority", "operator"],
+    )
+    assert refused.exit_code != 0, refused.output
+    assert "no terminal" in refused.output
+    assert not index.exists(), "a refused write leaves no row behind"
+
+    # Without the flag it still records, because a read that cannot happen is
+    # worse than one that is honestly labelled. It claims no authority, so the
+    # reader's existing unattributed lane covers it.
+    runner.invoke(
+        decide_app,
+        ["--subject", "pr-923", "--decision", "a note", "--decided-by", "J.N. Choi"],
+    )
+    row = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )["decisions"][0]
+    assert row["decided_by"] == "unattributed-caller"
+    assert row["relayed_by"] == "J.N. Choi", "the stated name is a claim, kept as one"
+    assert "authority_source" not in row
+    assert "attested_by" not in row
+    assert row["lane"] == "unattributed"
 
 
 def test_an_agent_cannot_type_a_name_into_decided_by(
@@ -1236,6 +1296,9 @@ def test_no_identity_explicit_operator_authority_records(
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Kept, with the terminal now pinned. The operator lane stays open to a
+    person who states their authority; only the silent inheritance closed."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
@@ -1243,6 +1306,7 @@ def test_no_identity_explicit_operator_authority_records(
         "resolve_harness_identity",
         lambda: harness_identity.HarnessIdentity(None, None),
     )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
 
     recorded = runner.invoke(
         decide_app,
@@ -1420,6 +1484,40 @@ def test_an_id_lookup_does_not_hide_rulings_recorded_about_that_id(
     )
     ids = {d["decision_id"] for d in payload["decisions"]}
     assert ids == {"d-3b26c1c6", "d-cccc0003"}, "the id AND what was said about it"
+    # A single value here would deny that the subject key answered, which is
+    # the confusion the field exists to prevent.
+    assert payload["matched_by"] == ["decision_id", "subject"]
+
+
+def test_a_lane_message_counts_every_lane_the_subject_holds(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """The law-only branch named the pre-cutover rows and stopped, so a subject
+    with unattributed AND coord rulings heard about the first and never the
+    second: the more specific branch gave the less complete answer."""
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-18T10:00:00Z",
+            "decision_id": "d-dddd0001",
+            "decision": "pre-cutover",
+            "subject": "pr-923",
+            "decided_by": "operator",
+            "authority_source": "operator",
+        },
+        {
+            "ts": "2026-08-22T10:00:00Z",
+            "decision_id": "d-dddd0002",
+            "decision": "a peer ruling",
+            "subject": "pr-923",
+            "decided_by": "king-g4",
+            "authority_source": "crown",
+        },
+    )
+    res = runner.invoke(decide_app, ["list", "--subject", "pr-923", "--lane", "law"])
+    assert res.exit_code == 0, res.output
+    assert "1 unattributed" in res.output
+    assert "1 coord" in res.output, "the lane the law branch used to hide"
 
 
 def test_near_miss_counts_are_deduped_the_way_the_listing_is(
@@ -1542,7 +1640,7 @@ def test_a_decision_id_is_a_lookup_key_whatever_subject_it_was_filed_under(
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "d-3b26c1c6", "--json"]).stdout
     )
-    assert payload["matched_by"] == "decision_id"
+    assert payload["matched_by"] == ["decision_id"]
     assert payload["decisions"][0]["subject"] == "force-push"
 
 
@@ -1681,6 +1779,7 @@ def test_only_an_attended_caller_writes_attested_by(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The field that makes a genuine ruling checkable on the row itself."""
+    from fno import decide as decide_mod
     from fno import harness_identity
 
     monkeypatch.setattr(
@@ -1688,6 +1787,7 @@ def test_only_an_attended_caller_writes_attested_by(
         "resolve_harness_identity",
         lambda: harness_identity.HarnessIdentity(None, None),
     )
+    monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
     runner.invoke(
         decide_app,
         ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
