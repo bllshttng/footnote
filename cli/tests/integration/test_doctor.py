@@ -260,7 +260,11 @@ def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
     assert check_agent_profiles(settings) == []
 
 
-def test_check_agent_profiles_flags_codex_lane_without_permission_mode() -> None:
+def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
+    """The codex-empty-permission_mode note is gone. Its premise was that the
+    workspace-write sandbox cannot reach ~/.fno, which is exactly what the
+    computed --add-dir grant fixed. A warning that turns doctor red for a
+    working config is worse than no warning."""
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
@@ -269,13 +273,23 @@ def test_check_agent_profiles_flags_codex_lane_without_permission_mode() -> None
             {"provider": "codex", "substrate": "pane"},
         ]}}}
     )
+    assert check_agent_profiles(settings) == []
+
+
+def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
+    """The substrate/provider compatibility half stays: bg is claude-only, so a
+    codex lane asking for it cannot launch and doctor should say so."""
+    from fno.config import SettingsModel
+    from fno.setup.doctor import check_agent_profiles
+
+    settings = SettingsModel(
+        agents={"profiles": {"target": {"lanes": [
+            {"provider": "codex", "substrate": "bg"},
+        ]}}}
+    )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
-    assert "agents.profiles.target.lanes[0].permission_mode" in problems[0]
-    # The message no longer claims claims will fail: fno grants the state root
-    # itself now (writable_dirs). What survives is the narrower true statement.
-    assert "codex" in problems[0] and "--add-dir" in problems[0]
-    assert "OUTSIDE its cwd" in problems[0]
+    assert "substrate" in problems[0] and "codex" in problems[0]
 
 
 def test_check_worktree_policy_flags_out_of_enum(
