@@ -7,6 +7,7 @@ to fire anywhere outside a pane -- which is where the capture miss concentrates.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -21,10 +22,16 @@ class _Gate:
 
 
 @pytest.fixture
-def spawned_env(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
+def spawned_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Dict[str, Any]:
     """Invoke cmd_spawn with the dispatch faked; capture the env the child sees."""
     from fno.agents import dispatch, spawn_gate
 
+    # A node-driven spawn now takes the node claim itself and leaves it for the
+    # worker to inherit, so these cases share one live claim on the id they all
+    # reuse. Root the claim store per test: otherwise the first case's handover
+    # window refuses every later one, and a local run writes real claims for
+    # fake nodes into the user's global store.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
     monkeypatch.delenv("FNO_NODE", raising=False)
     monkeypatch.delenv("FNO_SLUG", raising=False)
