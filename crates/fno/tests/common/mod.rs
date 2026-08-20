@@ -388,14 +388,44 @@ impl ClientHarness {
     /// always-on status row (US4) is client-local chrome that renders as the
     /// final non-empty line and never ends with `$`, so keying on the very
     /// last line alone would never see the prompt sitting just above it.
+    /// NUDGES with a bare CR, exactly like `FakeClient::wait_prompt`. A purely
+    /// passive wait here was the remaining half of the PR #220 hardening: the
+    /// nudge landed on FakeClient and this path kept polling. The prompt is a
+    /// TRANSIENT screen state, not a durable one - a layout reemit right after
+    /// the shell draws `$ ` erases the row, and readline only repaints when
+    /// input arrives, so a passive poll spins the full timeout against a row
+    /// nothing will redraw. Observed in CI on
+    /// `persistence_alt_screen_program_survives_detach_reattach`, whose whole
+    /// client output was the prompt being drawn and then blanked.
     pub fn wait_prompt(&mut self, secs: u64) -> String {
-        self.wait_screen(secs, |s| {
+        let rendered = |s: &str| {
             s.lines()
                 .rev()
                 .filter(|l| !l.trim().is_empty())
                 .take(2)
                 .any(|l| l.trim_end().ends_with('$'))
-        })
+        };
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            let screen = self.screen();
+            if rendered(&screen) {
+                return screen;
+            }
+            // A bare CR at a prompt just yields a fresh prompt line, so this is
+            // safe at every call site, including the one right after ^C ends a
+            // foreground program.
+            self.type_bytes(b"\r");
+            let attempt = (Instant::now() + Duration::from_millis(500)).min(deadline);
+            while Instant::now() < attempt {
+                let screen = self.screen();
+                if rendered(&screen) {
+                    return screen;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        // Deadline blown: one last look, and the standard panic + diagnostics.
+        self.wait_screen(0, rendered)
     }
 
     pub fn wait_exit(&mut self, secs: u64) -> portable_pty::ExitStatus {
