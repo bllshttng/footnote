@@ -110,6 +110,21 @@ def test_pane_run_failure_is_reported_without_a_child_pid_lookup(monkeypatch) ->
     assert result["error"] == "boom"
 
 
+def test_no_child_pid_names_the_pid_lookup_miss_not_a_timeout(monkeypatch) -> None:
+    # A pane that ran but whose child pid never resolved never waits out a
+    # window at all - the report must not claim "neither oracle bound
+    # within the window", which would misattribute a lookup miss as a
+    # timeout and hide the real cause.
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *a, **k: None)
+
+    result = doctor._codex_bind_report()
+
+    assert result["bound"] is False
+    assert result["oracle"] is None
+    assert result["error"] == "no child pid found for the canary pane"
+
+
 def test_unparseable_pane_id_on_a_successful_run_names_the_manual_cleanup_path(
     monkeypatch,
 ) -> None:
