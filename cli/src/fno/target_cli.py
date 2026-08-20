@@ -910,6 +910,32 @@ def check_review_gate() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("review-invocation", hidden=True)
+def review_invocation_cmd(
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        help="Harness to render for (default: the ambient session's). Callers "
+        "that already resolved a harness pass it so the render matches their view.",
+    ),
+) -> None:
+    """Print the sized self-review invocation for this session (x-dae5).
+
+    Stdout is exactly one line: the invocation the worker should run, level
+    sized from the branch's diff via ``level_for_diff`` (never a hardcoded
+    level). The refusal surfaces a held worker reads (the stop gate's coverage
+    reason, the merge guard, the CI status) embed this output; prose cannot
+    carry it because ``check-review-invocation-single-source.sh`` bans any
+    concrete level outside the builder. A worker or king can also run this
+    verb directly.
+
+    Read-only; writes no state. Always exits 0 - a render failure prints the
+    unsized placeholder form, it never refuses."""
+    from fno.review_capability import render_self_review_invocation
+
+    typer.echo(render_self_review_invocation(harness=harness, project_root=Path.cwd()))
+
+
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
     """Resolve the harness identity this process can PROVE it owns.

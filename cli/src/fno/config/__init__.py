@@ -623,14 +623,23 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
     "code-review": ReviewerDescriptor(
         kind="local-attestation",
         requires="none",
-        invocation="/code-review",
+        # The scalar is the harness-portable fallback: an unknown harness gets
+        # this, never claude's verb silently (opencode/agy workers were handed
+        # `/code-review`, a verb their harness cannot run).
+        invocation="/fno:review",
         # The claude value carries the full arg grammar with a `<level>`
         # placeholder; `self_review_invocation` substitutes a validated level
         # (never `ultra` - it is billed separately and absent from
-        # ALLOWED_REVIEW_LEVELS). Codex stays bare.
+        # ALLOWED_REVIEW_LEVELS). Codex stays bare - prose after the verb flips
+        # it to a no-merge-base review target. opencode stays bare for the same
+        # reason: its flag grammar is unverified against its docs, and an
+        # appended guess is the codex trap in a new coat. agy has no native
+        # verb, so it takes the fno review.
         invocations={
             "claude": "/code-review <level> --comment --fix",
             "codex": "/review",
+            "opencode": "/review-changes",
+            "agy": "/fno:review",
         },
         asserts="review-evidence",
     ),

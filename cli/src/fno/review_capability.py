@@ -19,6 +19,7 @@ is missing is a green gate with no review behind it.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -429,8 +430,14 @@ class PreShipReviewPlan:
 
 
 def harness_can_self_review(harness: Optional[str]) -> bool:
-    """Whether this harness exposes a native self-review verb."""
-    return harness in {"claude", "codex"}
+    """Whether this harness exposes a native self-review verb.
+
+    opencode joined at x-dae5: `/review-changes` is recorded in the descriptor
+    map, so the self-review floor is satisfiable there. agy/gemini stay out -
+    no native verb; agy's recorded `/fno:review` fallback serves lane-named
+    block reasons, but the floor's job is to demand only attestations a native
+    path produces."""
+    return harness in {"claude", "codex", "opencode"}
 
 
 # The effort levels an autonomous agent may issue. `ultra` is billed
@@ -471,9 +478,16 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
     Codex is `/review` bare - prose after the verb flips it to a no-merge-base
     review target, so nothing is appended. Claude is `/code-review <level>
     --comment --fix`: it takes its own argument grammar, and that form actually
-    posts comments and applies findings. The verb AND the arg grammar are read
-    from the `code-review` descriptor's per-harness map (the parity-checked
-    source of truth), so this is not a second copy of either.
+    posts comments and applies findings. opencode is `/review-changes` bare
+    (same no-appended-prose caution; its flag grammar is unverified against its
+    docs). The verb AND the arg grammar are read from the `code-review`
+    descriptor's per-harness map (the parity-checked source of truth), so this
+    is not a second copy of either.
+
+    An unknown harness gets the descriptor's scalar fallback (`/fno:review`),
+    never claude's verb silently: a confidently wrong answer where no answer
+    was available is the defect family this module exists to delete, and
+    `/fno:review` is runnable on every harness the plugin serves.
 
     `level` is validated against `ALLOWED_REVIEW_LEVELS` - anything outside it
     (`ultra` included) raises. `None` leaves the `<level>` placeholder in
@@ -487,10 +501,84 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
 
     desc = _RESOLVABLE_REVIEWERS.get("code-review")
     invocations = desc.invocations if desc and desc.invocations else {}
-    invocation = invocations.get(harness or "", invocations.get("claude", "/code-review"))
+    invocation = invocations.get(harness or "", desc.invocation if desc else "/fno:review")
     if level is None or "<level>" not in invocation:
         return invocation
     return invocation.replace("<level>", level)
+
+
+def _git_out(cwd: Path, *args: str) -> Optional[str]:
+    """Full stdout of a git call (stripped, may be multi-line), or None.
+
+    Never raises: sizing is advisory, the stop gate is the backstop. Multi-line
+    matters - the numstat read below parses every row, and a first-line-only
+    helper would size a 4-file diff as one file."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def diff_review_level(project_root: Optional[Path]) -> Optional[str]:
+    """The sized review level for this branch's current diff, or None.
+
+    None means no measurable diff yet (init, or no merge base): the caller then
+    leaves the `<level>` placeholder in the invocation rather than guessing a
+    level the diff has not earned. Advisory only; never raises. Moved here from
+    `fno.target.orient._diff_review_level` (x-dae5) so the renderer below and
+    the orienter share ONE sizing path."""
+    if project_root is None:
+        return None
+    try:
+        base = None
+        for candidate in ("origin/main", "origin/master"):
+            # Only an absent ref advances the fallback: a resolvable ref with
+            # no merge-base (unrelated histories) means this branch cannot be
+            # sized, not that the other ref should answer instead.
+            if not _git_out(project_root, "rev-parse", "--verify", f"{candidate}^{{commit}}"):
+                continue
+            base = _git_out(project_root, "merge-base", "HEAD", candidate)
+            break
+        if not base:
+            return None
+        numstat = _git_out(project_root, "diff", "--numstat", base)
+        if not numstat:
+            return None
+        files = lines = 0
+        for row in numstat.splitlines():
+            parts = row.split("\t")
+            if len(parts) < 3:
+                continue
+            files += 1
+            for n in parts[:2]:
+                lines += 0 if n.strip() == "-" else int(n or 0)
+        return level_for_diff(files, lines) if files else None
+    except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
+        return None
+
+
+def render_self_review_invocation(
+    harness: Optional[str] = None, project_root: Optional[Path] = None
+) -> str:
+    """The full self-review invocation for this session, level sized from the diff.
+
+    The render every refusal site names (x-dae5): a worker held at the stop
+    gate reads THIS string, not a `<level>` placeholder it has no renderer for.
+    Sizing always goes through `diff_review_level` (-> `level_for_diff`),
+    never the builder's `medium` default - the standing instruction is to size
+    from the diff. With no measurable diff the level is None and the
+    placeholder stays: an honest unsized render beats a fabricated one.
+    Harness falls back to the ambient session when not given. Never raises."""
+    try:
+        h = harness or detect_session().harness
+        return self_review_invocation(h, level=diff_review_level(project_root))
+    except Exception:  # noqa: BLE001 - advisory text; the gate stays the gate
+        return self_review_invocation(harness, level=None)
 
 
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:

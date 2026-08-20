@@ -569,46 +569,6 @@ def _local_review_gates(review: Any) -> List[str]:
     return gates
 
 
-def _diff_review_level(project_root: Optional[Path]) -> Optional[str]:
-    """The sized review level for this branch's current diff, or None.
-
-    None means no measurable diff yet (init, or no merge base): the caller then
-    leaves the `<level>` placeholder in the invocation rather than guessing a
-    level the diff has not earned. Advisory only; never raises."""
-    if project_root is None:
-        return None
-    try:
-        from fno.review_capability import level_for_diff
-
-        base = None
-        for candidate in ("origin/main", "origin/master"):
-            # Only an absent ref advances the fallback: a resolvable ref with
-            # no merge-base (unrelated histories) means this branch cannot be
-            # sized, not that the other ref should answer instead.
-            if not _git_out(
-                project_root, "rev-parse", "--verify", f"{candidate}^{{commit}}"
-            ):
-                continue
-            base = _git_out(project_root, "merge-base", "HEAD", candidate)
-            break
-        if not base:
-            return None
-        numstat = _git_out(project_root, "diff", "--numstat", base)
-        if not numstat:
-            return None
-        files = lines = 0
-        for row in numstat.splitlines():
-            parts = row.split("\t")
-            if len(parts) < 3:
-                continue
-            files += 1
-            for n in parts[:2]:
-                lines += 0 if n.strip() == "-" else int(n or 0)
-        return level_for_diff(files, lines) if files else None
-    except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
-        return None
-
-
 def _self_review_clause(project_root: Optional[Path] = None) -> str:
     """The self-review verb + fallback clause, or "".
 
@@ -622,6 +582,7 @@ def _self_review_clause(project_root: Optional[Path] = None) -> str:
     try:
         from fno.review_capability import (
             detect_session,
+            diff_review_level,
             harness_can_self_review,
             self_review_invocation,
         )
@@ -629,7 +590,7 @@ def _self_review_clause(project_root: Optional[Path] = None) -> str:
         s = detect_session()
         if not harness_can_self_review(s.harness):
             return ""
-        verb = self_review_invocation(s.harness, level=_diff_review_level(project_root))
+        verb = self_review_invocation(s.harness, level=diff_review_level(project_root))
     except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
         return ""
     harness = s.harness or "unknown"
