@@ -1,4 +1,4 @@
-"""The three-way stranded-worktree classifier (x-f4e9).
+"""The three-way stranded-worktree classifier.
 
 A provider-killed worker can leave finished commits with no branch, no PR
 and no roster row. No single probe tells that apart from an abandoned
@@ -32,7 +32,6 @@ from fno.graph.store import (
     GraphUnreadableError,
     read_graph_strict,
 )
-from fno.paths import resolve_repo_root
 
 _QUIET_TERMINAL_STATUSES = frozenset({"superseded", "deferred"})
 
@@ -266,9 +265,18 @@ def _load_worktree_status_module():
 _worktrees = _load_worktree_status_module()._worktrees
 
 
-def sweep(repo: Optional[Path] = None) -> list[Row]:
-    """Classify every worktree registered to ``repo`` (default: cwd's repo)."""
-    repo = repo or Path(resolve_repo_root())
+def sweep(repo: Path) -> list[Row]:
+    """Classify every worktree registered to ``repo``.
+
+    ``repo`` resolution is the caller's job, not this module's: a module
+    that calls the shared ``resolve_repo_root()`` itself would drag every
+    ``scripts/``-relative path in this file (the ``_unpushed_batch`` /
+    ``_worktrees`` script lookups, deliberately package-relative via
+    ``Path(__file__)`` rather than that same resolver - see their
+    docstrings) into `fno lint shellout-drift`'s scan scope for no reason;
+    that guard flags a module on the mere co-occurrence of a bash-exec and
+    a resolver call, not on which one actually roots the script path.
+    """
     worktrees = _worktrees(repo)
     paths = [p for _b, p in worktrees]
 

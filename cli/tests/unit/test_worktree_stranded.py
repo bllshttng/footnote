@@ -1,4 +1,4 @@
-"""The three-way stranded-worktree classifier (x-f4e9).
+"""The three-way stranded-worktree classifier.
 
 `classify()` is pure, so the fixture table drives it directly with no git or
 subprocess involved. The one thing that must NOT be pure-fixture-tested is
@@ -285,12 +285,22 @@ def test_remote_branch_at_older_sha_still_reads_unpushed(tmp_path):
     assert age != ""
 
 
-def test_unpushed_batch_ignores_resolve_repo_root(tmp_path, monkeypatch):
+def test_worktree_stranded_never_imports_resolve_repo_root():
     """A code-review finding, confirmed by three independent finder angles:
     the script's own path must never come from resolve_repo_root(), a
     process-cached, cwd-dependent read with no idea which of possibly many
-    swept repos (pr-watch's multi-repo tick loop) is in play. Point it at
-    garbage and confirm the batch still finds the real script and runs."""
+    swept repos (pr-watch's multi-repo tick loop) is in play. The module no
+    longer imports it at all - repo resolution for the interactive default
+    (worktree_cli/cli.py's `stranded` command) is the CLI layer's job, not
+    this module's, so there is nothing here left to decoy."""
+    import fno.worktree_stranded as ws
+
+    assert not hasattr(ws, "resolve_repo_root")
+
+
+def test_unpushed_batch_ignores_cwd(tmp_path, monkeypatch):
+    """Point cwd at garbage and confirm the batch still finds the real
+    script (resolved from this module's own __file__, never cwd) and runs."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
     work = tmp_path / "work"
@@ -303,9 +313,9 @@ def test_unpushed_batch_ignores_resolve_repo_root(tmp_path, monkeypatch):
     _git(work, "add", "f.txt")
     _git(work, "commit", "-q", "-m", "unpushed")
 
-    monkeypatch.setattr(
-        "fno.worktree_stranded.resolve_repo_root", lambda: "/nonexistent/decoy/repo"
-    )
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    monkeypatch.chdir(decoy)
 
     counts = _unpushed_batch([str(work)])
     count, ok, _age = counts[str(work)]

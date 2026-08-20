@@ -67,7 +67,7 @@ def stranded(
         "Default is classify-and-print only.",
     ),
 ) -> None:
-    """Classify every worktree git+graph+fleet can't otherwise tell apart (x-f4e9).
+    """Classify every worktree git+graph+fleet can't otherwise tell apart.
 
     Report, never reap: nothing here deletes a worktree, a branch, or a
     commit. A row this sweep cannot positively close reads UNKNOWN and is
@@ -77,7 +77,7 @@ def stranded(
 
     from fno.worktree_stranded import apply_sweep, sweep
 
-    rows = sweep()
+    rows = sweep(Path(resolve_repo_root()))
     outcomes = apply_sweep(rows) if apply else []
 
     if json_out:
