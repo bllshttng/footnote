@@ -754,6 +754,155 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
 # Enumeration (change 3): a stopped row survives into the returned map
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Retire: stop a finished worker, destroy nothing
+# ---------------------------------------------------------------------------
+#
+# A worker that finishes its deliverable and never exits holds a live slot
+# against config.agents.max_live forever. terminal_stop.rs already stops that
+# population, but its marker is written by finalize, which a /fno:blueprint or
+# /fno:think worker never reaches. Nothing tells those workers to stop.
+
+RETIRE_GRACE = 900
+
+
+def _retire_run(rows, transcripts, *, now_s=NOW_1840, grace=RETIRE_GRACE):
+    """The classifier with an EXPLICIT grace: reading the machine's real config
+    inside a unit test makes the verdict depend on the developer's settings."""
+    return verdicts(
+        rows,
+        transcript_for=lambda sid: transcripts.get(sid),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: None,
+        now_s=now_s,
+        retire_grace_s_value=grace,
+    )
+
+
+def _spawned(row_id="dddd4444-0000", name="bp-worker", state="idle"):
+    """A row footnote spawned, carrying the literal every spawn birth site
+    writes. Retire keys on that positive value, so a fixture that invents its
+    own spelling would test a lane no live row can enter."""
+    return Row(row_id, name, state, None, "/tmp/bp", "spawn")
+
+
+def test_a_finished_spawned_worker_past_the_grace_retires():
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+    assert v.verdict == watchdog.RETIRE
+    assert v.action == "stop"
+    assert "declared itself done" in v.basis
+    assert "worktree and row survive" in v.basis
+
+
+def test_retire_stops_and_removes_nothing():
+    """The whole reason this lane can be armed where reap cannot: one stop, no
+    rm, and the receipt names the undo."""
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(list(argv))
+        return _Proc(0)
+
+    v = Verdict("dddd4444-0000", "bp-worker", "idle", watchdog.RETIRE,
+                "worker declared itself done", "stop")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/bp", runner=runner)
+
+    assert outcome == "applied"
+    assert len(calls) == 1, "retire is exactly one call"
+    assert "stop" in " ".join(calls[0])
+    assert not any("rm" in a for a in calls[0]), "retire never removes anything"
+    assert "resume" in detail, "the receipt must name the undo"
+
+
+def test_retire_is_outside_the_wake_lane():
+    """--apply is documented as the one action that cannot destroy work, and
+    retire stops a session, so it needs --apply-all."""
+    v = Verdict("dddd4444-0000", "bp-worker", "idle", watchdog.RETIRE, "b", "stop")
+    outcome, detail = apply_verdict(v, lanes="wake")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
+
+
+def test_a_promise_that_also_asks_a_question_never_retires():
+    """classify_tail returns on its FIRST match - watching, then promise, then
+    question - so a turn that both promises and asks classifies `done` and never
+    `your-move`. That is the modal shape here: a blueprint worker mails its plan
+    and asks the operator one thing in the same turn. Retiring it strands the
+    question, so the predicate asks again rather than trusting the classifier's
+    single answer."""
+    row = _spawned()
+    tail = f"{FINISHED_TAIL}\nOne thing before I stop: should the grace stay 900?"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_a_promise_carrying_a_help_tag_never_retires():
+    row = _spawned()
+    tail = f"{FINISHED_TAIL}\n<help reason='blocked'>needs a ruling</help>"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_a_working_or_watching_tail_never_retires_at_any_age():
+    """Silence is a reading about the last write, never a verdict about whether
+    the work is over. Only a session that SAID it finished is retirable."""
+    for tail in ("still on it", "<watching>pr 42</watching>"):
+        row = _spawned()
+        [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=24 * 60)})
+        assert v.verdict != watchdog.RETIRE, tail
+
+
+def test_grace_zero_disarms_the_lane():
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)}, grace=0)
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_inside_the_grace_never_retires():
+    """The follow-up window is the point: a worker that just delivered can still
+    be asked one more thing."""
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=5)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_an_unjoined_or_operator_row_never_retires():
+    """Only the positive `spawn` stamp retires. `operator` is a session a human
+    started by hand, `adopted` is one the harness-store healer found already
+    running (routinely an operator's own terminal), and None is a row the
+    registry join did not answer for. An unanswered read is never a verdict."""
+    for origin in ("operator", "adopted", None):
+        row = Row("dddd4444-0000", "operator-session", "idle", None, "/tmp/bp", origin)
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=24 * 60)})
+        assert v.verdict != watchdog.RETIRE, origin
+
+
+def test_an_unreadable_transcript_never_retires():
+    row = _spawned()
+    [v] = _retire_run([row], {})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_reap_outranks_retire_on_the_same_row():
+    """Precedence: ghost > reap > retire. A row that satisfies both takes the
+    more specific verdict, so the reap lane's config freeze still governs it."""
+    row = Row("eeee5555-0000", "w1", "idle", "x-1", "/tmp/w1", "spawn",
+              STALE_MESSAGE_STAMP)
+    monkey_nodes = {"x-1": {"status": "done"}}
+    [v] = verdicts(
+        [row],
+        transcript_for=lambda sid: _facts(FINISHED_TAIL, age_min=20),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: monkey_nodes.get(node),
+        now_s=NOW_1840,
+        retire_grace_s_value=RETIRE_GRACE,
+    )
+    assert v.verdict == REAP
+
+
 def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
     """_default_failover mutates the GLOBAL active provider and its storm cap
     is per row, so eight blocked rows would walk the whole account queue in

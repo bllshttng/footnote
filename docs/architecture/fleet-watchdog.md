@@ -1,6 +1,6 @@
 # Fleet watchdog
 
-`fno agents watchdog` runs outside every session and decides, per fleet row, one of four things: wake it, reroute it, reap it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet.
+`fno agents watchdog` runs outside every session and decides, per fleet row, one of five things: wake it, reroute it, reap it, retire it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet.
 
 ## Why the transcript is the truth source
 
@@ -17,6 +17,7 @@ Order is precedence. The top row wins.
 | `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `reap` | the node is done or its claim is held live by another session, the worktree has no other occupant, no 429 window is open, and the tail says the session is finished rather than still in play | `node <id> done, tail reads done, quiet <n>m` |
 | `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
+| `retire` | a footnote-spawned worker whose tail says it declared itself done, carries no question the operator owes, and has been quiet past `config.recovery.retire_grace_s` | `worker declared itself done and has been quiet <n>m (grace <n>m); stop only, worktree and row survive` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
@@ -42,7 +43,7 @@ These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/test
 
 ## Lanes
 
-`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap and reroute, which both stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
+`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap, reroute and retire, which all stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
 Actions delegate. The watchdog owns the decision, never the mechanism.
 
@@ -51,7 +52,22 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `reap` | refuse when the worktree has uncommitted changes or unpushed commits, naming the count. Then `fno agents stop` and `fno agents rm`, never forced: `claude rm`'s own refusal on a dirty worktree is a safety feature to lean on |
+| `retire` | `fno agents stop <id>` and nothing else. No worktree refusal, no linked-worktree check, no config freeze, because none of those guard a stop |
 | `ghost` | report only |
+
+## Retire: the slot a finished worker never gives back
+
+A worker that finishes its deliverable and never exits holds a live slot against `config.agents.max_live` forever. Measured 2026-08-19: four blueprint workers had each mailed a finished plan and each still held a slot at 30 of 30, and a build spawn queued 91 seconds waiting for one of them.
+
+`crates/fno-agents/src/terminal_stop.rs` already stops that population, but only for a loop worker. Its marker is written by `finalize`, which runs from the target loop's stop hook, and a `/fno:blueprint` or `/fno:think` worker mails its plan and never reaches finalize. Nothing tells those workers to stop.
+
+The trigger is a predicate over transcript truth, not a signal the worker emits. A signal is a guard on one of N reachable paths: a worker that dies mid-delivery, or ships through a channel nobody wired, emits nothing, and that is exactly the population that leaks slots. A predicate needs no cooperation from the thing it measures. The loop-driven exclusion `should_mark` carries has no counterpart here and needs none: a `fno-agents loop run` child exits on allow rather than parking at an idle prompt, so it never becomes a quiet parked row.
+
+Retire does not require the node to be done, and does not require the worktree to be this row's alone. Both are reap preconditions because reap deletes a worktree. Retire runs a stop, so the transcript, the worktree and the registry row all survive and `fno agents resume` brings the session back. That reversibility is why it ships armed at a 900 second grace while reap ships off, and it is why a blueprint worker whose node is still `ready` is in scope here and out of scope for reap.
+
+The grace is the follow-up window. A worker that just delivered can still be asked one more thing. `config.recovery.retire_grace_s` tunes it; `0` turns the lane off.
+
+`classify_tail` returns on its first match, checking watching, then `<promise>`, then question-or-`<help>`. So a turn that both promises and asks classifies `done` and never `your-move`. That is the modal shape here: a blueprint worker mails its plan and asks the operator one thing in the same turn. Retiring it strands the question, so the retire predicate asks the question half again itself. Reordering `classify_tail` instead would have been wrong: `reap_decision`, the loop runtime's parked reading and the progress axis all share it, and reap deletes worktrees. One caller needs the finer reading, so the finer reading lives in that caller.
 
 A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake is an attach and a neutral resume, not a paste of a mail body. The wake message is always the bare resume word, never a mail payload.
 

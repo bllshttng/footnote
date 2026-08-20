@@ -3446,13 +3446,14 @@ def cmd_watchdog(
         False,
         "--apply-all",
         help=(
-            "Execute every lane: wake plus reap and reroute, which both stop "
-            "a session. Implies --apply."
+            "Execute every lane: wake plus reap, reroute and retire, which all "
+            "stop a session. Only reap also deletes its worktree; retire is a "
+            "stop that `fno agents resume` undoes. Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
-        help="Filter to one verdict: wake|reroute|reap|ghost|stale|leave.",
+        help="Filter to one verdict: wake|reroute|reap|retire|ghost|stale|leave.",
     ),
     mail_to: Optional[str] = typer.Option(
         None,
