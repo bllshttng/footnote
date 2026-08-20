@@ -1,0 +1,65 @@
+# scripts/ci/ci-gate-lanes.tsv
+#
+# One row per shell script in scripts/ci: script, lane, invoker, note.
+# Tab separated. check-ci-gate-lanes.sh diffs this against the live directory
+# and verifies that the declared invoker really runs the script.
+#
+# Adding a script to scripts/ci needs a row here, in the same PR. A script with
+# no row is a red check, not a review catch somebody has to remember to make.
+#
+# lane says WHEN it fires, which is the thing a document kept getting wrong:
+#   local       fires before the push, because cli/src/fno/test_cmd.py or
+#               scripts/ci/preflight.sh runs it and both CI and preflight run
+#               `fno-py test smoke`. One registration, two lanes.
+#   ci          only a workflow runs it, so it can only fail after the push.
+#               Every one of these is a candidate to move local.
+#   post-push   needs a PR, a remote or a merge to exist, so it cannot fire
+#               earlier by nature. Requires a note saying which artifact.
+#   entrypoint  a runner a person invokes, not a gate. Invoker column is '-'.
+#               Requires a note.
+#
+# Measured 2026-08-20 on this tree: 15 local, 27 ci, 1 entrypoint.
+apply-merge-ruleset.sh	ci	scripts/ci/check-merge-coverage-audit.sh	
+check-autonomy-registry.sh	ci	.github/workflows/guards.yml	
+check-axis-vocabulary.sh	ci	.github/workflows/guards.yml	
+check-ci-gate-lanes.sh	local	cli/src/fno/test_cmd.py	
+check-company-boundaries.sh	local	cli/src/fno/test_cmd.py	
+check-company-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
+check-config-schema-drift.sh	local	cli/src/fno/test_cmd.py	
+check-coverage-context-parity.sh	ci	.github/workflows/coverage-context-parity.yml	
+check-disposable-rm.sh	ci	.github/workflows/guards.yml	
+check-import-paths.sh	ci	.github/workflows/cli-ci.yml	
+check-mail-inject-callers.sh	ci	.github/workflows/guards.yml	
+check-markdown-style.sh	ci	.github/workflows/guards.yml	
+check-merge-coverage-audit.sh	ci	.github/workflows/merge-coverage-audit.yml	
+check-no-hardcoded-paths.sh	local	cli/src/fno/test_cmd.py	
+check-no-internal-refs.sh	ci	.github/workflows/internal-refs.yml	
+check-no-session-urls.sh	ci	.github/workflows/guards.yml	
+check-no-skill-local-evals.sh	ci	.github/workflows/guards.yml	
+check-no-stale-skill-refs.sh	local	cli/src/fno/test_cmd.py	
+check-no-stale-spec-refs.sh	local	cli/src/fno/test_cmd.py	
+check-oos-tracked.sh	ci	.github/workflows/guards.yml	
+check-pitfalls.sh	local	cli/src/fno/test_cmd.py	
+check-placement-rule.sh	local	cli/src/fno/test_cmd.py	
+check-plan-rung-authority.sh	ci	.github/workflows/guards.yml	
+check-plugins-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
+check-pr-body-length.sh	ci	.github/workflows/guards.yml	
+check-pr-node-closure-selftest.sh	ci	.github/workflows/pr-node-closure.yml	
+check-pr-node-closure.sh	ci	.github/workflows/pr-node-closure.yml	
+check-pr-style.sh	ci	.github/workflows/guards.yml	
+check-preamble-budget.sh	local	cli/src/fno/test_cmd.py	
+check-proto-version-bump.sh	ci	.github/workflows/rust-ci.yml	
+check-registry-schema-parity.sh	local	cli/src/fno/test_cmd.py	
+check-review-app-parity.sh	ci	.github/workflows/rust-ci.yml	
+check-review-invocation-single-source.sh	ci	.github/workflows/guards.yml	
+check-reviewer-descriptor-parity.sh	local	cli/src/fno/test_cmd.py	
+check-skill-snippets.sh	local	cli/src/fno/test_cmd.py	
+check-stacked-base.sh	ci	.github/workflows/stacked-base-guard.yml	
+check-tracker-consumers.sh	local	scripts/ci/preflight.sh	
+check-tracker-partition.sh	local	scripts/ci/preflight.sh	
+check-uv-install-compiles-bytecode.sh	ci	.github/workflows/guards.yml	
+check-workflow-manifest.sh	ci	.github/workflows/guards.yml	
+control-plane-doc-colocation.sh	ci	.github/workflows/guards.yml	
+coverage-carry.sh	ci	.github/workflows/review-coverage-gate.yml	
+loc-ratchet.sh	ci	.github/workflows/guards.yml	
+preflight.sh	entrypoint	-	the local rehearsal a person runs before pushing; it invokes gates, it is not one
