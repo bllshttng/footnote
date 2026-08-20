@@ -29,6 +29,11 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 SETUP_WORKTREE_SH="$REPO_ROOT/scripts/setup/setup-worktree.sh"
 
+dispatcher_body="$(sed -n '/^_salvage_dispatcher_body=/,/^fi'"'"'$/p' "$SETUP_WORKTREE_SH")"
+[[ -n "$dispatcher_body" ]] || fail "could not find salvage dispatcher body"
+[[ "$dispatcher_body" != *'[['* ]] \
+  || fail "salvage dispatcher prepended under an existing shebang must be POSIX sh"
+
 extract_install_snippet() {
   # Extracts the REAL salvage-ref install block from setup-worktree.sh
   # instead of hand-copying it a third time (a code-review finding: this
@@ -157,7 +162,7 @@ common_dir="$(git -C "$preexisting" rev-parse --git-common-dir)"
 [[ "$common_dir" = /* ]] || common_dir="$preexisting/$common_dir"
 marker_file="$SCRATCH/other-hook-ran"
 cat > "$common_dir/hooks/post-commit" <<HOOK
-#!/usr/bin/env bash
+#!/bin/sh
 touch "$marker_file"
 exit 0
 HOOK
@@ -168,14 +173,17 @@ git -C "$preexisting" config user.email t@t.co
 git -C "$preexisting" config user.name t
 echo v > "$preexisting/j.txt"
 git -C "$preexisting" add j.txt
-git -C "$preexisting" commit -q -m "preexisting-hook commit"
+preexisting_stderr="$SCRATCH/preexisting-hook.stderr"
+git -C "$preexisting" commit -q -m "preexisting-hook commit" 2>"$preexisting_stderr"
 sha_preexisting="$(git -C "$preexisting" rev-parse HEAD)"
 sleep 1
 
 [[ -f "$marker_file" ]] || fail "pre-existing hook's own logic did not run after prepend"
+[[ ! -s "$preexisting_stderr" ]] \
+  || fail "POSIX post-commit hook emitted an interpreter error: $(cat "$preexisting_stderr")"
 
 preexisting_ref="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$(basename "$preexisting")")"
 [[ -n "$preexisting_ref" ]] || fail "salvage ref missing when prepended onto a hook ending in exit 0"
 echo "$preexisting_ref" | grep -q "$sha_preexisting" || fail "salvage ref did not point at the commit"
 
-echo "PASS: prepending onto a pre-existing exit-terminated hook still runs both"
+echo "PASS: prepending onto a POSIX exit-terminated hook runs both without errors"
