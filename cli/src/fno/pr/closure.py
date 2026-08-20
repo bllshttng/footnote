@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from fno.graph._constants import NODE_ID_BODY, is_wellformed_node_id
 
@@ -166,7 +166,7 @@ def ensure_closure_trailer(
     head_ref: str,
     *,
     extra_ids: Optional[list[str]] = None,
-    known_ids: Optional[object] = None,
+    known_ids: Optional[Iterable[str]] = None,
 ) -> str:
     """``body`` with an exact trailer claiming every node id in ``head_ref``.
 
