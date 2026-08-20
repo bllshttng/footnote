@@ -401,6 +401,8 @@ watchdog = "off"
 watchdog_mail_to = ""
 # Whether `fno agents watchdog --apply-all` may EXECUTE the reap lane (default false). Reap runs stop then rm, which deletes the session's worktree; work that exists only there is gone with it. Wake and reroute are recoverable, so they ship on. Reap verdicts are still computed, reported and mailed when this is off - only the destructive action is withheld.
 watchdog_reap = false
+# How long a finished worker stays parked before `fno agents watchdog --apply-all` stops it (default 900 seconds; 0 turns the retire lane off). A worker that declares itself done and never exits holds a live slot against config.agents.max_live forever. The grace is the follow-up window, so a worker that just delivered can still be asked one more thing. Unlike reap this ships armed: retire only runs stop, so the worktree, the transcript and the registry row all survive and `fno agents resume` undoes it.
+retire_grace_s = 900
 
 [health_monitor]
 # Enable backlog health monitoring.
