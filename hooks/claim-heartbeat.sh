@@ -196,8 +196,16 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 # stops refreshing and its claim expires underneath it. Fall back to the
 # unflagged call, which every version understands, and pay the cross-check
 # rather than lose the heartbeat.
+# Keyed on EMPTY OUTPUT, not on the exit code. `fno claim status` happens to
+# exit 0 for every state today, but its own docstring says the exit code
+# reflects state, so an `||` here would one day run BOTH calls and print two
+# JSON objects. `jq .holder` then emits two lines, the gate below never matches,
+# and a live session silently stops refreshing its claim.
 _status_json() {
-  fno claim status "node:$NODE_ID" --json --no-roster 2>/dev/null     || fno claim status "node:$NODE_ID" --json 2>/dev/null
+  local out
+  out="$(fno claim status "node:$NODE_ID" --json --no-roster 2>/dev/null)"
+  [ -n "$out" ] || out="$(fno claim status "node:$NODE_ID" --json 2>/dev/null)"
+  printf '%s' "$out"
 }
 HOLDER="$(_status_json | jq -r '.holder // empty' 2>/dev/null)"
 if [[ "$HOLDER" != "$CLAIM_HOLDER" ]]; then

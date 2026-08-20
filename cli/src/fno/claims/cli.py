@@ -278,6 +278,14 @@ def acquire(
             # somebody else holds the key. Fall through to the ordinary acquire,
             # which applies its own rules and refuses a live foreign claim.
             if mode == "handover":
+                # STAMP HERE TOO. The stamp below sits at what its own comment
+                # calls the one choke point every acquire path reaches, and this
+                # return was a second path around it. It is now the DEFAULT path
+                # for every `fno agents spawn --node` worker, so without this a
+                # worker killed mid-phase leaves no do row at all - the exact
+                # loss the acquire-side stamp exists to prevent.
+                if key.startswith("node:"):
+                    _stamp_do_on_acquire(key, claim, holder)
                 typer.echo(
                     json.dumps(claim.model_dump(mode="json"))
                     if json_output
@@ -839,9 +847,14 @@ def _finished_row_states() -> frozenset:
     positive marker that this worker stopped working, which is the only thing
     either caller needs to know.
     """
-    from fno.agents.watchdog import _TERMINAL_STATES
+    from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
 
-    return _TERMINAL_STATES
+    # DERIVED from both authorities, never hand-listed. `_TERMINAL_STATES`
+    # holds `stopped`, and `_WAKE_STATES` holds it too: the watchdog will WAKE a
+    # stopped worker, so its claim is not abandoned and reaping it hands a
+    # returnable session's node to somebody else. The difference is the set that
+    # means gone for good, and it cannot drift from either source.
+    return _TERMINAL_STATES - _WAKE_STATES
 
 
 def _roster_verdict_line(info: dict) -> str:
@@ -856,15 +869,23 @@ def _roster_verdict_line(info: dict) -> str:
     sessions is genuinely unworked, and printing the live-worker alarm for it
     would train every reader to ignore the alarm.
     """
+    # The claim's OWN state, never the hardcoded word free. The cross-check runs
+    # for every unheld state, and `stale` is one of them, so a line saying free
+    # over a payload saying stale made stdout and stderr disagree about the same
+    # claim in the same breath.
+    state = info.get("state") or "free"
     if not info.get("roster_consulted"):
-        return f"free, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
+        return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
     finished = _finished_row_states()
     engaged = [w for w in workers if w["state"] not in finished]
     if engaged:
         rendered = ", ".join(f"{w['name']} (state={w['state']})" for w in engaged)
         return f"UNCLAIMED but a live worker is on this node: {rendered}"
-    scanned = f"free, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
+    scanned = (
+        f"{state}, no live worker found "
+        f"(roster scanned: {info['roster_rows_scanned']} rows)"
+    )
     if workers:
         rendered = ", ".join(w["name"] for w in workers)
         return f"{scanned}; {len(workers)} finished session(s) resolved to it: {rendered}"

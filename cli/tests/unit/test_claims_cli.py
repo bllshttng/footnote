@@ -487,6 +487,46 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     assert do[0]["started_at"] <= do[0]["ended_at"]
 
 
+def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
+    """The handover return is a THIRD acquire path, and the stamp below it calls
+    itself the one choke point every acquire path reaches. It is also the
+    default path for every `fno agents spawn --node` worker, so a worker killed
+    mid-phase would leave no do row at all."""
+    import fno.paths
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-ho-1")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "ab-hotest", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n')
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+
+    # The spawn side takes the launch-window claim, then the worker names it back.
+    acquire_claim(key="node:ab-hotest", holder="spawn-handover:t-worker",
+                  ttl_ms=900_000, root=home)
+    out = runner.invoke(cli, [
+        "acquire", "node:ab-hotest", "--holder", "target-session:w",
+        "--handover-from", "spawn-handover:t-worker", "--ttl", "2h",
+        "--harness", "claude",
+    ])
+    assert out.exit_code == 0, out.output
+    assert "handover from" in out.output
+
+    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    do = [x for x in rows if x.get("phase") == "do"]
+    assert len(do) == 1, rows
+    assert do[0]["started_at"]
+    assert not do[0].get("ended_at")
+
+
 def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     """A node claim acquire opens the do row with started_at from the claim's
     acquire time and NO ended_at - so a session killed before its release

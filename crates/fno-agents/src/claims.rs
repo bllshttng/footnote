@@ -1775,11 +1775,16 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
             existing.host = hostname();
             let mine = machine_id();
             existing.machine_id = if mine.is_empty() { None } else { Some(mine) };
-            // acquired_at MUST move with the pid. Reuse detection compares
+            // acquired_at STAYS PUT, and the earlier reasoning for moving it
+            // was wrong in both directions. Reuse detection compares
             // create_time(pid) against it, and the harness ancestor started
-            // BEFORE this renewal, so a stale anchor would read the live
-            // session's pid as recycled and undo the fix.
-            existing.acquired_at = now;
+            // BEFORE this renewal, so the original value already reads the
+            // anchor as live. Holding it also refuses an anchor whose session
+            // began AFTER the claim, which is the cross-session takeover a
+            // re-anchor must never perform. And the do provenance row keys
+            // started_at on this field, so moving it made the release stamp
+            // open a second row instead of closing the one this claim opened.
+            // `_rebound_claim(keep_acquired_at=True)` is the python twin.
         }
         // No resolvable durable pid (plain-shell ancestry, or the verb is
         // missing) means no better anchor exists, so the deadline moves alone -
@@ -1993,10 +1998,17 @@ mod tests {
     }
 
     #[test]
-    fn renew_moves_acquired_at_with_the_pid_so_reuse_detection_survives() {
-        // The anchor and the pid move together or the change does nothing:
-        // reuse detection compares create_time(pid) against acquired_at, and
-        // this process started before the renewal.
+    fn renew_holds_acquired_at_while_re_anchoring_the_pid() {
+        // acquired_at STAYS PUT. Reuse detection compares create_time(pid)
+        // against it, and the anchor started BEFORE the claim, so the original
+        // value already reads the anchor as live - asserted below by
+        // classifying LIVE, not by reading the field alone.
+        //
+        // Two things need it to hold still. The do provenance row keys
+        // started_at on this field, so moving it made the release stamp open a
+        // second row instead of closing the one this claim opened. And a fixed
+        // anchor refuses a session that began AFTER the claim, which is exactly
+        // the cross-session takeover a re-anchor must never perform.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let mut o = opts_in(&td);
@@ -2016,9 +2028,20 @@ mod tests {
         );
         std::env::remove_var("FNO_BIN");
 
-        assert!(
-            read_claim(&td, "node:x-anchor").acquired_at > before,
-            "acquired_at did not move with the pid"
+        let after = read_claim(&td, "node:x-anchor");
+        assert_eq!(
+            after.acquired_at, before,
+            "acquired_at moved; the do row keys started_at on it"
+        );
+        assert_eq!(
+            after.pid,
+            std::process::id() as i32,
+            "the pid must still be re-anchored"
+        );
+        assert_eq!(
+            classify(&after, None),
+            ClaimState::Live,
+            "a held anchor must still read LIVE, or the repair did nothing"
         );
     }
 

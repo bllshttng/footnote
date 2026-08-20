@@ -474,6 +474,7 @@ def _rebound_claim(
     new_holder: Optional[str] = None,
     new_reason: Optional[str] = None,
     new_harness: Optional[str] = None,
+    keep_acquired_at: bool = False,
 ) -> Claim:
     """A rebound claim: identity fields preserved, process anchor + lease fresh.
 
@@ -495,8 +496,16 @@ def _rebound_claim(
     harness precisely so a session that inherited a foreign marker does not
     mislabel its claim. Both default to None, which preserves the existing
     value, so every same-holder rebind is unchanged.
+
+    ``keep_acquired_at`` is for the renewal RE-ANCHOR, which repairs the process
+    anchor rather than acquiring anew. Two things depend on it. The do
+    provenance row keys ``started_at`` on ``acquired_at``, so moving it makes
+    the release stamp open a SECOND row instead of closing the one this claim
+    opened. And PID-reuse detection compares ``create_time(pid)`` against it, so
+    holding it still refuses an anchor whose session began AFTER the claim -
+    which is the cross-session takeover a re-anchor must never perform.
     """
-    acquired = now_ms()
+    acquired = existing.acquired_at if keep_acquired_at else now_ms()
     if ttl_ms is not None:
         expires_at: Optional[int] = acquired + ttl_ms
     elif existing.expires_at is not None:
@@ -651,7 +660,17 @@ def compare_and_rebind(
         # the rename or not at all. Applying them to a refused handover let a
         # caller rewrite another holder's fields while leaving the holder alone.
         effective_new_reason = new_reason if handover_allowed else None
-        effective_new_harness = new_harness if handover_allowed else None
+        # A handover with no PINNED harness resolves one from the ambient
+        # markers, exactly as `_make_claim` does on the ordinary acquire path.
+        # Preserving the spawner's tag instead left a claude worker under a
+        # codex king reading as codex for the life of the claim, and that tag
+        # flows on into the do provenance row. The init hook omits --harness
+        # whenever its owned-identity probe fails, so this is not a rare path.
+        effective_new_harness = (
+            (new_harness if new_harness is not None else resolve_harness_identity().harness)
+            if handover_allowed
+            else None
+        )
         if state == ClaimState.LIVE and handover_allowed:
             # A HANDOVER, and a live prior pid does not refuse it. The
             # concurrent-writer rule below protects one symbolic owner from two
@@ -995,7 +1014,9 @@ def refresh_claim(
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
         anchor_pid = _reanchor_pid_for(existing)
         if anchor_pid is not None:
-            refreshed = _rebound_claim(existing, anchor_pid, window)
+            refreshed = _rebound_claim(
+                existing, anchor_pid, window, keep_acquired_at=True
+            )
         else:
             refreshed = existing.model_copy(update={"expires_at": now_ms() + window})
 

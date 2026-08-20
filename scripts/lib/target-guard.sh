@@ -78,8 +78,10 @@ target_is_active() {
     # The || falls back to the unflagged call: --no-roster is new, this runs
     # against the DEPLOYED fno, and an older binary rejects an unknown option
     # with empty stdout - which this gate would read as "no claim".
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null \
-        || fno claim status "$claim_key" -J 2>/dev/null || true)
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
+    # Keyed on EMPTY OUTPUT, never on the exit code: an `||` chain would one day
+    # run both calls and concatenate two JSON objects into one string.
+    [ -n "$claim_json" ] || claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
     case "$claim_json" in
         "") return 0 ;;
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
@@ -104,16 +106,17 @@ target_claim_is_live() {
     claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
     _target_guard_is_empty_yaml "$claim_key" && return 1
     command -v fno >/dev/null 2>&1 || return 1
-    # No `|| true` here, unlike the fail-open twin above: a nonzero exit means
-    # the read did not complete, and a truncated payload can still carry the
-    # bytes `"state": "live"`. Strict means an incomplete read is not live.
     # --no-roster for the same reason as the twin above: `state` is all this
     # reads, so the cross-check would be a subprocess bought and thrown away.
-    # Same deployed-binary fallback as the twin above. The STRICT contract is
-    # unchanged: both calls failing still returns 1, so an incomplete read is
-    # never read as live.
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null \
-        || fno claim status "$claim_key" -J 2>/dev/null) || return 1
+    # The unflagged retry covers a DEPLOYED fno that predates the flag and
+    # rejects it. Keyed on empty output, never on the exit code, so the two
+    # calls can never both print and concatenate their JSON.
+    #
+    # STRICT is unchanged, and it now rests on the case arm rather than on a
+    # bare exit code: an empty or truncated read matches no live/suspect
+    # pattern, falls to `*)`, and returns 1. An incomplete read is not live.
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
+    [ -n "$claim_json" ] || claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
     case "$claim_json" in
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;
