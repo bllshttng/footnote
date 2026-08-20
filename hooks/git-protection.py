@@ -1367,7 +1367,12 @@ def _find_merge_segment(segments):
 
 
 def _find_pr_create_segments(segments):
-    """Every `gh pr create` segment, repo/host globals stripped."""
+    """Every `gh pr create` segment, as its RAW token list.
+
+    Raw rather than joined: the closure hatch below must be an ASSIGNMENT
+    PREFIX on this segment, and joining destroys the token boundary that
+    separates one from the same string sitting inside a quoted argument.
+    """
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
@@ -1375,8 +1380,31 @@ def _find_pr_create_segments(segments):
             continue
         argv = _strip_gh_global_opts(argv)
         if len(argv) >= 3 and [t.lower() for t in argv[1:3]] == ["pr", "create"]:
-            out.append(" ".join(seg))
+            out.append(seg)
     return out
+
+
+def _segment_has_closure_hatch(seg):
+    """True when FNO_PR_CLOSURE_OK=1 prefixes this segment's own command.
+
+    Position, never presence. A whole-command substring search read the string
+    out of any quoted argument, so `gh pr create --body "we set
+    FNO_PR_CLOSURE_OK=1 here"` opened the gate - the marker-substring false
+    allow this guard was written to close, reintroduced by its own fix.
+    Walk only the leading run of assignments and wrappers, exactly where a
+    shell would apply one.
+    """
+    for tok in seg:
+        if tok == "(":
+            continue
+        if _ASSIGN_RE.match(tok):
+            if tok == "FNO_PR_CLOSURE_OK=1":
+                return True
+            continue
+        if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
+            continue
+        break
+    return False
 
 
 # Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
@@ -1425,7 +1453,7 @@ def _file_trailer_claims(path, ids):
     )
 
 
-def _closure_trailer_refusal(command=""):
+def _closure_trailer_refusal(command="", hatch=False):
     """Deny reason for a `gh pr create` that shows no composed closure trailer.
 
     Measured 2026-08-19: five PRs in one evening red on
@@ -1454,10 +1482,10 @@ def _closure_trailer_refusal(command=""):
     # `FNO_PR_CLOSURE_OK=1 gh pr create ...` sets the variable for gh and never
     # reaches this os.environ - and _effective_argv strips the assignment, so
     # the segment still matched and still denied. The documented hatch was a
-    # dead end, and the refusal message taught it. Read the assignment off the
-    # command text too.
-    if (os.environ.get("FNO_PR_CLOSURE_OK", "") == "1"
-            or re.search(r"(?:^|\s)FNO_PR_CLOSURE_OK=1(?:\s|$)", command)):
+    # dead end, and the refusal message taught it. `hatch` carries the
+    # POSITION-checked answer from _segment_has_closure_hatch; never re-derive
+    # it from a substring search over the command.
+    if hatch or os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
         return None
     head = re.search(r"(?:--head(?:=|\s+)|(?:^|\s)-H\s+)(\S+)", command)
     ids = _branch_node_ids(
@@ -1948,7 +1976,13 @@ def main():
         # legacy fallback: unbalanced quotes, so match the whole command.
         pr_create_segs = re.findall(r"gh\s+pr\s+create", command, re.IGNORECASE)
     if pr_create_segs:
-        closure_reason = _closure_trailer_refusal(command)
+        # Position-checked, and only on the real segment list. The legacy
+        # fallback below has no tokens to check, so it cannot honor an inline
+        # hatch - deny-leaning there, matching that path's stated posture.
+        hatch = segments is not None and any(
+            _segment_has_closure_hatch(seg) for seg in pr_create_segs
+        )
+        closure_reason = _closure_trailer_refusal(command, hatch=hatch)
         if closure_reason:
             _emit("deny", closure_reason)
             sys.exit(0)

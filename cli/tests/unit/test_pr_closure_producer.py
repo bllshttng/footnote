@@ -346,17 +346,6 @@ def test_a_batch_branch_never_parses_as_node_bearing(domain):
     assert _gate(ensure_closure_trailer("Batch body.", ref), ref) == 0
 
 
-def test_hook_reads_an_inline_escape_hatch_assignment(monkeypatch):
-    # A PreToolUse hook is a separate process, so an inline assignment never
-    # reaches its os.environ. Reading only the env made the documented hatch a
-    # dead end and the refusal message taught it.
-    monkeypatch.delenv("FNO_PR_CLOSURE_OK", raising=False)
-    assert _hook_decision(
-        'FNO_PR_CLOSURE_OK=1 gh pr create --title t --body "$BODY"',
-        "feature/x-49ec", monkeypatch=monkeypatch,
-    ) is None
-
-
 def test_hook_reads_the_short_head_flag(monkeypatch):
     # `-H` is gh's short --head. The same one-spelling gap the -F fix closed.
     assert _hook_decision(
@@ -410,6 +399,42 @@ def node_branch_repo(tmp_path):
     ):
         subprocess.run(argv, cwd=tmp_path, check=True, capture_output=True)
     return tmp_path
+
+
+# The hatch is judged by POSITION, so every case here goes through main() with
+# a real segment list. Calling the predicate directly cannot test position.
+
+def test_hook_honors_an_inline_hatch_prefixing_the_gh_call(node_branch_repo):
+    # A PreToolUse hook is a separate process, so an inline assignment never
+    # reaches its os.environ. Reading only the env made the documented hatch a
+    # dead end, and the refusal message taught that spelling.
+    payload = _hook_main(
+        'FNO_PR_CLOSURE_OK=1 gh pr create --title t --body "$BODY"', node_branch_repo
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # In a commit message, in a compound command.
+        'git commit -m "note: FNO_PR_CLOSURE_OK=1 was needed" && gh pr create --body "$B"',
+        # In the PR body itself.
+        'gh pr create --body "we set FNO_PR_CLOSURE_OK=1 here"',
+        # Echoed before the call. This one already denied before the position
+        # fix, but for the WRONG reason: the quote characters broke a
+        # whitespace boundary. A test pinning a right answer for a wrong reason
+        # rots the moment the quoting changes, so it is pinned here on position.
+        'echo "FNO_PR_CLOSURE_OK=1" ; gh pr create --body "$B"',
+    ],
+)
+def test_hook_ignores_a_hatch_that_is_not_an_assignment_prefix(command, node_branch_repo):
+    # Position, never presence. A whole-command substring search read the
+    # string out of any quoted argument and opened the gate - the same
+    # marker-substring false allow this guard exists to close, reintroduced by
+    # its own fix.
+    payload = _hook_main(command, node_branch_repo)
+    assert payload["permissionDecision"] == "deny"
 
 
 def test_hook_denies_the_full_pretooluse_payload(node_branch_repo):
