@@ -422,6 +422,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     # headroom with nobody watching the slope.
     ("SessionStart preamble byte budget", ".", "bash scripts/ci/check-preamble-budget.sh"),
     ("Pitfalls corpus cap", ".", "bash scripts/ci/check-pitfalls.sh"),
+    # One registration, two lanes: cli-ci runs `fno-py test smoke` and so does
+    # preflight, so this line is both the CI gate and the local one. A second
+    # copy in guards.yml would be a duplicate implementation of one operation,
+    # not extra coverage.
+    ("CI gate lanes self-test", ".", "bash scripts/ci/check-ci-gate-lanes.sh --self-test"),
+    ("CI gate lanes (every gate has a real invoker)", ".", "bash scripts/ci/check-ci-gate-lanes.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),
     ("Config schema docs freshness", ".", "bash scripts/ci/check-config-schema-drift.sh"),
     ("Skill bundles freshness check", ".", "bash scripts/lint/check-skill-bundles-fresh.sh"),
