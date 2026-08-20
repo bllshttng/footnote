@@ -133,7 +133,7 @@ def branch_node_ids(head_ref: str) -> list[str]:
     return ids
 
 
-def known_node_ids() -> frozenset:
+def known_node_ids() -> frozenset[str]:
     """Every id the graph actually carries; empty when it cannot be read.
 
     Empty is the SAFE direction. With nothing verified, no branch-derived
@@ -189,13 +189,20 @@ def ensure_closure_trailer(
 
     ``known_ids`` defaults to reading the graph, so a caller cannot skip the
     check by forgetting an argument. Pass an explicit set to stay pure.
+    Nothing to verify means nothing to read: with no branch candidate the graph
+    read is skipped, because the batch path passes no head ref at all and paid
+    two git subprocesses and 2127 ids to filter an empty list.
     ``contained_in`` descendants remain ``render_pr_closure_trailer``'s job.
     """
     text = body if isinstance(body, str) else ""
-    known = known_node_ids() if known_ids is None else frozenset(known_ids)
+    candidates = branch_node_ids(head_ref)
+    if known_ids is not None:
+        known = frozenset(known_ids)
+    else:
+        known = known_node_ids() if candidates else frozenset()
     wanted = list(
         dict.fromkeys(
-            [n for n in branch_node_ids(head_ref) if n in known]
+            [n for n in candidates if n in known]
             + [e for e in (extra_ids or []) if is_wellformed_node_id(e)]
         )
     )
