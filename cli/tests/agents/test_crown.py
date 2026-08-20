@@ -777,6 +777,35 @@ def test_widening_rescope_keeps_contained_subordinates_out_of_the_report(
     assert json.loads(result.stdout)["stranded_subordinates"] == []
 
 
+def test_in_place_crown_refuses_partial_crown_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A level with no scope is unstampable by crown_validation_error, so no
+    legal writer produces it; the re-scope must surface the corruption, not
+    silently overwrite it."""
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "worker",
+                harness_session_id="worker-session",
+                status="idle",
+                crown_level=1,
+            )
+        ],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "partial crown metadata" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     tmp_path: Path, monkeypatch
 ) -> None:
