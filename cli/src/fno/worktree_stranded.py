@@ -16,6 +16,7 @@ testable with a fixture table with no filesystem or subprocess involved.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -247,31 +248,22 @@ def _load_registry() -> tuple[dict[str, str], bool]:
 # --- the sweep driver ------------------------------------------------------
 
 
-def _worktrees(repo: Path) -> list[tuple[Optional[str], str]]:
-    """[(branch_or_None, path), ...] for every worktree, detached included."""
-    out = subprocess.run(
-        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
-    )
-    rows: list[tuple[Optional[str], str]] = []
-    wt_path = ""
-    branch: Optional[str] = None
-    detached = False
-    for line in out.stdout.splitlines() + [""]:
-        if line.startswith("worktree "):
-            if wt_path:
-                rows.append((None if detached else branch, wt_path))
-            wt_path = line[len("worktree ") :]
-            branch = None
-            detached = False
-        elif line.startswith("branch refs/heads/"):
-            branch = line[len("branch refs/heads/") :]
-        elif line == "detached":
-            detached = True
-    if wt_path:
-        rows.append((None if detached else branch, wt_path))
-    return rows
+def _load_worktree_status_module():
+    """``scripts/lib/worktree-status.py`` as a module, loaded once. It is a
+    standalone script (invoked by worktree-lifecycle.sh via subprocess), not
+    part of the installed package, so it needs ``spec_from_file_location``
+    rather than a normal import - the same porcelain parser this function
+    reuses used to be copied verbatim into this file, and a code review
+    caught the two `_worktrees()` copies going byte-for-byte identical in
+    this same PR, exactly the "N implementations of one operation" trap."""
+    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-status.py"
+    spec = importlib.util.spec_from_file_location("_fno_worktree_status", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_worktrees = _load_worktree_status_module()._worktrees
 
 
 def sweep(repo: Optional[Path] = None) -> list[Row]:
