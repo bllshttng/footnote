@@ -27,7 +27,7 @@ from __future__ import annotations
 import random
 import re
 import sys
-from typing import IO, Any, Callable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 
 # Flags that consume the FOLLOWING token. Scanning for our three flags skips a
 # value flag's value so a value that looks like `--model` / `--effort` can never
@@ -1376,16 +1376,34 @@ def inject_spawn_defaults(
 
     if cfg_pane_group and _flag_value(out[1:], "--tab") is None:
         eff_substrate = explicit_substrate or injected_substrate or "pane"
-        if eff_substrate == "pane":
-            inject += ["--tab", cfg_pane_group]
-            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
-        else:
+        # A pane group places the pane by moving its OWN tab, so dispatch
+        # hard-refuses a group beside --split/--at (the pane then sits in a tab
+        # it does not own). That refusal is right for a group the operator
+        # TYPED and wrong for one this config injected: it would fail-close a
+        # spawn on a value the caller never asked for. Every other
+        # config-sourced field here degrades open with a named line, so this
+        # one does too.
+        conflicting = next(
+            (f for f in ("--split", "-x", "--at") if _flag_value(out[1:], f) is not None),
+            None,
+        )
+        if eff_substrate != "pane":
             print(
                 f"fno agents spawn: pane group skipped (resolved substrate "
                 f"{eff_substrate!r} has no pane geometry); "
                 f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
                 file=err,
             )
+        elif conflicting:
+            print(
+                f"fno agents spawn: pane group skipped ({conflicting} places this "
+                f"pane in a tab it does not own, which a group cannot move); "
+                f"{pane_group_rung}.pane_group = {cfg_pane_group!r} ignored",
+                file=err,
+            )
+        else:
+            inject += ["--tab", cfg_pane_group]
+            from_config.append(("tab", cfg_pane_group, f"{pane_group_rung}.pane_group"))  # type: ignore[arg-type]
 
     if from_config:
         # AC9-UI / AC1-HP: config-sourced routing is never invisible; name the

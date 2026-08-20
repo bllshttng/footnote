@@ -1545,3 +1545,30 @@ def test_lane_validation_refusals_run_on_real_dict_lanes(monkeypatch):
         spawn_defaults._validated_lanes([{}], "agents.profiles.target.lanes", err3)
     assert exc3.value.code == 2
     assert "is empty" in err3.getvalue()
+
+
+def test_config_pane_group_degrades_open_beside_an_explicit_split(monkeypatch):
+    """dispatch hard-refuses a pane group beside --split/--at. That refusal is
+    right for a group the operator TYPED and wrong for one config injected: it
+    would fail-close a spawn on a value the caller never asked for."""
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--split", "right", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert "--tab" not in out
+    assert "pane group skipped" in err.getvalue()
+    assert "--split" in err.getvalue()
+    # The rest of the lane still applies; only the group was dropped.
+    assert out[out.index("--harness") + 1] == "codex"
+
+
+def test_config_pane_group_still_injects_without_a_conflicting_flag(monkeypatch):
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        err=err,
+        profiles={"target": _lane("codex", substrate="pane", pane_group="codex")},
+    )
+    assert out[out.index("--tab") + 1] == "codex"

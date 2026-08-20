@@ -1684,6 +1684,11 @@ def place_pane_in_group_tab(
         if row.get("tab_id") == own_tab:
             return
         pane_ids = row.get("pane_ids")
+        # A join needs an ANCHOR pane inside the group tab, so a row with no
+        # usable pane list cannot be a target whatever its count says. `TabInfo`
+        # always serializes `pane_ids`, so the empty case is defensive against a
+        # malformed row rather than a shape the server produces - advancing to
+        # the next sibling is the safe read, not a claim the tab is full.
         if isinstance(pane_ids, list) and 0 < len(pane_ids) < max_panes:
             _join_own_tab(session, own_tab, int(pane_ids[0]), name, runner)
             return

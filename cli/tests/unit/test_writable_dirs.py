@@ -26,8 +26,11 @@ def fake_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("fno.paths.state_dir", lambda: state)
     monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: state)
     monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: state / "claims")
-    # No vault unless a test opts in.
-    monkeypatch.setattr("fno.paths.vault_root", lambda **kw: None)
+    # No plan directory unless a test opts in: an unresolvable plans dir grants
+    # nothing, which keeps the state-root assertions below about the state root.
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
     return state
 
 
@@ -50,26 +53,40 @@ def test_state_root_and_divergent_claims_root_both_granted(
     monkeypatch.setattr(
         "fno.claims.io.claims_dir", lambda root=None: claims_home / "claims"
     )
-    monkeypatch.setattr("fno.paths.vault_root", lambda **kw: None)
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
 
     assert worker_writable_dirs(tmp_path) == [str(configured), str(claims_home)]
 
 
-def test_vault_granted_only_when_the_plan_lives_under_it(
+def test_plan_dir_is_granted_but_never_the_vault_above_it(
     fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The grant is a WRITE grant, so granting the vault root to let a worker
+    write one plan hands a code worker the operator's whole notes directory.
+    Grant the plan's own directory instead."""
     vault = tmp_path / "vault"
-    (vault / "plans").mkdir(parents=True)
-    outside = tmp_path / "repo" / "docs" / "plans"
-    outside.mkdir(parents=True)
+    plans = vault / "fno" / "plans"
+    plans.mkdir(parents=True)
     monkeypatch.setattr("fno.paths.vault_root", lambda **kw: vault)
 
-    inside = worker_writable_dirs(tmp_path, plan_path=vault / "plans" / "p.md")
-    assert str(vault) in inside
+    got = worker_writable_dirs(tmp_path, plan_path=plans / "p.md")
+    assert got == [str(fake_state), str(plans)]
+    assert str(vault) not in got
 
-    out = worker_writable_dirs(tmp_path, plan_path=outside / "p.md")
-    assert str(vault) not in out
-    assert out == [str(fake_state)]
+
+def test_plan_dir_falls_back_to_the_configured_plans_dir(
+    fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No caller passes plan_path today, so the fallback decides every real
+    spawn. It must resolve to the plan DIRECTORY, not something above it."""
+    plans = tmp_path / "repo" / "docs" / "plans"
+    plans.mkdir(parents=True)
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: plans
+    )
+    assert worker_writable_dirs(tmp_path) == [str(fake_state), str(plans)]
 
 
 def test_foreign_roots_ride_last_and_only_when_passed(

@@ -340,7 +340,7 @@ This is not one harness's problem. codex `workspace-write` is the visible case. 
 | Directory | When |
 |---|---|
 | The state root (`fno.paths.state_dir()`, plus the config-free claims root when an override splits them) | Always. No worker functions without the claim store, the graph and the ledger. |
-| The vault root | Only when this spawn's plan resolves under it. A code worker whose plan sits in the repo gets no vault grant. |
+| The plan directory | The directory holding this spawn's plan, never the vault above it. A worker writes its plan, not the operator's notes. |
 | Sibling project roots | Only for a multi-repo wave, passed by the caller. |
 
 Three funnels carry it and each is tested on its own lane: the pane builder, claude's bg/headless builder, and codex's headless builder. A grant on one of several reachable paths is decorative.

@@ -334,11 +334,6 @@ def check_agent_profiles(settings: object) -> list[str]:
         for target, path in targets:
             provider = value(target, "provider") or value(profile, "provider") or value(defaults, "provider")
             substrate = value(target, "substrate") or value(profile, "substrate") or value(defaults, "substrate")
-            permission = (
-                value(target, "permission_mode")
-                or value(profile, "permission_mode")
-                or value(defaults, "permission_mode")
-            )
             if provider and substrate and not _substrate_compatible(substrate, provider):
                 problems.append(
                     f"{path}.substrate = {substrate!r} is incompatible with "
@@ -452,7 +447,7 @@ def run_doctor() -> int:
         print(f"\n[doctor] {len(profile_problems)} agent-profile issue(s):")
         for reason in profile_problems:
             print(f"  - {reason}")
-        print("\nSet compatible substrate and permission_mode values on each delivery lane.")
+        print("\nSet a substrate each lane's resolved provider can actually launch.")
 
     store_problems = check_state_root_writable()
     if store_problems:

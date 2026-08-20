@@ -19,6 +19,9 @@ session either way, so ``fno doctor`` carries the advisory half.
 The set is by need rather than blanket: ``--add-dir`` is a WRITE grant, and a
 blanket list hands a code worker the operator's notes.
 
+The plan directory is granted rather than the vault root that often contains it.
+A worker writes its plan, not the operator's notes.
+
 **What the state-root grant actually covers, stated rather than implied.**
 ``--add-dir`` is recursive, so granting the state root grants everything under
 it. On the default layout that includes ``worktrees_base``
@@ -118,35 +121,34 @@ def _state_roots() -> list[Path]:
     return out
 
 
-def _vault_root_if_plan_inside(cwd: Path, plan_path: Optional[Path]) -> Optional[Path]:
-    """The vault root, but only when this spawn's plan actually lives under it.
+def _plan_dir(cwd: Path, plan_path: Optional[Path]) -> Optional[Path]:
+    """The directory this spawn's plan lives in, and nothing above it.
 
-    A code worker whose plan sits in the repo gets no vault grant. ``plan_path``
-    unset falls back to the configured plan directory for ``cwd`` - the same
-    resolution ``plan_writable_args`` already uses on the codex lane - because a
-    spawn does not know the node's bound plan yet.
+    An earlier version of this returned the VAULT ROOT whenever the plan
+    resolved under one. That was wrong in the way this module's own docstring
+    warns about. No caller passes ``plan_path``, so the fallback below decided
+    every spawn, and on the default footnote layout the configured plan
+    directory sits inside the Obsidian vault. Every worker - code workers
+    included - was handed a recursive WRITE grant on the operator's whole
+    vault, which is the exact "blanket list hands a code worker the operator's
+    notes" case the grant is supposed to avoid.
+
+    A worker needs to write its plan, not the vault. So this grants the plan's
+    own directory. That is also what ``plan_writable_args`` already grants on
+    the codex lane, so the two agree instead of one being an order of magnitude
+    wider than the other.
+
+    ``plan_path`` unset falls back to the configured plan directory for ``cwd``,
+    because a spawn does not know the node's bound plan yet.
     """
+    if plan_path is not None:
+        return plan_path.parent if plan_path.suffix else plan_path
     try:
-        from fno.paths import vault_root
+        from fno.paths import plans_content_dir
 
-        vault = vault_root()
+        return Path(plans_content_dir(project_root=cwd))
     except Exception:
         return None
-    if not vault:
-        return None
-    probe = plan_path
-    if probe is None:
-        try:
-            from fno.paths import plans_content_dir
-
-            probe = Path(plans_content_dir(project_root=cwd))
-        except Exception:
-            return None
-    try:
-        probe.resolve().relative_to(Path(vault).resolve())
-    except (ValueError, OSError):
-        return None
-    return Path(vault)
 
 
 def worker_writable_dirs(
@@ -157,7 +159,7 @@ def worker_writable_dirs(
 ) -> list[str]:
     """Absolute, deduplicated, existing-only write grants for a worker spawned at ``cwd``.
 
-    Stable order: state root(s), the vault root when the plan reaches it, then any
+    Stable order: state root(s), this spawn's plan directory, then any
     caller-supplied sibling project roots (a multi-repo wave; ``/do`` spawns
     foreign waves with ``--cwd <root>`` and grants nothing for that root today).
 
@@ -166,7 +168,7 @@ def worker_writable_dirs(
     """
     candidates: Iterable[Optional[Path]] = (
         *_state_roots(),
-        _vault_root_if_plan_inside(cwd, plan_path),
+        _plan_dir(cwd, plan_path),
         *(Path(r) for r in foreign_roots),
     )
     out: list[str] = []
