@@ -152,6 +152,22 @@ def test_cli_exits_nonzero_on_a_failed_bind(monkeypatch) -> None:
     assert "FAILED" in result.output
 
 
+def test_codex_hooks_and_codex_bind_together_is_rejected_not_silently_dropped(
+    monkeypatch,
+) -> None:
+    # codex_hooks is checked first; before this fix its own exclusivity
+    # guard did not know about codex_bind, so the combination silently ran
+    # --codex-hooks and dropped --codex-bind with no error.
+    monkeypatch.setattr(
+        doctor,
+        "_codex_bind_report",
+        lambda: (_ for _ in ()).throw(AssertionError("should never be reached")),
+    )
+    result = runner.invoke(app, ["doctor", "--codex-hooks", "--codex-bind"])
+    assert result.exit_code == 2
+    assert "--codex-hooks may only be combined with --json" in result.output
+
+
 def test_cli_exits_zero_on_a_bound_pane(monkeypatch) -> None:
     monkeypatch.setattr(
         doctor,

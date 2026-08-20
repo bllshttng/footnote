@@ -3255,7 +3255,7 @@ def doctor_command(
         raise typer.Exit(0)
 
     if codex_hooks:
-        if fix or source is not None or cost_check:
+        if fix or source is not None or cost_check or codex_bind:
             raise typer.BadParameter("--codex-hooks may only be combined with --json")
         result = _codex_hooks_report()
         if json_out:
