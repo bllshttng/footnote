@@ -35,7 +35,7 @@
 apply-merge-ruleset.sh	post-push	scripts/ci/check-merge-coverage-audit.sh	reads and writes the live GitHub branch ruleset; nothing to check before a remote exists
 check-autonomy-registry.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-axis-vocabulary.sh	ci	.github/workflows/guards.yml	37s serial on this tree, too slow for the pre-push leg; the baseline it ratchets changes rarely
-check-ci-gate-lanes.sh	local	cli/src/fno/test_cmd.py	
+check-ci-gate-lanes.sh	local	.github/workflows/guards.yml,cli/src/fno/test_cmd.py	
 check-comment-restates-docstring.sh	local	cli/src/fno/test_cmd.py	
 check-company-boundaries.sh	local	cli/src/fno/test_cmd.py	
 check-company-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
@@ -46,7 +46,7 @@ check-import-paths.sh	ci	.github/workflows/cli-ci.yml	62s serial, the slowest st
 check-mail-inject-callers.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-markdown-style.sh	ci	.github/workflows/guards.yml	21s and it needs a diff base; the pre-push obligation for markdown is fno lint style --diff-base origin/main
 check-merge-coverage-audit.sh	post-push	.github/workflows/merge-coverage-audit.yml	audits merges since a ref through the GitHub API; needs merges that already landed
-check-no-direct-graphql-pr-read.sh	local	cli/src/fno/test_cmd.py	
+check-no-direct-graphql-pr-read.sh	local	.github/workflows/guards.yml,cli/src/fno/test_cmd.py	
 check-no-hardcoded-paths.sh	local	cli/src/fno/test_cmd.py	
 check-no-internal-refs.sh	local	.github/workflows/internal-refs.yml,scripts/ci/preflight.sh	
 check-no-session-urls.sh	post-push	.github/workflows/guards.yml	needs PR_BASE_SHA to scope the commit scan

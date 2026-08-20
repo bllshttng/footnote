@@ -19,7 +19,7 @@ from typing import Optional
 from fno.graph._intake import _project_key
 from fno.graph.render import in_progress_epic_ids, make_kanban_classifiers
 from fno.graph.statuses import live_claimed_node_ids
-from fno.pr._cache import newest_row_offline
+from fno.pr._cache import finite_or_zero, newest_row_offline
 
 MAX_ROWS_PER_SECTION = 5
 MAX_TITLE_WORDS = 12
@@ -84,14 +84,22 @@ def _age_from_epoch(ts: object, now: datetime) -> str:
     # `inf` raised OverflowError and `nan` raised ValueError from the `int()`
     # inside `_format_age`, which sits outside the try that used to be here.
     # One guard, every reader of the row - not one guard and a docstring.
-    from fno.pr._cache import finite_or_zero
-
+    #
+    # finite_or_zero closes non-finite, NOT out-of-range, and the difference
+    # showed here: a row carrying "ts": 1e18 is perfectly finite, so it passed
+    # the guard, went massively negative against now, and `_format_age` floored
+    # it at 0 - printing "checks green (as of 1m ago)" off a garbage stamp,
+    # which is the exact misreport the guard was added to stop. A future stamp
+    # is not an age, so it reads as unknown rather than as fresh.
     if ts is None:
         return "unknown age"
     ts_f = finite_or_zero(ts)
     if not ts_f:
         return "unknown age"
-    return _format_age(now.timestamp() - ts_f)
+    delta = now.timestamp() - ts_f
+    if delta < 0:
+        return "unknown age"
+    return _format_age(delta)
 
 
 def _just_finished_fact(entry: dict, now: datetime) -> str:

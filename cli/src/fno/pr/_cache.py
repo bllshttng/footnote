@@ -221,8 +221,11 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
 
     `refresh=True` (`fno pr status --refresh`) is the sanctioned escape: no row
     is served, the live read runs, and the fresh row replaces whatever was
-    there. Before it existed a caller who distrusted a cached verdict had no
-    option at all - `--help` listed none - and had to drop to raw `gh api`,
+    there - WHEN the head is readable. With no readable head there is no head
+    to key a row on, so the live read still runs and no row is written at all;
+    that arm also sits outside the per-key flock, so it is the one --refresh
+    shape that does not coalesce. Before it existed a caller who distrusted a
+    cached verdict had no option at all - `--help` listed none - and had to drop to raw `gh api`,
     which is what a king did on PR 994 after the cache reported red on a PR
     GitHub called clean. It is a MANUAL verb: it defeats the coalescing this
     module exists to do, so never put it in a watcher loop.

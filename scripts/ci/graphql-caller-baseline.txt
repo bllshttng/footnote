@@ -16,6 +16,16 @@
 # skills/ would make the disposition appear with no baseline row, and the gate
 # refuses an unknown disposition rather than accepting it.
 #
+# KNOWN BLIND SPOT, stated rather than discovered later. A count cannot see a
+# same-PR swap: delete one routed call site under cli/src and add a raw one,
+# and fno-process-proxy is still 110, so this passes. The sha256 inventory pin
+# this replaced did catch that shape, and it was dropped anyway because it went
+# red on every comment reword over 194 rows, which is how it ended up ignored
+# and unwired. The unclassified assertion still catches a raw caller in any
+# root that is not blanket-allowed. Closing the swap case needs a set
+# comparison of caller PATHS beside this ceiling, not the whole-body digest
+# back.
+#
 # Raising a number is a deliberate act: say in the PR body why the new caller
 # is routed rather than raw.
 fno-process-proxy 110

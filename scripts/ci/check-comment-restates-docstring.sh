@@ -136,7 +136,10 @@ FIXEOF
     n=$(_findings "$EXEMPLAR") || exit 1
     if [[ "$n" != "0" ]]; then
         echo "comment-restates-docstring: the density exemplar $EXEMPLAR scored $n findings, expected 0." >&2
-        echo "The instrument has drifted toward measuring documentation density. Re-examine the threshold; do not lower it." >&2
+        echo "Two things produce this, and the fix differs. READ THE FINDING FIRST:" >&2
+        echo "  bash scripts/ci/check-comment-restates-docstring.sh $EXEMPLAR" >&2
+        echo "1. The comment really does restate its docstring. Cut the comment; the exemplar is a live source file and a real finding in it is a real finding." >&2
+        echo "2. Nothing in the file changed and it still flags. Then the threshold has drifted toward measuring documentation density, which is the axis this lint exists NOT to measure. Re-examine the threshold; do not lower it." >&2
         exit 1
     fi
     echo "comment-restates-docstring: self-check ok (control flags $pos, exemplar scores 0)"
