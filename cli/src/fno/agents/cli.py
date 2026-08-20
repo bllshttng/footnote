@@ -3209,6 +3209,20 @@ def cmd_register(
         sys.stderr.write(f"register failed: {exc}\n")
         raise typer.Exit(code=1) from exc
 
+    # `origin` is write-once, so a human taking over a pane footnote spawned
+    # keeps `spawned` and this call cannot change it. Silence there reads as
+    # success: the operator believes they are registered as attended, while mail
+    # still treats them as unattended and the retire lane still holds them
+    # stoppable. The refusal is deliberate - a birth fact is not a claim a later
+    # caller gets to revise - so this says it rather than hiding it.
+    if entry.origin is not None and entry.origin != "operator":
+        sys.stderr.write(
+            f"note: origin stays {entry.origin!r}; it records what created this "
+            "row and is written once. Mail escalation and the watchdog retire "
+            "lane both read it, so this session is still treated as "
+            f"{entry.origin!r}.\n"
+        )
+
     events.emit(
         "session_registered",
         provider=entry.harness,

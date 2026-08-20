@@ -706,9 +706,16 @@ def _dispatch_one(
     # `bound` separates a live-but-unbound worker from a bound one.
     # The seed doubt has to reach THIS caller too. `cmd_spawn` surfaces
     # `unattempted` and `unknown` as exit 22, and both mean the target command
-    # may never have been submitted. Reporting a bare `launched` here left the
-    # lane slot held for a pane sitting at an empty prompt, which is the same
-    # signal reaching one of two callers.
+    # may never have been submitted, so a bare `launched` said more than this
+    # function knows.
+    #
+    # What this does and does NOT do. It reports the doubt, and `dispatch_notice`
+    # renders it, so an operator watching the mux sees "seed unverified" instead
+    # of a clean "dispatched". It does NOT release the lane slot: the pane may
+    # well be running, and dropping the hold on a live worker is the failure this
+    # whole branch exists to prevent. Whether an unverified seed should also
+    # release is a behaviour question with a live pane on the other side of it,
+    # and it is not answered here.
     seed = getattr(result, "seed", None)
     return {
         "outcome": "launched",

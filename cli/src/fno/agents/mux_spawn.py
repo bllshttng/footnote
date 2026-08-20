@@ -2663,7 +2663,12 @@ def _submit_spawn_seed(
             # healthy one produce identical receipts.
             return "unconfirmed", "mux did not answer the agy trust submit; the modal may still be up", ""
         if cleared.returncode != 0:
-            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+            # A refused submit is STRONGER evidence the gate did not clear than
+            # the timeouts above it, which already stopped claiming it. Harmless
+            # today only because `unconfirmed` fails the spawn before a receipt
+            # exists, and "harmless until the caller changes" is how the other
+            # two got written.
+            return "unconfirmed", "agy trust gate submit refused", ""
         try:
             screen = _run_mux(
                 ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
