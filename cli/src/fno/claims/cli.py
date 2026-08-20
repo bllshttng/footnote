@@ -287,7 +287,11 @@ def acquire(
                 if key.startswith("node:"):
                     _stamp_do_on_acquire(key, claim, holder)
                 typer.echo(
-                    json.dumps(claim.model_dump(mode="json"))
+                    # to_yaml_dict, matching the ordinary acquire below. One
+                    # --json flag must not return two schemas chosen by on-disk
+                    # state the caller cannot see, and this is now the default
+                    # path for every node-driven spawn.
+                    json.dumps(claim.to_yaml_dict())
                     if json_output
                     else f"acquired {key} (handover from {handover_from})"
                 )
@@ -794,13 +798,23 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
         rows, warnings = fleet_rows(timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
         return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
-    if warnings:
-        # ANY warning means the enumeration is incomplete, not just an empty
-        # one. fleet_rows warns on dropped session-id-less rows and on a roster
-        # probe approaching its budget, and both return a PARTIAL list. Treating
-        # a truncated scan as authoritative is the same absence-as-evidence
-        # move this cross-check exists to delete, one layer up.
-        return RosterReading(False, 0, {}, warnings[0])
+    # A warning about COMPLETENESS degrades; a warning about LATENCY does not.
+    # fleet_rows warns on dropped session-id-less rows, which really is a
+    # partial list, and separately on a probe that used over half its budget -
+    # which is a full list that took a while. Treating the second as a failed
+    # instrument threw away a complete fleet listing, and `read_roster` asks for
+    # a 10s budget, so the notice fires at 5.0s. On any fleet slower than that
+    # every reader degraded permanently: `claim status` printed "roster not
+    # consulted" forever and the abandonment probe answered None for every
+    # SUSPECT claim, so nothing was ever reaped again.
+    from fno.agents.watchdog import HEADROOM_WARNING_PREFIX
+
+    blocking = [w for w in warnings if not w.startswith(HEADROOM_WARNING_PREFIX)]
+    if blocking:
+        # Still the absence-as-evidence rule: a truncated scan is never
+        # authoritative, and reporting it as one is the move this cross-check
+        # exists to delete, one layer up.
+        return RosterReading(False, 0, {}, blocking[0])
     index: dict = {}
     by_session: dict = {}
     for r in rows:

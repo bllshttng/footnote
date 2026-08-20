@@ -947,7 +947,22 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
         return None
     from .session_pid import resolve_session_pid
 
-    return resolve_session_pid(from_pid=os.getpid())
+    anchor = resolve_session_pid(from_pid=os.getpid())
+    if anchor is None:
+        return None
+    # ONLY when the move actually repairs the claim. `acquired_at` is held now
+    # (the do row keys started_at on it), and `is_live` refuses a pid whose
+    # create_time is AFTER it. A RESUMED session's harness process started after
+    # the claim was filed, so anchoring to it would still classify SUSPECT while
+    # overwriting the original holder's pid for nothing. Leave the anchor alone
+    # there and let the TTL decide, which is what a claim with no better anchor
+    # has always done.
+    from .staleness import _process_create_time_ms
+
+    created = _process_create_time_ms(anchor)
+    if created is None or created > existing.acquired_at:
+        return None
+    return anchor
 
 
 def refresh_claim(

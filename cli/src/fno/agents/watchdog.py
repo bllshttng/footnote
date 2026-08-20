@@ -113,6 +113,13 @@ _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: already guards.
 _WAKE_STATES = frozenset({"working", "blocked", "stopped"})
 
+#: Prefix of the headroom notice below. It marks the ONE warning that says
+#: nothing about completeness: the probe finished and returned every row, it
+#: merely took over half its budget doing so. A reader that treats it as an
+#: incomplete enumeration throws away a full fleet listing, so the prefix is a
+#: named constant rather than a phrase two modules have to keep spelling alike.
+HEADROOM_WARNING_PREFIX = "roster probe latency: "
+
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe, not a status line: measured at 3.4s /
 #: 1.1s / 3.4s on a 43-row fleet, so the shared 3.0s interactive default
@@ -889,8 +896,8 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
         # the line has to be the thing that speaks.
         warnings = [
             *warnings,
-            f"roster probe took {elapsed:.1f}s of its {budget:.0f}s budget "
-            f"for {len(raw)} row(s); past the budget the sweep reads zero "
+            f"{HEADROOM_WARNING_PREFIX}took {elapsed:.1f}s of its {budget:.0f}s "
+            f"budget for {len(raw)} row(s); past the budget the sweep reads zero "
             f"rows and refuses. Raise ROSTER_TIMEOUT_S",
         ]
     by_sid: dict[str, Any] = {}

@@ -1770,7 +1770,15 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
         // ancestor and is the single resolver `fno target init` already uses to
         // acquire (`hooks/helpers/init-target-state.sh` shells the same verb);
         // a second walk implemented here would be two producers of one answer.
-        if let Some(anchor_pid) = durable_session_pid() {
+        // ONLY when the move actually repairs the claim. acquired_at is held
+        // below, and is_live refuses a pid whose create_time is AFTER it, so a
+        // RESUMED session's harness (started after the claim was filed) would
+        // still classify SUSPECT while overwriting the original holder's pid
+        // for nothing. Mirrors `_reanchor_pid_for` in claims/core.py.
+        let anchor = durable_session_pid().filter(|pid| {
+            process_create_time_ms(*pid).is_some_and(|created| created <= existing.acquired_at)
+        });
+        if let Some(anchor_pid) = anchor {
             existing.pid = anchor_pid;
             existing.host = hostname();
             let mine = machine_id();

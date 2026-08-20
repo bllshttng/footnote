@@ -827,6 +827,33 @@ def test_the_crosscheck_leaves_stdout_parseable_as_json(cwd_tmp, fake_roster):
     assert "UNCLAIMED but a live worker" in r.output
 
 
+def test_a_latency_notice_does_not_discard_a_complete_roster(cwd_tmp, fake_roster):
+    """The headroom notice fires at half the budget on a probe that RETURNED
+    every row, and read_roster asks for 10s, so it trips at 5.0s. Treating it as
+    a failed instrument threw the full listing away: `claim status` printed
+    "roster not consulted" forever and the abandonment probe answered None for
+    every SUSPECT claim, so nothing was reaped again."""
+    from fno.agents.watchdog import HEADROOM_WARNING_PREFIX
+
+    fake_roster(
+        rows=[_row("t-x76d1-rmtruth", "working", "x-76d1")],
+        warnings=[f"{HEADROOM_WARNING_PREFIX}took 5.4s of its 10s budget"],
+    )
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert r.exit_code == 0, r.output
+    assert "UNCLAIMED but a live worker is on this node" in r.output
+    assert "roster not consulted" not in r.output
+
+
+def test_a_completeness_warning_still_degrades(cwd_tmp, fake_roster):
+    """The other half of the pair. A dropped-row warning IS a partial list, and
+    a truncated scan must never read as authoritative."""
+    fake_roster(rows=[_row("t-other", "working", "x-other")],
+                warnings=["skipped 3 rows with no session id"])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "roster not consulted (skipped 3 rows with no session id)" in r.output
+
+
 def test_roster_read_failure_never_renders_a_clean_free(cwd_tmp, fake_roster):
     """An instrument that did not run must not render as an answer."""
     fake_roster(rows=[], warnings=["claude binary not found on PATH"])

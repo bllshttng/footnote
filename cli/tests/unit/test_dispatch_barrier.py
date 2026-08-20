@@ -610,3 +610,32 @@ def test_the_bare_guard_verb_never_clears_a_barrier_it_cannot_replace(
     # The positive marker: the reservation is still on disk, holder unchanged.
     assert claim_status("dispatch:N", root=tmp_path)["holder"] == "spawn-cli:99"
     assert exit_code == 0
+
+
+def test_a_held_node_refuses_and_hands_back_its_own_reservation(monkeypatch, tmp_path):
+    """A session that claimed the node through its own `fno target init` is
+    invisible to the reservation, which only dedups other DISPATCHERS. Swallowing
+    that as a best-effort hiccup put a second worker on a live session's node.
+
+    And the refusal must not keep the reservation it just took: nothing
+    downstream releases it, and a `dispatch:` key is unreapable inside its TTL,
+    so it would block every dispatcher for the full three minutes."""
+    _route_to(monkeypatch, tmp_path)
+    import os
+
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", "target-session:someone-else", ttl_ms=3_600_000,
+        pid=os.getpid(), root=tmp_path,
+    )
+    verdict, exit_code = _spawn_guard_decision(
+        "N", "spawn-cli:me", ttl="3m", handover_holder="spawn-handover:t-N"
+    )
+    assert verdict["verdict"] == "already-running"
+    assert verdict["reason"] == "live-claim"
+    assert exit_code == 0
+    assert (
+        claim_status("node:N", root=tmp_path)["holder"] == "target-session:someone-else"
+    )
+    assert claim_status("dispatch:N", root=tmp_path)["state"] == "free"

@@ -394,7 +394,13 @@ def _spawn_guard_decision(
             return {
                 "verdict": "already-running",
                 "reason": "reservation-held",
-                **({} if bucket == _HOLDER_ALIVE
+                # NO remedy when nothing was measured. `_HOLDER_ALIVE` means we
+                # PROVED a live spawner; `no-replacement-barrier` means we never
+                # looked, because this caller cannot replace what it would
+                # clear. Force-release advice against a spawner that is
+                # mid-launch is the worse-than-nothing advice the comment above
+                # forbids, and an unmeasured bucket cannot rule that out.
+                **({} if bucket in (_HOLDER_ALIVE, "no-replacement-barrier")
                    else {"remedy": _remedy_for(res_key)}),
             }, 0
         try:
@@ -470,6 +476,12 @@ def _spawn_guard_decision(
             # invisible to it. Swallowing this as best-effort put a second
             # worker on a node a live session was building, which is the whole
             # failure this PR exists to close.
+            # Hand back the reservation THIS call took. `cmd_spawn` records it
+            # only after a dispatchable verdict, so nothing downstream releases
+            # it, and `classify_for_sweep` refuses to reap a `dispatch:` key
+            # inside its TTL. Leaving it blocked every dispatcher for 3m over a
+            # node somebody else legitimately holds.
+            _release_dispatch_claims((res_key, holder))
             return {
                 "verdict": "already-running",
                 "reason": "live-claim",
@@ -486,6 +498,9 @@ def _spawn_guard_decision(
                 # proceeding here re-opens the double dispatch both barriers
                 # exist to close. The reservation carries a 3m TTL and an
                 # expired claim is provably dead, so the node self-heals.
+                # Same release as the branch above: this refusal must not keep
+                # the reservation it took.
+                _release_dispatch_claims((res_key, holder))
                 return {
                     "verdict": "error",
                     "detail": (
