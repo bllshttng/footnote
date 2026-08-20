@@ -816,18 +816,31 @@ def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
     in :func:`_codex_daemon_candidate` needs that distinction: an unreachable
     daemon must leave the fd oracle deciding alone, never manufacture a false
     "nothing new here".
+
+    Compares ``realpath``-normalized paths, not raw strings: the daemon may
+    report a symlink-resolved cwd (e.g. macOS's ``/tmp`` -> ``/private/tmp``)
+    that never equals our own unresolved ``str(cwd)``, which would silently
+    zero out this oracle for every thread and reintroduce the 0/20-bind
+    defect this correlation exists to fix.
     """
     from fno.agents.discover import _codex_daemon_threads_raw
 
     threads = _codex_daemon_threads_raw()
     if threads is None:
         return None
+    resolved_cwd = os.path.realpath(str(cwd))
     ids: set[str] = set()
     for thread in threads:
         if not isinstance(thread, dict):
             continue
         sid = thread.get("session_id")
-        if isinstance(sid, str) and sid and thread.get("cwd") == str(cwd):
+        thread_cwd = thread.get("cwd")
+        if (
+            isinstance(sid, str)
+            and sid
+            and isinstance(thread_cwd, str)
+            and os.path.realpath(thread_cwd) == resolved_cwd
+        ):
             ids.add(sid)
     return ids
 
@@ -909,6 +922,9 @@ def _make_codex_bind_probe(
     last_probe_s = [0.0]
     prev_candidate: list = [None]
 
+    def _mark_oracle(name: str) -> None:
+        used[:] = [name]
+
     def _probe() -> Optional[str]:
         sid = _backfill_codex_session_id(
             cwd,
@@ -918,10 +934,7 @@ def _make_codex_bind_probe(
             attempts=1,
         )
         if sid:
-            if used:
-                used[0] = "rollout-fd"
-            else:
-                used.append("rollout-fd")
+            _mark_oracle("rollout-fd")
             return sid
         now_s = time.monotonic()
         if now_s - last_probe_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
@@ -935,10 +948,7 @@ def _make_codex_bind_probe(
         # just told us the pane itself is already gone.
         if _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S) is False:
             return None
-        if used:
-            used[0] = "daemon"
-        else:
-            used.append("daemon")
+        _mark_oracle("daemon")
         return candidate
 
     return _probe

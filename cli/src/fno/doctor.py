@@ -2191,16 +2191,19 @@ def _codex_app_server_report() -> dict[str, Any]:
 
 
 def _codex_version() -> Optional[str]:
-    """The installed codex CLI's own version string, or None on any miss."""
-    try:
-        proc = subprocess.run(
-            ["codex", "--version"], capture_output=True, text=True, timeout=10
-        )
-    except (OSError, subprocess.SubprocessError):
+    """The installed codex CLI's own version string, or None on any miss.
+
+    Delegates to the memoized :func:`fno.agents.mux_spawn._codex_cli_version`
+    rather than shelling out a second time: two independent `codex --version`
+    probes with different timeouts and parsing could otherwise silently
+    disagree on what "the installed codex" is.
+    """
+    from fno.agents.mux_spawn import _codex_cli_version
+
+    version = _codex_cli_version()
+    if version is None:
         return None
-    if proc.returncode != 0:
-        return None
-    return (proc.stdout or proc.stderr or "").strip() or None
+    return "codex-cli %d.%d.%d" % version
 
 
 #: The production binding window (mirrors the codex harness contract's
