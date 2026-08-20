@@ -35,8 +35,9 @@ Main" bypass phrase and approve_no_verify.flag).
 
 Megawalk-state.md deliberately does NOT authorize gh pr merge. When
 megawalk is invoked, only target (via its internal Phase 7a pipeline) can
-merge a PR; the outer megawalk thread must not. PR creation, however, is
-not a megawalk-only concern - it's always allowed.
+merge a PR; the outer megawalk thread must not. PR creation is not a
+megawalk-only concern either, and is ungated here except for the closure
+trailer described above.
 """
 import json
 import os
@@ -460,7 +461,8 @@ def _get_active_target_session(prefer_pr=None):
 
     The megawalk-state.md file deliberately does NOT authorize gh pr create or
     gh pr merge. Megawalk orchestrates target subagents; if target fails, megawalk
-    must halt, not take over PR operations itself.
+    must halt, not take over PR operations itself. (Creation is otherwise
+    ungated except for _closure_trailer_refusal.)
     """
     matches = []
     for repo_root in _candidate_repo_roots():
@@ -1447,9 +1449,17 @@ def _closure_trailer_refusal(command=""):
     node-bearing local branch denied a PR that closes nothing, and told the
     author to claim a node the PR does not ship.
     """
-    if os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
+    # Both spellings, because only one of them is the one people type. A
+    # PreToolUse hook is a SEPARATE PROCESS, so an inline
+    # `FNO_PR_CLOSURE_OK=1 gh pr create ...` sets the variable for gh and never
+    # reaches this os.environ - and _effective_argv strips the assignment, so
+    # the segment still matched and still denied. The documented hatch was a
+    # dead end, and the refusal message taught it. Read the assignment off the
+    # command text too.
+    if (os.environ.get("FNO_PR_CLOSURE_OK", "") == "1"
+            or re.search(r"(?:^|\s)FNO_PR_CLOSURE_OK=1(?:\s|$)", command)):
         return None
-    head = re.search(r"--head(?:=|\s+)(\S+)", command)
+    head = re.search(r"(?:--head(?:=|\s+)|(?:^|\s)-H\s+)(\S+)", command)
     ids = _branch_node_ids(
         head.group(1).strip("'\"") if head else get_current_branch()
     )

@@ -193,9 +193,14 @@ def test_batch_ship_claims_every_member(monkeypatch):
             return subprocess.CompletedProcess(argv, 0, "[]", "")
         return subprocess.CompletedProcess(argv, 0, "https://x/pull/7", "")
 
+    # The branch is the shape ship_batch actually produces. Patching it to a
+    # tidier "batch/code" pinned the tag and not the destination: the real
+    # "feature/batch-code-a1b2c3" parsed as node-bearing, so the trailer
+    # carried a "code-a1b2c3" the graph does not carry, and
+    # bind_closure_claims voided every genuine member claim beside it.
     monkeypatch.setattr(
         batch_mod, "read_batch", lambda *_a, **_k: {
-            "status": "open", "worktree": "/tmp/wt", "branch": "batch/code",
+            "status": "open", "worktree": "/tmp/wt", "branch": "feature/batch-code.a1b2c3",
             "members": ["x-aaaa", "x-bbbb"],
         }
     )
@@ -329,6 +334,46 @@ def test_hook_still_denies_an_explicit_node_head_ref(monkeypatch):
         monkeypatch=monkeypatch,
     )
     assert reason is not None and "Backlog-Closure: x-1111" in reason
+
+
+@pytest.mark.parametrize("domain", ["code", "docs", "front-end"])
+def test_a_batch_branch_never_parses_as_node_bearing(domain):
+    # <word>-<hex> IS the node-id grammar, so every batch-code-a1b2c3 branch
+    # read as node-bearing. The gate then demanded an id the graph does not
+    # carry, and one unknown id refuses the WHOLE binding.
+    ref = f"feature/batch-{domain}.a1b2c3"
+    assert branch_node_ids(ref) == []
+    assert _gate(ensure_closure_trailer("Batch body.", ref), ref) == 0
+
+
+def test_hook_reads_an_inline_escape_hatch_assignment(monkeypatch):
+    # A PreToolUse hook is a separate process, so an inline assignment never
+    # reaches its os.environ. Reading only the env made the documented hatch a
+    # dead end and the refusal message taught it.
+    monkeypatch.delenv("FNO_PR_CLOSURE_OK", raising=False)
+    assert _hook_decision(
+        'FNO_PR_CLOSURE_OK=1 gh pr create --title t --body "$BODY"',
+        "feature/x-49ec", monkeypatch=monkeypatch,
+    ) is None
+
+
+def test_hook_reads_the_short_head_flag(monkeypatch):
+    # `-H` is gh's short --head. The same one-spelling gap the -F fix closed.
+    assert _hook_decision(
+        'gh pr create -H chore/tidy-docs --body "$BODY"',
+        "feature/x-49ec", monkeypatch=monkeypatch,
+    ) is None
+    reason = _hook_decision(
+        'gh pr create -H feature/x-1111 --body "$BODY"',
+        "chore/tidy-docs", monkeypatch=monkeypatch,
+    )
+    assert reason is not None and "Backlog-Closure: x-1111" in reason
+
+
+def test_hook_docstrings_do_not_claim_creation_is_ungated():
+    # A PR must not ship a doc its own code disproves.
+    text = HOOK.read_text(encoding="utf-8")
+    assert "it's always allowed" not in text
 
 
 def test_hook_escape_hatch_clears_the_gate(monkeypatch):

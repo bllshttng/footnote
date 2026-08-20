@@ -672,7 +672,15 @@ def prepare_batch(
         # but before it merged, reuse the branch - `gh pr list --head` would then
         # fold the new members into the stale PR and blow past max_nodes. The
         # random suffix guarantees one branch per batch (codex P2).
-        name = f"batch-{_safe(domain)}-{secrets.token_hex(3)}"
+        #
+        # The suffix hangs off a '.' rather than a '-' because `<word>-<hex>`
+        # IS the node-id grammar: every `batch-code-a1b2c3` branch parsed as
+        # node-bearing, so check-pr-node-closure demanded a `code-a1b2c3` the
+        # graph does not carry, and bind_closure_claims - which refuses the
+        # WHOLE binding on one unknown id - then voided the real member claims
+        # beside it. A '.' cannot appear in a node id, so the ref reads as the
+        # non-node branch it is and the members stay the only claim.
+        name = f"batch-{_safe(domain)}.{secrets.token_hex(3)}"
         branch = f"feature/{name}"
         # A batch lane runs a claude `/target batched` member, so it is claude
         # harness-native: forward --harness claude to land it at .claude/worktrees/.
