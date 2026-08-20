@@ -2266,12 +2266,20 @@ def _codex_bind_report() -> dict[str, Any]:
     try:
         pane_id = int((proc.stdout or "").strip().splitlines()[-1])
     except (ValueError, IndexError):
+        # No pane id to reap by (same unrecoverable shape mux_spawn's own
+        # dispatch raises on): the canary pane may exist without a way to
+        # name it, so point at the manual cleanup path instead of a silent
+        # leak.
         return {
             "bound": False,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
-            "error": f"unparseable pane run output {proc.stdout!r}",
+            "error": (
+                f"unparseable pane run output {proc.stdout!r}; a pane may "
+                f"exist without a registry row - inspect with 'fno mux pane "
+                f"ls --session {session}'"
+            ),
         }
 
     mux = {"session": session, "pane_id": pane_id}

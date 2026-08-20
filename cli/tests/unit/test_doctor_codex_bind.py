@@ -110,6 +110,19 @@ def test_pane_run_failure_is_reported_without_a_child_pid_lookup(monkeypatch) ->
     assert result["error"] == "boom"
 
 
+def test_unparseable_pane_id_on_a_successful_run_names_the_manual_cleanup_path(
+    monkeypatch,
+) -> None:
+    # returncode 0 means the pane really was created - unlike the failure
+    # case above, this must not claim "no output" or go silent about the
+    # orphaned pane it cannot reap without an id.
+    _patch_common(monkeypatch, run_returncode=0, pane_id_out="not-an-int\n")
+    result = doctor._codex_bind_report()
+    assert result["bound"] is False
+    assert "unparseable pane run output" in result["error"]
+    assert "fno mux pane ls --session main" in result["error"]
+
+
 def test_cli_exits_nonzero_on_a_failed_bind(monkeypatch) -> None:
     monkeypatch.setattr(
         doctor,
