@@ -185,7 +185,7 @@ Preflight runs before a push only at the policy's request. The single decision p
 On a stock config the pre-push obligation is the focused checks below, each seconds. There is deliberately no wrapper script for them. Every check already runs in CI. A new mandatory local runner rebuilds the gate this contract removes, one rung smaller.
 
 - `cargo fmt --check` for rust changes.
-- `fno lint style --surface markdown --files <changed .md> --diff-base origin/main` for markdown changes. Commit first. The added-lines scan reads COMMITTED changes, so an uncommitted working tree inspects nothing and passes. Read the `inspected N added line(s)` count it prints. A zero on a file you just edited means the scan missed it, never that the file is clean. It counts pure insertions, so a line you EDITED is not scanned at all. House style puts a paragraph on one physical line. Most prose edits are therefore modifications, and the gate never sees them.
+- `fno lint style --surface markdown --files <changed .md> --diff-base origin/main` for markdown changes. Commit first. The added-lines scan reads COMMITTED changes, so an uncommitted working tree inspects nothing and passes. Read the `inspected N added line(s)` count it prints. A zero on a file you just edited means the scan missed it, never that the file is clean. A file-wide `style-exception` marker exempts that whole file from every rule, permanently, whatever narrow reason it states. The receipt cannot tell you it happened. `0 added line(s) across 1 changed file(s)` reads the same for a file with nothing to inspect and a file skipped by its marker.
 - `bash scripts/ci/check-pr-body-length.sh` before opening the PR.
 - The tests covering the diff's blast radius.
 
