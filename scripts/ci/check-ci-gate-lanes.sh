@@ -205,6 +205,52 @@ while IFS=$'\t' read -r script lane invoker note; do
     esac
 done < <(grep -v '^[[:space:]]*#' "$MANIFEST" | grep -v '^[[:space:]]*$')
 
+# Undeclared invokers ------------------------------------------------------
+# Verifying the invokers a row DECLARES is only half the job. A row that names
+# one of its two real invokers is still a row that lies about coverage, and the
+# gate would never notice: delete the guards.yml step for a gate whose row only
+# names preflight.sh and the manifest stays green while a CI lane disappears.
+# So enumerate the real invokers too and require the row to list all of them.
+REAL="$(mktemp)"
+trap 'rm -f "$LIVE" "$LISTED" "$REAL"' EXIT
+
+scan_surface() {
+    local surface="$1" base hit
+    [ -f "$REPO_ROOT/$surface" ] || return 0
+    base="$(basename "$surface")"
+    grep -v '^[[:space:]]*#' "$REPO_ROOT/$surface" 2>/dev/null \
+        | grep -Eo "${RUN}[A-Za-z0-9._-]+\.sh" \
+        | sed -E 's#.*/##' \
+        | while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            [ "$hit" = "$base" ] && continue
+            [ -f "$GATE_DIR/$hit" ] || continue
+            printf '%s\t%s\n' "$hit" "$surface"
+          done
+}
+
+for wf in "$REPO_ROOT"/.github/workflows/*.yml; do
+    [ -f "$wf" ] || continue
+    scan_surface ".github/workflows/$(basename "$wf")"
+done >> "$REAL"
+scan_surface "cli/src/fno/test_cmd.py" >> "$REAL"
+for g in "$GATE_DIR"/*.sh; do
+    [ -f "$g" ] || continue
+    scan_surface "scripts/ci/$(basename "$g")"
+done >> "$REAL"
+
+while IFS=$'\t' read -r script lane invoker note; do
+    case "$script" in ''|'#'*) continue ;; esac
+    [ "$lane" = entrypoint ] && continue
+    while IFS= read -r found; do
+        [ -n "$found" ] || continue
+        case ",$invoker," in
+            *",$found,"*) ;;
+            *) note_fail "$script: '$found' invokes it but the row does not list it - the invoker column records every path, not a favourite one" ;;
+        esac
+    done < <(awk -F'\t' -v k="$script" '$1 == k {print $2}' "$REAL" | LC_ALL=C sort -u)
+done < <(grep -v '^[[:space:]]*#' "$MANIFEST" | grep -v '^[[:space:]]*$')
+
 if [ "$FAIL" -ne 0 ]; then
     echo "ci-gate-lanes: FAILED" >&2
     exit 1

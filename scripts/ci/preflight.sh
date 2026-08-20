@@ -162,7 +162,7 @@ FAILED_LEG_SCOPES=""
 if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
     while read -r _leg_line; do
         [[ -z "$_leg_line" ]] && continue
-        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno " in
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno structural-gates:fno " in
             *" $_leg_line "*)
                 case " $FAILED_LEG_SCOPES " in
                     *" $_leg_line "*) ;;
@@ -1172,8 +1172,16 @@ fi
 
 # structural gates --------------------------------------------------------
 # The cheap half of guards.yml, run here so it can fail at the keystroke
-# instead of a CI cycle later. Measured 2026-08-20 on this tree: 13 gates,
-# ~49s serial, every one static and offline.
+# instead of a CI cycle later. Measured 2026-08-20 on this tree: 12 gates,
+# ~46s serial, every one static and offline.
+#
+# "Offline" is a membership rule, not a description. run_hermetic exports an
+# empty HOME, so a gate that reaches the network here has no ~/.ssh and no
+# ~/.gitconfig: it fails host-key verification, or worse, blocks on ssh's
+# interactive prompt while holding the preflight lock. check-proto-version-bump
+# was in this list until it was caught doing an unconditional `git fetch`, and
+# it stays in the ci lane for that reason. Check for network calls before
+# adding a gate here; a green run outside run_hermetic proves nothing.
 #
 # These stay in guards.yml too, and that is deliberate rather than a duplicate.
 # guards.yml carries no paths filter, so it is the lane that covers a docs-only
@@ -1205,7 +1213,6 @@ if retry_run_leg structural-gates:fno; then
     run_hermetic bash scripts/ci/check-no-skill-local-evals.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-plan-rung-authority.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-pr-node-closure-selftest.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
-    run_hermetic bash scripts/ci/check-proto-version-bump.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-review-app-parity.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-review-invocation-single-source.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-uv-install-compiles-bytecode.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc

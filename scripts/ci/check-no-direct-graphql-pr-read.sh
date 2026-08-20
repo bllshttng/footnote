@@ -39,10 +39,15 @@ matches=$(python3 scripts/ci/graphql-caller-inventory.py)
 classified=$(printf '%s\n' "$matches" | awk 'NF {n++} END {print n+0}')
 unclassified=$(printf '%s\n' "$matches" | awk -F'|' '$1 == "unclassified" {n++} END {print n+0}')
 
-# documentation rows are excluded by construction: a comment mentioning
-# `gh pr view` is not a caller, and counting them made every prose edit red.
+# Prose is excluded from the ceiling by construction, on two tests rather than
+# one. The `documentation` disposition only catches a #- or //-prefixed line in
+# a code file, so it misses markdown entirely: measured on this tree, all 11
+# worker-proxy-or-hook rows were prose in skills/*.md, and pinning that bucket
+# would have gone red the next time somebody wrote `gh pr view` in a skill doc.
+# A .md file cannot execute, so it cannot be a caller. The disposition taxonomy
+# is left alone; only the counting excludes it.
 counts=$(printf '%s\n' "$matches" \
-    | awk -F'|' 'NF && $1 != "documentation" {n[$1]++} END {for (k in n) print k, n[k]}' \
+    | awk -F'|' 'NF && $1 != "documentation" && $3 !~ /\.md$/ {n[$1]++} END {for (k in n) print k, n[k]}' \
     | LC_ALL=C sort)
 
 if [[ "${1:-}" == "--print-counts" ]]; then
@@ -80,12 +85,15 @@ if ! grep -q 'protected = worker_environment(' cli/src/fno/cli.py; then
   echo "direct-graphql-pr-read: cli.py no longer binds worker_environment() - the worker env boundary is gone" >&2
   exit 1
 fi
-if ! grep -q '"fno-gh-coverage"' crates/fno-agents/src/finalize.rs; then
-  echo "direct-graphql-pr-read: finalize.rs no longer names the fno-gh-coverage adapter" >&2
+# Anchored to the SPAWN and the env override, not to a bare string. Both files
+# also name their adapter inside #[cfg(test)] blocks, so a bare grep would stay
+# green on the test occurrence alone after the production boundary was deleted.
+if ! grep -q 'Command::new("fno-gh-coverage")' crates/fno-agents/src/finalize.rs; then
+  echo "direct-graphql-pr-read: finalize.rs no longer SPAWNS the fno-gh-coverage adapter" >&2
   exit 1
 fi
-if ! grep -q '"fno-gh-loopcheck"' crates/fno-agents/src/loopcheck.rs; then
-  echo "direct-graphql-pr-read: loopcheck.rs no longer names the fno-gh-loopcheck adapter" >&2
+if ! grep -q 'FNO_LOOPCHECK_GH_BIN' crates/fno-agents/src/loopcheck.rs; then
+  echo "direct-graphql-pr-read: loopcheck.rs no longer resolves its gh binary through FNO_LOOPCHECK_GH_BIN" >&2
   exit 1
 fi
 

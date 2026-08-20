@@ -4,18 +4,21 @@
 # <disposition> <max callers>. Measured 2026-08-20.
 #
 # Read as a ceiling, never equality. Removing a caller passes. Adding one
-# raises a count and goes red, which is the case worth a human read: the two
-# blanket-allow buckets (fno-process-proxy for cli/src, worker-proxy-or-hook
-# for skills/) accept anything by path, so a count is the only tripwire on a
-# new raw caller landing there.
+# raises a count and goes red, which is the case worth a human read: the
+# blanket-allow buckets accept anything by path, so a count is the only
+# tripwire on a new raw caller landing there.
 #
-# The `documentation` disposition is deliberately absent. A comment naming
-# `gh pr view` is not a caller, and counting prose made every reword red.
+# Prose is not counted. That means the `documentation` disposition, and it also
+# means any .md row whatever its disposition: the disposition rule only catches
+# a #- or //-prefixed line in a code file, so markdown slipped through it. All
+# 11 worker-proxy-or-hook rows measured on this tree were prose in skills/*.md,
+# which is why that bucket has no row here. A real executable caller under
+# skills/ would make the disposition appear with no baseline row, and the gate
+# refuses an unknown disposition rather than accepting it.
 #
 # Raising a number is a deliberate act: say in the PR body why the new caller
 # is routed rather than raw.
 fno-process-proxy 110
 fixed-purpose-adapter 19
-worker-proxy-or-hook 11
 operator-guard-definition 7
 quota-soak-broker 1

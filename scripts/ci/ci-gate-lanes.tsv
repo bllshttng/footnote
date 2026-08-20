@@ -1,8 +1,11 @@
 # scripts/ci/ci-gate-lanes.tsv
 #
 # One row per shell script in scripts/ci: script, lane, invoker, note.
-# Tab separated. check-ci-gate-lanes.sh diffs this against the live directory
-# and verifies that the declared invoker really runs the script.
+# Tab separated. check-ci-gate-lanes.sh diffs this against the live directory,
+# verifies that every declared invoker really runs the script, AND enumerates
+# the real invokers to refuse a row that lists only some of them. Naming one of
+# two invokers is still a row that lies about coverage: delete the workflow step
+# it left out and the manifest stays green while a CI lane disappears.
 #
 # Adding a script to scripts/ci needs a row here, in the same PR. A script with
 # no row is a red check, not a review catch somebody has to remember to make.
@@ -27,7 +30,7 @@
 # names a runtime, a network dependency, or the PR artifact the gate needs.
 #
 # Measured 2026-08-20. Before this pass: 15 local, 27 ci, 1 entrypoint, and 2
-# scripts reachable from nothing at all. After: 31 local, 4 ci, 10 post-push,
+# scripts reachable from nothing at all. After: 30 local, 5 ci, 10 post-push,
 # 1 entrypoint, 0 unreachable.
 apply-merge-ruleset.sh	post-push	scripts/ci/check-merge-coverage-audit.sh	reads and writes the live GitHub branch ruleset; nothing to check before a remote exists
 check-autonomy-registry.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
@@ -51,7 +54,7 @@ check-no-skill-local-evals.sh	local	.github/workflows/guards.yml,scripts/ci/pref
 check-no-stale-skill-refs.sh	local	cli/src/fno/test_cmd.py	
 check-no-stale-spec-refs.sh	local	cli/src/fno/test_cmd.py	
 check-oos-tracked.sh	post-push	.github/workflows/guards.yml	reads the PR body
-check-pitfalls.sh	local	cli/src/fno/test_cmd.py	
+check-pitfalls.sh	local	.github/workflows/pitfalls.yml,cli/src/fno/test_cmd.py	
 check-placement-rule.sh	local	cli/src/fno/test_cmd.py	
 check-plan-rung-authority.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-plugins-function-agnostic.sh	local	cli/src/fno/test_cmd.py	
@@ -59,16 +62,16 @@ check-pr-body-length.sh	post-push	.github/workflows/guards.yml	reads the PR body
 check-pr-node-closure-selftest.sh	local	.github/workflows/pr-node-closure.yml,scripts/ci/preflight.sh	
 check-pr-node-closure.sh	post-push	.github/workflows/pr-node-closure.yml	needs PR_HEAD_REF
 check-pr-style.sh	post-push	.github/workflows/guards.yml	reads the PR body
-check-preamble-budget.sh	local	cli/src/fno/test_cmd.py	
-check-proto-version-bump.sh	local	.github/workflows/rust-ci.yml,scripts/ci/preflight.sh	
-check-registry-schema-parity.sh	local	cli/src/fno/test_cmd.py	
+check-preamble-budget.sh	local	.github/workflows/guards.yml,cli/src/fno/test_cmd.py	
+check-proto-version-bump.sh	ci	.github/workflows/rust-ci.yml	runs an unconditional git fetch, so it cannot run in the hermetic pre-push leg with an empty HOME
+check-registry-schema-parity.sh	local	.github/workflows/rust-ci.yml,cli/src/fno/test_cmd.py	
 check-review-app-parity.sh	local	.github/workflows/rust-ci.yml,scripts/ci/preflight.sh	
 check-review-invocation-single-source.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
-check-reviewer-descriptor-parity.sh	local	cli/src/fno/test_cmd.py	
+check-reviewer-descriptor-parity.sh	local	.github/workflows/rust-ci.yml,cli/src/fno/test_cmd.py	
 check-skill-snippets.sh	local	cli/src/fno/test_cmd.py	
 check-stacked-base.sh	post-push	.github/workflows/stacked-base-guard.yml	needs a PR number and head sha, and posts commit statuses to other open PRs
-check-tracker-consumers.sh	local	scripts/ci/preflight.sh	
-check-tracker-partition.sh	local	scripts/ci/preflight.sh	
+check-tracker-consumers.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
+check-tracker-partition.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-uv-install-compiles-bytecode.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 check-workflow-manifest.sh	local	.github/workflows/guards.yml,scripts/ci/preflight.sh	
 control-plane-doc-colocation.sh	ci	.github/workflows/guards.yml	needs BASE_REF and is advisory without a PR base, so it reports nothing actionable before the push

@@ -63,6 +63,11 @@
 # in this first pass.
 set -euo pipefail
 
+# Resolved BEFORE the cd: a relative $0 stops resolving once the shell is
+# somewhere else, and the --self-check re-invocation below would then die
+# inside a command substitution with no message.
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$REPO_ROOT"
 
@@ -79,7 +84,7 @@ if [[ "${1:-}" == "--self-check" ]]; then
         echo "comment-restates-docstring: exemplar missing at $EXEMPLAR - repoint it, do not drop the check" >&2
         exit 1
     fi
-    n=$(bash "$0" "$EXEMPLAR" | awk '/^findings:/ {print $2}')
+    n=$(bash "$SELF" "$EXEMPLAR" | awk '/^findings:/ {print $2}')
     if [[ "$n" != "0" ]]; then
         echo "comment-restates-docstring: the density exemplar $EXEMPLAR scored $n findings, expected 0." >&2
         echo "The instrument has drifted toward measuring documentation density, which is the axis this lint exists NOT to measure. Re-examine the threshold; do not lower it." >&2
