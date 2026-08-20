@@ -272,7 +272,18 @@ def clear(
                     # Refuse the CLOSE too, never just the decision. Closing a
                     # question whose answer was refused would retire it with
                     # nothing on record, which is the worse of the two.
-                    typer.echo(f"outstanding: refused, {qid} stays open: {exc}", err=True)
+                    #
+                    # Say NOTHING was closed, not that this id stayed open.
+                    # _resolve_decider is a pure function of the ambient
+                    # identity and the one --authority value, both invariant
+                    # across this loop, so the refusal fires on the first id or
+                    # never. Naming one id would be the partial statement this
+                    # verb's whole family of messages exists to stop.
+                    typer.echo(
+                        f"outstanding: refused: {exc}. Nothing was closed; "
+                        f"all {len(targets)} question(s) stay open.",
+                        err=True,
+                    )
                     raise typer.Exit(3)
             try:
                 event = operator_question_closed(

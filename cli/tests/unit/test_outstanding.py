@@ -669,7 +669,7 @@ def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
         ["clear", qid, "--answer", "fold", "--authority", "operator"],
     )
     assert refused.exit_code != 0, refused.output
-    assert "stays open" in refused.output
+    assert "Nothing was closed" in refused.output
 
     still_open = runner.invoke(outstanding_app, [])
     assert still_open.exit_code == 0, still_open.output
