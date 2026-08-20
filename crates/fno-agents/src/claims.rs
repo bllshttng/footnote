@@ -1733,10 +1733,17 @@ fn durable_session_pid() -> Option<i32> {
         .ok()
 }
 
-/// Wall-clock ceiling on the `claim session-pid` shell-out. Generous enough for
-/// a cold python start, short enough that a hung one does not hold the recovery
-/// mutex for a human-noticeable time.
-const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Wall-clock ceiling on the `claim session-pid` shell-out.
+///
+/// UNDER the python side's own wait for this same mutex. `compare_and_rebind`
+/// gives up after `_RECOVERY_LOCK_MAX_WAIT_S` (5.0s) and `reap`'s targeted
+/// recovery waits zero, so a bound above that let a cold python start here hold
+/// the lock long enough to make a successor's `fno target init --handover-from`
+/// refuse as mutex-busy, fall through to a plain acquire, and cancel the
+/// session on ClaimHeldByOther. Three seconds leaves headroom under 5 and is
+/// still ample for a warm resolve; a slower one degrades to None, which leaves
+/// the anchor alone.
+const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.

@@ -847,11 +847,41 @@ def test_a_latency_notice_does_not_discard_a_complete_roster(cwd_tmp, fake_roste
 
 def test_a_completeness_warning_still_degrades(cwd_tmp, fake_roster):
     """The other half of the pair. A dropped-row warning IS a partial list, and
-    a truncated scan must never read as authoritative."""
+    a truncated scan must never read as authoritative. It carries no advisory
+    marker, which is what makes it block."""
     fake_roster(rows=[_row("t-other", "working", "x-other")],
-                warnings=["skipped 3 rows with no session id"])
+                warnings=["3 row(s) carried no session id, unmeasurable, skipped"])
     r = runner.invoke(cli, ["status", "node:x-76d1"])
-    assert "roster not consulted (skipped 3 rows with no session id)" in r.output
+    assert "roster not consulted" in r.output
+    assert "carried no session id" in r.output
+
+
+def test_an_unmapped_row_state_does_not_degrade_the_reading(cwd_tmp, fake_roster):
+    """A status spelling claude has not shipped before is a fidelity note on a
+    row that IS in the listing. Blocking on it printed "roster not consulted"
+    forever and answered None for every SUSPECT claim, so nothing was reaped.
+
+    Carrying it is safe because an unknown state matches no finished state, so
+    the alarm reads the worker as engaged - the conservative direction."""
+    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
+
+    fake_roster(
+        rows=[_row("t-x76d1-rmtruth", "frobnicating", "x-76d1")],
+        warnings=[f"{ADVISORY_WARNING_PREFIX}unmapped row state 'frobnicating'"],
+    )
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "UNCLAIMED but a live worker is on this node" in r.output
+    assert "roster not consulted" not in r.output
+
+
+def test_an_unanticipated_warning_degrades_by_default(cwd_tmp, fake_roster):
+    """The polarity, pinned. A warning nobody has thought about yet is exactly
+    the one that must not be waved through, so the marker is on the harmless
+    ones and everything else blocks."""
+    fake_roster(rows=[_row("t-x76d1-rmtruth", "working", "x-76d1")],
+                warnings=["something nobody has written a branch for yet"])
+    r = runner.invoke(cli, ["status", "node:x-76d1"])
+    assert "roster not consulted" in r.output
 
 
 def test_roster_read_failure_never_renders_a_clean_free(cwd_tmp, fake_roster):

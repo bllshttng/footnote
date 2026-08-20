@@ -119,12 +119,23 @@ _WAKE_STATES = frozenset({"working", "blocked", "stopped"})
 #: that put completed work in the digest.
 _FINISHED_NODE_STATUSES = frozenset({"done", "superseded", "deferred"})
 
-#: Prefix of the headroom notice below. It marks the ONE warning that says
-#: nothing about completeness: the probe finished and returned every row, it
-#: merely took over half its budget doing so. A reader that treats it as an
-#: incomplete enumeration throws away a full fleet listing, so the prefix is a
-#: named constant rather than a phrase two modules have to keep spelling alike.
-HEADROOM_WARNING_PREFIX = "roster probe latency: "
+#: Prefix marking a warning that leaves the LISTING USABLE. A reader deciding
+#: whether it may trust a reading blocks on anything WITHOUT this, so a warning
+#: nobody anticipated degrades safely by default - the polarity an allowlist of
+#: known-harmless phrases got wrong twice: first it named only the latency
+#: notice, and the unmapped-state notices still threw away a listing whose rows
+#: were all present.
+#:
+#: Two warnings earn it. The latency notice is about elapsed time on a probe
+#: that returned everything. An unmapped row state is a fidelity note on a row
+#: that IS in the result, and it degrades conservatively downstream: an unknown
+#: state matches no finished state, so a reader sees an engaged worker and a
+#: reaper sees a holder still working.
+ADVISORY_WARNING_PREFIX = "roster advisory: "
+
+#: Prefix of the headroom notice. It carries ADVISORY_WARNING_PREFIX because a
+#: probe that took a while still returned every row.
+HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a
 #: fleet-wide live-status probe, not a status line: measured at 3.4s /
@@ -1032,9 +1043,15 @@ def _row_state(r: dict) -> tuple[str, str]:
             if mapped is None:
                 if raw in _TERMINAL_STATES:
                     return raw, ""
-                return raw, f"unmapped row state {raw!r}, classified by name only"
+                return raw, (
+                    f"{ADVISORY_WARNING_PREFIX}unmapped row state {raw!r}, "
+                    "classified by name only"
+                )
             return _CANONICAL_STATE.get(mapped, mapped.lower()), ""
-    return "", "row carried no state under either alias, unmeasurable"
+    return "", (
+        f"{ADVISORY_WARNING_PREFIX}row carried no state under either alias, "
+        "unmeasurable"
+    )
 
 
 def _is_linked_worktree(cwd: str) -> bool:

@@ -802,18 +802,20 @@ def read_roster(timeout: float = 10.0) -> RosterReading:
         rows, warnings = fleet_rows(timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - any failure must degrade loudly
         return RosterReading(False, 0, {}, f"{type(exc).__name__}: {exc}")
-    # A warning about COMPLETENESS degrades; a warning about LATENCY does not.
-    # fleet_rows warns on dropped session-id-less rows, which really is a
-    # partial list, and separately on a probe that used over half its budget -
-    # which is a full list that took a while. Treating the second as a failed
-    # instrument threw away a complete fleet listing, and `read_roster` asks for
-    # a 10s budget, so the notice fires at 5.0s. On any fleet slower than that
-    # every reader degraded permanently: `claim status` printed "roster not
-    # consulted" forever and the abandonment probe answered None for every
-    # SUSPECT claim, so nothing was ever reaped again.
-    from fno.agents.watchdog import HEADROOM_WARNING_PREFIX
+    # A warning degrades this reading UNLESS it marks itself advisory. The
+    # default has to be "do not trust", because a warning nobody anticipated is
+    # exactly the one that must not be waved through - and an instrument failure
+    # ("claude not on PATH") arrives as a plain warning with zero rows.
+    #
+    # Naming the harmless ones instead got this wrong twice. First only the
+    # latency notice was excused, so the two `unmapped row state` notices still
+    # threw away a listing whose rows were all present: one status spelling
+    # claude had not shipped before printed "roster not consulted" forever and
+    # answered None for every SUSPECT claim, and nothing was ever reaped again.
+    # Then the inverse blanket excused the instrument failure too.
+    from fno.agents.watchdog import ADVISORY_WARNING_PREFIX
 
-    blocking = [w for w in warnings if not w.startswith(HEADROOM_WARNING_PREFIX)]
+    blocking = [w for w in warnings if not w.startswith(ADVISORY_WARNING_PREFIX)]
     if blocking:
         # Still the absence-as-evidence rule: a truncated scan is never
         # authoritative, and reporting it as one is the move this cross-check

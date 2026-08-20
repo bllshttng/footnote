@@ -1217,7 +1217,19 @@ PYEOF
       # Still "ambiguous", and the word is load-bearing: the manifest's single
       # graph_node_id and the in_review guard genuinely cannot pick one. Only
       # the CLAIM stops treating ambiguity as a reason to record nothing.
-      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous for the manifest, claiming each" >&2
+      #
+      # The tail states what will ACTUALLY happen, checking the same two gates
+      # the claim block below is guarded by. It promised "claiming each"
+      # unconditionally, so with no owner id or no `fno` on PATH the operator
+      # was told about claims that were never attempted.
+      if [[ -n "$claim_owner_id" ]] && command -v fno >/dev/null 2>&1; then
+        _AMBIG_TAIL="claiming each"
+      elif [[ -z "$claim_owner_id" ]]; then
+        _AMBIG_TAIL="no owner id resolved, so claiming none"
+      else
+        _AMBIG_TAIL="fno not on PATH, so claiming none"
+      fi
+      echo "target: input names multiple node ids ($_GUARD_MATCHES); ambiguous for the manifest, $_AMBIG_TAIL" >&2
     else
       echo "target: no backlog node resolved from input '$INITIAL_INPUT'; running unclaimed" >&2
     fi
@@ -1236,7 +1248,18 @@ PYEOF
   if [[ "$_GUARD_AMBIGUOUS" -eq 1 && -z "$_NODE_ID" && -n "$claim_owner_id" ]] \
      && command -v fno >/dev/null 2>&1; then
     _MULTI_HOLDER="target-session:${claim_owner_id}"
-    _MULTI_TTL="${TARGET_CLAIM_TTL:-2h}"
+    # SHORTER than the single-node 2h, because nothing renews these and nothing
+    # releases them. `loop-check` renews `target_claim_key`, which this branch
+    # never sets, and every release site keys on that same field - so the TTL is
+    # not a lease here, it is the entire lifetime of the claim.
+    #
+    # At 2h a session that FINISHED left both nodes reading SUSPECT (unexpired
+    # TTL, dead pid) for the rest of the window, and SUSPECT blocks dispatch, so
+    # the work being done wedged its own nodes for up to two hours. Thirty
+    # minutes covers the launch and the early work; past it the claim lapses to
+    # STALE, which reads free and is the honest answer for a claim nobody is
+    # renewing.
+    _MULTI_TTL="${TARGET_CLAIM_MULTI_TTL:-30m}"
     _MULTI_PID="$(fno claim session-pid --from-pid "$$" 2>/dev/null || true)"
     _MULTI_PID_FLAGS=""
     [[ "$_MULTI_PID" =~ ^[0-9]+$ ]] && _MULTI_PID_FLAGS="--pid $_MULTI_PID"
@@ -1300,12 +1323,17 @@ PYEOF
     fi
     if [[ -n "$_EXTRA_CLAIMED" ]]; then
       echo "target: claimed $_EXTRA_CLAIMED for this session" >&2
-      # Recorded so the set is discoverable from the manifest alone. Say the
-      # limit out loud rather than let it be found: `fno-agents loop-check`
-      # renews the single `target_claim_key`, which this path never sets, so
-      # these expire at their TTL instead of being renewed on every stop. An
-      # expiring claim still beats no claim - it is true while the work is young
-      # and then reads STALE, which is reapable and honest, rather than free.
+      # Recorded so the set is discoverable from the manifest alone, and the
+      # limit is said out loud rather than left to be found. NOTHING renews
+      # these and NOTHING releases them: `fno-agents loop-check` renews the
+      # single `target_claim_key`, and so does every release site, and this path
+      # never sets that field. The TTL above is therefore the whole lifetime,
+      # which is why it is shorter than the single-node one.
+      #
+      # An expiring claim still beats no claim: it is true while the work is
+      # young and then reads STALE, which is reapable and honest, rather than
+      # free. Wiring a real release means teaching every release site to read a
+      # SET rather than one key, which is its own change.
       echo "target_claim_multi_keys: \"$_EXTRA_CLAIMED\"" >> "$STATE_FILE"
       echo "target_claim_multi_holder: \"$_MULTI_HOLDER\"" >> "$STATE_FILE"
     fi
