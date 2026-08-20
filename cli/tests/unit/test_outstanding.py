@@ -787,6 +787,69 @@ def _capture_event(fu_id: str, ts: str) -> str:
     )
 
 
+def test_capture_project_roots_reads_graph_without_importing_tracker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-VERIFY: the default fold stays off the heavy tracker import path."""
+    import builtins
+
+    from fno.outstanding.core import _capture_project_roots
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "x-this", "cwd": str(this)},
+                    {"id": "x-sibling", "source_cwd": str(sibling)},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    real_import = builtins.__import__
+
+    def refuse_tracker_import(name, *args, **kwargs):
+        if name == "fno.tracker" or name.startswith("fno.tracker."):
+            raise AssertionError("default graph fold imported fno.tracker")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_tracker_import)
+
+    assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
+
+
+def test_capture_project_roots_preserves_external_backend_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC-EDGE: non-graph trackers still discover roots through sidecars."""
+    from types import SimpleNamespace
+
+    from fno.outstanding.core import _capture_project_roots
+    from fno.tracker import sidecar as sidecar_store
+
+    this = tmp_path / "this"
+    sibling = tmp_path / "sibling"
+    this.mkdir()
+    sibling.mkdir()
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    monkeypatch.setattr(
+        sidecar_store,
+        "load_all",
+        lambda: {
+            "external-1": SimpleNamespace(cwd=None, source_cwd=str(sibling)),
+        },
+    )
+
+    assert _capture_project_roots(this) == [sibling.resolve(), this.resolve()]
+
+
 @pytest.fixture()
 def capture_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

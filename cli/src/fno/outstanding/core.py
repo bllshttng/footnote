@@ -14,6 +14,7 @@ The report path is read-only; explicit ask, clear, and reindex helpers own write
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -311,13 +312,25 @@ def _capture_project_roots(root: Path) -> "list[Path]":
     """
     roots = {Path(root).resolve()}
     try:
-        # cwd and source_cwd are footnote-owned sidecar fields; the scan runs
-        # over the sidecar projection so capture collection works on any
-        # tracker backend.
-        from fno.tracker import sidecar as sidecar_store
+        backend = os.environ.get("FNO_TRACKER_BACKEND") or "graph"
+        if backend == "graph":
+            from fno import paths
 
-        for sc in sidecar_store.load_all().values():
-            for raw in (sc.cwd, sc.source_cwd):
+            payload = json.loads(paths.graph_json().read_text(encoding="utf-8"))
+            entries = payload.get("entries", []) if isinstance(payload, dict) else payload
+            locations = (
+                (entry.get("cwd"), entry.get("source_cwd"))
+                for entry in entries
+                if isinstance(entry, dict)
+            )
+        else:
+            # External trackers keep footnote-owned checkout fields in their
+            # sidecars; graph mode reads those same fields from their owner.
+            from fno.tracker import sidecar as sidecar_store
+
+            locations = ((sc.cwd, sc.source_cwd) for sc in sidecar_store.load_all().values())
+        for pair in locations:
+            for raw in pair:
                 if isinstance(raw, str) and raw:
                     p = Path(raw)
                     if p.is_dir():
