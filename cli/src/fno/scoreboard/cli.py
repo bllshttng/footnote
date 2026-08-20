@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json as _json
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from fno.scoreboard.fold import (
     CONTEXT_TRACE_EVENT_KINDS,
     build_calibration,
     build_efficiency,
+    build_lanes,
     build_plan_fidelity,
     build_provider_scoreboard,
     build_scoreboard,
@@ -26,6 +28,7 @@ from fno.scoreboard.fold import (
     read_jsonl_events,
     read_jsonl_events_with_coverage,
 )
+from fno import paths as _paths
 
 
 def _delivery_event_paths(rows: list[dict], canonical_root: Path) -> list[Path]:
@@ -96,6 +99,11 @@ def scoreboard_command(
             "bucket and a coverage line. Feeds quota-aware dispatch."
         ),
     ),
+    lanes: bool = typer.Option(
+        False,
+        "--lanes",
+        help="Lane truth: retrospective provider/model/effort cells plus live occupancy and headroom.",
+    ),
 ) -> None:
     """Fold ledger + events + graph into a stop-cause / spend / autonomy /
     survival scoreboard, with a mandatory coverage line."""
@@ -110,13 +118,12 @@ def scoreboard_command(
             ("--efficiency", efficiency),
             ("--plan-fidelity", plan_fidelity),
             ("--by-provider", by_provider),
+            ("--lanes", lanes),
         )
         if on
     ]
     if len(_views) > 1:
         raise typer.BadParameter(f"{' and '.join(_views)} are mutually exclusive views; pick one.")
-    from fno import paths as _paths
-
     ledger_path = _paths.ledger_json()
     events_paths = [ledger_path.parent / "events.jsonl"]
     graph_path = _paths.graph_json()
@@ -179,6 +186,26 @@ def scoreboard_command(
             typer.echo(_json.dumps(pb, indent=2))
             return
         _render_by_provider(pb)
+        return
+
+    if lanes:
+        from fno.agents.registry import load_registry
+        from fno.config import load_settings
+
+        settings = load_settings()
+        lane_view = build_lanes(
+            rows,
+            read_graph_nodes(graph_path),
+            [asdict(row) for row in load_registry(path=_paths.agents_registry_path())],
+            read_jsonl_events(events_paths, {"provider_rate_limited"}),
+            dict(getattr(settings.agents, "max_lanes", {})),
+            since_days=since,
+            now=datetime.now(),
+        )
+        if json_out:
+            typer.echo(_json.dumps(lane_view, indent=2))
+            return
+        _render_lanes(lane_view)
         return
 
     if plan_fidelity:
@@ -412,6 +439,46 @@ def _render_by_provider(pb: dict) -> None:
             f"  {provider:<16}{row['model']:<22}{row['runs']:>6}{row['shipped']:>9}"
             f"{row['spend_usd']:>10.2f}{cps:>11}{bounce:>13}{_fmt(row['median_iterations']):>10}{row['retry_rows']:>9}\n"
         )
+
+
+def _render_lanes(view: dict) -> None:
+    out = sys.stdout.write
+    win = view["since_days"]
+    out(f"fno scoreboard --lanes (last {win}d)\n\n")
+    cov = view["coverage"]
+    out("Coverage\n")
+    out(f"  rows in window:  {cov['rows']}\n")
+    out(f"  provider:        {cov['provider']}/{cov['rows']}\n")
+    out(f"  model:           {cov['model']}/{cov['rows']}\n")
+    out(f"  effort:          {cov['effort']}/{cov['rows']}\n")
+    if any(cov[axis] < cov["rows"] for axis in ("provider", "model", "effort")):
+        out("  ! axis coverage is partial; missing values are not a model verdict.\n")
+
+    out("\nRetrospective\n")
+    if not view["retrospective"]:
+        out("  no execution rows in window.\n")
+    else:
+        out("  provider          model                    effort size runs ok% wall-min carveouts sample\n")
+        for row in view["retrospective"]:
+            out(
+                f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
+                f"{row['size']:<4} {row['runs']:>4} {row['ok_pct']:>3}% "
+                f"{row['wall_minutes']:>8.1f} {row['carveouts_filed']:>9} {row['sample_state']}\n"
+            )
+
+    out("\nLive\n")
+    if not view["live"]:
+        out("  no active lanes.\n")
+    else:
+        out("  provider          model                    effort occupancy cap headroom\n")
+        for row in view["live"]:
+            cap = row["cap"] if row["cap"] is not None else "n/a"
+            headroom = row["headroom"] if row["headroom"] is not None else "n/a"
+            out(
+                f"  {row['provider']:<16} {row['model']:<24} {row['effort']:<6} "
+                f"{row['occupancy']:>9} {cap:>3} {headroom:>8}\n"
+            )
+    out(f"\n  provider_rate_limited events: {view['rate_limited']}\n")
 
 
 def _render(sb: dict) -> None:

@@ -791,6 +791,125 @@ def build_skill_scoreboard(
     }
 
 
+# ── lane truth (x-a4a1) ─────────────────────────────────────────────────────
+
+_LANE_COVERAGE_FLOOR = 5
+
+
+def _lane_axis(value, fallback: str) -> str:
+    return value if isinstance(value, str) and value else fallback
+
+
+def _lane_key(row: dict) -> tuple[str, str, str]:
+    return (
+        _lane_axis(row.get("provider"), "unattributed"),
+        _lane_axis(row.get("model"), "unknown"),
+        _lane_axis(row.get("effort"), "unknown"),
+    )
+
+
+def build_lanes(
+    rows: list[dict],
+    graph_nodes: list[dict],
+    registry_rows: list[dict],
+    rate_limit_events: list[dict],
+    max_lanes: dict[str, int],
+    *,
+    since_days: int,
+    now: datetime,
+) -> dict:
+    """Fold retrospective ledger axes and live registry occupancy together."""
+    cutoff = now - timedelta(days=since_days)
+    in_window = [
+        row
+        for row in rows
+        if row.get("type") == "execution"
+        and (completed := _parse_ts(row.get("completed"))) is not None
+        and cutoff <= completed <= now
+    ]
+    sizes = {
+        node.get("id"): _lane_axis(node.get("size"), "unknown")
+        for node in graph_nodes
+        if node.get("id")
+    }
+    buckets: dict[tuple[str, str, str, str], dict] = {}
+    coverage = {
+        "provider": sum(bool(row.get("provider")) for row in in_window),
+        "model": sum(bool(row.get("model")) for row in in_window),
+        "effort": sum(bool(row.get("effort")) for row in in_window),
+        "rows": len(in_window),
+    }
+    for row in in_window:
+        provider, model, effort = _lane_key(row)
+        size = sizes.get(row.get("graph_node_id"), "unknown")
+        bucket = buckets.setdefault(
+            (provider, model, effort, size),
+            {"runs": 0, "ok": 0, "wall_minutes": 0.0, "carveouts_filed": 0},
+        )
+        bucket["runs"] += 1
+        bucket["ok"] += int(_is_shipped_reason(row.get("termination_reason")))
+        bucket["wall_minutes"] += _num(row.get("duration_minutes"))
+        bucket["carveouts_filed"] += int(
+            _num(row.get("carveouts_filed", row.get("carveouts", 0)))
+        )
+
+    retrospective = []
+    for (provider, model, effort, size), bucket in sorted(buckets.items()):
+        runs = bucket["runs"]
+        retrospective.append(
+            {
+                "provider": provider,
+                "model": model,
+                "effort": effort,
+                "size": size,
+                "runs": runs,
+                "ok_pct": _pct(bucket["ok"], runs),
+                "wall_minutes": round(bucket["wall_minutes"], 1),
+                "carveouts_filed": bucket["carveouts_filed"],
+                "sample_state": (
+                    "ok" if runs >= _LANE_COVERAGE_FLOOR else "insufficient_sample"
+                ),
+            }
+        )
+
+    active_statuses = {"live", "busy", "ready", "idle", "spawning"}
+    occupancy: Counter[tuple[str, str, str]] = Counter()
+    for row in registry_rows:
+        if row.get("status") in active_statuses:
+            occupancy[_lane_key(row)] += 1
+    live = []
+    for key, count in sorted(occupancy.items()):
+        provider, model, effort = key
+        live.append(
+            {
+                "provider": provider,
+                "model": model,
+                "effort": effort,
+                "occupancy": count,
+                "cap": max_lanes.get(provider),
+                "headroom": (
+                    max_lanes[provider] - count if provider in max_lanes else None
+                ),
+            }
+        )
+
+    rate_limited = 0
+    for event in rate_limit_events:
+        raw = event.get("ts") or (event.get("data") or {}).get("ts")
+        event_time = _parse_ts(raw)
+        if event_time is None or cutoff <= event_time <= now:
+            rate_limited += 1
+    return {
+        "state": "ok" if in_window or live else "no_data",
+        "since_days": since_days,
+        "coverage": coverage,
+        "retrospective": retrospective,
+        "live": live,
+        "rate_limited": rate_limited,
+        "coverage_floor": _LANE_COVERAGE_FLOOR,
+    }
+
+
 # ── provider-outcome attribution (x-140c) ───────────────────────────────────
 #
 # What does a shipped PR cost on each provider/model, and whose work bounces
