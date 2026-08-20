@@ -509,6 +509,27 @@ def ledger_json() -> Path:
     return _resolve("~/.fno/") / "ledger.json"
 
 
+def operator_lane() -> Path:
+    """Return the path to the operator's own ranked lane (my-priorities.md).
+
+    Pinned global for the same reason as the ledger: the lane is one file per
+    person, not per repo, so a relative ``state_dir`` must not fork it into a
+    checkout. An absolute ``config.paths.operator_lane`` override wins, while
+    a relative one is anchored under ``~/.fno``.
+    """
+    settings = _settings()
+    override = settings.paths.operator_lane
+    if override is not None:
+        expanded = os.path.expanduser(os.path.expandvars(override))
+        if os.path.isabs(expanded):
+            return _resolve(override)
+        return _resolve(override, project_root=_resolve("~/.fno/"), settings=settings)
+    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "my-priorities.md"
+    return _resolve("~/.fno/") / "my-priorities.md"
+
+
 def global_events_json() -> Path:
     """Return the cross-checkout event journal beside the global ledger."""
     return ledger_json().parent / "events.jsonl"

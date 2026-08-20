@@ -192,10 +192,11 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno king board --json` reads six queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
+`fno king board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
+| `operator_lane` | `cat ~/.fno/my-priorities.md` | yes, by filing a node or parking with a reason |
 | `undispatched` | `fno backlog ready --json` + `fno claim list -J` | yes, by spawning a worker |
 | `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |

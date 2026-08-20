@@ -69,6 +69,7 @@ def test_undispatched_queue_carries_a_nonempty_note():
         prs=_ok([]),
         questions=_ok([]),
         needs=_ok([]),
+        lane=_ok([]),
     )
     board = build_board(inputs)
     queue = next(q for q in board["queues"] if q["name"] == "undispatched")

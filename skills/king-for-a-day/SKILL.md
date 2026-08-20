@@ -213,6 +213,16 @@ Wiring `blocked_by` *after* linking loses that race and stampedes a wave that wa
 
 ### 1. Read the track
 
+Read your operator's lane before the graph.
+
+`fno outstanding` prints its count and top item at session start, in every session, and `fno king board` lists it as the first queue, above `undispatched`.
+
+Nothing on the lane is claimable until you file it: run `fno backlog idea "<text>"` and stamp the returned id onto that line as `-> <id>`.
+
+An item that is not node-shaped gets `-> parked: <reason>` instead.
+
+Either stamp shrinks the queue. A bare `-> parked:` with no reason does not.
+
 ```bash
 fno backlog epic status <epic>          # children: status, worker, PR
 fno backlog get <id>                    # one node in full

@@ -67,6 +67,8 @@ prefix = "fno"
 # loops_paused_json = <unset>   # optional; no default
 # Override path to the observer harness digest dir.
 # observer_reports_dir = <unset>   # optional; no default
+# Override path to the operator's priorities lane.
+# operator_lane = <unset>   # optional; no default
 
 [obsidian]
 # Whether this project uses an Obsidian vault for plans/docs.

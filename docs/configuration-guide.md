@@ -27,6 +27,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.bus_dir` | str (optional) | _(none)_ | never | Override path to the cross-project mail bus dir. |
 | `paths.loops_paused_json` | str (optional) | _(none)_ | never | Override path to the loops pause-all sentinel. |
 | `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
+| `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
