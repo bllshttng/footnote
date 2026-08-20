@@ -272,7 +272,7 @@ def _resolve_question_liveness(
         resolver = resolve_reachable
     context = multiprocessing.get_context("fork")
     receive, send = context.Pipe(duplex=False)
-    deadline = clock() + budget_seconds
+    _ = clock
 
     def resolve_all() -> None:
         answers: "dict[str, bool]" = {}
@@ -333,6 +333,8 @@ def read_open_questions(
     closed: "set[str]" = set()
     for rec in _read_question_events(questions_path(), missing_hint=True):
         data = rec.get("data")
+        if not isinstance(data, dict):
+            continue
         if rec.get("type") == QUESTION_EVENT:
             qid = data.get("question_id")
             if not qid:
