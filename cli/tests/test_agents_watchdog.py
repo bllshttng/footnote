@@ -852,6 +852,33 @@ def test_a_question_asked_before_the_promise_never_retires():
     assert "question the operator owes" in v.basis
 
 
+def test_tag_stripping_never_hides_a_pending_question():
+    """The over-strip risk the tag regex introduces, pinned in both directions.
+
+    Stripping terminal tags to find the real end of a turn can eat the question
+    it was meant to expose. An UNCLOSED `<promise>` was the live case: stripping
+    only the tag left its body behind as the apparent end of the turn, so a turn
+    that genuinely ended on a question answered "nothing pending" and the worker
+    retired with the operator still owing an answer.
+
+    The false direction matters as much: over-stripping into a permanent "a
+    question is pending" would stop the lane firing at all.
+    """
+    ask = "Should I open the PR?"
+    for tail, pending in (
+        (f"{ask}\n<promise>DONE</promise>", True),
+        (f"{ask}\n<promise>DONE", True),               # unclosed: body is promise content
+        (f"{ask}\n<promise/>", True),
+        (f'{ask}\n<watching reason="ci" pr="1">', True),
+        ("<promise>DONE</promise>\nOne more thing?", True),
+        ("All green.\n<promise>DONE</promise>", False),
+        ("All done, nothing pending.", False),
+        ("<watching>x</watching>\nStill ok?\n<promise>D</promise>", True),
+    ):
+        facts = _facts(tail, age_min=20)
+        assert watchdog._question_pending(facts) is pending, tail
+
+
 def test_a_clean_promise_with_no_question_still_retires():
     """The counterweight: stripping the terminal tags must not invent a question
     where there is none, or the lane never fires at all."""

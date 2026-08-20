@@ -103,11 +103,26 @@ VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
 RETIRE_GRACE_S = 900
 
 #: The terminal markers a worker emits at the END of its last turn, stripped
-#: before asking whether that turn ends on a question. Matching the tag pair
-#: rather than a bare `<promise` so a mention inside prose cannot swallow the
-#: rest of the text.
+#: before asking whether that turn ends on a question.
+#:
+#: Three alternatives, and the ORDER is load-bearing. A matched pair goes first
+#: and non-greedily, so it takes one block rather than everything up to the last
+#: closing tag. An UNCLOSED opening tag then consumes to end of text, because
+#: that is what an unclosed tag means: a turn cut off mid-promise, where
+#: everything after the tag is promise content. Stripping only the tag there
+#: left its body behind as the apparent end of the turn, which answered "no
+#: question pending" for a turn that ended on one - the exact stranding this
+#: whole check exists to prevent. A self-closing tag is last and takes itself.
+#:
+#: KNOWN GAP, accepted: prose that writes a bare `<promise>` and then really
+#: promises loses the text between the two. Every other reader of that text has
+#: the same ambiguity - the loop's own `_PROMISE_RE` already reads the prose
+#: mention as a promise - so resolving it here alone would not make the fleet
+#: agree, and the shape is not one a worker produces in practice.
 _TERMINAL_TAG_RE = re.compile(
-    r"<(promise|watching)\b[^>]*>.*?</\1>|<(promise|watching)\b[^>]*/?>",
+    r"<(promise|watching)\b[^>]*>.*?</\1>"
+    r"|<(?:promise|watching)\b[^>]*(?<!/)>.*"
+    r"|<(?:promise|watching)\b[^>]*/>",
     re.DOTALL | re.IGNORECASE,
 )
 
