@@ -143,6 +143,20 @@ _CLOSED_PROMISE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+#: Code the worker QUOTED rather than emitted. Fenced blocks first, then inline
+#: spans, because a fence can contain backticks.
+#:
+#: 34 files in this repo contain a literal closing promise tag, this module
+#: among them. A worker whose last turn summarises a diff to one of them quotes
+#: the closed block, and every read below it - `classify_tail`, then
+#: `_CLOSED_PROMISE_RE` - answers exactly as if the worker had declared itself
+#: done. The lane ships armed, so that stops a session mid-task by default.
+#:
+#: Stripped for the DONE read only. The question read keeps the raw text,
+#: because losing a question there stops a session and gaining one only holds a
+#: slot.
+_QUOTED_CODE_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
 #: transcript is not a ghost - stopped is already the operator's answer.
@@ -569,8 +583,9 @@ def retire_decision(
     # `classify_tail` reaches `done` on any `<promise` in the turn, so the
     # classifier alone cannot tell a declaration from a prose mention. This lane
     # stops sessions, so it asks for the closed block rather than the loose read
-    # its siblings share.
-    if _CLOSED_PROMISE_RE.search(facts.last_text or "") is None:
+    # its siblings share - and asks it of the text the worker EMITTED, with
+    # anything it merely quoted removed first.
+    if _CLOSED_PROMISE_RE.search(_QUOTED_CODE_RE.sub("", facts.last_text or "")) is None:
         return False, ""
     if _question_pending(facts):
         return (
@@ -2143,6 +2158,17 @@ def apply_verdict(
     not in whatever project launched the sweep."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
+    if v.verdict == RETIRE and retire_grace_s() <= 0:
+        # `retire_grace_s = 0` is documented as the lane's off switch, and until
+        # now it was read only at CLASSIFICATION time. A caller handing a
+        # pre-built RETIRE verdict to this funnel stopped the session with the
+        # lane switched off. That is the same defect the reap comment below
+        # names, so the switch sits at the same funnel.
+        return (
+            "frozen",
+            "retire classified but not executed: config.recovery."
+            "retire_grace_s is 0, which turns the lane off",
+        )
     if v.verdict == REAP:
         # The freeze sits HERE, at the one funnel every lane and every
         # caller passes through, rather than in the CLI that happens to

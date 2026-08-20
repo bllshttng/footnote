@@ -2586,6 +2586,18 @@ def _send_permission_response(
 _SEED_RETRY_DELAY_S = 1.0
 
 
+def _send_source(payload: str) -> str:
+    """What the send actually put in the pane.
+
+    `delivered` is the word this module reserves for text that WAS typed. When
+    the seed rode in on argv the payload is empty and the send carries only a
+    submit keystroke, so calling that `delivered` names a pane nothing was typed
+    into. Both failure arms used the literal and contradicted the success arm
+    two lines below them, which had the rule right all along.
+    """
+    return "preloaded" if payload == "" else "delivered"
+
+
 def _submit_spawn_seed(
     provider: str,
     session: str,
@@ -2688,10 +2700,14 @@ def _submit_spawn_seed(
         # (`unattempted`, which retries and would double-type here) nor a
         # refusal (`unconfirmed`, which reaps). A non-zero return code below IS
         # a refusal, and that is the one that fails the spawn.
-        return "unknown", "mux did not answer the submit; the keystroke may have landed", trust_source or "delivered"
+        return (
+            "unknown",
+            "mux did not answer the submit; the keystroke may have landed",
+            trust_source or _send_source(payload),
+        )
     if submitted.returncode != 0:
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
-    return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
+        return "unconfirmed", "submission refused", trust_source or _send_source(payload)
+    return "submitted", "", trust_source or _send_source(payload)
 
 
 def dispatch_spawn_pane(

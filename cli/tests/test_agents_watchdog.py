@@ -1087,32 +1087,84 @@ def test_an_unmarked_row_never_retires():
 
 
 def test_every_registry_row_is_born_with_an_origin():
-    """The producer half, and it has to cover EVERY birth site.
+    """The producer half, and it has to cover EVERY birth site in BOTH languages.
 
-    The consumer above only acts on a positive marker, so a spawn path that
-    forgets one does not open a hole - it makes the lane silently unsatisfiable
-    for the workers that path creates, which is the same defect pointing the
-    other way. A row can only be born through an `AgentEntry(...)` literal, so
-    the check is over all of them rather than over the three that exist today."""
+    The consumer only acts on a positive marker, so a birth path that forgets
+    one does not open a hole - it makes the lane silently unsatisfiable for the
+    workers that path creates, which is the same defect pointing the other way.
+
+    Scanning only Python was that defect in the test itself. Rust mints rows
+    too, through `RegistryEntry { .. }` literals in the daemon, the three
+    `*_ask` create paths and both adopt paths, and a seventh added later would
+    have shipped unmarked with nothing failing. So this walks the Rust struct
+    literals as well, and accepts the attribute call form (`registry.AgentEntry`)
+    that a plain `func.id` check lets through.
+    """
     import ast
     import pathlib
+    import re
+
+    missing = []
 
     pkg = pathlib.Path(watchdog.__file__).parent
-    missing = []
     for path in sorted(pkg.glob("*.py")):
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
+        for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, ast.Call):
                 continue
-            if getattr(node.func, "id", None) != "AgentEntry":
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name != "AgentEntry":
                 continue
             # `AgentEntry(**row)` rehydrates a row that was already born.
             if any(kw.arg is None for kw in node.keywords):
                 continue
             if not any(kw.arg == "origin" for kw in node.keywords):
                 missing.append(f"{path.name}:{node.lineno}")
+
+    # Rust has no AST here, so read the literal's field list: from the opening
+    # brace to the matching close at the same indent. Struct-update syntax
+    # (`..other`) inherits the field and is not a birth statement.
+    rust = next(
+        (d / "crates" / "fno-agents" / "src")
+        for d in pkg.parents
+        if (d / "crates" / "fno-agents" / "src").is_dir()
+    )
+    # Match the literal ANYWHERE on the line. Anchoring it to the start of the
+    # line after indent was the same mistake this test exists to catch: it saw 8
+    # of the 20 literals, because most are written `let e = RegistryEntry {` or
+    # `entries.push(state::RegistryEntry {`, and it passed by not looking.
+    opener = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*::)*RegistryEntry\s*\{\s*$")
+    seen = 0
+    for path in sorted(rust.rglob("*.rs")):
+        lines = path.read_text().split("\n")
+        for i, line in enumerate(lines):
+            # Type positions, not literals: `struct X {`, `impl X {`, and any
+            # signature whose return type is X. Widening the match to find the
+            # literals swept these in, and a type position has no fields to
+            # carry a marker.
+            if re.search(r"\b(struct|impl|trait|enum)\b", line) or "->" in line:
+                continue
+            if opener.search(line) is None:
+                continue
+            seen += 1
+            body = []
+            for later in lines[i + 1:]:
+                if later.strip() in ("}", "};", "})", "}),"):
+                    break
+                body.append(later)
+            joined = "\n".join(body)
+            if ".." in joined and "origin" not in joined:
+                continue  # struct-update inherits it
+            if not re.search(r"^\s*origin:", joined, re.MULTILINE):
+                missing.append(f"{path.name}:{i + 1}")
+
+    # A scan that matches nothing passes for the same reason a correct one does,
+    # so state the floor. This is a positive control on the instrument, and it
+    # caught the anchored regex above reading 8 sites instead of 20.
+    assert seen >= 15, f"the Rust scan reached only {seen} literals; it is not looking"
     assert not missing, (
-        "every registry row must state what created it; unmarked at " + ", ".join(missing)
+        "every registry row must state what created it; unmarked at "
+        + ", ".join(missing)
     )
 
 

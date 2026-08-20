@@ -704,10 +704,18 @@ def _dispatch_one(
     # provider was indistinguishable from a healthy one. A confirmed-dead pane
     # now raises out of the spawn above (exit 13) into the `failed` return, and
     # `bound` separates a live-but-unbound worker from a bound one.
+    # The seed doubt has to reach THIS caller too. `cmd_spawn` surfaces
+    # `unattempted` and `unknown` as exit 22, and both mean the target command
+    # may never have been submitted. Reporting a bare `launched` here left the
+    # lane slot held for a pane sitting at an empty prompt, which is the same
+    # signal reaching one of two callers.
+    seed = getattr(result, "seed", None)
     return {
         "outcome": "launched",
         "node": node_id,
         "slug": slug or "",
         "pane_id": result.pane_id,
         "bound": result.bound,
+        "seed": seed,
+        "seed_verified": seed == "submitted",
     }
