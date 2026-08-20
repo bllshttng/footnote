@@ -2598,10 +2598,12 @@ def _submit_spawn_seed(
                      Folding it into ``unconfirmed`` would reap a healthy pane
                      for the crime of not having painted yet.
 
-    The agy trust gate splits along the same line. A trust submit that raised
-    or exited non-zero is ``unconfirmed``: it was tried and it failed. A trust
-    dialog still on screen afterwards is ``unattempted``, because that is a
-    reading about paint timing rather than about the send.
+    The agy trust gate is ``unconfirmed`` on every arm, including the dialog
+    still being on screen after the clearing submit. That last one reads like a
+    paint-timing miss and is not: the submit WAS sent, the modal outlived it,
+    and until a human answers the modal the pane runs nothing. Calling it
+    ``unattempted`` would write a live registry row for a wedged pane, which is
+    the slot leak this whole change exists to close.
     """
     try:
         screen = _run_mux(
@@ -2627,10 +2629,10 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unattempted", "agy trust gate did not clear", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unattempted", "agy trust gate did not clear", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
         trust_source = "trust-cleared"
     else:
         trust_source = ""
@@ -3152,9 +3154,11 @@ def dispatch_spawn_pane(
             seed_state, seed_detail, seed_source = _submit_spawn_seed(
                 provider, session, pane_id, message, runner
             )
-            if seed_state == "unconfirmed":
-                # One retry. A send that did not land is transient-shaped, and
-                # a pane that painted late is the common case.
+            if seed_state in ("unconfirmed", "unattempted"):
+                # One retry, on BOTH non-success states. A pane that painted
+                # late is the common case and it lands in `unattempted`, so a
+                # retry keyed on `unconfirmed` alone would never fire for the
+                # population it was written for.
                 seed_state, seed_detail, seed_source = _submit_spawn_seed(
                     provider, session, pane_id, message, runner
                 )

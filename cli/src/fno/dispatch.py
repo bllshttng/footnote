@@ -572,25 +572,21 @@ def _dispatch_one(
         # gets one verdict for both instead of an uncaught traceback.
         return {"outcome": "already-dispatching", "node": node_id, "slug": slug or ""}
 
-    # 3. Atomic lane cap (config.parallel.max_lanes). A full cap -> lanes-full:
-    #    no lane, no spawn (AC-edge). max_lanes 0 would forbid every manual grab,
-    #    so a deliberate keystroke floors it to one slot. Free the reservation on
-    #    a full cap so the node stays re-dispatchable.
-    max_lanes = max(1, load_settings().parallel.max_lanes or 1)
-    slot = acquire_lane_slot(max_lanes, node_id)
-    if slot is None:
-        release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
-        return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}
-
-    # 4. Spawn the pane worker into THIS session. Any exit from here releases
-    #    BOTH the lane slot and the dispatch reservation so the node stays
+    # 3. Atomic lane cap (config.parallel.max_lanes) and then the spawn. Any
+    #    exit from here releases every hold taken so far, so the node stays
     #    re-dispatchable - never a phantom lane holding the cap. On success
     #    dispatch:<id> is left to TTL-expire (bridges the boot window until the
     #    worker owns node:<id>).
     #
-    #    The window starts at the lane-slot acquisition, not at the spawn call.
-    #    Everything below - provenance, the cutover render, the refusal carrier -
-    #    runs with both holds taken, so an exception there leaks them just as a
+    #    The guard opens at the RESERVATION, not at the lane slot and not at the
+    #    spawn call. `dispatch:<id>` is already held here, so a corrupt settings
+    #    file in `load_settings()` or an OSError inside `acquire_lane_slot`
+    #    leaks that reservation for its full TTL and blocks the node's own
+    #    re-dispatch. Releasing the lane slot before one is held is a documented
+    #    no-op, which is what lets one guard cover both.
+    #
+    #    Everything below - the cap, provenance, the cutover render, the refusal
+    #    carrier - runs with a hold taken, so an exception there leaks just as a
     #    failed spawn does. And the guard catches BaseException, not just
     #    Exception: GateRefused subclasses SystemExit, which is a BaseException,
     #    so an `except Exception` lets a gate refusal walk out still holding the
@@ -630,6 +626,14 @@ def _dispatch_one(
                 )
 
     try:
+        # max_lanes 0 would forbid every manual grab, so a deliberate keystroke
+        # floors it to one slot. A full cap frees the reservation and returns
+        # before any lane slot exists, so the node stays re-dispatchable.
+        max_lanes = max(1, load_settings().parallel.max_lanes or 1)
+        if acquire_lane_slot(max_lanes, node_id) is None:
+            release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
+            return {"outcome": "lanes-full", "node": node_id, "slug": slug or ""}
+
         workdir = Path(cwd) if cwd else Path.cwd()
         # (x-c914) Stamp the birth account into the pane provenance (FNO_ACCOUNT)
         # when routed, so the mux server reads it back for the sideline account

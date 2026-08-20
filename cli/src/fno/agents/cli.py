@@ -2057,8 +2057,11 @@ def cmd_spawn(
                 # worker reached its provider; `status` alone could not, so a
                 # pane about to bind and one already dead read identically.
                 "bound": pane_result.bound,
-                # Independent delivery fact. Null means no seed was requested;
-                # unconfirmed is printed before the command exits non-zero.
+                # Independent delivery fact. Null means no seed was requested.
+                # `unattempted` is printed before the command exits non-zero: the
+                # pane is live but its frame could not be read, so the seed is
+                # unverified. A genuine `unconfirmed` submit never reaches this
+                # receipt - it fails the spawn inside dispatch_spawn_pane.
                 "seed": pane_result.seed,
             }
             if pane_result.seed_source is not None:

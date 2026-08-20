@@ -886,15 +886,43 @@ def test_an_unreadable_transcript_never_retires():
     assert v.verdict != watchdog.RETIRE
 
 
-def test_an_already_stopped_row_never_retires():
-    """Retire exists to reclaim a LIVE slot. None of the terminal states appear
-    in `spawn_gate.LIVE_STATUSES`, so stopping one frees nothing, the receipt's
-    promised undo is false, and the same row draws the verdict on every sweep
-    forever. Found by self-review, not by the original acceptance criteria."""
-    for state in sorted(watchdog._TERMINAL_STATES):
+def test_a_row_whose_process_is_gone_never_retires():
+    """Retire exists to reclaim a LIVE slot. A stopped process holds none, so
+    stopping it again frees nothing and the receipt's promised undo is false."""
+    for state in sorted(watchdog._STOPPED_STATES):
         row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", True)
         [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
         assert v.verdict != watchdog.RETIRE, state
+
+
+def test_a_live_pane_painting_done_still_retires():
+    """The counterweight to the test above, and the reason retire keys on
+    `_STOPPED_STATES` rather than `_TERMINAL_STATES`. `Done` is a member of
+    claude's own KNOWN_LIVE_STATUSES, so a pane wearing it is ALIVE - a worker
+    that finished and parked, which is this lane's entire target population.
+    Excluding it reads as caution and silently empties the lane."""
+    for state in ("done", "completed", "idle", "working"):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", True)
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict == watchdog.RETIRE, state
+
+
+def test_arming_the_lane_never_demotes_the_stale_escalation():
+    """A retire near-miss is a LEAVE, and a LEAVE returned above the wake
+    ceiling deleted the escalation for the rows that most need a human. Measured
+    on review: a spawned row owing the operator an answer and quiet 13h read
+    `stale / needs a human` with the lane off, and `leave / none` with it armed.
+    The verdict must not depend on whether the lane is armed."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", True)
+    tail = f"{FINISHED_TAIL}\nShould the grace stay 900?"
+    facts = {row.row_id: _facts(tail, age_min=13 * 60)}
+
+    [off] = _retire_run([row], facts, grace=0)
+    [armed] = _retire_run([row], facts, grace=RETIRE_GRACE)
+
+    assert off.verdict == STALE
+    assert armed.verdict == STALE, "arming the lane must not hide a needs-human row"
+    assert "needs a human" in armed.basis
 
 
 def test_an_open_429_window_never_retires():
@@ -907,6 +935,20 @@ def test_an_open_429_window_never_retires():
     [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
     assert v.verdict != watchdog.RETIRE
     assert v.verdict == REROUTE, "the row belongs to reroute, not retire"
+
+
+def test_the_predicate_is_the_only_route_to_a_retire_verdict():
+    """The sibling of the reap version of this test, and for the same reason: a
+    guard on one of N paths is decorative. Every condition retire refuses on -
+    terminal state, open 429, pending question, grace - lives in
+    `retire_decision`, so a second construction site is a bypass of all four."""
+    import inspect
+
+    source = inspect.getsource(watchdog._verdict_one)
+    assert source.count("RETIRE,") == 1, (
+        "a second RETIRE verdict site bypasses retire_decision"
+    )
+    assert "retire_decision(" in source
 
 
 def test_reap_outranks_retire_on_the_same_row():

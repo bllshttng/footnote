@@ -465,19 +465,28 @@ def retire_decision(
     # already running. Neither is evidence of a worker, so both decline here.
     if row.origin != "spawn":
         return False, ""
-    # A row that already stopped holds no slot, so stopping it again frees
-    # nothing and the receipt would claim an undo for a session that is not
-    # running. None of `_TERMINAL_STATES` appear in `spawn_gate.LIVE_STATUSES`,
-    # which is the whole point of the lane: retire exists to reclaim a LIVE
-    # slot. Without this the same finished-and-stopped row draws a retire
-    # verdict on every sweep, forever.
-    if row.state in _TERMINAL_STATES:
+    # A row whose PROCESS is gone holds no slot, so stopping it again frees
+    # nothing and the receipt would promise an undo for a session that is not
+    # running. Without this the same row draws the verdict on every sweep.
+    #
+    # `_STOPPED_STATES`, never `_TERMINAL_STATES`: the latter carries `done` and
+    # `completed`, which are the roster's opinion about the WORK rather than
+    # about the process, and `Done` is a member of claude's own
+    # KNOWN_LIVE_STATUSES. A live pane painting `Done` is precisely this lane's
+    # target, so keying on that set excludes the population retire exists for.
+    # `_TERMINAL_STATES`' own comment records the 2026-08-15 case where the
+    # roster called a working session done; reusing it here re-adopts that lie.
+    if row.state in _STOPPED_STATES:
         return False, ""
     # A session waiting out a rate limit is silent and is NOT finished. The
     # reap predicate refuses on the same reading, and retire sits ABOVE the
     # reroute lane, so without this it stops exactly the rows reroute exists to
     # move onto a fresh account - and stops them without rotating anything.
-    if window == "live":
+    #
+    # `unknown` too, not just `live`: a 429 whose reset stamp will not parse is
+    # a window that MIGHT be open, and the wake lane already refuses it. The
+    # lane that ships armed must not be the laxer one.
+    if window in ("live", "unknown"):
         return False, ""
     if facts is None or facts.last_event_epoch is None:
         return False, ""
@@ -941,12 +950,6 @@ def _verdict_one(
     if retire_yes:
         return Verdict(row.row_id, row.name, row.state, RETIRE,
                        retire_basis, "stop")
-    if retire_basis:
-        # The predicate declined for a reason worth reading: this row was one
-        # condition away from being stopped. A generic "no lane applies" would
-        # hide the near miss, and the near miss is the interesting row.
-        return Verdict(row.row_id, row.name, row.state, LEAVE,
-                       retire_basis, "none")
 
     if reap_basis:
         return Verdict(row.row_id, row.name, row.state, LEAVE,
@@ -958,6 +961,13 @@ def _verdict_one(
     facts_age_s: Optional[float] = None
     if facts is not None and facts.last_event_epoch is not None:
         facts_age_s = max(0.0, now_s - facts.last_event_epoch)
+    # The retire near-miss basis rides BELOW this ceiling on purpose. It names a
+    # row one condition away from being stopped, which is worth reading, but it
+    # is a LEAVE - and a LEAVE returned above the ceiling silently demoted the
+    # rows that most need a human. Measured on review: a spawned row owing the
+    # operator an answer and quiet 13h read `stale / needs a human` with the
+    # lane off and `leave / none` with it armed, so arming the lane deleted the
+    # escalation. The ceiling answers first; the near miss answers after.
     if row.state in _WAKE_STATES and facts_age_s is not None:
         if facts_age_s > WAKE_MAX_AGE_S:
             return Verdict(
@@ -966,6 +976,13 @@ def _verdict_one(
                 f"{int(WAKE_MAX_AGE_S // 3600)}h wake ceiling, needs a human",
                 "report",
             )
+
+    if retire_basis:
+        # The retire predicate declined for a reason worth reading: this row was
+        # one condition away from being stopped. A generic "no lane applies"
+        # would hide the near miss, and the near miss is the interesting row.
+        return Verdict(row.row_id, row.name, row.state, LEAVE,
+                       retire_basis, "none")
 
     # reroute: blocked on a 429 whose window has NOT opened. Waking bounces
     # (proved twice by hand); the session must be stopped before the window
@@ -1381,6 +1398,14 @@ _ENGAGED_TAILS = frozenset({"watching", "your-move", "working"})
 #: deciding whether an unmapped spelling deserves a drift warning, where a
 #: terminal word is expected and anything else is news.
 _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"})
+
+#: The subset of the above whose word is about the PROCESS rather than about
+#: the WORK. `done` and `completed` are deliberately absent: claude's own
+#: KNOWN_LIVE_STATUSES carries `Done`, so a pane painting it is alive - and a
+#: finished-but-alive pane is exactly what the retire lane exists to stop.
+#: Retire keys on this set for that reason; nothing may widen it back to
+#: `_TERMINAL_STATES` without re-adopting the 2026-08-15 lie named above.
+_STOPPED_STATES = frozenset({"stopped", "exited", "killed"})
 
 
 def _row_state(r: dict) -> tuple[str, str]:

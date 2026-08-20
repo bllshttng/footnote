@@ -624,11 +624,12 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
         raise AssertionError(argv)
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
-    # A dialog still on screen after our submit is a paint-timing read, not a
-    # send that was refused, so it is `unattempted` and the caller's retry gets
-    # another look. Calling it `unconfirmed` would reap an agy pane whose trust
-    # prompt painted a second late.
-    assert state == "unattempted"
+    # `unconfirmed`, not `unattempted`. The clearing submit WAS sent and the
+    # modal outlived it, which is positive evidence the gate did not clear - not
+    # a paint-timing miss. Until a human answers that modal the pane runs
+    # nothing, so calling it `unattempted` would write a live registry row for a
+    # wedged pane and leak the very slot this change exists to reclaim.
+    assert state == "unconfirmed"
     assert "trust gate did not clear" in detail
     assert source == "trust-cleared"
 

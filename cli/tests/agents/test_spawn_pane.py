@@ -4309,12 +4309,17 @@ def test_pane_run_env_does_not_latch_the_writable_dir_grant(
 
 # --- An unconfirmed seed is a failed spawn, not a ready worker --------------
 #
-# `_submit_spawn_seed` returns "unconfirmed" on five paths: an unreadable frame,
-# an agy trust gate that will not clear, an empty frame, a DispatchAskError on
-# the send, and a non-zero send. The call site used to fold all five into a
-# rewritten `readiness_detail` and carry on, so the pane got a `ready` row and
-# `spawn_gate.LIVE_STATUSES` counted it live while it sat at an empty prompt
-# having executed nothing. That is a slot held by a worker that never started.
+# `_submit_spawn_seed` used to return "unconfirmed" on five paths. The call site
+# folded all five into a rewritten `readiness_detail` and carried on, so the pane
+# got a `ready` row and `spawn_gate.LIVE_STATUSES` counted it live while it sat
+# at an empty prompt having executed nothing. That is a slot held by a worker
+# that never started.
+#
+# Those five now split on one question: was a send attempted? An unreadable
+# frame and a blank frame answer no and return `unattempted`, because an alive
+# unpainted child is still a live worker. The two send failures and both agy
+# trust-gate arms answer yes and stay `unconfirmed`. Both states retry once;
+# only `unconfirmed` fails the spawn after that.
 
 
 def _seed_script(monkeypatch, *states: str) -> list[tuple]:
