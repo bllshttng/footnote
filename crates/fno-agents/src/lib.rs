@@ -661,6 +661,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
     // bound 40 seconds after spawn" visible instead of inferred.
     "agent_late_bind",
+    // Late-bind write failure (daemon-emitted, x-9de7 follow-up): the registry
+    // write that would have bound `harness_session_id` failed, most often a
+    // collision with a session id already claimed by another row. Distinct
+    // from a probe miss (no event, just skipped) and from `agent_late_bind`
+    // (the write succeeded).
+    "agent_late_bind_failed",
     // Dead-row GC (daemon/reap-verb-emitted, x-b1aa): a terminal, past-grace,
     // clean agent-view row was removed from the registry by the GC sweep or
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a

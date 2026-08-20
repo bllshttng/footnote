@@ -1752,6 +1752,16 @@ enum AdoptError {
     Io(String),
 }
 
+fn persist_manifest_identity(
+    id: &ManifestIdentity,
+    home: &AgentsHome,
+) -> Result<Value, AdoptError> {
+    let entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
+    upsert_synthesized_row(&home.registry_json(), entry.clone())
+        .map_err(|error| AdoptError::Io(error.to_string()))?;
+    serde_json::to_value(&entry).map_err(|error| AdoptError::Io(error.to_string()))
+}
+
 /// Resolve `session_id` to one registry row, minting one if needed, through the
 /// plan precedence: an existing registry row; a `.fno/target-state.md` whose
 /// session id matches; then the harness session stores (the heal-token shellout,
@@ -1774,11 +1784,8 @@ fn synthesize_and_adopt(
     }
     // 2. Target manifest.
     if let Some(id) = find_manifest_for_session(session_id) {
-        let entry = mint_synthesized_entry(&id, &crate::daemon::now_rfc3339_like());
-        let fno_id = entry.fno_id.clone();
-        upsert_synthesized_row(&registry_path, entry.clone())
-            .map_err(|e| AdoptError::Io(e.to_string()))?;
-        let value = serde_json::to_value(&entry).map_err(|e| AdoptError::Io(e.to_string()))?;
+        let fno_id = (!id.fno_id.is_empty()).then(|| id.fno_id.clone());
+        let value = persist_manifest_identity(&id, home)?;
         return Ok((value, fno_id, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
@@ -1791,12 +1798,13 @@ fn synthesize_and_adopt(
 
 /// Manifest-only adoption used as the `resume` fallback: `resolve_entry_with_heal`
 /// already consulted the registry + harness stores, so this is just the manifest
-/// path. Returns the minted row (already upserted) or `None`.
-fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Option<Value> {
-    let id = find_manifest_for_session(session_id)?;
-    let entry = mint_synthesized_entry(&id, &crate::daemon::now_rfc3339_like());
-    upsert_synthesized_row(&home.registry_json(), entry.clone()).ok()?;
-    serde_json::to_value(&entry).ok()
+/// path. Returns the minted row (already upserted), `None` when no manifest
+/// matches, or the actual registry/serialization failure.
+fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Value>, AdoptError> {
+    let Some(id) = find_manifest_for_session(session_id) else {
+        return Ok(None);
+    };
+    persist_manifest_identity(&id, home).map(Some)
 }
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
@@ -2407,16 +2415,26 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // evidence heal-token does not consult) before refusing, so
             // `fno agents resume <session-id>` revives a /target orphan. A plain
             // name keeps today's refusal (AC7-HP: byte-identical for name args).
-            let adopted = is_session_shaped(&name)
-                .then(|| adopt_from_manifest(&name, home))
-                .flatten();
+            let adopted = if is_session_shaped(&name) {
+                adopt_from_manifest(&name, home)
+            } else {
+                Ok(None)
+            };
             match adopted {
-                Some(e) => e,
-                None => {
+                Ok(Some(e)) => e,
+                // `adopt_from_manifest` only ever returns `Ok(None)` or
+                // `Err(Io)` -- `NoEvidence` is `synthesize_and_adopt`'s
+                // variant, unreachable through this call, kept here only for
+                // exhaustiveness over `AdoptError`.
+                Ok(None) | Err(AdoptError::NoEvidence) => {
                     eprintln!(
                         "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",
                         err.message()
                     );
+                    return 13;
+                }
+                Err(AdoptError::Io(message)) => {
+                    eprintln!("fno agents resume: manifest adoption failed: {message}");
                     return 13;
                 }
             }
@@ -5050,6 +5068,41 @@ mod tests {
         );
         assert_eq!(fno_id, None, "seeded row carried no fno_id");
         std::env::remove_var(crate::paths::HOME_ENV);
+    }
+
+    #[test]
+    fn persist_manifest_identity_surfaces_registry_write_failure() {
+        let dir = cv_tmpdir();
+        let home = AgentsHome::at(dir.path());
+        let mut existing = mint_synthesized_entry(
+            &ManifestIdentity {
+                harness: "codex".into(),
+                harness_session_id: "existing-session".into(),
+                ..Default::default()
+            },
+            "t0",
+        );
+        existing.name = "dffdeeca".into();
+        existing.short_id = "transport".into();
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(existing);
+        })
+        .unwrap();
+
+        let result = persist_manifest_identity(
+            &ManifestIdentity {
+                harness: "codex".into(),
+                harness_session_id: "01a0152f-45fd-78f0-b109-78f8dffdeeca".into(),
+                ..Default::default()
+            },
+            &home,
+        );
+
+        let Err(AdoptError::Io(message)) = result else {
+            panic!("registry collision must remain an adoption I/O error");
+        };
+        assert!(message.contains("collides with row"));
+        assert!(message.contains("dffdeeca"));
     }
 
     #[test]
