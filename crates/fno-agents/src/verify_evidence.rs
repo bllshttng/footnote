@@ -493,14 +493,25 @@ fn valid_receipt(event: &Value) -> bool {
         && (mode != "void" || result != "passed")
 }
 
+// The SAME receipt-scope rule as `_PREFLIGHT_BASE_SCOPE` / `_PREFLIGHT_OPTIONAL_SCOPE`
+// in `cli/src/fno/pr/_preflight.py`. Two implementations of one operation are
+// reachable here - the Python one through `fno pr` and this one through
+// `fno-agents verify-evidence receipt` - so widening only the Python side left
+// this path rejecting a green preflight, which is the silent-discard failure the
+// widening existed to close. Keep the two lists in step; a leg added to
+// preflight.sh must land in BOTH optional sets or receipts go untrusted here.
+const PREFLIGHT_BASE_SCOPE: [&str; 5] = [
+    "smoke",
+    "rustfmt:fno-agents",
+    "rustfmt:fno",
+    "cargo-test:fno-agents",
+    "cargo-test:fno",
+];
+
+// Legs preflight adds when the tree calls for them: allowed, never required.
+const PREFLIGHT_OPTIONAL_SCOPE: [&str; 2] = ["squads-leak-guard:fno", "tracker-gates:fno"];
+
 fn gate_eligible_receipt(event: &Value) -> bool {
-    const BASE_SCOPE: [&str; 5] = [
-        "smoke",
-        "rustfmt:fno-agents",
-        "rustfmt:fno",
-        "cargo-test:fno-agents",
-        "cargo-test:fno",
-    ];
     let Some(data) = event.get("data") else {
         return false;
     };
@@ -524,14 +535,21 @@ fn gate_eligible_receipt(event: &Value) -> bool {
         && (command_path == "scripts/ci/preflight.sh"
             || command_path.ends_with("/scripts/ci/preflight.sh"))
         && scope.is_some_and(|items| {
-            matches!(items.len(), 5 | 6)
-                && BASE_SCOPE
+            // Every required leg present, nothing unknown added, no duplicates -
+            // NOT a length pin. A length pin makes the gate unsatisfiable for any
+            // tree that legitimately runs one more leg.
+            let names: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+            names.len() == items.len()
+                && PREFLIGHT_BASE_SCOPE
                     .iter()
-                    .all(|expected| items.iter().any(|item| item.as_str() == Some(expected)))
-                && (items.len() == 5
-                    || items
-                        .iter()
-                        .any(|item| item.as_str() == Some("squads-leak-guard:fno")))
+                    .all(|expected| names.contains(expected))
+                && names.iter().all(|name| {
+                    PREFLIGHT_BASE_SCOPE.contains(name) || PREFLIGHT_OPTIONAL_SCOPE.contains(name)
+                })
+                && {
+                    let mut seen = std::collections::HashSet::new();
+                    names.iter().all(|name| seen.insert(*name))
+                }
         })
 }
 
@@ -1177,6 +1195,63 @@ mod tests {
                 "steps_executed": 6
             }
         })
+    }
+
+    /// A receipt whose scope carries the legs preflight really emits today.
+    /// `receipt_event` pins the old six, so every existing test passed while the
+    /// gate rejected a green preflight on this path - the scope length was the
+    /// thing under test and nothing exercised a longer one.
+    fn receipt_event_with_scope(scope: Vec<&str>) -> Value {
+        let mut event = receipt_event("2026-07-26T01:00:02Z", "abc", "full", "passed");
+        event["data"]["scope"] = json!(scope);
+        event
+    }
+
+    #[test]
+    fn gate_accepts_every_leg_preflight_emits_and_refuses_an_unknown_one() {
+        // The full set this tree emits: five base legs plus both optional ones.
+        assert!(gate_eligible_receipt(&receipt_event_with_scope(vec![
+            "smoke",
+            "rustfmt:fno-agents",
+            "rustfmt:fno",
+            "cargo-test:fno-agents",
+            "cargo-test:fno",
+            "squads-leak-guard:fno",
+            "tracker-gates:fno",
+        ])));
+        // Base alone stays eligible: the optional legs are allowed, never required.
+        assert!(gate_eligible_receipt(&receipt_event_with_scope(vec![
+            "smoke",
+            "rustfmt:fno-agents",
+            "rustfmt:fno",
+            "cargo-test:fno-agents",
+            "cargo-test:fno",
+        ])));
+        // A missing base leg is not a green preflight.
+        assert!(!gate_eligible_receipt(&receipt_event_with_scope(vec![
+            "smoke",
+            "rustfmt:fno-agents",
+            "rustfmt:fno",
+            "cargo-test:fno-agents",
+        ])));
+        // An unknown leg is refused rather than widening the gate by accident.
+        assert!(!gate_eligible_receipt(&receipt_event_with_scope(vec![
+            "smoke",
+            "rustfmt:fno-agents",
+            "rustfmt:fno",
+            "cargo-test:fno-agents",
+            "cargo-test:fno",
+            "not-a-real-leg:fno",
+        ])));
+        // A duplicate leg is refused: it pads the set without running anything.
+        assert!(!gate_eligible_receipt(&receipt_event_with_scope(vec![
+            "smoke",
+            "smoke",
+            "rustfmt:fno-agents",
+            "rustfmt:fno",
+            "cargo-test:fno-agents",
+            "cargo-test:fno",
+        ])));
     }
 
     #[test]

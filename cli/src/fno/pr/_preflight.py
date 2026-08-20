@@ -41,17 +41,36 @@ OK = 0
 REFUSED_STALE = 3
 UNRELATED = 4
 
-_PREFLIGHT_GATE_SCOPE = frozenset(
+# The legs a full preflight MUST have run. Membership here is the real
+# assertion: a receipt missing one of these is not a full run.
+_PREFLIGHT_BASE_SCOPE = frozenset(
     {
         "smoke",
         "rustfmt:fno-agents",
         "rustfmt:fno",
         "cargo-test:fno-agents",
         "cargo-test:fno",
-        "squads-leak-guard:fno",
     }
 )
-_PREFLIGHT_BASE_SCOPE = _PREFLIGHT_GATE_SCOPE - {"squads-leak-guard:fno"}
+# Legs preflight adds when the tree calls for them. They are ALLOWED, never
+# required, and that distinction is why this is a separate set.
+#
+# It used to be one set compared with `in {BASE, GATE}`, i.e. exact equality
+# against two spellings. Every optional leg added since then silently
+# invalidated the receipt it appeared in: `tracker-gates:fno` broke it the day
+# it landed, and any future optional leg would break it again. The failure is
+# quiet - `_trusted_preflight_producer` returns False, the receipt is discarded
+# rather than rejected loudly, and a green preflight can never clear
+# `check_verification_evidence` on an install with preflight.required = true.
+# Adding a leg to preflight.sh must not be able to do that, so the test below
+# is "every required leg present, nothing unknown added" rather than equality.
+_PREFLIGHT_OPTIONAL_SCOPE = frozenset(
+    {
+        "squads-leak-guard:fno",
+        "tracker-gates:fno",
+    }
+)
+_PREFLIGHT_GATE_SCOPE = _PREFLIGHT_BASE_SCOPE | _PREFLIGHT_OPTIONAL_SCOPE
 def _event_timestamp(value: object) -> Optional[dt.datetime]:
     if not isinstance(value, str) or not value:
         return None
@@ -280,7 +299,8 @@ def _trusted_preflight_producer(event: dict) -> bool:
             command_path == "scripts/ci/preflight.sh"
             or command_path.endswith("/scripts/ci/preflight.sh")
         )
-        and frozenset(data["scope"]) in {_PREFLIGHT_BASE_SCOPE, _PREFLIGHT_GATE_SCOPE}
+        and frozenset(data["scope"]) >= _PREFLIGHT_BASE_SCOPE
+        and frozenset(data["scope"]) <= _PREFLIGHT_GATE_SCOPE
         and len(data["scope"]) == len(frozenset(data["scope"]))
     )
 

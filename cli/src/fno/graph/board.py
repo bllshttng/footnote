@@ -19,7 +19,7 @@ from typing import Optional
 from fno.graph._intake import _project_key
 from fno.graph.render import in_progress_epic_ids, make_kanban_classifiers
 from fno.graph.statuses import live_claimed_node_ids
-from fno.pr._cache import newest_row_offline
+from fno.pr._cache import finite_or_zero, newest_row_offline
 
 MAX_ROWS_PER_SECTION = 5
 MAX_TITLE_WORDS = 12
@@ -57,11 +57,27 @@ def _parse_iso(value: object) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+# A stamp from the future is not an age. The tolerance is not slop: the board
+# samples `now` once and then reads rows, so a row written concurrently is
+# legitimately a second or two ahead of it, and flooring that at "1m ago" is
+# the behaviour worth keeping. A garbage stamp misses by decades, never by
+# seconds, so a minute of headroom separates the two cleanly.
+#
+# This lives HERE, in the shared formatter, rather than in one caller. It was
+# fixed in `_age_from_epoch` alone first, which left `_age_from_iso` - the
+# other reader, three lines away, on the same board render - still printing
+# "merged 1m ago" off a future `completed_at`. One guard on one of two
+# reachable paths is the shape this repo's own pitfalls corpus opens with.
+_FUTURE_STAMP_TOLERANCE_S = -60
+
+
 def _format_age(seconds: float) -> str:
     # Several near-identical seconds/timedelta-to-string age humanizers
     # already exist (fno.mail.cli._humanize_age and others); this is its
     # own copy, not a reuse, because a board line has no use for the
     # sub-minute precision those give - it floors at "1m ago".
+    if seconds < _FUTURE_STAMP_TOLERANCE_S:
+        return "unknown age"
     seconds = max(0, int(seconds))
     if seconds < 3600:
         return f"{max(1, seconds // 60)}m ago"
@@ -84,13 +100,20 @@ def _age_from_epoch(ts: object, now: datetime) -> str:
     # `inf` raised OverflowError and `nan` raised ValueError from the `int()`
     # inside `_format_age`, which sits outside the try that used to be here.
     # One guard, every reader of the row - not one guard and a docstring.
-    from fno.pr._cache import finite_or_zero
-
+    #
+    # finite_or_zero closes non-finite, NOT out-of-range, and the difference
+    # showed here: a row carrying "ts": 1e18 is perfectly finite, so it passed
+    # the guard, went massively negative against now, and `_format_age` floored
+    # it at 0 - printing "checks green (as of 1m ago)" off a garbage stamp,
+    # which is the exact misreport the guard was added to stop. A future stamp
+    # is not an age, so it reads as unknown rather than as fresh.
     if ts is None:
         return "unknown age"
     ts_f = finite_or_zero(ts)
     if not ts_f:
         return "unknown age"
+    # The future-stamp bound lives in `_format_age`, so both readers of a board
+    # row get it rather than this one.
     return _format_age(now.timestamp() - ts_f)
 
 
