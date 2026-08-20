@@ -81,6 +81,11 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Sidecar/metadata seam readers resolve through paths.graph_json at call
     # time; pin the resolver too or the seam reads the real machine graph.
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(
+        "fno.paths.questions_jsonl",
+        lambda: tmp_path / "questions.jsonl",
+        raising=False,
+    )
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
     return tmp_path
 
@@ -483,6 +488,179 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     result = runner.invoke(outstanding_app, ["--json"])
     assert result.exit_code == 0, result.output
     assert [q["id"] for q in json.loads(result.stdout)["questions"]] == [qid]
+
+
+# --- 2.2 machine-wide question index ---------------------------------------
+
+
+def test_question_index_dual_writes_ask_and_close(root: Path):
+    asked = runner.invoke(outstanding_app, ["ask", "which lane ships first?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+
+    project_path = root / ".fno" / "events.jsonl"
+    index_path = root / "questions.jsonl"
+    project_ask = json.loads(project_path.read_text(encoding="utf-8").splitlines()[-1])
+    index_ask = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert project_ask == index_ask
+    assert project_ask["data"]["question_id"] == qid
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid])
+    assert cleared.exit_code == 0, cleared.output
+    project_close = json.loads(project_path.read_text(encoding="utf-8").splitlines()[-1])
+    index_close = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert project_close == index_close
+    assert project_close["type"] == "operator_question_closed"
+    assert project_close["data"]["question_id"] == qid
+
+
+def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
+    from fno import paths
+    from fno.events import append_event as real_append_event
+
+    index_path = paths.questions_jsonl()
+    monkeypatch.setattr("fno.outstanding.cli.secrets.token_hex", lambda _n: "feedface")
+
+    def fail_index(event, *, events_path=None):
+        if events_path == index_path:
+            raise OSError("index unavailable")
+        return real_append_event(event, events_path=events_path)
+
+    monkeypatch.setattr("fno.events.append_event", fail_index)
+    result = runner.invoke(outstanding_app, ["ask", "which index?"])
+
+    assert result.exit_code == 1
+    assert "q-feedface" in result.output
+    assert "fno outstanding reindex" in result.output
+    durable = json.loads(
+        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert durable["data"]["question_id"] == "q-feedface"
+
+
+def test_question_close_index_failure_names_id_and_reindex(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno import paths
+    from fno.events import append_event as real_append_event
+
+    asked = runner.invoke(outstanding_app, ["ask", "which close path?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+    index_path = paths.questions_jsonl()
+
+    def fail_close_index(event, *, events_path=None):
+        if event["type"] == "operator_question_closed" and events_path == index_path:
+            raise OSError("index unavailable")
+        return real_append_event(event, events_path=events_path)
+
+    monkeypatch.setattr("fno.events.append_event", fail_close_index)
+    result = runner.invoke(outstanding_app, ["clear", qid])
+
+    assert result.exit_code == 1
+    assert qid in result.output
+    assert "fno outstanding reindex" in result.output
+    project_close = json.loads(
+        (root / ".fno" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert project_close["type"] == "operator_question_closed"
+    index_last = json.loads(index_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert index_last["type"] == "operator_question"
+
+
+def test_missing_question_index_reports_empty_with_reindex_hint(root: Path):
+    result = runner.invoke(outstanding_app, ["--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["questions"] == []
+    assert "fno outstanding reindex" in result.stderr
+
+
+def test_unreadable_question_index_is_a_failed_read(root: Path):
+    index_path = root / "questions.jsonl"
+    index_path.mkdir()
+
+    result = runner.invoke(outstanding_app, ["--json"])
+
+    assert result.exit_code == 1
+    assert "failed to read" in result.output
+    assert "questions.jsonl" in result.output
+
+
+def test_reindex_is_idempotent_and_machine_wide(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.events import append_event, operator_question, operator_question_closed
+    from fno.outstanding.core import events_path
+
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    first = operator_question(
+        question_id="q-first",
+        question="first project question",
+        session_id="s-first",
+        cwd=str(root),
+    )
+    first["ts"] = "2026-08-19T00:00:00Z"
+    second = operator_question(
+        question_id="q-second",
+        question="second project question",
+        session_id="s-second",
+        cwd=str(sibling),
+    )
+    second["ts"] = "2026-08-19T00:01:00Z"
+    closed = operator_question_closed(question_id="q-first", closed_by="operator")
+    closed["ts"] = "2026-08-19T00:02:00Z"
+    append_event(first, events_path=events_path(root))
+    append_event(second, events_path=events_path(sibling))
+    append_event(closed, events_path=events_path(root))
+    monkeypatch.setattr(
+        "fno.outstanding.core._capture_project_roots", lambda _root: [root, sibling]
+    )
+
+    indexed = runner.invoke(outstanding_app, ["reindex"])
+    assert indexed.exit_code == 0, indexed.output
+    assert "3 event(s) added" in indexed.output
+    indexed_again = runner.invoke(outstanding_app, ["reindex"])
+    assert indexed_again.exit_code == 0, indexed_again.output
+    assert "0 event(s) added" in indexed_again.output
+
+    monkeypatch.setattr("fno.outstanding.cli._storage_root", lambda: root)
+    from_first = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+    monkeypatch.setattr("fno.outstanding.cli._storage_root", lambda: sibling)
+    from_second = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)["questions"]
+    assert from_first == from_second
+    assert [row["id"] for row in from_first] == ["q-second"]
+
+    indexed_events = [
+        json.loads(line)
+        for line in (root / "questions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert indexed_events == [first, closed, second]
+
+
+def test_reindex_dedupes_symlinked_journals_by_inode(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.events import append_event, operator_question
+    from fno.outstanding.core import events_path
+
+    append_event(
+        operator_question(
+            question_id="q-control",
+            question="positive control",
+            session_id="s-control",
+            cwd=str(root),
+        ),
+        events_path=events_path(root),
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr("fno.outstanding.core._capture_project_roots", lambda _root: [root, alias])
+
+    from fno.outstanding.core import _question_journals
+
+    assert _question_journals(root) == [events_path(root)]
 
 
 # --- 3rd leg: the capture fold -----------------------------------------------

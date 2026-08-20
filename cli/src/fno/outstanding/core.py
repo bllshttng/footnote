@@ -8,12 +8,13 @@ only ``deferred`` carve-outs block anything (condition D in ``graph/_reconcile.p
 refuses a node close on an unharvested one), and 39 of those rows are ``oos-bug``,
 which blocks nothing, ever. So the fix is a surface, not a wire.
 
-Read-only by construction: this module imports no graph or state writer.
+The report path is read-only; explicit ask, clear, and reindex helpers own writes.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,15 @@ class OutstandingError(Exception):
     one is the absence-as-success trap, and here it would tell an operator the
     queue is clear when it is merely unreadable.
     """
+
+
+class QuestionIndexWriteError(RuntimeError):
+    """A question event is durable but missing from the recall index."""
+
+    def __init__(self, question_id: str, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.question_id = question_id
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -174,52 +184,82 @@ def _iter_question_lines(fh: "Iterable[str]") -> "Iterator[str]":
             yield line
 
 
+def questions_path() -> Path:
+    """Resolve the machine-wide question index through the configured state dir."""
+    from fno import paths
+
+    return paths.questions_jsonl()
+
+
+def append_question_event(event: dict[str, Any], root: Path) -> None:
+    """Write one event to project durability first, then machine-wide recall."""
+    from fno.events import append_event
+
+    data = event.get("data")
+    question_id = data.get("question_id") if isinstance(data, dict) else None
+    if not question_id:
+        raise ValueError("question event has no question_id")
+    append_event(event, events_path=events_path(root))
+    try:
+        append_event(event, events_path=questions_path())
+    except Exception as exc:  # noqa: BLE001 - caller needs the durable event id
+        raise QuestionIndexWriteError(str(question_id), exc) from exc
+
+
+def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, Any]]":
+    """Read valid question envelopes, distinguishing absent from unreadable."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if missing_hint:
+                print(
+                    f"outstanding: question index {path} is missing; run "
+                    "`fno outstanding reindex` to recover project questions.",
+                    file=sys.stderr,
+                )
+            return []
+        except OSError as exc:
+            raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+        raise OutstandingError(f"cannot read question index {path}: dangling symlink")
+    except OSError as exc:
+        raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+
+    events: "list[dict[str, Any]]" = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in _iter_question_lines(fh):
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") not in {
+                    QUESTION_EVENT,
+                    QUESTION_CLOSED_EVENT,
+                }:
+                    continue
+                data = rec.get("data")
+                if isinstance(data, dict) and data.get("question_id"):
+                    events.append(rec)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
+    return events
+
+
 def read_open_questions(root: Path) -> "list[Question]":
     """Fold ``operator_question`` minus ``operator_question_closed``.
 
     Newest first. A malformed line is SKIPPED, never raised, inheriting
     ``read_carveouts``' rule: one bad row must not cost the others. A missing
-    journal is the common case and reads as no questions.
+    index reads as no questions with a recovery hint; an unreadable one fails.
     """
-    path = events_path(root)
-    if not path.exists():
-        return []
-
+    _ = root  # The index is machine-wide; retain the argument for caller parity.
     asked: "dict[str, Question]" = {}
     closed: "set[str]" = set()
-    try:
-        # STREAM, never read_text().splitlines(). This journal is shared and
-        # never rotated, so materializing it holds the whole file in memory
-        # before the prefilter below skips anything - the read itself becomes
-        # the cost the prefilter was added to remove.
-        with path.open(encoding="utf-8") as fh:
-            lines = list(_iter_question_lines(fh))
-    except (OSError, UnicodeDecodeError) as exc:
-        raise OutstandingError(f"cannot read events journal {path}: {exc}") from exc
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Substring prefilter before json.loads. This journal is shared,
-        # append-only and never rotated, so nearly every line belongs to some
-        # other event type; parsing all of them cost ~0.9s against the hook's
-        # 3s bound, and the bound firing does not surface an error - the block
-        # just vanishes and the operator reads "nothing outstanding". That is
-        # the absence-as-success failure this whole verb exists to prevent, so
-        # the read must not get slower as the journal grows. Full history is
-        # preserved: questions never expire, so a tail read is not an option.
-        if QUESTION_MARKER not in stripped:
-            continue
-        try:
-            rec = json.loads(stripped)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(rec, dict):
-            continue
+    for rec in _read_question_events(questions_path(), missing_hint=True):
         data = rec.get("data")
-        if not isinstance(data, dict):
-            continue
         if rec.get("type") == QUESTION_EVENT:
             qid = data.get("question_id")
             if not qid:
@@ -273,6 +313,64 @@ def _capture_project_roots(root: Path) -> "list[Path]":
     except Exception:  # noqa: BLE001 - the graph is advisory here, never fatal
         pass
     return sorted(roots)
+
+
+def _question_journals(root: Path) -> "list[Path]":
+    """Every graph-named project journal, deduped by physical file."""
+    seen: "set[tuple[int, int]]" = set()
+    journals: "list[Path]" = []
+    for project_root in _capture_project_roots(root):
+        path = events_path(project_root)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = (stat.st_dev, stat.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        journals.append(path)
+    return journals
+
+
+def _question_event_identity(event: dict[str, Any]) -> "tuple[str, str] | None":
+    event_type = event.get("type")
+    data = event.get("data")
+    question_id = data.get("question_id") if isinstance(data, dict) else None
+    if event_type not in {QUESTION_EVENT, QUESTION_CLOSED_EVENT} or not question_id:
+        return None
+    return str(event_type), str(question_id)
+
+
+def reindex_questions(root: Path) -> "dict[str, int]":
+    """Append every missing ask/close identity from graph-named projects."""
+    from fno.events import append_event
+
+    index = questions_path()
+    existing = _read_question_events(index, missing_hint=False)
+    known = {
+        identity for event in existing if (identity := _question_event_identity(event)) is not None
+    }
+    preexisting = set(known)
+    added = 0
+    already: "set[tuple[str, str]]" = set()
+    for journal in _question_journals(root):
+        try:
+            events = _read_question_events(journal, missing_hint=False)
+        except OutstandingError:
+            continue
+        for event in events:
+            identity = _question_event_identity(event)
+            if identity is None:
+                continue
+            if identity in known:
+                if identity in preexisting:
+                    already.add(identity)
+                continue
+            append_event(event, events_path=index)
+            known.add(identity)
+            added += 1
+    return {"added": added, "already": len(already), "total": len(known)}
 
 
 def _capture_added_at(root: Path) -> "dict[str, str]":

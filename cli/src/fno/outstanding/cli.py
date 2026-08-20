@@ -97,29 +97,36 @@ def ask(
     lands - and in a mail-driven mesh the very next turn is usually the agent
     answering some mail.
     """
-    from fno.events import append_event, operator_question
+    from fno.events import operator_question
     from fno.harness_identity import canonical_handle, resolve_harness_identity
-    from fno.outstanding.core import events_path
+    from fno.outstanding.core import QuestionIndexWriteError, append_question_event
 
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
     ident = resolve_harness_identity()
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
     try:
-        append_event(
-            operator_question(
-                question_id=qid,
-                question=question,
-                session_id=session_id,
-                cwd=str(Path.cwd()),
-                node=node,
-                asker=asker,
-                ask=ask,
-                options=option or None,
-                blocks=blocks or None,
-            ),
-            events_path=events_path(_storage_root()),
+        event = operator_question(
+            question_id=qid,
+            question=question,
+            session_id=session_id,
+            cwd=str(Path.cwd()),
+            node=node,
+            asker=asker,
+            ask=ask,
+            options=option or None,
+            blocks=blocks or None,
         )
+        append_question_event(event, _storage_root())
+    except QuestionIndexWriteError as exc:
+        typer.echo(
+            f"outstanding: recorded {exc.question_id} in the project journal, "
+            f"but the recall index write failed: {exc}. Run "
+            "`fno outstanding reindex`; do not retry ask, which would mint a "
+            "second id for the same question.",
+            err=True,
+        )
+        raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
         typer.echo(f"outstanding: failed to record question: {exc}", err=True)
         raise typer.Exit(1)
@@ -144,8 +151,12 @@ def clear(
 ) -> None:
     """Close one or more open questions. Idempotent."""
     from fno.decide import IndexWriteError
-    from fno.events import append_event, operator_question_closed
-    from fno.outstanding.core import events_path, read_open_questions
+    from fno.events import operator_question_closed
+    from fno.outstanding.core import (
+        QuestionIndexWriteError,
+        append_question_event,
+        read_open_questions,
+    )
 
     root = _storage_root()
     try:
@@ -191,12 +202,12 @@ def clear(
                     events_root=root,
                 )["decision_id"]
             try:
-                append_event(
-                    operator_question_closed(
-                        question_id=qid, answer=answer, closed_by=closed_by
-                    ),
-                    events_path=events_path(root),
+                event = operator_question_closed(
+                    question_id=qid, answer=answer, closed_by=closed_by
                 )
+                append_question_event(event, root)
+            except QuestionIndexWriteError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 # The close failed AFTER the decision landed (a contended
                 # journal lock, ENOSPC). The generic handler below would say
@@ -227,6 +238,14 @@ def clear(
                 err=True,
             )
             raise typer.Exit(1)
+        except QuestionIndexWriteError as exc:
+            typer.echo(
+                f"outstanding: recorded the close for {exc.question_id} in the "
+                f"project journal, but the recall index write failed: {exc}. "
+                "Run `fno outstanding reindex`; do not retry clear blindly.",
+                err=True,
+            )
+            raise typer.Exit(1)
         except typer.Exit:
             # typer.Exit derives from RuntimeError, so the generic handler
             # below would swallow the precise message just raised and replace
@@ -241,3 +260,22 @@ def clear(
             f"outstanding: not open, nothing to close: {', '.join(skipped)}", err=True
         )
     typer.echo(str(len(targets)))
+
+
+@outstanding_app.command("reindex")
+def reindex() -> None:
+    """Backfill the machine-wide question index from every project journal."""
+    from fno.outstanding.core import reindex_questions
+
+    try:
+        result = reindex_questions(_storage_root())
+    except OutstandingError as exc:
+        typer.echo(f"outstanding: failed to read: {exc}", err=True)
+        raise typer.Exit(1)
+    except Exception as exc:  # noqa: BLE001 - a partial backfill is not success
+        typer.echo(f"outstanding: failed to reindex questions: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(
+        f"{result['added']} event(s) added; {result['already']} already indexed; "
+        f"{result['total']} total"
+    )
