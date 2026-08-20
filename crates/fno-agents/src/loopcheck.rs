@@ -8923,8 +8923,8 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     };
     if !pr.state.is_open_or_merged() {
         let guidance = match pr.state {
-            PrState::Closed => "PR is closed - reopen it or create a new PR: `git push` and `gh pr create`",
-            _ => "PR state is not open or merged - check GitHub for the PR status"
+            PrState::Closed => "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`",
+            _ => "PR state is not open or merged - verify on GitHub and update locally"
         };
         return format!(
             "no open/merged PR for HEAD (pr_state={}). {}",
@@ -8961,8 +8961,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             _ => "CI",
         };
         return format!(
-            "CI red on PR #{}: {} failed. Re-read the check logs and fix the failing code: \
-             `fno pr checks --watch {}`",
+            "CI red on PR #{}: {} failed. Debug and fix with `fno pr checks --watch {}`",
             pr.number,
             check_name,
             pr.number
@@ -9235,7 +9234,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             );
             return format!(
                 "PR #{}: {} has not reviewed. \
-                 Not nudgeable - manually trigger review, or move to config.review.optional_apps.{}",
+                 Cannot trigger automatically - manually trigger review, or move to config.review.optional_apps.{}",
                 pr.number,
                 names.join(", "),
                 hint("review")
@@ -9246,7 +9245,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         // either (the two must never disagree about whether a wait is valid).
         return format!(
             "PR #{} not yet reviewed (no required reviewers configured). \
-             To require review: set config.review.required_bots (GitHub App logins) or \
+             To require review: set config.review.github_apps (GitHub App logins) or \
              config.review.reviewers (local reviewers like sigma). \
              Nothing will arrive on its own without a configured gate.",
             pr.number
