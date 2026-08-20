@@ -249,6 +249,39 @@ pub fn resolve_keymap(
     )
 }
 
+/// Resolve a candidate prefix against the live rebinds.
+///
+/// The returned map is safe to pass to [`reinstall`]. A refusal carries the
+/// same operator-readable warning as [`resolve_keymap`] and changes nothing.
+pub fn resolve_prefix_change(spec: &str) -> Result<Keymap, String> {
+    let rebinds = KEYMAP
+        .read()
+        .map_err(|_| "keymap is unavailable; prefix unchanged".to_string())?
+        .as_ref()
+        .map(|map| map.rebinds.clone())
+        .unwrap_or_default();
+    resolve_prefix_change_with_rebinds(spec, &rebinds)
+}
+
+fn resolve_prefix_change_with_rebinds(
+    spec: &str,
+    live_rebinds: &[(String, u8)],
+) -> Result<Keymap, String> {
+    let requested = parse_key(spec);
+    let specs: Vec<(String, String)> = live_rebinds
+        .iter()
+        .map(|(action, byte)| (action.clone(), key_disp(*byte)))
+        .collect();
+    let (map, warnings) = resolve_keymap(Some(spec), &specs);
+    if requested != Some(map.prefix) || map.rebinds != live_rebinds || !warnings.is_empty() {
+        return Err(warnings
+            .first()
+            .map(|warning| warning.0.clone())
+            .unwrap_or_else(|| "prefix could not be applied exactly; unchanged".to_string()));
+    }
+    Ok(map)
+}
+
 static KEYMAP: std::sync::RwLock<Option<Keymap>> = std::sync::RwLock::new(None);
 
 /// Install the resolved keymap read from config. First call wins; later config
@@ -1836,6 +1869,19 @@ mod tests {
             warn.iter().any(|w| w.0.contains("is the prefix")),
             "{warn:?}"
         );
+    }
+
+    #[test]
+    fn resolve_prefix_change_reuses_the_full_keymap_validator() {
+        let map = resolve_prefix_change_with_rebinds("C-a", &[]).unwrap();
+        assert_eq!(map.prefix, 0x01);
+
+        let collision =
+            resolve_prefix_change_with_rebinds("Q", &[("detach".to_string(), b'Q')]).unwrap_err();
+        assert!(collision.contains("prefix"), "{collision}");
+
+        let digit = resolve_prefix_change_with_rebinds("3", &[]).unwrap_err();
+        assert!(digit.contains("1-9 select tabs"), "{digit}");
     }
 
     #[test]
