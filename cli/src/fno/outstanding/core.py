@@ -17,10 +17,12 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional
+
+from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 
 # Rows rendered before the footer takes over. A growing pile should read as a
 # number, not as a wall - a block that scrolls the operator's screen gets
@@ -122,10 +124,17 @@ class Outstanding:
     captures: "list[Capture]"
     capture_file_total: int = 0
     capture_row_total: int = 0
+    lane: "list[LaneItem]" = field(default_factory=list)
+    lane_parked: int = 0
 
     @property
     def empty(self) -> bool:
-        return self.carveout_total == 0 and not self.questions and not self.captures
+        return (
+            self.carveout_total == 0
+            and not self.questions
+            and not self.captures
+            and not self.lane
+        )
 
     def as_dict(self) -> "dict[str, Any]":
         by_project: "dict[str, int]" = {}
@@ -145,6 +154,11 @@ class Outstanding:
                 "repeated_ids": self.capture_row_total - len(self.captures),
                 "by_project": by_project,
                 "items": [c.as_dict() for c in self.captures],
+            },
+            "lane": {
+                "total": len(self.lane),
+                "parked": self.lane_parked,
+                "items": [{"text": i.text, "line": i.line} for i in self.lane],
             },
         }
 
@@ -654,8 +668,12 @@ def read_open_captures(root: Path) -> "list[Capture]":
     return _read_open_captures_with_counts(root)[0]
 
 
-def collect(root: Path) -> Outstanding:
-    """Read both legs. Raises ``OutstandingError`` if either store is unreadable."""
+def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
+    """Read every leg. Raises ``OutstandingError`` if a store is unreadable.
+
+    ``lane`` is a keyword-only, already-fetched read so core stays pure and
+    testable with a hand-built one; the caller resolves the real file.
+    """
     from fno.carveout.core import CarveoutError, read_carveouts
 
     try:
@@ -670,6 +688,9 @@ def collect(root: Path) -> Outstanding:
     stamps = sorted(str(r.get("ts") or "") for r in rows if r.get("ts"))
 
     captures, capture_file_total, capture_row_total = _read_open_captures_with_counts(root)
+    lane_read = lane if lane is not None else read_lane()
+    if lane_read.error:
+        raise OutstandingError(lane_read.error)
     return Outstanding(
         carveout_total=len(rows),
         carveout_by_kind=by_kind,
@@ -678,6 +699,8 @@ def collect(root: Path) -> Outstanding:
         captures=captures,
         capture_file_total=capture_file_total,
         capture_row_total=capture_row_total,
+        lane=open_items(lane_read),
+        lane_parked=len(parked_items(lane_read)),
     )
 
 
@@ -695,7 +718,9 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
-def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str:
+def render(
+    outstanding: Outstanding, *, session_id: Optional[str] = None, crowned: bool = False
+) -> str:
     """Render the human block. Empty string when nothing is outstanding.
 
     Silence on zero is the correct steady state and must be reachable, which is
@@ -709,11 +734,30 @@ def render(outstanding: Outstanding, *, session_id: Optional[str] = None) -> str
     "clear <id>" after suppressing every id. The ``RENDER_CAP`` already keeps
     any session's share to three rows plus a count, which is what the short
     render was for, so the branch bought nothing that the cap does not.
+
+    The crown splits the RENDER, never the READ. Every session prints the lane
+    count and top item; only a crowned session also gets the action line.
+    Gating the read itself would reproduce the defect this block exists to
+    fix - most sessions are not crowned, so the lane would stay invisible in
+    the common case and nobody would read it again.
     """
     if outstanding.empty:
         return ""
 
     lines: "list[str]" = ["## Outstanding for you", ""]
+
+    if outstanding.lane:
+        head = f"{_plural(len(outstanding.lane), 'item')} on your lane, top first."
+        if outstanding.lane_parked:
+            head += f" {outstanding.lane_parked} parked."
+        lines.append(head)
+        lines.append(f"  {outstanding.lane[0].text}")
+        if crowned:
+            lines.append(
+                '  File one with: fno backlog idea "<text>", then stamp `-> <id>` '
+                "onto its line, or park it with `-> parked: <reason>`."
+            )
+        lines.append("")
 
     if outstanding.carveout_total:
         split = ", ".join(

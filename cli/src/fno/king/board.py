@@ -1,4 +1,4 @@
-"""Read the six queues that decide whether a king still has work.
+"""Read the seven queues that decide whether a king still has work.
 
 Three properties are load-bearing and each has a test that fails loudly when it
 breaks.
@@ -38,8 +38,10 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from fno import paths
 from fno.agents.reachability import _ACTIVE_STATES as ACTIVE_STATES
 from fno.agents.session_truth import STALLED_AFTER_S
+from fno.king.lane import LaneItem, LaneRead, open_items, parked_items, read_lane
 from fno.pr._status import _classify, _latest_per_name
 
 #: Priorities a king treats as its own work. Lower bands are the operator's to
@@ -109,6 +111,9 @@ class BoardInputs:
     prs: SourceRead
     questions: SourceRead
     needs: SourceRead
+    #: The operator's own ranked lane. A 66-byte file read done in process at
+    #: fetch time, never through `_run_json` - there is no verb behind it.
+    lane: SourceRead
     warnings: list[str] = field(default_factory=list)
 
 
@@ -244,6 +249,17 @@ def build_board(
         if r.get("state") in _DEAD_CLAIM_STATES
     ]
 
+    lane_items = [LaneItem(**r) for r in inputs.lane.rows()] if inputs.lane.ok else []
+    lane_open = open_items(LaneRead(items=lane_items)) if inputs.lane.ok else []
+    lane_parked = parked_items(LaneRead(items=lane_items)) if inputs.lane.ok else []
+    lane_rows = [{"text": i.text, "line": i.line} for i in lane_open]
+    lane_note = (
+        "the operator's own ranking. File each with `fno backlog idea \"<text>\"` "
+        "and stamp `-> <id>` onto its line, or park it with `-> parked: <reason>`."
+    )
+    if lane_parked:
+        lane_note += f" {len(lane_parked)} parked, reasons are in the file."
+
     pr_rows = [
         {"number": r.get("number"), "title": r.get("title")} for r in inputs.prs.rows()
     ]
@@ -263,6 +279,14 @@ def build_board(
     ]
 
     queues = [
+        _queue(
+            "operator_lane",
+            f"cat {paths.operator_lane()}",
+            inputs.lane,
+            lane_rows,
+            actionable=True,
+            note=lane_note,
+        ),
         _queue(
             "undispatched",
             f"{SRC_READY} + {SRC_CLAIMS}",
@@ -447,6 +471,18 @@ def _read_questions(timeout: int) -> SourceRead:
     return SourceRead(payload=payload.get("questions") or [])
 
 
+def _read_lane() -> SourceRead:
+    """A 66-byte file read done in process; there is no verb behind it."""
+    lane = read_lane()
+    if lane.error:
+        return SourceRead(error=lane.error)
+    rows = [
+        {"text": i.text, "node": i.node, "parked": i.parked, "done": i.done, "line": i.line}
+        for i in lane.items
+    ]
+    return SourceRead(payload=rows)
+
+
 def _resolve_holder_activity(holders: set[str]) -> dict[str, dict]:
     """Read the activity axis for exactly the holders the king cares about.
 
@@ -547,6 +583,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         prs=prs,
         questions=_read_questions(timeout),
         needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
+        lane=_read_lane(),
         warnings=warnings,
     )
 

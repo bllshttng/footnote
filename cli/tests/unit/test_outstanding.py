@@ -22,6 +22,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.harness_identity import HarnessIdentity
+from fno.king.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
 from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
 
@@ -84,6 +85,14 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(
         "fno.paths.questions_jsonl",
         lambda: tmp_path / "questions.jsonl",
+        raising=False,
+    )
+    # Every test in this module that calls `collect()` without an explicit
+    # `lane=` must never touch the real machine's ~/.fno/my-priorities.md -
+    # pin it to a sandbox path that starts out missing (an empty lane).
+    monkeypatch.setattr(
+        "fno.paths.operator_lane",
+        lambda: tmp_path / "my-priorities.md",
         raising=False,
     )
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
@@ -1371,6 +1380,52 @@ def test_hook_block_positive_control(root: Path):
     assert runner.invoke(outstanding_app, []).stdout.strip() == ""
     _write_carveouts(root, [_carveout("cv-1", "oos-bug")])
     assert runner.invoke(outstanding_app, []).stdout.strip() != ""
+
+
+# --- 2.6 the operator lane ---------------------------------------------------
+
+
+def _lane_item(text, **kw):
+    return LaneItem(text=text, node=None, parked=None, done=False, line=1, **kw)
+
+
+def test_lane_leads_the_block_above_carveouts(root: Path):
+    """AC1-HP: any session sees the lane count and top item first."""
+    (root / "my-priorities.md").write_text(
+        "- [ ] ship 981 and 971 tonight\n- [ ] call the dentist\n", encoding="utf-8"
+    )
+    out = runner.invoke(outstanding_app, []).stdout
+    assert out.startswith("## Outstanding for you\n\n2 items on your lane, top first.")
+    assert "ship 981 and 971 tonight" in out
+
+
+def test_render_hides_the_action_line_when_uncrowned():
+    """AC6-HP: an uncrowned session gets the count and top item, no action line."""
+    outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
+    block = render(outstanding, crowned=False)
+    assert "1 item on your lane, top first." in block
+    assert "ship it" in block
+    assert "File one with:" not in block
+
+
+def test_render_shows_the_action_line_when_crowned():
+    """AC6-HP, the crowned half: the same input gets all three lines."""
+    outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
+    block = render(outstanding, crowned=True)
+    assert "File one with:" in block
+
+
+def test_render_reports_the_parked_count():
+    outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")], lane_parked=1)
+    block = render(outstanding, crowned=False)
+    assert "1 parked" in block
+
+
+def test_lane_alone_is_enough_to_break_silence():
+    """AC4-EDGE positive control: a non-empty lane renders even with both other legs clear."""
+    outstanding = Outstanding(0, {}, None, [], [], lane=[_lane_item("ship it")])
+    assert render(outstanding, crowned=False) != ""
+    assert Outstanding(0, {}, None, [], []).empty
 
 
 # --- 3.3 output modes --------------------------------------------------------

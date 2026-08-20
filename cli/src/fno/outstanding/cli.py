@@ -15,6 +15,7 @@ from typing import List
 
 import typer
 
+from fno.king.lane import read_lane
 from fno.outstanding.core import OutstandingError, collect, render
 
 outstanding_app = typer.Typer(
@@ -85,6 +86,38 @@ def _session_id() -> "str | None":
     return env_session.strip() if env_session and env_session.strip() else None
 
 
+def _is_crowned() -> bool:
+    """True only when this session's registry row carries a crown.
+
+    ``FNO_AGENT_SELF`` (tier 1 of ``resolve_self``) answers with no
+    session-id dependency, which is what lets a spawned king resolve this at
+    session start before the harness has written anything else. Any
+    exception degrades to "not crowned" and never fails the command:
+    `fno outstanding` runs on the session-start path under a bound, and
+    degrading this way costs one missing action line, not a missing lane.
+    """
+    try:
+        from fno.agents.registry import RegistryVersionError, load_registry
+        from fno.agents.whoami import resolve_self
+        from fno.harness_identity import resolve_harness_identity
+
+        registry: list = []
+        try:
+            registry = load_registry()
+        except RegistryVersionError:
+            pass
+        ident = resolve_harness_identity()
+        result = resolve_self(
+            env=os.environ,
+            registry=registry,
+            session_uuid=ident.session_id,
+            harness=ident.harness,
+        )
+    except Exception:  # noqa: BLE001 - an unresolved crown is not an error here
+        return False
+    return result.crown is not None
+
+
 @outstanding_app.callback(invoke_without_command=True)
 def report(
     ctx: typer.Context,
@@ -101,7 +134,7 @@ def report(
 
     root = _storage_root()
     try:
-        outstanding = collect(root)
+        outstanding = collect(root, lane=read_lane())
     except OutstandingError as exc:
         # A present-but-unreadable store is a FAILED read, never "nothing
         # outstanding": reporting an empty queue here would tell the operator
@@ -113,7 +146,7 @@ def report(
         typer.echo(json.dumps(outstanding.as_dict(), separators=(",", ":")))
         return
 
-    block = render(outstanding, session_id=_session_id())
+    block = render(outstanding, session_id=_session_id(), crowned=_is_crowned())
     if block:
         typer.echo(block, nl=False)
 

@@ -43,6 +43,7 @@ One file per install. These belong at the root.
 | `session-names.json`, `.lock` | `agents/discover.py` | grows per session |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` | permanent |
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
+| `my-priorities.md` | the operator, by hand or `~/.fno/board.py`; read via `paths.operator_lane()` | permanent |
 | `plugin-root` | `hooks/session-start.sh` | permanent |
 | `pr-watcher-state.json` | `pr_watch/_state.py` | permanent |
 | `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |

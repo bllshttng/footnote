@@ -26,9 +26,14 @@ def _empty_inputs(**overrides) -> BoardInputs:
         prs=_ok([]),
         questions=_ok([]),
         needs=_ok([]),
+        lane=_ok([]),
     )
     base.update(overrides)
     return BoardInputs(**base)
+
+
+def _lane_item(text, *, node=None, parked=None, done=False, line=1):
+    return {"text": text, "node": node, "parked": parked, "done": done, "line": line}
 
 
 def _node(node_id, priority="p0", plan_path="/plans/p.md"):
@@ -79,7 +84,7 @@ def test_undispatched_row_names_the_node_and_carries_a_rerunnable_source():
 
 def test_every_queue_carries_a_source_command():
     board = build_board(_empty_inputs())
-    assert len(board["queues"]) == 6
+    assert len(board["queues"]) == 7
     for q in board["queues"]:
         assert q["source"], f"{q['name']} has no source command"
 
@@ -314,6 +319,71 @@ def test_a_healthy_board_exits_zero_and_is_json_serialisable():
     assert board["actionable"] == 0
     assert board["exit_code"] == 0
     json.dumps(board)
+
+
+# --- the operator lane -------------------------------------------------------
+
+
+def test_operator_lane_is_the_first_queue_above_undispatched():
+    """AC2-HP: the lane outranks the agent queue in the payload, not just prose."""
+    inputs = _empty_inputs(lane=_ok([_lane_item("ship 981 and 971 tonight")]))
+    board = build_board(inputs)
+
+    assert board["queues"][0]["name"] == "operator_lane"
+    assert board["queues"][0]["count"] == 1
+    assert board["queues"][1]["name"] == "undispatched"
+    assert board["queues"][0]["actionable"] is True
+
+
+def test_a_linked_lane_item_is_absent_from_the_count():
+    """AC3-HP: filing a node onto the line shrinks the lane."""
+    inputs = _empty_inputs(
+        lane=_ok(
+            [
+                _lane_item("call the dentist", line=1),
+                _lane_item("ship it", node="x-aaae", line=2),
+            ]
+        )
+    )
+    board = build_board(inputs)
+    q = _queue(board, "operator_lane")
+    assert q["count"] == 1
+    assert [r["text"] for r in q["rows"]] == ["call the dentist"]
+
+
+def test_no_lane_file_reads_as_ok_and_empty():
+    """AC4-EDGE: a missing lane is silence, not a broken board."""
+    board = build_board(_empty_inputs())
+    q = _queue(board, "operator_lane")
+    assert q["status"] == "ok"
+    assert q["count"] == 0
+
+
+def test_unreadable_lane_is_never_reported_as_empty():
+    """AC5-EDGE: an unreadable lane blinds the king; it must not read as clean."""
+    inputs = _empty_inputs(lane=SourceRead(error="cannot read operator lane: permission denied"))
+    board = build_board(inputs)
+
+    q = _queue(board, "operator_lane")
+    assert q["status"] == "unreadable"
+    assert q["error"]
+    assert board["exit_code"] != 0
+
+
+def test_parked_item_is_excluded_and_counted_in_the_note():
+    """AC7-HP: a reasoned park removes the item and the note says how many."""
+    inputs = _empty_inputs(
+        lane=_ok(
+            [
+                _lane_item("call the dentist", parked="not node-shaped", line=1),
+                _lane_item("ship it", line=2),
+            ]
+        )
+    )
+    board = build_board(inputs)
+    q = _queue(board, "operator_lane")
+    assert q["count"] == 1
+    assert "1 parked" in q["note"]
 
 
 # --- the PR filter ----------------------------------------------------------

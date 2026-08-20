@@ -62,6 +62,7 @@ FIELD_META: dict[str, Meta] = {
     "paths.bus_dir": Meta("never", "Override path to the cross-project mail bus dir."),
     "paths.loops_paused_json": Meta("never", "Override path to the loops pause-all sentinel."),
     "paths.observer_reports_dir": Meta("never", "Override path to the observer harness digest dir."),
+    "paths.operator_lane": Meta("never", "Override path to the operator's priorities lane."),
     # --- config.inbox.* ---
     "inbox.unclaimed_ttl": Meta(
         "advanced",

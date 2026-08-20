@@ -134,6 +134,7 @@ class PathsBlock(BaseModel):
     bus_dir: Optional[str] = None
     loops_paused_json: Optional[str] = None
     observer_reports_dir: Optional[str] = None
+    operator_lane: Optional[str] = None
 
     @field_validator(
         "graph_json",
@@ -153,6 +154,7 @@ class PathsBlock(BaseModel):
         "bus_dir",
         "loops_paused_json",
         "observer_reports_dir",
+        "operator_lane",
         mode="before",
     )
     @classmethod
