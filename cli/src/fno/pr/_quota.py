@@ -17,6 +17,18 @@ REFUSED = 75
 _PROXY_DIR_ENV = "FNO_GH_PROXY_DIR"
 
 
+class ProxyIdentityError(RuntimeError):
+    """The proxy cannot work out which directories its own shims live in."""
+
+
+def proxy_identity_refusal(exc: BaseException) -> str:
+    """One wording for the refusal, so the four callers cannot drift apart."""
+    return (
+        "gh proxy: cannot identify its own install directory, refusing to "
+        f"delegate: {exc}"
+    )
+
+
 def quota_lock_path() -> Path:
     return graphql_quota_lock()
 
@@ -49,14 +61,23 @@ def _is_proxy_shim(path: Path) -> bool:
 
 
 def _proxy_dirs() -> set[str]:
+    """Every directory one of our own shims can sit in.
+
+    Swallowing the lookup failure returned an empty set, and an empty set says
+    two different things: "there is no proxy" and "I could not find out". Every
+    caller read it as the first. `resolve_real_gh` then handed back the proxy's
+    own shim and `os.execve` re-entered it with the same argv forever. So this
+    fails closed: a proxy that cannot identify itself must not delegate,
+    because calling itself is the one thing it is able to do.
+    """
     paths = set()
     inherited = os.environ.get(_PROXY_DIR_ENV)
     if inherited:
         paths.add(str(Path(inherited).resolve()))
     try:
         paths.add(str(github_cli_proxy_dir().resolve()))
-    except Exception:
-        pass
+    except Exception as exc:
+        raise ProxyIdentityError(str(exc)) from exc
     return paths
 
 
@@ -184,7 +205,10 @@ def execute_graphql(
     # the proxy. Re-entering the broker while this process holds the flock
     # deadlocks until the outer command times out, so only an explicit non-bare
     # path bypasses the pinned-delegate resolver.
-    gh = real_gh if real_gh and real_gh != "gh" else resolve_real_gh()
+    try:
+        gh = real_gh if real_gh and real_gh != "gh" else resolve_real_gh()
+    except ProxyIdentityError as exc:
+        return Result(2, "", proxy_identity_refusal(exc))
     if not gh:
         return Result(127, "", "gh not found on PATH")
     lock = lock_path or quota_lock_path()
@@ -192,7 +216,10 @@ def execute_graphql(
     with lock.open("a+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:
-            env = delegate_environment()
+            try:
+                env = delegate_environment()
+            except ProxyIdentityError as exc:
+                return Result(2, "", proxy_identity_refusal(exc))
             probe = runner(
                 [gh, "api", "rate_limit"], cwd=cwd, timeout=min(30, timeout), env=env
             )

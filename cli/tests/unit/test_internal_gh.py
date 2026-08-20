@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fno.pr import _internal_gh
+from fno.pr import _internal_gh, _quota
 from fno.pr._proc import Result
 
 
@@ -129,3 +129,13 @@ def test_ambiguous_pr_selectors_are_rejected():
     )
     assert number is None
     assert "ambiguous" in reason
+
+
+def test_execute_turns_a_proxy_identity_failure_into_a_result(monkeypatch):
+    def broken():
+        raise _quota.ProxyIdentityError("config load failed")
+
+    monkeypatch.setattr(_quota, "resolve_real_gh", broken)
+    result = _internal_gh.execute("discretionary", ["auth", "status"])
+    assert result.returncode == 2
+    assert "cannot identify its own install directory" in result.stderr

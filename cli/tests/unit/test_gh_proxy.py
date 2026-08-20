@@ -235,3 +235,41 @@ def test_resolve_real_gh_returns_a_path_even_with_no_proxy_dir_to_skip(
 
     assert resolved == str(real.resolve())
     assert os.sep in resolved
+
+
+def test_main_refuses_to_run_when_the_reentry_marker_is_set(monkeypatch, capsys):
+    # os.execve leaves no child, so the marker is the only evidence of a repeat.
+    monkeypatch.setattr(sys, "argv", ["gh", "api", "rate_limit"])
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    with pytest.raises(SystemExit, match="1"):
+        gh_proxy.main()
+    assert "re-entered itself" in capsys.readouterr().err
+
+
+def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatch):
+    seen = {}
+
+    def execve(path, argv, env):
+        seen["env"] = env
+        raise RuntimeError("exec sentinel")
+
+    monkeypatch.setattr("fno.pr.gh_proxy.os.execve", execve)
+    monkeypatch.setattr(
+        "fno.pr.gh_proxy._quota.delegate_environment", lambda: {"PATH": "/real/bin"}
+    )
+    with pytest.raises(RuntimeError, match="exec sentinel"):
+        delegate("/real/gh", ["auth", "status"])
+    assert seen["env"]["FNO_GH_PROXY_DEPTH"] == "1"
+
+
+def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gh", "auth", "status"])
+    monkeypatch.delenv("FNO_GH_PROXY_DEPTH", raising=False)
+
+    def broken():
+        raise gh_proxy._quota.ProxyIdentityError("config load failed")
+
+    monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", broken)
+    with pytest.raises(SystemExit, match="2"):
+        gh_proxy.main()
+    assert "cannot identify its own install directory" in capsys.readouterr().err
