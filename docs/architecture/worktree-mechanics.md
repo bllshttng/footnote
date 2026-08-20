@@ -58,6 +58,12 @@ NEVER `rm -rf` a worktree, which leaves dangling refs.
 Post-merge pruning is automated.
 `/fno:pr merged` archives the PR's worktree, and `fno worktree cleanup --merged --apply` sweeps landed ones.
 
+## Commit-time salvage refs
+
+`scripts/setup/setup-worktree.sh` installs a shared `post-commit` dispatcher that runs the committing worktree's `hooks/worktree-salvage-ref.sh`. Every commit advances a local `refs/fno/salvage/<worktree>` ref so a detached or provider-killed worktree stays recoverable without a network dependency.
+
+Remote mirroring is off by default because the commit can still be work in progress. A repository can explicitly enable the detached best-effort mirror with `git config --local fno.salvageRemoteMirror true`. Disable it again with `git config --local --unset fno.salvageRemoteMirror`. The local salvage ref remains active in both cases, and a remote failure never blocks the commit.
+
 ## Enforcement
 
 Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-location.sh`.
