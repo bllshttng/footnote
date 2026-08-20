@@ -1556,77 +1556,35 @@ def _pane_group_max() -> int:
         return 4
 
 
-def _tab_scope_args(squad: Optional[str]) -> list[str]:
-    return ["--workspace", squad] if squad else []
+def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
+    """Split a ``--tab`` value into a placement selector and a pane-group name.
 
-
-def _resolve_group_tab(
-    requested: str,
-    session: str,
-    squad: Optional[str],
-    runner: Callable[..., "subprocess.CompletedProcess[str]"],
-) -> tuple[str, Optional[str]]:
-    """Return the pane-run selector and an optional post-create tab name."""
+    An explicit selector the operator typed (``active``/``new``/``id:``/``name:``
+    /an ordinal) rides the placement path untouched: they named a target, and fno
+    has nothing to resolve. A bare name is a GROUP, and a group is placed after
+    the spawn rather than before it - see :func:`place_pane_in_group_tab`.
+    """
     if (
         requested in {"active", "new"}
         or requested.startswith(("id:", "name:"))
         or requested.isdigit()
     ):
         return requested, None
-
-    listed = _run_mux(
-        ["mux", "tab", "ls", "--session", session, *_tab_scope_args(squad), "--json"],
-        runner,
-    )
-    detail = (listed.stderr or listed.stdout or "no output").strip()
-    missing_server = (
-        listed.returncode == 1
-        and "cannot reach session" in detail
-        and "No such file or directory" in detail
-    )
-    if listed.returncode != 0 and not missing_server:
-        raise DispatchAskError(
-            f"cannot resolve pane group {requested!r}: mux tab ls failed: {detail}",
-            exit_code=1,
-        )
-    try:
-        rows = [] if missing_server else json.loads(listed.stdout or "[]")
-        if not isinstance(rows, list):
-            raise ValueError("tab list is not an array")
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise DispatchAskError(
-            f"cannot resolve pane group {requested!r}: unparseable tab list",
-            exit_code=1,
-        ) from exc
-
-    by_name = {
-        row.get("name"): row
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
-    max_panes = _pane_group_max()
-    suffix = 1
-    while True:
-        name = requested if suffix == 1 else f"{requested}-{suffix}"
-        row = by_name.get(name)
-        if row is None:
-            return "new", name
-        pane_ids = row.get("pane_ids")
-        if isinstance(pane_ids, list) and len(pane_ids) < max_panes:
-            return f"name:{name}", None
-        suffix += 1
+    return None, requested
 
 
-def _rename_spawned_group_tab(
+def _pane_own_squad_and_tab(
     session: str,
-    squad: Optional[str],
     pane_id: int,
-    name: str,
+    group: str,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
-) -> None:
-    panes = _run_mux(
-        ["mux", "pane", "ls", "--session", session, "--json"], runner
-    )
+) -> tuple[int, int]:
+    """The squad and tab the spawned pane ACTUALLY landed in, read from itself.
+
+    ``PaneInfo`` carries both, so the pane names its own squad and there is
+    nothing to predict.
+    """
+    panes = _run_mux(["mux", "pane", "ls", "--session", session, "--json"], runner)
     try:
         rows = json.loads(panes.stdout or "[]") if panes.returncode == 0 else []
         row = next(
@@ -1634,24 +1592,145 @@ def _rename_spawned_group_tab(
             for item in rows
             if isinstance(item, dict) and item.get("pane_id") == pane_id
         )
-        tab_id = int(row["tab_id"])
+        return int(row["squad_id"]), int(row["tab_id"])
     except (StopIteration, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise DispatchAskError(
-            f"pane group {name!r} was created but pane {pane_id} has no resolvable tab id",
+            f"pane group {group!r}: pane {pane_id} was created but reports no "
+            f"resolvable squad/tab id",
             exit_code=1,
         ) from exc
+
+
+def _group_tab_rows(
+    session: str,
+    squad_id: int,
+    group: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> dict[str, dict]:
+    """Tabs in the squad the pane landed in, keyed by name.
+
+    Scoped with ``--workspace id:<squad_id>`` and never unscoped. An unscoped
+    ``tab ls`` resolves ``CurrentRoute``, which on the tab verbs means the squad
+    the operator happens to be LOOKING at - while the pane run resolved the same
+    token by CWD. Two defaults for one token is what put panes at one squad and
+    the tabs read for them at another.
+    """
+    listed = _run_mux(
+        [
+            "mux", "tab", "ls",
+            "--session", session,
+            "--workspace", f"id:{squad_id}",
+            "--json",
+        ],
+        runner,
+    )
+    if listed.returncode != 0:
+        detail = (listed.stderr or listed.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"cannot resolve pane group {group!r}: mux tab ls failed: {detail}",
+            exit_code=1,
+        )
+    try:
+        rows = json.loads(listed.stdout or "[]")
+        if not isinstance(rows, list):
+            raise ValueError("tab list is not an array")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise DispatchAskError(
+            f"cannot resolve pane group {group!r}: unparseable tab list",
+            exit_code=1,
+        ) from exc
+    return {
+        row.get("name"): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("name"), str)
+    }
+
+
+def place_pane_in_group_tab(
+    session: str,
+    pane_id: int,
+    group: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    """Put a freshly spawned pane into its group tab. Act, then place.
+
+    The old shape pre-read ``tab ls`` to PREDICT where the pane would land, then
+    placed it with ``--tab``. The prediction was the wrong half: the pane run
+    resolves its squad from the spawn's cwd and the tab verbs resolve theirs from
+    the operator's gaze, so three panes asking for one tab landed on three.
+
+    Here every read is keyed on a pane that already exists. The pane names its own
+    squad; the tab read is scoped to that squad; and ``tab join`` derives its
+    squad from the anchor pane, so the join is scope-correct by construction
+    rather than by guessing correctly. Prefer construction over prediction.
+
+    Cost, stated rather than hidden: the pane is visible in its own tab for the
+    moment between the spawn and the join, and two concurrent spawns can both see
+    room and land one pane over ``pane_group_max``. An over-full tab is cosmetic;
+    a global spawn lock costs more than it buys.
+    """
+    squad_id, own_tab = _pane_own_squad_and_tab(session, pane_id, group, runner)
+    by_name = _group_tab_rows(session, squad_id, group, runner)
+    max_panes = _pane_group_max()
+    suffix = 1
+    while True:
+        name = group if suffix == 1 else f"{group}-{suffix}"
+        row = by_name.get(name)
+        if row is None:
+            _rename_own_tab(session, squad_id, own_tab, name, runner)
+            return
+        if row.get("tab_id") == own_tab:
+            return
+        pane_ids = row.get("pane_ids")
+        if isinstance(pane_ids, list) and 0 < len(pane_ids) < max_panes:
+            _join_own_tab(session, own_tab, int(pane_ids[0]), name, runner)
+            return
+        suffix += 1
+
+
+def _join_own_tab(
+    session: str,
+    own_tab: int,
+    anchor_pane: int,
+    name: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
+    """Fold the pane's own tab into the group tab, anchored on a pane inside it.
+
+    No squad argument: ``tab_join`` reads the anchor pane's squad itself, which is
+    the whole reason this path cannot land in the wrong one.
+    """
+    joined = _run_mux(
+        [
+            "mux", "tab", "join",
+            "--session", session,
+            "--src", f"id:{own_tab}",
+            "--at", str(anchor_pane),
+            "--dir", "right",
+        ],
+        runner,
+    )
+    if joined.returncode != 0:
+        detail = (joined.stderr or joined.stdout or "no output").strip()
+        raise DispatchAskError(
+            f"pane group tab join into {name!r} failed: {detail}", exit_code=1
+        )
+
+
+def _rename_own_tab(
+    session: str,
+    squad_id: int,
+    own_tab: int,
+    name: str,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> None:
     renamed = _run_mux(
         [
-            "mux",
-            "tab",
-            "rename",
-            "--session",
-            session,
-            *_tab_scope_args(squad),
-            "--tab",
-            f"id:{tab_id}",
-            "--name",
-            name,
+            "mux", "tab", "rename",
+            "--session", session,
+            "--workspace", f"id:{squad_id}",
+            "--tab", f"id:{own_tab}",
+            "--name", name,
         ],
         runner,
     )
@@ -1660,6 +1739,8 @@ def _rename_spawned_group_tab(
         raise DispatchAskError(
             f"pane group tab rename to {name!r} failed: {detail}", exit_code=1
         )
+
+
 def _reap_spawned_pane(
     session: str,
     pane_id: int,
@@ -2735,11 +2816,9 @@ def dispatch_spawn_pane(
 
     session = resolve_mux_session(session)
     tab_selector: Optional[str] = None
-    tab_name_after_create: Optional[str] = None
+    pane_group: Optional[str] = None
     if tab:
-        tab_selector, tab_name_after_create = _resolve_group_tab(
-            tab, session, squad, runner
-        )
+        tab_selector, pane_group = _resolve_group_tab(tab)
     # Resolve the monitor BEFORE the argv build. happy OWNS the claude session
     # id: claudeLocal() extracts `--session-id` out of the caller's argv and only
     # re-adds it on its `!hookSettingsPath` branch, which a normal `happy` launch
@@ -2969,11 +3048,9 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 ) from exc
 
-        if tab_name_after_create is not None:
+        if pane_group is not None:
             try:
-                _rename_spawned_group_tab(
-                    session, squad, pane_id, tab_name_after_create, runner
-                )
+                place_pane_in_group_tab(session, pane_id, pane_group, runner)
             except DispatchAskError as exc:
                 reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
                 suffix = "pane reaped" if reaped else f"cleanup failed: {cleanup_detail}"

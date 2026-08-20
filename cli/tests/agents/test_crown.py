@@ -296,12 +296,25 @@ def test_top_rows_join_the_crown_by_name() -> None:
     from fno.agents.spawn_gate import LiveWorker
     from fno.agents.top import _rows
 
-    w = LiveWorker(
-        source="fno", name="king-epic", harness="claude",
-        substrate="pane", pid=1, status="live",
+    def worker(name: str) -> "LiveWorker":
+        return LiveWorker(
+            source="fno", name=name, harness="claude",
+            substrate="pane", pid=1, status="live",
+        )
+
+    # TWO workers and TWO crowns, deliberately: with one of each, a _rows that
+    # ignored the name entirely and handed back the only crown present would
+    # still pass. The join is only observable when a wrong one is available to
+    # pick.
+    rows = _rows(
+        [worker("king-epic"), worker("king-other"), worker("plain")],
+        {"king-epic": "L1 epic-x", "king-other": "L2 epic-y"},
     )
-    assert _rows([w], {"king-epic": "L1 epic-x"})[0]["crown"] == "L1 epic-x"
-    assert _rows([w], {})[0]["crown"] is None
+    by_name = {row["name"]: row["crown"] for row in rows}
+    assert by_name["king-epic"] == "L1 epic-x"
+    assert by_name["king-other"] == "L2 epic-y"
+    assert by_name["plain"] is None
+    assert _rows([worker("king-epic")], {})[0]["crown"] is None
 
 
 # --- attended in-place crown promotion --------------------------------------

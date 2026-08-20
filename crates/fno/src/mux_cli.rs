@@ -2493,10 +2493,24 @@ fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<Str
 }
 
 /// A `--workspace <name>` (alias `--squad`) -> `PaneTarget`, defaulting to `CurrentRoute`.
+///
+/// `id:<n>` addresses a squad by the id `fno mux pane ls` reports, so a caller
+/// holding a pane's own `squad_id` can scope a tab read to the squad that pane
+/// actually landed in. Without it the two verbs cannot be composed: `pane ls`
+/// answers with an id and `tab` accepted only a name, so a tab read fell back to
+/// `CurrentRoute` - which for the tab verbs means the squad the operator happens
+/// to be LOOKING at, not the one the spawn routed to by cwd. A bare name keeps
+/// its meaning; a malformed `id:` value is a name, since a squad may legitimately
+/// be called something starting with `id:` and refusing here would be a new way
+/// to fail for a spelling that used to work.
 fn squad_target(squad: Option<String>) -> PaneTarget {
-    squad
-        .map(PaneTarget::SquadName)
-        .unwrap_or(PaneTarget::CurrentRoute)
+    match squad {
+        None => PaneTarget::CurrentRoute,
+        Some(s) => match s.strip_prefix("id:").and_then(|n| n.parse::<u64>().ok()) {
+            Some(id) => PaneTarget::SquadId(id),
+            None => PaneTarget::SquadName(s),
+        },
+    }
 }
 
 /// `fno mux tab ls|create|rename|join ...` (x-d865).
@@ -4742,6 +4756,29 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn squad_target_reads_the_id_spelling_pane_ls_reports() {
+        // `pane ls` answers with a squad id; before this the tab verbs took only
+        // a name, so a caller holding a pane's own squad_id had to fall back to
+        // CurrentRoute - which resolves by GAZE on the tab path and by CWD on the
+        // pane path. Two defaults for one token is what split the two verbs.
+        assert_eq!(squad_target(Some("id:5".into())), PaneTarget::SquadId(5));
+        assert_eq!(squad_target(Some("id:0".into())), PaneTarget::SquadId(0));
+        // A bare name keeps its meaning.
+        assert_eq!(
+            squad_target(Some("codex".into())),
+            PaneTarget::SquadName("codex".into())
+        );
+        // A malformed id: value stays a NAME rather than becoming a refusal: a
+        // squad may legitimately be called this, and refusing would be a new way
+        // to fail for a spelling that already worked.
+        assert_eq!(
+            squad_target(Some("id:notanumber".into())),
+            PaneTarget::SquadName("id:notanumber".into())
+        );
+        assert_eq!(squad_target(None), PaneTarget::CurrentRoute);
+    }
 
     #[test]
     fn mux_session_resolution_flag_beats_env_beats_default() {

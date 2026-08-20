@@ -1899,16 +1899,137 @@ def test_cmd_spawn_tab_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> 
     assert "--tab" in res.output and "--substrate pane" in res.output
 
 
+class SquadAwareRunner(FakeRunner):
+    """A fake whose two verbs DISAGREE about which squad they answer for.
+
+    This is the whole point of the fixture. The old fake's ``pane ls`` payload
+    carried ``pane_id``, ``squad_id`` and ``tab_id`` in one object and its
+    ``tab ls`` stub returned a canned list correlated with nothing, so pane and
+    tab agreed on squad by construction and the bug could not reproduce.
+
+    Here the spawned pane lands in squad 1 and an UNSCOPED ``tab ls`` answers
+    with squad 5's tabs - the live shape, where the pane run resolves its squad
+    from the spawn's cwd and the tab verbs resolve theirs from the operator's
+    gaze. A resolver that reads unscoped gets squad 5's tabs for a squad-1 pane
+    and places nothing where it meant to.
+    """
+
+    def __init__(self, *, squads: dict, pane_squad: int, pane_tab: int, **kw) -> None:
+        super().__init__(
+            ls_stdout=json.dumps(
+                [
+                    {
+                        "pane_id": 7,
+                        "squad_id": pane_squad,
+                        "tab_id": pane_tab,
+                        "cwd": "/w",
+                        "child_pid": 4242,
+                    }
+                ]
+            ),
+            **kw,
+        )
+        self.squads = squads
+        self.gazed_at = 5
+        self.tab_ls_scopes: list[str] = []
+
+    def __call__(self, argv, **kwargs):
+        if list(argv[1:4]) == ["mux", "tab", "ls"]:
+            self.calls.append(list(argv))
+            if "--workspace" in argv:
+                scope = argv[argv.index("--workspace") + 1]
+            else:
+                scope = "UNSCOPED"
+            self.tab_ls_scopes.append(scope)
+            if scope == "UNSCOPED":
+                # CurrentRoute on the tab verbs = the squad being LOOKED at.
+                rows = self.squads.get(self.gazed_at, [])
+            elif scope.startswith("id:"):
+                sid = int(scope[3:])
+                if sid not in self.squads:
+                    return subprocess.CompletedProcess(
+                        argv, 1, "", f"no such squad id: {sid}"
+                    )
+                rows = self.squads[sid]
+            else:
+                return subprocess.CompletedProcess(
+                    argv, 1, "", f"no such squad: {scope}"
+                )
+            return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
+        if list(argv[1:4]) == ["mux", "tab", "join"]:
+            self.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return super().__call__(argv, **kwargs)
+
+
+def _squad_fake(**kw) -> SquadAwareRunner:
+    """Squad 1 holds the pane and a `codex` tab; squad 5 is what gaze answers."""
+    return SquadAwareRunner(
+        squads={
+            1: [{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3], "active": True}],
+            5: [{"tab_id": 77, "name": "codex", "pane_ids": [50], "active": True}],
+        },
+        pane_squad=1,
+        pane_tab=10,
+        **kw,
+    )
+
+
+def test_pane_group_scopes_every_tab_read_to_the_pane_own_squad(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The measured defect: `pane ls` reported panes at squad 1 while `tab ls`
+    listed squad 5's tabs, so `tab join --src 67 --at 88` answered "no tab at
+    index 67" for a pane id `pane ls` had just handed over. One enum value
+    (`PaneTarget::CurrentRoute`) resolved by CWD on the pane path and by GAZE on
+    the tab path.
+    """
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=_squad_fake())
+
+    assert runner.tab_ls_scopes, "the group placement must read the tab list"
+    assert "UNSCOPED" not in runner.tab_ls_scopes
+    assert set(runner.tab_ls_scopes) == {"id:1"}
+
+    # And it joined squad 1's codex tab (anchored on one of ITS panes), never
+    # squad 5's tab 77 that an unscoped read would have offered.
+    join = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "join"])
+    assert join[join.index("--at") + 1] == "1"
+    assert join[join.index("--src") + 1] == "id:10"
+
+
+def test_pane_group_never_predicts_placement_before_the_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Act, then place. A pre-spawn `--tab` guess is a PREDICTION of where the
+    pane will land, and the prediction is the half that was wrong."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=_squad_fake())
+
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert "--tab" not in run_call
+    # Every tab read happens AFTER the pane exists.
+    run_at = runner.calls.index(run_call)
+    tab_reads = [i for i, c in enumerate(runner.calls) if c[1:4] == ["mux", "tab", "ls"]]
+    assert tab_reads and min(tab_reads) > run_at
+
+
 def test_pane_group_reuses_first_tab_with_room(tmp_path: Path, monkeypatch) -> None:
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
-    tabs = json.dumps([{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3], "active": True}])
-    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=FakeRunner(tabs_stdout=tabs))
-    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    sep = run_call.index("--")
-    assert run_call[run_call.index("--tab") + 1] == "name:codex"
-    assert run_call.index("--tab") < sep
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=_squad_fake())
+
+    join = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "join"])
+    # Anchored on a pane INSIDE the group tab: tab_join derives its squad from
+    # that pane, so the join is scope-correct by construction and carries no
+    # --workspace of its own.
+    assert join[join.index("--at") + 1] == "1"
+    assert "--workspace" not in join
     assert not [call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"]]
 
 
@@ -1916,36 +2037,73 @@ def test_pane_group_overflow_creates_numbered_tab(tmp_path: Path, monkeypatch) -
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
-    tabs = json.dumps([{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3, 4], "active": True}])
-    panes = json.dumps([{"pane_id": 7, "squad_id": 1, "tab_id": 10, "cwd": "/w", "child_pid": 4242}])
-    _result, runner = _spawn(
-        monkeypatch,
-        tmp_path,
-        tab="codex",
-        runner=FakeRunner(tabs_stdout=tabs, ls_stdout=panes),
+    runner = SquadAwareRunner(
+        squads={
+            1: [{"tab_id": 9, "name": "codex", "pane_ids": [1, 2, 3, 4], "active": True}],
+            5: [],
+        },
+        pane_squad=1,
+        pane_tab=10,
     )
-    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert run_call[run_call.index("--tab") + 1] == "new"
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=runner)
+
     rename = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"])
     assert rename[rename.index("--tab") + 1] == "id:10"
     assert rename[rename.index("--name") + 1] == "codex-2"
+    assert rename[rename.index("--workspace") + 1] == "id:1"
+    assert not [call for call in runner.calls if call[1:4] == ["mux", "tab", "join"]]
 
 
-def test_pane_group_first_spawn_bootstraps_missing_mux(tmp_path: Path, monkeypatch) -> None:
+def test_pane_group_first_spawn_names_its_own_tab(tmp_path: Path, monkeypatch) -> None:
+    """No group tab yet: the pane's own tab takes the group name. The `tab ls`
+    read succeeds and answers empty, because by this point the `pane run` has
+    already bootstrapped the mux server - which is exactly what act-then-place
+    buys over a pre-read that had to tolerate an unreachable session."""
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
-    panes = json.dumps([{"pane_id": 7, "squad_id": 1, "tab_id": 1, "cwd": "/w", "child_pid": 4242}])
-    runner = FakeRunner(
-        tabs_returncode=1,
-        tabs_stderr='fno mux: cannot reach session "main": No such file or directory (os error 2)',
-        ls_stdout=panes,
-    )
+    runner = SquadAwareRunner(squads={1: [], 5: []}, pane_squad=1, pane_tab=1)
     _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=runner)
-    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
-    assert run_call[run_call.index("--tab") + 1] == "new"
+
     rename = next(call for call in runner.calls if call[1:4] == ["mux", "tab", "rename"])
     assert rename[rename.index("--name") + 1] == "codex"
+    assert rename[rename.index("--tab") + 1] == "id:1"
+
+
+def test_pane_group_is_a_noop_when_the_pane_already_landed_in_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pane's own tab IS the group tab - join it into itself and the server
+    refuses with "cannot join a tab into itself"."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    runner = SquadAwareRunner(
+        squads={1: [{"tab_id": 10, "name": "codex", "pane_ids": [7], "active": True}], 5: []},
+        pane_squad=1,
+        pane_tab=10,
+    )
+    _result, runner = _spawn(monkeypatch, tmp_path, tab="codex", runner=runner)
+
+    assert not [c for c in runner.calls if c[1:4] == ["mux", "tab", "join"]]
+    assert not [c for c in runner.calls if c[1:4] == ["mux", "tab", "rename"]]
+
+
+@pytest.mark.parametrize("selector", ["active", "new", "id:4", "name:codex", "12"])
+def test_explicit_tab_selector_rides_the_placement_path_untouched(
+    selector: str, tmp_path: Path, monkeypatch
+) -> None:
+    """Only a bare NAME is fno resolving a target the operator did not name.
+    An explicit selector still places before the spawn and reads no tab list."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 4)
+    _result, runner = _spawn(monkeypatch, tmp_path, tab=selector, runner=_squad_fake())
+    run_call = next(
+        call for call in runner.calls if call[1:4] == ["mux", "pane", "run"]
+    )
+    assert run_call[run_call.index("--tab") + 1] == selector
+    assert not runner.tab_ls_scopes
 
 
 def test_cmd_spawn_rejects_bad_split_value(tmp_path: Path, monkeypatch) -> None:
