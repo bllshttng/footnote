@@ -55,7 +55,8 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, NamedTuple, Optional
+from types import MappingProxyType
+from typing import List, Mapping, NamedTuple, Optional
 
 import typer
 
@@ -740,7 +741,10 @@ class RosterReading(NamedTuple):
     rows_scanned: int
     workers_by_node: dict
     reason: str = ""
-    rows_by_session: dict = {}
+    # An immutable default, not a bare `{}`. A NamedTuple's default is built
+    # once and shared by every instance that omits it, so a plain dict here is
+    # one caller's `setdefault` away from leaking rows between readings.
+    rows_by_session: Mapping = MappingProxyType({})
 
     def workers_on(self, node_id: str) -> list:
         return self.workers_by_node.get(node_id, [])

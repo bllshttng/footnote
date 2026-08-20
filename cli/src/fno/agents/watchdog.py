@@ -75,6 +75,12 @@ LEAVE = "leave"
 #: notices a live worker on a node no claim covers.
 UNCLAIMED = "unclaimed"
 
+#: Every verdict this module can return. `--only` validates against THIS, not
+#: against a hand-copied tuple in the CLI: the copy went stale the moment a
+#: verdict was added, and `--only unclaimed` exited 2 on a verdict the sweep
+#: had been producing all along.
+VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
+
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
 #: transcript is not a ghost - stopped is already the operator's answer.

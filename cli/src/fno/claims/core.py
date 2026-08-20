@@ -576,7 +576,8 @@ def compare_and_rebind(
     Omitting it preserves the holder, which is every pre-existing caller.
 
     Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
-    rebound) or ``"idempotent"`` (a live same-PID lease refresh).
+    rebound), ``"idempotent"`` (a live same-PID lease refresh), or ``"handover"``
+    (a named prior holder was replaced by ``new_holder``).
     """
     _validate_inputs(key, expected_holder, ttl_ms)
     path = claim_path(key, root=root)
@@ -1107,6 +1108,7 @@ def force_release_claim(
     reason: str,
     *,
     root: Optional[Path] = None,
+    holding_recovery_lock: bool = False,
 ) -> None:
     """Administratively drop a claim, regardless of holder.
 
@@ -1114,6 +1116,13 @@ def force_release_claim(
     override and why. Idempotent: missing claim file is success. Existing
     claims are archived to ``.expired/`` rather than unlinked, so a forensic
     trail survives.
+
+    ``holding_recovery_lock`` is for the one caller that already holds this
+    key's recovery mutex and is calling from inside it. The mutex is a mkdir
+    lock and mkdir locks are not reentrant, so without this the nested acquire
+    below cannot ever succeed: it waits out the full timeout and then archives
+    UNLOCKED, which is the exact race the lock exists to close, bought at five
+    seconds per recovery.
     """
     if not key:
         raise ClaimValidationError("key must be non-empty")
@@ -1138,8 +1147,14 @@ def force_release_claim(
     acquired_lock = False
     recovery_token = ""
     try:
-        token = acquire_dir_mutex(
-            recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
+        token = (
+            None
+            if holding_recovery_lock
+            else acquire_dir_mutex(
+                recovery_lock,
+                _RECOVERY_LOCK_MAX_WAIT_S,
+                poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S,
+            )
         )
         if token is not None:
             recovery_token = token

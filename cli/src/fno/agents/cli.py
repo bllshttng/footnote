@@ -64,7 +64,7 @@ class AgentProgressFilter(str, enum.Enum):
     unknown = "unknown"
 
 
-def _remedy_for(key: str, holder: str) -> str:
+def _remedy_for(key: str) -> str:
     """The two commands that clear KEY, safest first.
 
     A refusal that names only its blocker leaves the operator doing archaeology:
@@ -157,6 +157,7 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
                 key=key,
                 reason=f"holder {claim.holder} (pid {claim.pid}) proven dead at dispatch",
                 root=claims_root_for(key),
+                holding_recovery_lock=True,
             )
         except Exception:  # noqa: BLE001 - a failed release just leaves the refusal
             return None, "release-failed"
@@ -276,17 +277,29 @@ def _spawn_guard_decision(
                         **common,
                     }, 0
         if observation.blocks_dispatch:
+            # A launch-window holder is NOT a wedge. Its claim carries the pid of
+            # the `fno agents spawn` process, which exits the moment it has
+            # forked the worker, so the claim reads SUSPECT for its whole TTL by
+            # construction. The abandonment probe already exempts this holder;
+            # rendering it as a wedge here would put the exemption on one of two
+            # paths and hand an operator force-release advice for a launch that
+            # is proceeding normally.
+            from fno.claims.cli import HANDOVER_HOLDER_PREFIX
+
+            in_launch_window = str(observation.holder or "").startswith(
+                HANDOVER_HOLDER_PREFIX
+            )
             # The remedy is force-release advice, and it is only honest once
             # recovery has been TRIED and failed. A probe takes no recovery, so
             # it says the wedge is recoverable-untried instead and the caller
             # goes on to the real spawn, which recovers or refuses for real.
-            wedged = state == "suspect"
+            wedged = state == "suspect" and not in_launch_window
             recovery = "not-attempted" if wedged and no_reserve else None
             return {
                 "verdict": "already-running",
                 "reason": "suspect-claim" if wedged else "live-claim",
                 **({"recovery": recovery} if recovery else {}),
-                **({"remedy": _remedy_for(node_key, observation.holder)}
+                **({"remedy": _remedy_for(node_key)}
                    if wedged and not no_reserve else {}),
                 **common,
             }, 0
@@ -309,7 +322,15 @@ def _spawn_guard_decision(
         #
         # Exactly ONE retry, never a loop: a genuine racing dispatcher still
         # wins the second acquire, and losing twice means the contention is real.
-        cleared, bucket = _reclaim_if_provably_dead(res_key)
+        # The recovery touches the filesystem (a mkdir mutex, an archive move),
+        # so it can raise for reasons that have nothing to do with the claim -
+        # an unwritable claims dir, for one. Raised inside this handler, that
+        # escapes past the sibling `except Exception` below as a traceback where
+        # the honest answer is the refusal we already have.
+        try:
+            cleared, bucket = _reclaim_if_provably_dead(res_key)
+        except Exception:  # noqa: BLE001 - a failed recovery clears nothing
+            cleared, bucket = None, "unrecoverable"
         if cleared is None:
             # A live spawner is mid-launch: benign dedup, and naming a
             # force-release here would be worse advice than none.
@@ -317,7 +338,7 @@ def _spawn_guard_decision(
                 "verdict": "already-running",
                 "reason": "reservation-held",
                 **({} if bucket == _HOLDER_ALIVE
-                   else {"remedy": _remedy_for(res_key, holder)}),
+                   else {"remedy": _remedy_for(res_key)}),
             }, 0
         try:
             acquire_claim(
@@ -331,7 +352,7 @@ def _spawn_guard_decision(
             return {
                 "verdict": "already-running",
                 "reason": "reservation-held",
-                "remedy": _remedy_for(res_key, holder),
+                "remedy": _remedy_for(res_key),
             }, 0
         except Exception as exc:
             return {
@@ -3177,9 +3198,7 @@ def cmd_watchdog(
 
     from fno.agents import watchdog as wd
 
-    if only is not None and only not in (
-        wd.GHOST, wd.REAP, wd.REROUTE, wd.WAKE, wd.STALE, wd.LEAVE,
-    ):
+    if only is not None and only not in wd.VERDICTS:
         print(f"fno agents watchdog: unknown verdict {only!r}", file=sys.stderr)
         raise typer.Exit(code=2)
 

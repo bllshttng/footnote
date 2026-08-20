@@ -72,7 +72,10 @@ target_is_active() {
     fi
     command -v fno >/dev/null 2>&1 || return 0
     local claim_json
-    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    # --no-roster: this reads `state` and nothing else, and the cross-check's
+    # whole cost lands on exactly the free/stale branch this hits in the common
+    # case. Paying a harness subprocess here buys a field the caller discards.
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
     case "$claim_json" in
         "") return 0 ;;
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
@@ -100,7 +103,9 @@ target_claim_is_live() {
     # No `|| true` here, unlike the fail-open twin above: a nonzero exit means
     # the read did not complete, and a truncated payload can still carry the
     # bytes `"state": "live"`. Strict means an incomplete read is not live.
-    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null) || return 1
+    # --no-roster for the same reason as the twin above: `state` is all this
+    # reads, so the cross-check would be a subprocess bought and thrown away.
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null) || return 1
     case "$claim_json" in
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;

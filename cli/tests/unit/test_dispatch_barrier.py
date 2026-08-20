@@ -298,6 +298,28 @@ def test_an_unprovable_wedge_refuses_and_names_the_way_out(monkeypatch, tmp_path
     assert "fno claim reap --apply" in verdict["remedy"]
 
 
+def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_path):
+    """The spawn-side claim carries the pid of `fno agents spawn`, which exits
+    the moment it has forked the worker. So it reads SUSPECT for its whole TTL
+    by construction, and a second dispatcher used to call a healthy in-flight
+    launch a wedge and hand back force-release advice for it."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.claims.cli import HANDOVER_HOLDER_PREFIX
+    from fno.claims.core import acquire_claim, claim_status
+
+    acquire_claim(
+        "node:N", f"{HANDOVER_HOLDER_PREFIX}t-N-worker", ttl_ms=900_000,
+        pid=_dead_pid(), root=tmp_path,
+    )
+    assert claim_status("node:N", root=tmp_path)["state"] == "suspect"
+    _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
+
+    verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
+    assert verdict["reason"] == "live-claim"
+    assert "remedy" not in verdict
+    assert exit_code == 0
+
+
 def test_a_probe_reports_the_wedge_as_untried_and_offers_no_remedy(monkeypatch, tmp_path):
     """A probe takes no recovery, so it has nothing to say about whether the
     wedge clears. It says untried, and the shell callers read that and go on to

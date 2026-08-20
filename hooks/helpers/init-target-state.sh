@@ -639,7 +639,10 @@ PYEOF
     #     shows NO fresh activity. Fresh activity => a live session is working
     #     here; refuse as `contested` (the claim-wait BLOCKED contract: the
     #     caller relays REASON/UNBLOCKS_AFTER and stops) rather than steal.
-    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json 2>/dev/null \
+    # --no-roster: only `state` is read here, and this call hits the free/stale
+    # branch in the common case, which is exactly where the cross-check spends
+    # a harness subprocess on a field nothing downstream looks at.
+    _CLAIM_STATE=$(fno claim status "$_STALE_CLAIM_KEY" --json --no-roster 2>/dev/null \
       | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' || true)
     case "${_CLAIM_STATE:-}" in
       free|stale|corrupted)
@@ -1267,11 +1270,21 @@ PYEOF
     # a king reading the claimed half would conclude the unclaimed half is free
     # and staff it, which is the duplicate this whole change exists to stop.
     if [[ "$_MULTI_OK" -ne 1 ]]; then
+      _MULTI_KEPT=""
       for _mnode in $_EXTRA_CLAIMED; do
+        # NEVER the node this worker was spawned for. That claim was taken at
+        # dispatch and handed to this session, and this session is about to
+        # build it. Releasing it because a SIBLING id was held elsewhere would
+        # publish the one node genuinely being worked as free, which is the
+        # duplicate launch the rollback exists to prevent.
+        if [[ -n "${FNO_NODE:-}" && "$_mnode" == "${FNO_NODE}" ]]; then
+          _MULTI_KEPT="$_mnode"
+          continue
+        fi
         FNO_CLAIMS_ROOT="$HOME" fno claim release "node:${_mnode}" \
           --holder "$_MULTI_HOLDER" >/dev/null 2>&1 || true
       done
-      _EXTRA_CLAIMED=""
+      _EXTRA_CLAIMED="$_MULTI_KEPT"
     fi
     if [[ -n "$_EXTRA_CLAIMED" ]]; then
       echo "target: claimed $_EXTRA_CLAIMED for this session" >&2

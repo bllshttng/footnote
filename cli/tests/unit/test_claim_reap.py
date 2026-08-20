@@ -86,35 +86,56 @@ class TestIsProvablyDead:
 
 
 class TestExpiredTTLIsHostIndependent:
-    """x-cd1e: an expired TTL is provably dead from any host.
+    """x-cd1e: an expired TTL is provably dead from any host, for the rows that
+    cannot be identified at all.
 
     The measured leak: this machine wrote claims as ``BB16s-MBP``,
     ``BB16s-MacBook-Pro.local`` and a tailnet name within one hour. Rows
     predating the ``machine_id`` field carry only that moving name, so a
     host-gated sweep could never satisfy its same-machine proof and kept them
-    forever. Expiry is a clock reading, not a local measurement, so it needs no
-    such proof.
+    forever. Expiry is a clock reading, not a local measurement, so for THOSE
+    rows it needs no such proof.
+
+    A row that names a real other machine keeps the gate, and the boundary is
+    load-bearing: ``classify``'s hybrid arm reads an expired claim as LIVE when
+    its pid is live, and that pid means something only on the machine that
+    wrote it. Reaping one from here would archive a claim its owner is still
+    refreshing, and the next reader would staff a second worker onto the node.
     """
 
-    def test_expired_ttl_off_host_is_reapable(self):
+    def test_expired_ttl_on_an_unidentifiable_row_is_reapable(self):
+        """The row this arm exists for: no machine_id, and a hostname that has
+        already moved, so no same-machine proof is ever possible for it."""
         claim = Claim(
             key="k", holder="h", acquired_at=now_ms() - 120_000,
             expires_at=now_ms() - 60_000, pid=_dead_pid(),
             host="bb16s-macbook-pro.bigeye-truck.ts.net",
-            machine_id="not-this-machine",
+            machine_id=None,
         )
         assert is_provably_dead(claim) is True
 
-    def test_expired_ttl_off_host_with_a_live_local_pid_is_still_reapable(self):
+    def test_expired_ttl_on_an_unidentifiable_row_ignores_a_live_local_pid(self):
         """The pid arm cannot rescue it: that pid belongs to another machine's
         namespace, so a locally-live number proves nothing about the holder.
         """
         claim = Claim(
             key="k", holder="h", acquired_at=now_ms() - 120_000,
             expires_at=now_ms() - 60_000, pid=os.getpid(),
-            host="some-other-host", machine_id="not-this-machine",
+            host="some-other-host", machine_id=None,
         )
         assert is_provably_dead(claim) is True
+
+    def test_expired_ttl_from_a_named_other_machine_is_kept(self):
+        """The boundary. That machine's `classify` reads this same claim as
+        LIVE whenever its pid is live, so archiving it here publishes as free a
+        node its owner is still working."""
+        claim = Claim(
+            key="k", holder="h", acquired_at=now_ms() - 120_000,
+            expires_at=now_ms() - 60_000, pid=_dead_pid(),
+            host="some-other-host", machine_id="not-this-machine",
+        )
+        provably_dead, bucket = classify_for_sweep(claim)
+        assert (provably_dead, bucket) == (False, "offhost")
 
     def test_off_host_pid_liveness_claim_is_still_kept(self):
         """The pid arm keeps its same-machine proof. Only expiry travels."""

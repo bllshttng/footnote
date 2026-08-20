@@ -167,8 +167,20 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     """
     same_machine = is_same_machine(claim.host, claim.machine_id)
     # The same-machine gate guards the PID arm only. An expired TTL carries its
-    # own proof, so it must reach classify() even from a host we cannot verify.
-    if not is_expired(claim, now=now) and not same_machine:
+    # own proof, so it reaches classify() even from a host we cannot verify -
+    # but ONLY for a claim with no machine_id.
+    #
+    # That is exactly the row this arm exists for: written before the field
+    # existed, identified by a hostname that MOVES, so it can never satisfy a
+    # same-machine proof and stays unreapable for the life of the disk.
+    #
+    # A claim that DOES name another machine keeps the gate. classify()'s hybrid
+    # arm reads an expired claim as LIVE when its pid is live, and that pid is
+    # only meaningful on the machine that wrote it. Reaping from here would let
+    # this host archive a claim its owner is still refreshing, and the next
+    # reader would see the node free and staff a second worker onto it.
+    unidentifiable = not claim.machine_id
+    if not same_machine and not (unidentifiable and is_expired(claim, now=now)):
         return False, "offhost"
     state = classify(claim, now=now)
     if state is ClaimState.STALE:
