@@ -7,7 +7,10 @@ if [[ $# -eq 0 ]]; then
 fi
 
 # sccache was installed 2026-08-19. Before that this wrapper fell through
-# to bare rustc silently, and every worktree compiled cold.
+# to bare rustc silently, and every worktree compiled cold. Until 2026-08-20
+# it was installed-but-inert too: Cargo decides incremental before this
+# script ever runs, so `.cargo/config.toml`'s `[build] incremental = false`
+# is what actually enables caching, not anything in this wrapper.
 if command -v sccache >/dev/null 2>&1; then
     HAS_SCCACHE=1
 else
