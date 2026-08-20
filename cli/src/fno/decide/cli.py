@@ -362,10 +362,16 @@ def list_cmd(
         # column far more often than it is read here, so the authority and the
         # attestation have to be part of what a reader copies.
         attested = "  [attested]" if d.get("attested_by") else ""
+        # Parenthesised only when there IS one. Law is no longer defaulted, so
+        # most rows claim no authority, and `operator ()` on every line is
+        # noise on the one line added to carry provenance. `or ""` rather than
+        # a .get default: an explicit JSON null would otherwise print "None".
+        authority = str(d.get("authority_source") or "")
+        authority = f" ({authority})" if authority else ""
         typer.echo(
-            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts', '')}  {scope}"
-            f"{d.get('decided_by', '')} ({d.get('authority_source', '')})"
-            f"{attested}  {d.get('decision', '')}{marker}"
+            f"{lane_marker}  {d.get('decision_id')}  {d.get('ts') or ''}  {scope}"
+            f"{d.get('decided_by') or ''}{authority}"
+            f"{attested}  {d.get('decision') or ''}{marker}"
         )
         if d.get("relayed_by"):
             typer.echo(

@@ -190,15 +190,38 @@ def clear(
     answer: str = typer.Option(
         None, "--answer", help="The answer, recorded so the decision outlives the session."
     ),
+    authority: str = typer.Option(
+        None,
+        "--authority",
+        help="How the answerer was entitled to answer: 'operator', 'crown', "
+        "'agent', or 'beastmode'. Omit to claim none.",
+    ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
-    from fno.decide import IndexWriteError
+    from fno.decide import (
+        AUTHORITY_SOURCES,
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+    )
     from fno.events import operator_question_closed
     from fno.outstanding.core import (
         QuestionIndexWriteError,
         append_question_event,
         read_open_questions,
     )
+
+    # Answering a question the operator was formally asked is the canonical
+    # law-producing act in this system. Without this flag `clear` had nothing
+    # to say once law stopped being defaulted, so the one path that most
+    # deserves the operator lane could never reach it.
+    if authority is not None and authority not in AUTHORITY_SOURCES:
+        typer.echo(
+            f"outstanding: --authority '{authority}' is not one of "
+            f"{', '.join(AUTHORITY_SOURCES)}. Nothing was closed.",
+            err=True,
+        )
+        raise typer.Exit(2)
 
     root = _storage_root()
     try:
@@ -234,15 +257,23 @@ def clear(
                 from fno.decide import record_decision
 
                 record = open_by_id[qid]
-                recorded = record_decision(
-                    decision=answer,
-                    subject=record.node,
-                    question_id=qid,
-                    question=record.question,
-                    asked_by=record.asker or record.session_id,
-                    asked_at=record.ts or None,
-                    events_root=root,
-                )["decision_id"]
+                try:
+                    recorded = record_decision(
+                        decision=answer,
+                        subject=record.node,
+                        question_id=qid,
+                        question=record.question,
+                        asked_by=record.asker or record.session_id,
+                        asked_at=record.ts or None,
+                        authority_source=authority,
+                        events_root=root,
+                    )["decision_id"]
+                except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+                    # Refuse the CLOSE too, never just the decision. Closing a
+                    # question whose answer was refused would retire it with
+                    # nothing on record, which is the worse of the two.
+                    typer.echo(f"outstanding: refused, {qid} stays open: {exc}", err=True)
+                    raise typer.Exit(3)
             try:
                 event = operator_question_closed(
                     question_id=qid, answer=answer, closed_by=closed_by

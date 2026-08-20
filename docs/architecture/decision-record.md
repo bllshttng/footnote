@@ -49,7 +49,9 @@ Law is never DEFAULTED, in any state. A caller who wants the operator lane passe
 
 State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno decide --authority operator` was enough to forge an attested row in the law lane.
 
-Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
+Say the residual limit out loud, because it is narrower than the rule it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` reports one from a context with no person in it, measured on this box. So the terminal raises the cost of forging law and does not prevent it. Forging law THROUGH THIS VERB now takes two deliberate acts, a wrapped tty and an explicit flag, and neither happens by accident.
+
+That claim is scoped to the verb on purpose. The index is an append-only file that nothing authenticates. One raw line written into `~/.fno/decisions.jsonl` reads as law, and `fno decide reindex` re-emits a forged journal row verbatim. No local signal proves a human is present, because a caller that owns the process owns every local signal. Proof needs an out-of-band attestation this verb cannot mint for itself.
 
 On 2026-08-19 an agent passed `--decided-by "J.N. Choi"`, and that name landed in `decided_by`. Five workers had been told to verify their orders by reading that field. Each did it correctly and got a fabricated yes.
 
