@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from types import SimpleNamespace
+
 import pytest
 
 from fno.paths_testing import use_tmpdir
@@ -4428,6 +4430,43 @@ def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
     assert "submission unconfirmed" in message
     assert "reaped" in message
     assert load_registry() == [], "an unstarted worker must not hold a live row"
+
+
+def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
+    """A timeout at the trust gate is not the timeout at the submit, and the
+    modal is the whole difference.
+
+    At the submit the seed was already typed into a RUNNING pane, so an
+    unanswered RPC leaves a worker that may be doing its job. At the trust gate
+    the modal may still be up, and a pane behind an unanswered modal executes
+    NOTHING while holding a slot against max_live. That is the leak this
+    function exists to close, so both trust arms fail the spawn.
+
+    The source must not say `trust-cleared` either. Nothing read back that the
+    gate cleared, and claiming it makes a wedged pane and a healthy one produce
+    identical receipts."""
+    from fno.agents import mux_spawn
+    from fno.agents.mux_spawn import DispatchAskError, _submit_spawn_seed
+
+    modal = "Do you trust this folder?"
+
+    def runner_that_times_out_after_the_modal(argv, **kw):
+        # argv[0] is the fno binary `_run_mux` prepends. The first read paints
+        # the modal; every later RPC times out, which is what `_run_mux` turns
+        # into DispatchAskError.
+        if argv[1:4] == ["mux", "pane", "read"] and not calls:
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=modal, stderr="")
+        raise DispatchAskError("mux did not answer", exit_code=1)
+
+    calls: list = []
+    state, detail, source = _submit_spawn_seed(
+        "agy", "sess", 3, "seed", runner_that_times_out_after_the_modal
+    )
+
+    assert state == "unconfirmed", "a pane behind a live modal must not keep a row"
+    assert source != "trust-cleared", "nothing read back that the gate cleared"
+    assert "modal may still be up" in detail
 
 
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(

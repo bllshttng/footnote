@@ -117,6 +117,16 @@ RETIRE_GRACE_S = 900
 #: than costing its own alternative.
 _TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
 
+#: Trailing decoration a question mark can hide behind. A worker closing on
+#: `**Do you want me to cover the migration path too?**` ends on `*`, and a bare
+#: `endswith("?")` answered no-question-pending for it. Agents write bold,
+#: quoted and parenthesised closing questions constantly, and this predicate
+#: gates a lane that stops sessions.
+#:
+#: Stripped from the END only, so a `?` anywhere else is still not a question at
+#: the end of the turn. Over-stripping can only ever DECLINE to retire.
+_QUESTION_TRAILERS = "*_~`'\"\u2019\u201d)]}>"
+
 #: A promise the worker actually CLOSED. `classify_tail` answers `done` on any
 #: `<promise` in the last turn, a prose mention included, and agents working on
 #: this repo write the tag in prose routinely. The question half of this lane
@@ -128,21 +138,20 @@ _TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
 #: unclosed tag means a turn cut off mid-promise, which is not a worker calmly
 #: declaring itself finished. Refusing there costs a slot that stays held; the
 #: other direction stops a session that never said it was done.
-#: Trailing decoration a question mark can hide behind. A worker closing on
-#: `**Do you want me to cover the migration path too?**` ends on `*`, and a bare
-#: `endswith("?")` answered no-question-pending for it. Agents write bold,
-#: quoted and parenthesised closing questions constantly, and this predicate
-#: gates a lane that stops sessions.
-#:
-#: Stripped from the END only, so a `?` anywhere else is still not a question at
-#: the end of the turn. Over-stripping can only ever DECLINE to retire.
-_QUESTION_TRAILERS = "*_~`'\"\u2019\u201d)]}>"
-
 _CLOSED_PROMISE_RE = re.compile(
     r"<promise\b[^>]*>.*?</promise\s*>|<promise\b[^>]*/>",
     re.DOTALL | re.IGNORECASE,
 )
 
+#: States that make a transcript-less row a ghost: the row claims a live-ish
+#: session whose recorded id resolves to nothing. A ``stopped`` row with no
+#: transcript is not a ghost - stopped is already the operator's answer.
+#: ``_row_state`` folds claude's ``busy`` onto ``working`` and its ``needs
+#: input`` onto ``blocked`` before the classifier runs, so on rows built by
+#: ``fleet_rows`` the fold is what keeps a ``busy`` ghost from reading as a
+#: healthy leave - not the ``busy`` entry here, which cannot match. It stays
+#: because ``verdicts`` is a pure function anyone can hand a raw row, and a
+#: caller that skips the fold must not silently lose the ghost lane.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: Membership here is CANDIDACY, not a wake. The lane below wakes only on
 #: ``classify_tail == "stalled"``, the tail asserting the session went silent

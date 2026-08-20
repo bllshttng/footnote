@@ -2131,14 +2131,18 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
-            # `unattempted`, not `unconfirmed`: a genuine unconfirmed submit now
-            # fails the spawn inside dispatch_spawn_pane and never reaches a
-            # receipt, so keying on it here would be a dead branch and exit 22
-            # would silently stop firing. `unattempted` is the state that still
-            # reaches a written receipt - the pane is live but its frame could
-            # not be read, so the seed is unverified - and that is exactly what
-            # exit 22 has always meant to a caller.
-            if pane_result.seed == "unattempted":
+            # Exit 22 means one thing: a receipt WAS written and the seed on it
+            # is unverified. So it keys on every state that reaches this line
+            # without a confirmed submit, and there are two.
+            #
+            # `unconfirmed` is deliberately absent, and not because it is
+            # verified: it fails the spawn inside dispatch_spawn_pane and never
+            # reaches a receipt at all, so keying on it here would be a dead
+            # branch. `unattempted` is a live pane whose frame could not be
+            # read. `unknown` is a live pane whose submit mux never answered.
+            # Both leave a caller holding a row it cannot trust, which is what
+            # exit 22 has always told it.
+            if pane_result.seed in ("unattempted", "unknown"):
                 raise typer.Exit(code=22)
             return
         if substrate == "headless":

@@ -2595,11 +2595,12 @@ def _submit_spawn_seed(
 ) -> tuple[str, str, str]:
     """Submit a spawn seed after the shared readiness probe has painted.
 
-    Three states, and the split between the last two is load-bearing:
+    Four states, and every split between them is load-bearing:
 
     ``submitted``    the seed is in flight (sent, or it rode in the argv).
-    ``unconfirmed``  a send WAS attempted and did not land. This is a fact
-                     about the seed, so the caller may fail the spawn on it.
+    ``unconfirmed``  a send WAS attempted and did not land, or cannot be shown
+                     to have landed into a pane that can run it. A fact about
+                     the seed, so the caller may fail the spawn on it.
     ``unattempted``  the pane frame could not be read, so no send was tried.
                      That is a fact about the INSTRUMENT, not about the seed,
                      and an alive-but-unpainted child is still a live worker.
@@ -2607,13 +2608,18 @@ def _submit_spawn_seed(
                      for the crime of not having painted yet. It is also the
                      only state the caller retries, because it is the only one
                      where nothing can already be sitting in the pane's buffer.
+    ``unknown``      the seed was typed into a RUNNING pane and mux did not
+                     answer the submit. The keystroke may have landed, so
+                     reaping would kill a worker already doing its job, and a
+                     retry would type the seed twice. The row survives and the
+                     receipt carries the uncertainty.
 
-    The agy trust gate is ``unconfirmed`` on every arm, including the dialog
-    still being on screen after the clearing submit. That last one reads like a
-    paint-timing miss and is not: the submit WAS sent, the modal outlived it,
-    and until a human answers the modal the pane runs nothing. Calling it
-    ``unattempted`` would write a live registry row for a wedged pane, which is
-    the slot leak this whole change exists to close.
+    The agy trust gate is ``unconfirmed`` on every arm, including both timeouts
+    and the dialog still being on screen after the clearing submit. None of
+    those is the ``unknown`` case, and the modal is the reason: an unanswered
+    modal is a pane that executes NOTHING while holding a slot. Calling any of
+    them ``unattempted`` or ``unknown`` would write a live registry row for a
+    wedged pane, which is the slot leak this whole change exists to close.
     """
     try:
         screen = _run_mux(
@@ -2633,9 +2639,17 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            # mux did not ANSWER; it may still have delivered the keystroke.
-            # Not a rejection, so it must not reap a pane that may be running.
-            return "unknown", "mux did not answer the agy trust submit", "trust-cleared"
+            # `unconfirmed`, NOT `unknown`, and the difference from the submit
+            # arm at the bottom of this function is the modal. There, the seed
+            # was already typed into a running pane and a timeout leaves a
+            # worker that may be doing its job. Here the modal may still be up,
+            # and a pane behind an unanswered modal runs NOTHING while holding
+            # a slot against max_live - the leak this function exists to close.
+            #
+            # The source is "" for the same reason: nothing read back that the
+            # gate cleared, and `trust-cleared` would make a wedged pane and a
+            # healthy one produce identical receipts.
+            return "unconfirmed", "mux did not answer the agy trust submit; the modal may still be up", ""
         if cleared.returncode != 0:
             return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
         try:
@@ -2644,9 +2658,12 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            # The clearing submit went through and only the READ-BACK timed out,
-            # so whether the modal cleared is unknown. Refuse to reap on it.
-            return "unknown", "mux did not answer the agy trust read-back", "trust-cleared"
+            # The read-back IS the evidence the modal cleared, so a timeout here
+            # leaves that unproven. Same reasoning as the arm above: an
+            # unanswered modal is a pane that executes nothing, so this fails
+            # the spawn rather than writing a row for it, and it must not claim
+            # `trust-cleared` for a read that never came back.
+            return "unconfirmed", "mux did not answer the agy trust read-back; the modal may still be up", ""
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
             return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"

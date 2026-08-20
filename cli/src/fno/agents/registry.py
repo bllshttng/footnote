@@ -1441,7 +1441,24 @@ def register_existing_session(
                 # Filling an empty one is safe and is what the healer needs: a
                 # row that never stated its origin gains the only claim anyone
                 # has made about it.
-                if origin is not None and entry.origin is None:
+                #
+                # `adopted` -> `operator` is the one CHANGE allowed, because it
+                # is the only transition with no downside. The healer stamps
+                # `adopted` on store rows that its own comment says are
+                # routinely an operator's terminal no SessionStart hook had
+                # registered yet. Refusing the later hook froze those rows at
+                # `adopted`, and `_recipient_is_attended` requires exactly
+                # `operator`, so `fno mail send` stopped escalating questions to
+                # that human permanently and said nothing. The upgrade also
+                # makes the retire lane STRICTER, since `operator` answers
+                # `spawned=False` where `adopted` answers unknown, and both
+                # already refuse to retire. Neither failure this rule was
+                # written against involves it: a blind `None` never lands here,
+                # and `operator` still cannot touch a `spawned` row.
+                upgradeable = entry.origin is None or (
+                    entry.origin == "adopted" and origin == "operator"
+                )
+                if origin is not None and upgradeable:
                     entry.origin = origin
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg
