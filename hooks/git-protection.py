@@ -1177,11 +1177,28 @@ def _effective_argv(seg):
     """Strip a leading run of subshell `(`, env-assignments (NAME=value), and
     command wrappers (sudo/env/...) so the real executable token lands at
     argv[0]. Keeps a wrapper prefix from hiding a gated verb."""
+    return _effective_argv_and_assignments(seg)[0]
+
+
+def _effective_argv_and_assignments(seg):
+    """The real argv, plus the NAME=value assignments a shell would apply.
+
+    One walk, two answers, because a second copy of this scan disagreed with it.
+    `_pr_create_signals` used to re-implement the prefix walk and got two shapes
+    wrong that this function has always handled: a create behind `bash -c`,
+    which is unwrapped here but one opaque token there, and a wrapper carrying
+    its own option (`timeout 60 FNO_PR_CLOSURE_OK=1 gh pr create`), skipped here
+    but a hard stop there. A thinner second implementation of an existing one is
+    the pitfall by name, so this is the only walk now.
+    """
     i, n = 0, len(seg)
     saw_wrapper = False
+    assignments = []
     while i < n:
         tok = seg[i]
         if tok == "(" or _ASSIGN_RE.match(tok):
+            if tok != "(":
+                assignments.append(tok)
             i += 1
             continue
         # Lowercased for the same reason the segment finders are: on a
@@ -1226,8 +1243,10 @@ def _effective_argv(seg):
         except ValueError:
             inner = argv[0].split()
         if inner:
-            return _effective_argv(inner)
-    return argv
+            inner_argv, inner_assignments = _effective_argv_and_assignments(inner)
+            # The wrapper's own assignments still apply to the inner command.
+            return inner_argv, assignments + inner_assignments
+    return argv, assignments
 
 
 # Git's global options, which sit BEFORE the subcommand. The value-taking ones
@@ -1384,57 +1403,6 @@ def _find_pr_create_segments(segments):
     return out
 
 
-def _pr_create_signals(seg):
-    """The closure-relevant facts of one `gh pr create` segment, from its tokens.
-
-    Returns (hatch, head, body_files). All three by POSITION, never presence:
-    a whole-command regex read every one of them out of quoted prose. A --body
-    merely QUOTING the words "--head chore/tidy-docs" retargeted the gate; one
-    naming a --body-file path in prose satisfied it; and the string
-    FNO_PR_CLOSURE_OK=1 anywhere in a commit message opened it. That is the
-    marker-substring false allow this guard exists to close, on three flags.
-    Argv position is the only thing separating a flag from a word, and shlex
-    has already collapsed each quoted argument into one token.
-    """
-    hatch, head, body_files = False, None, []
-    i, n = 0, len(seg)
-    # The leading assignment / wrapper run, exactly where a shell applies one.
-    while i < n:
-        tok = seg[i]
-        if tok == "(":
-            i += 1
-            continue
-        if _ASSIGN_RE.match(tok):
-            if tok == "FNO_PR_CLOSURE_OK=1":
-                hatch = True
-            i += 1
-            continue
-        if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
-            i += 1
-            continue
-        break
-    while i < n:
-        tok = seg[i]
-        if tok in ("--head", "-H") and i + 1 < n:
-            head = seg[i + 1]
-            i += 2
-            continue
-        if tok.startswith("--head="):
-            head = tok[len("--head="):]
-            i += 1
-            continue
-        if tok in ("--body-file", "-F") and i + 1 < n:
-            body_files.append(seg[i + 1])
-            i += 2
-            continue
-        if tok.startswith("--body-file="):
-            body_files.append(tok[len("--body-file="):])
-            i += 1
-            continue
-        i += 1
-    return hatch, head, body_files
-
-
 # Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
 # scripts/lib/node-id.sh. This hook is stdlib-only and runs under a bare
 # interpreter that may not import fno at all, so it cannot defer to either.
@@ -1479,6 +1447,49 @@ def _file_trailer_claims(path, ids):
     return all(
         re.search(rf"(^|[\s,]){re.escape(node_id)}($|[\s,])", claimed) for node_id in ids
     )
+
+
+def _pr_create_signals(seg):
+    """The closure-relevant facts of one `gh pr create` segment, from its tokens.
+
+    Returns (hatch, head, body_files). All three by POSITION, never presence:
+    a whole-command regex read every one of them out of quoted prose. A --body
+    merely QUOTING the words "--head chore/tidy-docs" retargeted the gate; one
+    naming a --body-file path in prose satisfied it; and the string
+    FNO_PR_CLOSURE_OK=1 anywhere in a commit message opened it. That is the
+    marker-substring false allow this guard exists to close, on three flags.
+    Argv position is the only thing separating a flag from a word, and shlex
+    has already collapsed each quoted argument into one token.
+
+    The prefix walk is _effective_argv_and_assignments', not a copy of it, so
+    this agrees with the detector on `bash -c "gh pr create ..."` and on a
+    wrapper carrying its own option.
+    """
+    argv, assignments = _effective_argv_and_assignments(seg)
+    hatch = "FNO_PR_CLOSURE_OK=1" in assignments
+    argv = _strip_gh_global_opts(argv)
+    head, body_files = None, []
+    i, n = 0, len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok in ("--head", "-H") and i + 1 < n:
+            head = argv[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--head="):
+            head = tok[len("--head="):]
+            i += 1
+            continue
+        if tok in ("--body-file", "-F") and i + 1 < n:
+            body_files.append(argv[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--body-file="):
+            body_files.append(tok[len("--body-file="):])
+            i += 1
+            continue
+        i += 1
+    return hatch, head, body_files
 
 
 def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):

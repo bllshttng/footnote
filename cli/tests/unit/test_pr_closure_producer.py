@@ -25,6 +25,14 @@ from fno.pr.closure import (
     parse_closure_trailer,
 )
 
+# Every branch-derived claim below is verified against the graph by the
+# producer, so these tests name their own universe rather than depending on
+# whatever ~/.fno/graph.json happens to hold. Passing an explicit set is also
+# what keeps them pure: the default path reads the real graph.
+KNOWN = frozenset({"x-4271", "x-5a83", "x-76d1", "x-49ec", "x-1111", "ab-55ba9adb",
+                   "x-5b667", "x-cdef"})
+
+
 REPO = Path(__file__).resolve().parents[3]
 GATE = REPO / "scripts" / "ci" / "check-pr-node-closure.sh"
 HOOK = REPO / "hooks" / "git-protection.py"
@@ -79,44 +87,44 @@ def test_branch_node_ids_rejects_a_bare_substring():
 # ---- ensure_closure_trailer ----
 
 def test_appends_the_trailer_when_the_body_has_none():
-    out = ensure_closure_trailer("Some summary.", "x-4271-x-5a83-pr-status-tally")
+    out = ensure_closure_trailer("Some summary.", "x-4271-x-5a83-pr-status-tally", known_ids=KNOWN)
     assert parse_closure_trailer(out) == ["x-4271", "x-5a83"]
     assert out.startswith("Some summary.")
 
 
 def test_is_a_noop_on_a_compliant_body():
     body = "Summary.\n\nBacklog-Closure: x-76d1\n"
-    assert ensure_closure_trailer(body, "feature/x-76d1") == body
+    assert ensure_closure_trailer(body, "feature/x-76d1", known_ids=KNOWN) == body
 
 
 def test_is_a_noop_on_a_branch_naming_no_node():
     body = "Summary."
-    assert ensure_closure_trailer(body, "chore/tidy-docs") == body
+    assert ensure_closure_trailer(body, "chore/tidy-docs", known_ids=KNOWN) == body
 
 
 def test_is_idempotent():
-    once = ensure_closure_trailer("Summary.", "feature/x-49ec")
-    assert ensure_closure_trailer(once, "feature/x-49ec") == once
+    once = ensure_closure_trailer("Summary.", "feature/x-49ec", known_ids=KNOWN)
+    assert ensure_closure_trailer(once, "feature/x-49ec", known_ids=KNOWN) == once
 
 
 def test_keeps_existing_claims_when_adding_a_missing_one():
     body = "Summary.\n\nBacklog-Closure: x-1111\n"
-    out = ensure_closure_trailer(body, "feature/x-49ec")
+    out = ensure_closure_trailer(body, "feature/x-49ec", known_ids=KNOWN)
     assert parse_closure_trailer(out) == ["x-1111", "x-49ec"]
 
 
 def test_extra_ids_join_the_claim():
-    out = ensure_closure_trailer("Summary.", "batch/code", extra_ids=["x-aaaa", "x-bbbb"])
+    out = ensure_closure_trailer("Summary.", "batch/code", extra_ids=["x-aaaa", "x-bbbb"], known_ids=KNOWN)
     assert parse_closure_trailer(out) == ["x-aaaa", "x-bbbb"]
 
 
 def test_malformed_extra_ids_are_dropped():
-    out = ensure_closure_trailer("Summary.", "feature/x-49ec", extra_ids=["NOT-AN-ID"])
+    out = ensure_closure_trailer("Summary.", "feature/x-49ec", extra_ids=["NOT-AN-ID"], known_ids=KNOWN)
     assert parse_closure_trailer(out) == ["x-49ec"]
 
 
 def test_an_empty_body_still_gets_a_parseable_trailer():
-    assert parse_closure_trailer(ensure_closure_trailer("", "feature/x-49ec")) == ["x-49ec"]
+    assert parse_closure_trailer(ensure_closure_trailer("", "feature/x-49ec", known_ids=KNOWN)) == ["x-49ec"]
 
 
 # ---- Parity with the real gate, both directions ----
@@ -130,7 +138,7 @@ def test_produced_body_passes_the_real_gate(head_ref):
     # green on the treated body is the producer working and not the gate
     # skipping this ref.
     assert _gate(body, head_ref) == 1
-    assert _gate(ensure_closure_trailer(body, head_ref), head_ref) == 0
+    assert _gate(ensure_closure_trailer(body, head_ref, known_ids=KNOWN), head_ref) == 0
 
 
 @pytest.mark.parametrize(
@@ -143,7 +151,7 @@ def test_the_gate_never_demands_an_id_spanning_a_slash(head_ref):
     # the producer side could generate, which is the whole defect this pair
     # exists to close.
     assert branch_node_ids(head_ref) == []
-    assert _gate(ensure_closure_trailer("Summary.", head_ref), head_ref) == 0
+    assert _gate(ensure_closure_trailer("Summary.", head_ref, known_ids=KNOWN), head_ref) == 0
 
 
 # ---- Call site: fno worker ship ----
@@ -165,7 +173,8 @@ def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     ]
     with patch("subprocess.run", mock_run), patch(
         "fno.pr._preflight.check_stale_base", return_value=(0, None)
-    ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")):
+    ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")), \
+            patch("fno.pr.closure.known_node_ids", lambda: KNOWN):
         from fno.worker.ship import ship
 
         ship(
@@ -178,6 +187,33 @@ def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     argv = mock_run.call_args_list[2][0][0]
     sent_body = argv[argv.index("--body") + 1]
     assert parse_closure_trailer(sent_body) == ["x-49ec"]
+
+
+def test_a_graph_unknown_branch_candidate_is_never_claimed():
+    # "cache-dead" is cache plus the hex dead, so it parses as a node id and is
+    # ordinary English. Claiming it passed CI and then made bind_closure_claims
+    # refuse the WHOLE binding at merge, so the real node never closed and
+    # nothing said so. A gate may DEMAND liberally; a producer that MINTS must
+    # be right.
+    out = ensure_closure_trailer(
+        "Summary.", "feature/x-49ec-cache-dead", known_ids=KNOWN
+    )
+    assert parse_closure_trailer(out) == ["x-49ec"]
+
+
+def test_an_unreadable_graph_claims_nothing_from_the_branch():
+    # Empty is the safe direction: nothing verified means nothing claimed, and
+    # the CI gate reds loudly where a bogus claim would have passed silently.
+    out = ensure_closure_trailer("Summary.", "feature/x-49ec", known_ids=frozenset())
+    assert parse_closure_trailer(out) == []
+
+
+def test_extra_ids_are_an_assertion_and_bypass_verification():
+    # The caller knows these ship here; the branch is only ever a guess.
+    out = ensure_closure_trailer(
+        "Summary.", "chore/tidy-docs", extra_ids=["x-aaaa"], known_ids=frozenset()
+    )
+    assert parse_closure_trailer(out) == ["x-aaaa"]
 
 
 # ---- Call site: the batch lane ----
@@ -193,18 +229,19 @@ def test_batch_ship_claims_every_member(monkeypatch):
             return subprocess.CompletedProcess(argv, 0, "[]", "")
         return subprocess.CompletedProcess(argv, 0, "https://x/pull/7", "")
 
-    # The branch is the shape ship_batch actually produces. Patching it to a
-    # tidier "batch/code" pinned the tag and not the destination: the real
-    # "feature/batch-code-a1b2c3" parsed as node-bearing, so the trailer
-    # carried a "code-a1b2c3" the graph does not carry, and
-    # bind_closure_claims voided every genuine member claim beside it.
+    # The PRE-RENAME branch shape on purpose. A batch already open when the
+    # rename landed still carries it, so pinning only the new shape tests a
+    # generation that cannot exist yet. The ship path passes no head ref at
+    # all, which is what makes both generations bind their real members.
     monkeypatch.setattr(
         batch_mod, "read_batch", lambda *_a, **_k: {
-            "status": "open", "worktree": "/tmp/wt", "branch": "feature/batch-code.a1b2c3",
+            "status": "open", "worktree": "/tmp/wt", "branch": "feature/batch-code-a1b2c3",
             "members": ["x-aaaa", "x-bbbb"],
         }
     )
     monkeypatch.setattr(batch_mod, "member_ids", lambda _b: ["x-aaaa", "x-bbbb"])
+    # The graph is not consulted for members: they are the caller's assertion.
+    monkeypatch.setattr("fno.pr.closure.known_node_ids", lambda: frozenset())
     monkeypatch.setattr(batch_mod, "_batch_pr_body", lambda _b: "Batch body.")
     monkeypatch.setattr(batch_mod, "_set_member_pr_refs", lambda *_a, **_k: None)
     monkeypatch.setattr(batch_mod, "close_batch", lambda **_k: None)
@@ -282,7 +319,7 @@ def test_a_batch_branch_never_parses_as_node_bearing(domain):
     # carry, and one unknown id refuses the WHOLE binding.
     ref = f"feature/batch-{domain}.a1b2c3"
     assert branch_node_ids(ref) == []
-    assert _gate(ensure_closure_trailer("Batch body.", ref), ref) == 0
+    assert _gate(ensure_closure_trailer("Batch body.", ref, known_ids=KNOWN), ref) == 0
 
 
 def test_hook_docstrings_do_not_claim_creation_is_ungated():
@@ -413,7 +450,7 @@ def test_hook_still_denies_a_node_bearing_explicit_head(node_branch_repo):
 @pytest.mark.parametrize("flag", ["--body-file", "-F"])
 def test_hook_reads_a_body_file_under_either_spelling(flag, node_branch_repo, tmp_path):
     body = tmp_path / "pr-body.md"
-    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec"))
+    body.write_text(ensure_closure_trailer("Summary.", "feature/x-49ec", known_ids=KNOWN))
     payload = _hook_main(f"gh pr create --title t {flag} {body}", node_branch_repo)
     assert payload is None or payload["permissionDecision"] != "deny"
 

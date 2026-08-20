@@ -133,8 +133,34 @@ def branch_node_ids(head_ref: str) -> list[str]:
     return ids
 
 
+def known_node_ids() -> frozenset:
+    """Every id the graph actually carries; empty when it cannot be read.
+
+    Empty is the SAFE direction. With nothing verified, no branch-derived
+    candidate is claimed and the CI gate reds loudly, which a human can see and
+    act on. The alternative is a trailer naming an id the graph does not carry:
+    that PASSES CI, and then ``bind_closure_claims`` refuses the WHOLE binding
+    at merge, so the real node never closes and nothing says so.
+    """
+    try:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        return frozenset(
+            e["id"]
+            for e in read_graph(graph_json())
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+        )
+    except Exception:
+        return frozenset()
+
+
 def ensure_closure_trailer(
-    body: str, head_ref: str, *, extra_ids: Optional[list[str]] = None
+    body: str,
+    head_ref: str,
+    *,
+    extra_ids: Optional[list[str]] = None,
+    known_ids: Optional[object] = None,
 ) -> str:
     """``body`` with an exact trailer claiming every node id in ``head_ref``.
 
@@ -147,14 +173,23 @@ def ensure_closure_trailer(
     read the LAST trailer line, so a new final line wins without touching what
     an author already wrote.
 
-    Graph-free on purpose. ``contained_in`` descendants stay
-    ``render_pr_closure_trailer``'s job because that needs graph entries; this
-    needs only the branch, so it works in any cwd, with no graph and no I/O.
+    A branch-derived candidate is a GUESS and is verified against the graph
+    before it is claimed; ``extra_ids`` is a caller's ASSERTION that those nodes
+    ship here, so it is trusted. That asymmetry is the whole point: the CI gate
+    may be liberal because it only DEMANDS a claim, but a producer that MINTS
+    one has to be right. ``branch_node_ids("feature/x-49ec-cache-dead")`` yields
+    ``cache-dead`` from ordinary English, and claiming it made every real claim
+    on the line void at merge while CI stayed green.
+
+    ``known_ids`` defaults to reading the graph, so a caller cannot skip the
+    check by forgetting an argument. Pass an explicit set to stay pure.
+    ``contained_in`` descendants remain ``render_pr_closure_trailer``'s job.
     """
     text = body if isinstance(body, str) else ""
+    known = known_node_ids() if known_ids is None else frozenset(known_ids)
     wanted = list(
         dict.fromkeys(
-            branch_node_ids(head_ref)
+            [n for n in branch_node_ids(head_ref) if n in known]
             + [e for e in (extra_ids or []) if is_wellformed_node_id(e)]
         )
     )

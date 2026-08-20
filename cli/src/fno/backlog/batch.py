@@ -539,12 +539,17 @@ def ship_batch(
                 reason=f"git push failed: {(push.stderr or push.stdout or '').strip()[:200]}",
                 members=members,
             )
-        # Same producer the /pr create and worker/ship.py paths run (x-49ec):
-        # the batch branch carries its members' node ids, and the CI closure
-        # gate reads them off the head ref.
+        # Same producer the /pr create and worker/ship.py paths run, but with
+        # NO head ref. The members are the delivery, and they are known here
+        # exactly; deriving from the branch adds nothing and got it wrong.
+        # A batch minted before the '.' rename still carries
+        # feature/batch-<domain>-<hex>, which parses as a node id the graph does
+        # not hold, and one unknown id makes bind_closure_claims refuse the
+        # WHOLE binding - so neither real member bound. Passing "" is correct
+        # for both branch generations, including batches already open.
         from fno.pr.closure import ensure_closure_trailer
 
-        body = ensure_closure_trailer(body, branch, extra_ids=list(members))
+        body = ensure_closure_trailer(body, "", extra_ids=list(members))
         cr = run(
             ["gh", "pr", "create", "--title", pr_title, "--body", body,
              "--base", base, "--head", branch],
