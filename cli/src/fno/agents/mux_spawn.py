@@ -73,16 +73,13 @@ _MUX_SUBPROCESS_TIMEOUT_S = 30
 #: (mirrors crates/fno proto::DEFAULT_SESSION).
 _DEFAULT_SESSION = "main"
 
-#: Per-harness default model, keyed by provider (mux_spawn owns this alongside
-#: _EFFORT_ALLOWED). A harness appears ONLY when fno must supply a model the
-#: harness will not self-default: opencode's providerID/modelID pair needs one,
-#: so fno injects the z.ai GLM secondary. claude and codex are omitted ON
-#: PURPOSE - each reads its own harness config and self-defaults better than fno
-#: can guess, so injecting nothing is correct. An explicit --model always
-#: overrides. ponytail: a code table, not a config knob, until the set outgrows
-#: a literal.
-_PER_HARNESS_DEFAULT_MODEL = {
-    "opencode": "z-ai/glm-5.3",
+#: Per-harness spelling for a model selected by the route table. The route
+#: table owns the model choice; this map only adapts its provider/model id to a
+#: harness that requires the provider prefix in its argv.
+from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
+
+_PER_HARNESS_MODEL_SPELLING = {
+    "opencode": f"zai-coding-plan/{DEFAULT_SECONDARY_MODEL}",
 }
 
 
@@ -630,6 +627,45 @@ def _query_opencode_sessions(sql: str, runner: Optional[Callable] = None) -> Opt
     if proc.returncode != 0:
         return None
     return [ln.strip() for ln in (proc.stdout or "").splitlines() if _SES_ID_RE.match(ln.strip())]
+
+
+def _read_opencode_model(
+    session_id: str, *, runner: Optional[Callable] = None
+) -> Optional[str]:
+    """Read the model id opencode recorded for a bound session."""
+    if not _SES_ID_RE.fullmatch(session_id):
+        return None
+    sql = (
+        "SELECT data FROM message "
+        f"WHERE session_id = '{session_id}' "
+        "ORDER BY time_created DESC LIMIT 20"
+    )
+    run = runner or subprocess.run
+    try:
+        proc = run(
+            ["opencode", "db", sql],
+            capture_output=True,
+            text=True,
+            timeout=_OPENCODE_DB_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        try:
+            data = json.loads(line)
+            if isinstance(data, str):
+                data = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        model_id = data.get("modelID") or data.get("model_id")
+        provider_id = data.get("providerID") or data.get("provider_id")
+        if isinstance(model_id, str) and model_id:
+            return f"{provider_id}/{model_id}" if provider_id else model_id
+    return None
 
 
 def _backfill_opencode_session_id(
@@ -1242,7 +1278,7 @@ def build_pane_argv(
         # opencode expects the provider/model form. An explicit --model wins,
         # else the per-harness default table (opencode is the only entry);
         # inject nothing if the table has no entry for this provider.
-        _default_model = model or _PER_HARNESS_DEFAULT_MODEL.get(provider)
+        _default_model = model or _PER_HARNESS_MODEL_SPELLING.get(provider)
         if _default_model:
             argv += ["--model", _default_model]
         argv += tier3
@@ -2666,7 +2702,7 @@ def dispatch_spawn_pane(
                 exit_code=2,
             )
         if provider == "opencode" and effort:
-            _variant_model = model or _PER_HARNESS_DEFAULT_MODEL.get(provider)
+            _variant_model = model or _PER_HARNESS_MODEL_SPELLING.get(provider)
             if _variant_model:
                 apply_opencode_variant(_variant_model, effort)
 
@@ -2853,6 +2889,7 @@ def dispatch_spawn_pane(
         #: Set only when the spawn already knows the row's terminal status and
         #: must not let the id-less heuristic below relabel it.
         forced_row_status: Optional[AgentStatus] = None
+        actual_model: Optional[str] = model
 
         # opencode and codex ids are discovered, not minted (see the two
         # backfills). A miss leaves the row exactly as live-only as before
@@ -2863,6 +2900,22 @@ def dispatch_spawn_pane(
             # the same fake every spawn test already installs and the suite
             # never touches the real ~/.local/share/opencode.
             session_uuid = _backfill_opencode_session_id(cwd, spawn_started_ms, runner=runner)
+            requested_model = model or _PER_HARNESS_MODEL_SPELLING.get(provider)
+            actual_model = (
+                _read_opencode_model(session_uuid, runner=runner)
+                if session_uuid is not None
+                else None
+            )
+            if actual_model is not None and requested_model != actual_model:
+                from fno.agents import events as _events
+
+                _events.emit(
+                    "model_substituted",
+                    harness=provider,
+                    session_id=session_uuid,
+                    requested_model=requested_model,
+                    actual_model=actual_model,
+                )
             if session_uuid is None:
                 from fno.agents import events as _events
 
@@ -3189,7 +3242,7 @@ def dispatch_spawn_pane(
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
-                    model=model,
+                    model=actual_model,
                     effort=effort,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
