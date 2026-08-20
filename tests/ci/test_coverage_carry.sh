@@ -19,6 +19,10 @@
 #   T06 - the compare API call itself fails -> no-carry (not a crash): under
 #         `set -euo pipefail` a failing `gh api compare` must degrade to an
 #         empty identity, not abort the script before it prints a decision
+#   T07 - a truncated compare response (e.g. GitHub's diff-size limit) on one
+#         side only -> no-carry code-changed, never a false carry: truncation
+#         changes the bytes `git patch-id` hashes, so identical code behind a
+#         truncated read fails the same safe way as code that really changed
 #
 # Exit codes: 0 pass, 1 fail
 set -uo pipefail
@@ -186,12 +190,33 @@ STUB
   rm -rf "$stub_dir"
 }
 
+t07() {
+  local stub_dir out rc truncated_diff
+  stub_dir="$(mktemp -d -t coverage-carry-test-XXXXXX)"
+  # Same logical change as DIFF_A, cut off mid-hunk - what a response hitting
+  # GitHub's diff-size limit looks like: the bytes differ even though the
+  # code does not.
+  truncated_diff='diff --git a/foo.txt b/foo.txt
+index e69de29..d95f3ad 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -0,0 +1 @@
+'
+  make_stub_gh "$stub_dir" ok success "covered: 2 reviewed at ${BEFORE:0:8}" "$DIFF_A" "$truncated_diff"
+  out="$(run_carry "$stub_dir")"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then fail "T07: expected rc=0, got $rc: $out"; rm -rf "$stub_dir"; return; fi
+  [[ "$out" == "no-carry code-changed" ]] || fail "T07: expected no-carry code-changed on a truncated read, got: $out"
+  pass "T07 a truncated compare response fails safe (no-carry), never a false carry"
+  rm -rf "$stub_dir"
+}
+
 t01
 t02
 t03
 t04
 t05
 t06
+t07
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
