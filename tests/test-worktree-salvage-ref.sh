@@ -28,9 +28,11 @@ trap 'rm -rf "$SCRATCH"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 install_dispatcher() {
-  # Mirrors scripts/setup/setup-worktree.sh's install: a shared post-commit
-  # dispatcher in the git-common-dir that resolves the COMMITTING worktree's
-  # own checked-out copy of the real hook at execution time.
+  # Mirrors scripts/setup/setup-worktree.sh's CREATE path (fresh install, no
+  # pre-existing hook): a shared post-commit dispatcher in the git-common-dir
+  # that resolves the COMMITTING worktree's own checked-out copy of the real
+  # hook at execution time. Never exits early - see prepend_dispatcher below
+  # for why.
   local wt="$1"
   local common_dir
   common_dir="$(git -C "$wt" rev-parse --git-common-dir)"
@@ -38,12 +40,45 @@ install_dispatcher() {
   mkdir -p "$common_dir/hooks"
   cat > "$common_dir/hooks/post-commit" <<'HOOK'
 #!/usr/bin/env bash
-toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-script="$toplevel/hooks/worktree-salvage-ref.sh"
-[[ -x "$script" ]] && exec "$script"
-exit 0
+toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [[ -n "$toplevel" ]]; then
+  _fno_salvage_script="$toplevel/hooks/worktree-salvage-ref.sh"
+  [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"
+fi
 HOOK
   chmod +x "$common_dir/hooks/post-commit"
+}
+
+prepend_dispatcher() {
+  # Mirrors scripts/setup/setup-worktree.sh's PREPEND path (a post-commit
+  # hook already exists and is not ours): a code-review finding caught that
+  # appending after an existing hook's own `exit` makes the appended block
+  # dead code, unreachable regardless of file position. This prepends
+  # instead, right after any shebang line, and the body above never exits
+  # early - so whatever the pre-existing hook does next still runs.
+  local wt="$1"
+  local common_dir post_commit tmp first_line
+  common_dir="$(git -C "$wt" rev-parse --git-common-dir)"
+  [[ "$common_dir" = /* ]] || common_dir="$wt/$common_dir"
+  post_commit="$common_dir/hooks/post-commit"
+  tmp="$(mktemp "${post_commit}.XXXXXX")"
+  first_line="$(head -n 1 "$post_commit")"
+  if [[ "$first_line" == "#!"* ]]; then
+    {
+      printf '%s\n' "$first_line"
+      echo "toplevel=\"\$(git rev-parse --show-toplevel 2>/dev/null)\""
+      echo 'if [[ -n "$toplevel" ]]; then'
+      echo '  _fno_salvage_script="$toplevel/hooks/worktree-salvage-ref.sh"'
+      echo '  [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"'
+      echo "fi"
+      echo ""
+      tail -n +2 "$post_commit"
+    } > "$tmp"
+  else
+    fail "test fixture hook has no shebang - unexpected"
+  fi
+  mv -f "$tmp" "$post_commit"
+  chmod +x "$post_commit"
 }
 
 link_real_hook() {
@@ -137,3 +172,40 @@ offline_ref="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$(basename "$o
 echo "$offline_ref" | grep -q "$sha_offline" || fail "local salvage ref did not point at the commit with a dead remote"
 
 echo "PASS: a dead remote never blocks the commit or the local salvage ref"
+
+# --- AC4: prepending onto a pre-existing hook that ends in `exit 0` ------
+# A code-review finding: appending after a hook's own bare `exit` makes the
+# appended block dead code - the interpreter never reaches it, regardless of
+# its position in the file. This proves both directions: the salvage ref
+# still lands, AND the pre-existing hook's own tail logic still runs.
+
+preexisting="$SCRATCH/preexisting-wt"
+git -C "$canonical" worktree add -q -b preexisting-branch "$preexisting" >/dev/null
+link_real_hook "$preexisting"
+
+common_dir="$(git -C "$preexisting" rev-parse --git-common-dir)"
+[[ "$common_dir" = /* ]] || common_dir="$preexisting/$common_dir"
+marker_file="$SCRATCH/other-hook-ran"
+cat > "$common_dir/hooks/post-commit" <<HOOK
+#!/usr/bin/env bash
+touch "$marker_file"
+exit 0
+HOOK
+chmod +x "$common_dir/hooks/post-commit"
+prepend_dispatcher "$preexisting"
+
+git -C "$preexisting" config user.email t@t.co
+git -C "$preexisting" config user.name t
+echo v > "$preexisting/j.txt"
+git -C "$preexisting" add j.txt
+git -C "$preexisting" commit -q -m "preexisting-hook commit"
+sha_preexisting="$(git -C "$preexisting" rev-parse HEAD)"
+sleep 1
+
+[[ -f "$marker_file" ]] || fail "pre-existing hook's own logic did not run after prepend"
+
+preexisting_ref="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$(basename "$preexisting")")"
+[[ -n "$preexisting_ref" ]] || fail "salvage ref missing when prepended onto a hook ending in exit 0"
+echo "$preexisting_ref" | grep -q "$sha_preexisting" || fail "salvage ref did not point at the commit"
+
+echo "PASS: prepending onto a pre-existing exit-terminated hook still runs both"

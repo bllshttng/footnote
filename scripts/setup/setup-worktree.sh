@@ -1350,19 +1350,26 @@ link_dir ".gemini"
 # gc-proof and enumerable at commit time, the one moment guaranteed to
 # occur before a worker is killed. Worktrees share one git-common-dir hooks
 # directory, so this installs (or, if a post-commit hook already exists and
-# is not ours, appends to) ONE shared post-commit dispatcher - idempotent
+# is not ours, prepends to) ONE shared post-commit dispatcher - idempotent
 # across every worktree's own setup run, and it resolves each committing
 # worktree's OWN checked-out copy of hooks/worktree-salvage-ref.sh at
 # execution time via `git rev-parse --show-toplevel`, so it stays correct
 # no matter which worktree fires it.
 _salvage_marker="worktree-salvage-ref.sh"
 # The one source of truth for the dispatcher body, built once and reused by
-# both the create and the append path below, so a future change (e.g. a
-# guard) cannot land in one copy and drift from the other.
-_salvage_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
-script="$toplevel/hooks/'"$_salvage_marker"'"
-[[ -x "$script" ]] && exec "$script"
-exit 0'
+# both the create and the prepend path below, so a future change (e.g. a
+# guard) cannot land in one copy and drift from the other. Never exec/exit:
+# a THIRD-PARTY hook this lands ahead of may itself end in a bare `exit` (a
+# common idiom, and the exact shape a prior version of this body used), and
+# anything positioned AFTER that `exit` is unreachable regardless of file
+# order - only code that runs before it and falls through is guaranteed to
+# fire. git ignores post-commit's own exit code, so falling through costs
+# nothing.
+_salvage_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [[ -n "$toplevel" ]]; then
+  _fno_salvage_script="$toplevel/hooks/'"$_salvage_marker"'"
+  [[ -x "$_fno_salvage_script" ]] && "$_fno_salvage_script"
+fi'
 _common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)"
 if [[ -n "$_common_hooks_dir" ]]; then
   [[ "$_common_hooks_dir" = /* ]] || _common_hooks_dir="$WORKTREE/$_common_hooks_dir"
@@ -1380,14 +1387,38 @@ if [[ -n "$_common_hooks_dir" ]]; then
     chmod +x "$_post_commit"
     echo "setup-worktree: installed shared post-commit salvage-ref hook at $_post_commit"
   elif ! grep -q "$_salvage_marker" "$_post_commit" 2>/dev/null; then
-    # The identical body: it is still the last statement in the file either
-    # way, so `exec` here is exactly as safe as in the create path above.
-    {
-      echo ""
-      echo "# Appended by scripts/setup/setup-worktree.sh."
-      printf '%s\n' "$_salvage_dispatcher_body"
-    } >> "$_post_commit"
-    echo "setup-worktree: appended salvage-ref call to existing post-commit hook at $_post_commit"
+    # PREPEND, never append: a code-review finding caught that appending
+    # after an existing hook's own `exit` (a common idiom - the create
+    # path's PRIOR body was exactly this shape) makes the appended block
+    # dead code, unreachable regardless of its position in the file.
+    # Prepending ahead of the shebang-preserved original guarantees this
+    # runs first; the fall-through body above never exits early, so the
+    # original hook's own logic still runs right after it either way.
+    _tmp_post_commit="$(mktemp "${_post_commit}.XXXXXX" 2>/dev/null)" || _tmp_post_commit=""
+    if [[ -n "$_tmp_post_commit" ]]; then
+      _first_line="$(head -n 1 "$_post_commit" 2>/dev/null)"
+      if [[ "$_first_line" == "#!"* ]]; then
+        {
+          printf '%s\n' "$_first_line"
+          echo "# Prepended by scripts/setup/setup-worktree.sh."
+          printf '%s\n' "$_salvage_dispatcher_body"
+          echo ""
+          tail -n +2 "$_post_commit"
+        } > "$_tmp_post_commit"
+      else
+        {
+          echo "# Prepended by scripts/setup/setup-worktree.sh."
+          printf '%s\n' "$_salvage_dispatcher_body"
+          echo ""
+          cat "$_post_commit"
+        } > "$_tmp_post_commit"
+      fi
+      mv -f "$_tmp_post_commit" "$_post_commit"
+      chmod +x "$_post_commit"
+      echo "setup-worktree: prepended salvage-ref call to existing post-commit hook at $_post_commit"
+    else
+      echo "setup-worktree: could not prepend salvage-ref call (mktemp failed)" >&2
+    fi
   fi
 else
   echo "setup-worktree: could not resolve git-common-dir; salvage-ref hook not installed" >&2
