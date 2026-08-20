@@ -3489,7 +3489,7 @@ mod tests {
     // The seam-published set rides the SAME repeatable flag, after the
     // operator's own grant. Without this the bg lane - the substrate the shipped
     // stage table uses for its own delivery lane - launches a worker that cannot
-    // write the claim store, so `fno claim status` reports the node free while
+    // write the claim store, so the graph reads that node free while
     // it works.
     #[test]
     fn build_argv_appends_the_seam_published_state_dirs() {
