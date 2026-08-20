@@ -348,6 +348,15 @@ def neutralise(
     out["FNO_THINK_SPAWN"] = "0"  # never spawn a real /think worker
     out["FNO_SPAWN_GATE"] = "0"  # never queue behind the host's live workers
     out["FNO_E2E"] = "1"  # arm idle-exit so an orphaned mux server reaps itself
+    # The spawn seam publishes the computed writable-dir grant on the AMBIENT
+    # process env, because os.execv is what carries it to the Rust client. In
+    # a test tree that makes it leak: xdist reuses one process per worker, so a
+    # test that reaches the seam pins its directories onto every later test in
+    # that worker, and the codex-resume argv builders read it. Measured as five
+    # cross-file failures that vanish when the files run alone. Scrub it for the
+    # same reason the harness session markers are scrubbed - a hermetic run must
+    # not inherit a live session's state.
+    out.pop("FNO_WORKER_ADD_DIRS", None)
     # The operator needs panel folds the checkout journal, and repo-root
     # resolution cannot be sandboxed (see the FNO_REPO_ROOT note above), so an
     # unpathed append_event under test lands a production-shaped row on a live

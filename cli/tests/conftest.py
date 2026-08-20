@@ -145,6 +145,22 @@ def _hermetic_promise_carveout_gate(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_worker_add_dirs(monkeypatch):
+    """Isolate the seam-published writable-dir grant per test.
+
+    ``_export_worker_dirs_at_seam`` publishes on the AMBIENT ``os.environ``,
+    because ``os.execv`` is what carries the value to the Rust client. xdist
+    reuses one process per worker, so a test that reaches the seam pins its
+    directories onto every later test in that worker - and the codex-resume argv
+    builders read exactly this variable. Measured as five cross-file failures
+    that pass when those files run alone, which is the signature of ambient
+    leakage rather than a real defect. Cleared per test, same reason
+    ``hermetic.py`` scrubs the harness session markers.
+    """
+    monkeypatch.delenv("FNO_WORKER_ADD_DIRS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_claim_reap(monkeypatch):
     """Neutralise cmd_reconcile's claim-GC leg during tests.
 
