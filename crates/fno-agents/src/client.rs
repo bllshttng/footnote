@@ -49,16 +49,17 @@ pub enum ClientError {
 /// whether or not anyone ever calls accept, so connect time cannot tell
 /// "saturated" from "serving"; only a bounded read can. The value must sit
 /// ABOVE the daemon's own legitimate worst-case handler budget: a `stop`
-/// escalation alone runs ~42s (bounded shutdown ack + 5s + 5s + 2s); a
+/// escalation alone runs ~47s (bounded shutdown ack + 5s + 5s + 2s); a
 /// force-rm on a live, mux-hosted claude row pays `AGENTS_LIST_TIMEOUT` 15s
 /// twice (once up front, once after `claude_rm`) plus `CASCADE_TIMEOUT` 15s
 /// for that `claude_rm` itself plus another `CASCADE_TIMEOUT` 15s for
-/// `run_mux_pane_kill` plus `stop_worker_confirmed` <=12s in daemon.rs (paid
-/// on force OR on a `provably_gone` non-force removal alike), a 72s leg. 120s
-/// clears that worst case with real margin, not tight against it, so
-/// ordinary process-spawn slop does not trip it on a legitimate rm - and
-/// still turns the old forever-hang (measured as a 300s hang with the row
-/// already removed) into a bounded failure. `FNO_AGENTS_RESPONSE_DEADLINE_MS`
+/// `run_mux_pane_kill` plus `stop_worker_confirmed` <=35s in daemon.rs (5s
+/// `WORKER_ACK_WRITE_TIMEOUT` + 30s `WORKER_ACK_TIMEOUT`, paid on force OR on
+/// a `provably_gone` non-force removal alike), a 95s leg. 120s clears that
+/// worst case with real margin, not tight against it, so ordinary
+/// process-spawn slop does not trip it on a legitimate rm - and still turns
+/// the old forever-hang (measured as a 300s hang with the row already
+/// removed) into a bounded failure. `FNO_AGENTS_RESPONSE_DEADLINE_MS`
 /// overrides it (tests drive a wedged-peer case through a child process so
 /// the override never touches a parallel test's ambient calls).
 pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(120);
