@@ -109,10 +109,20 @@ fi
 # design - rather than block on the one sweep that would tell it otherwise.
 CACHE_MAX_AGE_S=900
 _CACHE_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-cache.json"
+# _reconcile_mtime, not a third hand-rolled `stat -f || stat -c`: GNU `stat -f`
+# means --file-system, not a format flag, so it SUCCEEDS on Linux and prints
+# garbage instead of failing - the `||` fallback to `stat -c %Y` never fires,
+# and the caller's arithmetic dies "unbound variable" under `set -u`. This
+# exact crash already happened and was fixed twice in this repo (see
+# scripts/lib/reconcile-throttle.sh); reuse that fix rather than reintroduce it.
+_RT_HELPER="$SCRIPT_DIR/../scripts/lib/reconcile-throttle.sh"
+[[ -f "$_RT_HELPER" ]] && source "$_RT_HELPER"
 _cache_age() {
-  local mtime
-  mtime="$(stat -f %m "$_CACHE_FILE" 2>/dev/null || stat -c %Y "$_CACHE_FILE" 2>/dev/null || echo 0)"
-  echo $(( $(date +%s) - mtime ))
+  if ! command -v _reconcile_mtime >/dev/null 2>&1; then
+    echo 999999  # helper unavailable: read as maximally stale, never as fresh
+    return
+  fi
+  echo $(( $(date +%s) - $(_reconcile_mtime "$_CACHE_FILE") ))
 }
 
 stranded_lines=()
