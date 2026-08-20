@@ -455,3 +455,41 @@ def test_refresh_with_an_unreadable_head_goes_loud_not_stale(
     assert code == 0
     assert "cached" not in out
     assert "stale_reason" not in out
+
+
+def test_a_refused_refresh_never_deepens_the_backoff_window(
+    cache_env, monkeypatch, capsys
+):
+    """`--refresh` punches through a live backoff window; it must not double it.
+
+    The degraded `unknown` serve inside a backoff window is exactly when an
+    operator reaches for the escape hatch, so the collision is the modal case,
+    not an edge one. Letting the refused read escalate `fail_count` walks the
+    whole fleet's wait toward the 900s cap one keystroke at a time - the
+    "retry that sustains the very refusal it is waiting out" this module
+    exists to refuse.
+    """
+    cache_dir, head = cache_env
+    err = (None, "HTTP 403: You have exceeded a secondary rate limit | back off")
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: _GREEN)
+    _cache.cached_status("42")
+    p = _row_path(cache_dir)
+    row = json.loads(p.read_text())
+    row["ts"] -= 3600  # past the TTL, so the next call is a real miss
+    p.write_text(json.dumps(row))
+
+    monkeypatch.setattr(_status, "_fetch", lambda pr, cwd: err)
+    _cache.cached_status("42")
+    opened = json.loads(p.read_text())
+    assert opened["fail_count"] == 1
+    window = opened["backoff_until"]
+
+    capsys.readouterr()
+    fetch, calls = _fetch_spy([err])
+    monkeypatch.setattr(_status, "_fetch", fetch)
+    assert _cache.cached_status("42", refresh=True) == 4
+    assert calls["n"] == 1, "the escape hatch still spends its one read"
+    after = json.loads(p.read_text())
+    assert after["fail_count"] == 1, "a refused refresh must not escalate"
+    assert after["backoff_until"] == pytest.approx(window, abs=1.0)
+    assert after["output"] == opened["output"], "the last good verdict survives"

@@ -185,8 +185,8 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     posted to the statuses endpoint). `counts["check_runs"]` and
     `counts["statuses"]` split that total, because a reader who compares
     `total` against `gh api .../check-runs` sees a phantom gap otherwise: that
-    endpoint never returns statuses. Measured on PR 981 - the tally said 13,
-    the check-runs endpoint named 10 jobs, and the 3-row gap was
+    endpoint never returns statuses. Measured 2026-08-20 - the tally said 15,
+    the check-runs endpoint named 13 jobs, and the 2-row gap was
     fno's own statuses (stacked-base-guard, fno/review-coverage). The two
     sub-counts need not sum to `total`: a rollup row carrying neither key is
     counted in neither (it is also never deduped).

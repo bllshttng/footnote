@@ -109,6 +109,20 @@ def _write_row_locked(p: Path, row: dict) -> None:
     os.replace(tmp, p)
 
 
+def _num(row: dict, key: str) -> float:
+    """A numeric row field, 0.0 when absent or unparseable.
+
+    A row written by a different schema (a concurrent fno install polling the
+    same PR) must read as a miss, never crash a caller - the same discipline
+    `_serve` already applies to a corrupt exit code. Every numeric read of a
+    row goes through here so no one path keeps the raw `float()`.
+    """
+    try:
+        return float(row.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _serve(row: dict, *, stale: bool) -> int:
     """Print one cached row and return its exit code (-1 = not servable).
 
@@ -152,7 +166,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         )
         code = 3
     out["cached"] = True
-    ts = float(row.get("ts") or 0)
+    ts = _num(row, "ts")
     out["cached_head"] = out.get("head")
     out["cached_at"] = (
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
@@ -223,9 +237,9 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         -1 when the caller must do (or wait on) a live read."""
         if not row:
             return -1
-        if at - float(row.get("ts") or 0) < _ttl():
+        if at - _num(row, "ts") < _ttl():
             return _serve(row, stale=False)
-        if float(row.get("backoff_until") or 0) > at:
+        if _num(row, "backoff_until") > at:
             return _serve(row, stale=True)
         return -1
 
@@ -271,8 +285,21 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             now = time.time()
             reason = str((output or {}).get("reason", "")).lower()
             if code == 4 and output is not None and "secondary rate limit" in reason:
-                fails = int((row or {}).get("fail_count") or 0) + 1
-                backoff = min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                # A manual --refresh punches THROUGH a live backoff window (the
+                # window may have cleared server-side, and the escape hatch is
+                # worth the one read). Being refused by it must not DEEPEN it:
+                # the fleet's wait is not the refresher's to double, and an
+                # operator who retries the hatch would otherwise walk the whole
+                # window to the 900s cap - the very "retry that sustains the
+                # refusal it is waiting out" this module refuses to be.
+                prior_until = _num(row or {}, "backoff_until")
+                held = refresh and prior_until > now
+                fails = int((row or {}).get("fail_count") or 0) + (0 if held else 1)
+                backoff = (
+                    prior_until - now
+                    if held
+                    else min(2 ** min(fails - 1, 8) * 60, _backoff_cap())
+                )
                 # Keep the last GOOD verdict for stale serving - its exit code
                 # too, so the served JSON and the process exit never disagree;
                 # with none, keep the error row itself (loud: verdict error).
