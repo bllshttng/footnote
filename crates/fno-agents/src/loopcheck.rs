@@ -1096,6 +1096,21 @@ struct PrInfo {
     coverage: CoverageReport,
 }
 
+/// The ordering every "you are not reviewed yet" remedy must teach, and the
+/// producer it ends at. A verb name alone leaves two ways to waste the round:
+/// attesting over an open finding (the gate then lies to the whole board), and
+/// reviewing before the last commit is pushed (a later code commit voids the
+/// attestation). The emitter is named because the fallback arms of these
+/// messages render where `fno` does not resolve, so nothing else in the line
+/// tells the reader what actually produces the event.
+///
+/// `_coverage_refused_reason` in `cli/src/fno/pr/_merge.py` carries the sentence
+/// for the merge guard. Two gates refuse the same uncovered head, so they must
+/// not teach two different remedies.
+const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
+     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
+     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
+
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
 /// the `invocation` field of `_RESOLVABLE_REVIEWERS` in
 /// `cli/src/fno/config/__init__.py`. A block message that names a reviewer
@@ -1120,17 +1135,6 @@ struct PrInfo {
 /// verb their harness cannot run). agy has no native verb and takes the fno
 /// review. Kept honest against the Python descriptor's `invocations` map by
 /// check-reviewer-descriptor-parity.sh.
-/// The ordering every "you are not reviewed yet" remedy must teach, and the
-/// producer it ends at. A verb name alone leaves two ways to waste the round:
-/// attesting over an open finding (the gate then lies to the whole board), and
-/// reviewing before the last commit is pushed (a later code commit voids the
-/// attestation). The emitter is named because the fallback arms of these
-/// messages render where `fno` does not resolve, so nothing else in the line
-/// tells the reader what actually produces the event.
-const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
-     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
-     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
-
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
     (
@@ -8950,10 +8954,16 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         }
     };
     if !pr.state.is_open_or_merged() {
+        // `None` is the pre-ship state EVERY session sits in before the PR
+        // exists, not an error, so it gets the create verb. Sending it to
+        // GitHub to "verify" a PR that was never opened is an errand with no
+        // end. The catch-all keeps the verify wording, because it means gh
+        // answered a state this build does not know.
         let guidance = match pr.state {
             PrState::Closed => {
                 "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`"
             }
+            PrState::None => "No PR for HEAD yet. Create one: `/fno:pr create`, or `gh pr create`",
             _ => "PR state is not open or merged - verify on GitHub and update locally",
         };
         return format!(
@@ -8991,7 +9001,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             _ => "CI",
         };
         return format!(
-            "CI red on PR #{}: {} failed. Read check logs: `fno pr status {}` or GitHub.{}",
+            "CI red on PR #{}: {} failed. Read the failing log: `fno pr logs {}`.{}",
             pr.number,
             check_name,
             pr.number,
@@ -9252,8 +9262,12 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     hint("review")
                 );
             }
-            // All NotNudgeable (or not classified): today's exact string + hint
-            // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
+            // All NotNudgeable (or not classified) + hint (AC5 - a non-nudgeable
+            // required bot keeps the pre-x-b167 behavior). The remedy must NOT
+            // say "trigger it": `nudge_class_idlable` counts NotNudgeable as
+            // idlable, so `hint("review")` renders the arm-and-tag ritual right
+            // after this sentence, and telling a session to act and to idle in
+            // one line is the contradiction x-cdc7 removed.
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
@@ -9264,8 +9278,8 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     .map(|(b, _)| format!("{b}{}", read_note(b))),
             );
             return format!(
-                "PR #{}: {} has not reviewed. \
-                 Cannot trigger automatically - manually trigger review, or move to config.review.optional_apps.{}",
+                "PR #{}: {} has not reviewed. A mention will not trigger it. \
+                 Wait for it to post, or move it to config.review.optional_apps if it never will.{}",
                 pr.number,
                 names.join(", "),
                 hint("review")
@@ -9275,10 +9289,10 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
         return format!(
-            "PR #{} not yet reviewed (no required reviewers configured). \
-             To require review: set config.review.github_apps (GitHub App logins) or \
-             config.review.reviewers (local reviewers like sigma). \
-             Nothing will arrive on its own without a configured gate.",
+            "PR #{} not yet reviewed and no reviewer is outstanding. \
+             Check config.review: github_apps (GitHub App logins) and \
+             reviewers (local reviewers like sigma). \
+             Nothing here will arrive on its own.",
             pr.number
         );
     }

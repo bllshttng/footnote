@@ -23,7 +23,7 @@ An in-session agent can launch the native review verb through the Skill
 tool with **bare args**, not by typing the slash command:
 
 ```
-Skill(skill="code-review", args="<level> --comment --fix")
+Skill(skill="code-review", args="<level> --comment")
 -> Skill "code-review" launched (forked execution, running in the background).
 ```
 
@@ -58,12 +58,14 @@ Use it to fire a verb in a live worker, or with `--to-self` to target the curren
 
 ```bash
 # Into a peer:
-fno mail send <peer> '/code-review <level> --comment --fix' --raw
+fno mail send <peer> '/code-review <level> --comment' --raw
 # At your own prompt line (recipient derived from ambient identity):
-fno mail send '/code-review <level> --comment --fix' --to-self --raw
+fno mail send '/code-review <level> --comment' --to-self --raw
 ```
 
 `<level>` is sized from the diff by `level_for_diff` in `cli/src/fno/review_capability.py` (never `ultra`: billed separately, and the builder rejects it). No surface needs to spell the invocation. `fno target review-invocation` prints it rendered and sized for this session, and the coverage refusals (stop gate, merge guard, the `fno/review-coverage` status) embed that render.
+
+No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the spawned-reviewer contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
 
 ## A reply does not resolve a thread
 
@@ -100,7 +102,7 @@ Other non-keystroke daemon lanes keep the generic refusal. A slash submitted thr
 The `mail-inject` binary remains reachable directly for scripting against a Claude daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
 ```bash
-printf '/code-review <level> --comment --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
+printf '/code-review <level> --comment' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
 It reads the turn text from STDIN and enforces the brevity cap for a direct binary call. The raw lane itself is capped in Python at the `fno mail send --raw` front door. The binary holds the same ceiling for callers that bypass it.
