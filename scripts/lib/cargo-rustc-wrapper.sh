@@ -6,13 +6,8 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
-# Cargo probes the compiler with `rustc -vV` once per invocation, before any
-# real compile - the one place a line can announce which path this build
-# takes without flooding the log with one line per rustc call. sccache was
-# installed 2026-08-19; before that this wrapper fell through to bare rustc
-# with no announcement, and every worktree compiled cold behind a working
-# switch nobody had flipped. Checked once, so the announcement and the
-# actual dispatch below can never disagree.
+# sccache was installed 2026-08-19. Before that this wrapper fell through
+# to bare rustc silently, and every worktree compiled cold.
 if command -v sccache >/dev/null 2>&1; then
     HAS_SCCACHE=1
 else
