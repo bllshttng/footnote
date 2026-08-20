@@ -742,9 +742,9 @@ def _implied_vendor(model: Optional[str]) -> Optional[str]:
             if candidate.startswith(prefix):
                 return vendor
         base = candidate.split("[", 1)[0].split("-", 1)[0]
-        vendor = _MODEL_WORD_VENDORS.get(base)
-        if vendor:
-            return vendor
+        word_vendor: Optional[str] = _MODEL_WORD_VENDORS.get(base)
+        if word_vendor:
+            return word_vendor
     return None
 
 
