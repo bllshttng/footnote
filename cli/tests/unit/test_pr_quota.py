@@ -315,6 +315,17 @@ def test_proxy_dirs_fails_closed_instead_of_reporting_no_proxy(monkeypatch):
         _quota._proxy_dirs()
 
 
+def test_proxy_dirs_keeps_the_inherited_dir_when_the_config_load_fails(monkeypatch, tmp_path):
+    # An inherited FNO_GH_PROXY_DIR already answers "where do my shims live?".
+    # Refusing there would fail every gh command over an unrelated config error.
+    def broken():
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(_quota, "github_cli_proxy_dir", broken)
+    monkeypatch.setenv("FNO_GH_PROXY_DIR", str(tmp_path))
+    assert _quota._proxy_dirs() == {str(tmp_path.resolve())}
+
+
 def test_execute_graphql_refuses_when_the_proxy_cannot_identify_itself(monkeypatch):
     def broken():
         raise RuntimeError("config load failed")

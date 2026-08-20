@@ -448,9 +448,16 @@ app = typer.Typer(
 
 def _protect_process_path(ctx: typer.Context) -> None:
     """Put the quota proxy in PATH for subprocesses spawned by this command."""
-    from fno.setup.github_cli import fallback_proxy_dir, worker_environment
+    from fno.setup.github_cli import (
+        PROXY_DEPTH_ENV,
+        fallback_proxy_dir,
+        worker_environment,
+    )
 
-    keys = ("PATH", "FNO_GH_PROXY_DIR", "FNO_REAL_GH")
+    # PROXY_DEPTH_ENV is in the key set so `worker_environment`'s drop reaches
+    # os.environ: this call also prepends the proxy to PATH, and a marker left
+    # beside it makes every bare-`gh` shell-out from this process refuse.
+    keys = ("PATH", "FNO_GH_PROXY_DIR", "FNO_REAL_GH", PROXY_DEPTH_ENV)
     original = {key: os.environ.get(key) for key in keys}
     base = dict(os.environ)
     base["FNO_GH_PROXY_DIR"] = str(fallback_proxy_dir())

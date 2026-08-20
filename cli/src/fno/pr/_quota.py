@@ -68,7 +68,10 @@ def _proxy_dirs() -> set[str]:
     caller read it as the first. `resolve_real_gh` then handed back the proxy's
     own shim and `os.execve` re-entered it with the same argv forever. So this
     fails closed: a proxy that cannot identify itself must not delegate,
-    because calling itself is the one thing it is able to do.
+    because calling itself is the one thing it is able to do. An inherited
+    ``FNO_GH_PROXY_DIR`` already answers the question, so a config load that
+    fails after that is not an identity failure and must not refuse every gh
+    command in the worker.
     """
     paths = set()
     inherited = os.environ.get(_PROXY_DIR_ENV)
@@ -77,7 +80,8 @@ def _proxy_dirs() -> set[str]:
     try:
         paths.add(str(github_cli_proxy_dir().resolve()))
     except Exception as exc:
-        raise ProxyIdentityError(str(exc)) from exc
+        if not paths:
+            raise ProxyIdentityError(str(exc)) from exc
     return paths
 
 

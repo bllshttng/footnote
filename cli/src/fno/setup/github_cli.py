@@ -84,6 +84,9 @@ def ensure_proxy(
 def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     inherited_delegate = base.get("FNO_REAL_GH")
     env = dict(base)
+    # Dropped once, before any return: a worker inherits the marker from a
+    # delegated gh, never earns it, and would have its first gh call refused.
+    env.pop(PROXY_DEPTH_ENV, None)
     requested_dir = env.get(_PROXY_DIR_ENV)
     found = inherited_delegate or _WHICH("gh", path=env.get("PATH"))
     if not found:
@@ -93,7 +96,6 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
         if delegate.is_file() and _is_wrapper(delegate):
             env[_PROXY_DIR_ENV] = str(delegate.parent.resolve())
             env.pop("FNO_REAL_GH", None)
-            env.pop(PROXY_DEPTH_ENV, None)
             return env
     except OSError:
         pass
@@ -110,5 +112,4 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     env["PATH"] = str(result.proxy.parent) + (os.pathsep + old_path if old_path else "")
     env[_PROXY_DIR_ENV] = str(result.proxy.parent.resolve())
     env.pop("FNO_REAL_GH", None)
-    env.pop(PROXY_DEPTH_ENV, None)
     return env

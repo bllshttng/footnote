@@ -275,6 +275,40 @@ def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, c
     assert "cannot identify its own install directory" in capsys.readouterr().err
 
 
+def test_process_proxy_boundary_drops_an_inherited_reentry_marker(monkeypatch, tmp_path):
+    # The boundary prepends the proxy to PATH. Every bare-`gh` shell-out from
+    # this process then hits it, and an inherited marker would refuse them all.
+    original = "/original/bin"
+    proxy = str(tmp_path / "proxy")
+    monkeypatch.setenv("PATH", original)
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: {
+            key: value
+            for key, value in {**dict(base), "PATH": f"{proxy}{os.pathsep}{original}"}.items()
+            if key != "FNO_GH_PROXY_DEPTH"
+        },
+    )
+    closed = []
+
+    class Context:
+        def call_on_close(self, callback):
+            closed.append(callback)
+
+    protect_process_path(Context())
+    assert "FNO_GH_PROXY_DEPTH" not in os.environ
+    closed[0]()
+    assert os.environ["FNO_GH_PROXY_DEPTH"] == "1"
+
+
+def test_worker_environment_drops_the_marker_even_with_no_gh_to_proxy(monkeypatch):
+    # The early return is one of three exits, and a guard on one of N paths is
+    # decorative: a PATH that gains gh later would meet a marker it never earned.
+    env = worker_environment({"PATH": "/nowhere", "FNO_GH_PROXY_DEPTH": "1"})
+    assert "FNO_GH_PROXY_DEPTH" not in env
+
+
 def test_worker_environment_drops_an_inherited_reentry_marker(monkeypatch, tmp_path):
     # A delegated gh runs git, a git hook runs fno, and fno builds a worker env
     # from os.environ. The marker rides along and the worker's first, only gh
