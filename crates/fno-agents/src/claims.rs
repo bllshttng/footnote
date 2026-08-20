@@ -1695,11 +1695,6 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 /// harness ancestor - because the caller's fallback is to leave the anchor
 /// exactly as it found it. An unresolvable pid is not a reason to write a worse
 /// one.
-/// Wall-clock ceiling on the `claim session-pid` shell-out. Generous enough for
-/// a cold python start, short enough that a hung one does not hold the recovery
-/// mutex for a human-noticeable time.
-const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 fn durable_session_pid() -> Option<i32> {
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
     let mut child = std::process::Command::new(&fno)
@@ -1737,6 +1732,11 @@ fn durable_session_pid() -> Option<i32> {
         .parse::<i32>()
         .ok()
 }
+
+/// Wall-clock ceiling on the `claim session-pid` shell-out. Generous enough for
+/// a cold python start, short enough that a hung one does not hold the recovery
+/// mutex for a human-noticeable time.
+const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.

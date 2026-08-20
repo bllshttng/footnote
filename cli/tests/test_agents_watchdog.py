@@ -1915,7 +1915,7 @@ def test_a_live_row_on_an_unclaimed_node_is_flagged():
         claims={"x-76d1": {"state": "free"}},
     )
     assert v.verdict == UNCLAIMED
-    assert "node x-76d1 carries NO claim while this row is live" in v.basis
+    assert "node x-76d1 carries a free claim while this row is live" in v.basis
 
 
 def test_the_advisory_never_becomes_an_action():
@@ -1990,6 +1990,20 @@ def test_every_terminal_row_state_is_skipped_not_just_done(state):
         claims={"x-76d1": {"state": "free"}},
     )
     assert v.verdict != UNCLAIMED
+
+
+def test_a_lapsed_claim_is_flagged_too_not_only_a_free_one():
+    """`fno claim status` counts free AND stale as unheld, so this must make the
+    same cut. Reading only `free` left a live worker whose claim had expired
+    unflagged, which is precisely the gap the advisory exists to report."""
+    rows = [Row("cccc3333-0008", "t-worker", "working", "x-76d1", "/tmp/w")]
+    [v] = _run(
+        rows,
+        {"cccc3333-0008": _facts("still going", age_min=2)},
+        claims={"x-76d1": {"state": "stale", "holder": "target-session:old"}},
+    )
+    assert v.verdict == UNCLAIMED
+    assert "carries a stale claim" in v.basis
 
 
 def test_a_suspect_claim_is_not_flagged_as_unclaimed():

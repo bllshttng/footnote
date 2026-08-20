@@ -75,7 +75,11 @@ target_is_active() {
     # --no-roster: this reads `state` and nothing else, and the cross-check's
     # whole cost lands on exactly the free/stale branch this hits in the common
     # case. Paying a harness subprocess here buys a field the caller discards.
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
+    # The || falls back to the unflagged call: --no-roster is new, this runs
+    # against the DEPLOYED fno, and an older binary rejects an unknown option
+    # with empty stdout - which this gate would read as "no claim".
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null \
+        || fno claim status "$claim_key" -J 2>/dev/null || true)
     case "$claim_json" in
         "") return 0 ;;
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
@@ -105,7 +109,11 @@ target_claim_is_live() {
     # bytes `"state": "live"`. Strict means an incomplete read is not live.
     # --no-roster for the same reason as the twin above: `state` is all this
     # reads, so the cross-check would be a subprocess bought and thrown away.
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null) || return 1
+    # Same deployed-binary fallback as the twin above. The STRICT contract is
+    # unchanged: both calls failing still returns 1, so an incomplete read is
+    # never read as live.
+    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null \
+        || fno claim status "$claim_key" -J 2>/dev/null) || return 1
     case "$claim_json" in
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;

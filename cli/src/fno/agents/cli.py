@@ -73,12 +73,24 @@ def _remedy_for(key: str) -> str:
     this text is for the case the probe could NOT run - which is exactly when
     nobody is coming to help.
     """
+    if key.startswith("dispatch:"):
+        # A reservation is NOT reapable inside its TTL, by design: that window
+        # is the boot window and `classify_for_sweep` deliberately has no
+        # one-shot arm for this key family. Naming reap here sent an operator to
+        # a command that provably cannot clear what they are looking at.
+        return f"  Clear it:  fno claim release {key} --force --reason '<why>'"
     return (
         f"  Clear it:  fno claim reap --apply      "
         f"(takes it only if no live worker is on the node)\n"
         f"  Override:  fno claim release {key} --force --reason '<why>'"
     )
 
+
+#: Holder prefix of a reservation THIS verb writes. The targeted clear below is
+#: scoped to it: every other producer of a `dispatch:` key has its own launch
+#: contract, and `fno backlog advance` in particular relies on that reservation
+#: outliving its own exit because it takes no node claim to replace it.
+_SPAWN_CLI_HOLDER_PREFIX = "spawn-cli:"
 
 #: `_reclaim_if_provably_dead` bucket meaning "a holder we PROVED is alive".
 #: The discriminator between benign dedup and a wedge: somebody is genuinely
@@ -137,12 +149,26 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
             # a dead pid means no launch is in flight from that process. A
             # background sweep must not act on that (the TTL is the boot window,
             # see staleness.classify_for_sweep), but THIS caller is the next
-            # dispatcher, standing at the moment of launch, and the node claim it
-            # already holds covers the window the reservation was protecting.
+            # dispatcher, standing at the moment of launch, and it takes the node
+            # claim itself, which covers the window the reservation protected.
+            #
+            # ONLY this dispatcher's own holder shape. `fno backlog advance`
+            # reserves the same key as `advance:<pid>` and spawns WITHOUT
+            # --node, so no node claim is taken and that reservation is the only
+            # barrier its booting worker has. Its pid is dead by design too, so
+            # a predicate reading dead-pid-and-same-host alone cleared it and
+            # launched a second worker onto the node advance had just staffed.
             from fno.claims.hostid import is_same_machine
 
+            # LIVENESS FIRST. A live holder is benign dedup whoever wrote it,
+            # and answering `foreign-reservation` there would lose the one
+            # discriminator callers use to tell dedup from a wedge - they would
+            # print force-release advice against a reservation somebody is
+            # actively launching under.
             if not is_same_machine(claim.host, claim.machine_id) or is_live(claim):
                 return None, _HOLDER_ALIVE if is_live(claim) else "offhost"
+            if not claim.holder.startswith(_SPAWN_CLI_HOLDER_PREFIX):
+                return None, "foreign-reservation"
             provably_dead, bucket = True, ""
         else:
             try:
@@ -247,10 +273,20 @@ def _spawn_guard_decision(
             # invoke the real `fno agents spawn`, which runs this guard again
             # WITH a reservation, and the recovery happens there - at the moment
             # of launch, by the caller that is about to launch.
-            from fno.claims.cli import _abandonment_probe
+            from fno.claims.cli import _abandonment_probe, read_roster
 
+            # The roster is READ HERE, outside the recovery mutex. Reading it
+            # under the lock shells out to the harness while holding a mutex
+            # `compare_and_rebind` waits only five seconds for, so a peer's
+            # probe could make the worker's own `fno target init` handover fail
+            # as claim-held-by-other. Handing the reading in leaves nothing
+            # under the lock but a dictionary lookup.
+            try:
+                reading = read_roster()
+            except Exception:  # noqa: BLE001 - an unread roster proves nothing
+                reading = None
             prior, _bucket = _reclaim_if_provably_dead(
-                node_key, probe=_abandonment_probe()
+                node_key, probe=_abandonment_probe(reading)
             )
             if prior is not None:
                 _emit_reaped_abandoned(node_id, prior, observation.truth_status)

@@ -733,22 +733,24 @@ def compare_and_rebind(
                 rebound,
                 previous_pid=existing.pid,
                 previous_state=state.value,
-                mode="rebound",
+                mode="handover" if handover_allowed else "rebound",
                 fno_id=fno_id,
                 harness=harness_tag,
                 harness_session_id=harness_session_id,
             )
-        return rebound, "rebound"
+        # A rename applied here is a HANDOVER, whatever the prior state was.
+        # This is in fact the dominant real case: on the pane substrate the
+        # spawner's pid is already dead when the worker reaches `target init`,
+        # so the claim reads SUSPECT and lands on this branch, not the LIVE one
+        # above. Reporting `rebound` made `acquire --handover-from` treat the
+        # successful takeover as a decline, fall through, and write the claim a
+        # second time - and labelled a holder change as a resume in the event.
+        return rebound, ("handover" if handover_allowed else "rebound")
     finally:
         if acquired_lock:
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-#: Suffix of the per-claim recovery mutex directory. One definition: this
-#: string was written out at six call sites, and a seventh (the dispatch
-#: guard's targeted recovery) is what made the duplication worth collapsing.
-#: A caller that spells it differently takes a DIFFERENT lock and silently
-#: serializes against nobody.
 #: Holder prefix marking a claim taken by `fno agents spawn --node` on behalf of
 #: a worker that does not exist yet. Worker-specific (it carries the worker's
 #: name) and delivered only in that worker's environment, so naming it back is
@@ -757,6 +759,11 @@ def compare_and_rebind(
 #: constant lives here rather than in the command module that re-exports it.
 HANDOVER_HOLDER_PREFIX = "spawn-handover:"
 
+#: Suffix of the per-claim recovery mutex directory. One definition: this
+#: string was written out at six call sites, and a seventh (the dispatch
+#: guard's targeted recovery) is what made the duplication worth collapsing.
+#: A caller that spells it differently takes a DIFFERENT lock and silently
+#: serializes against nobody.
 RECOVERY_LOCK_SUFFIX = ".recovery.d"
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
