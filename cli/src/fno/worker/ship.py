@@ -210,6 +210,12 @@ def ship(
                 "error": base_msg or "stale base: refused to open PR from a stale base",
                 "branch": branch,
             }
+        # Claim this branch's node(s) in the exact trailer BEFORE gh sees the
+        # body (x-49ec). Unconditional: it is a no-op on a non-node branch and
+        # idempotent on a body that already claims them.
+        from fno.pr.closure import ensure_closure_trailer
+
+        body = ensure_closure_trailer(body, branch)
         # Create new PR
         create_result = subprocess.run(
             [

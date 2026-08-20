@@ -8,8 +8,10 @@ Blocks:
 - gh pr merge without two-factor state+artifact verification
 
 Allowed without gate:
-- gh pr create (ad-hoc development is legitimate; merge gate enforces
-  pipeline discipline at the shipping boundary)
+- gh pr create, EXCEPT from a node-bearing branch with no sign the exact
+  `Backlog-Closure:` trailer was composed (see _closure_trailer_refusal).
+  Ad-hoc development stays legitimate: `FNO_PR_CLOSURE_OK=1` clears it, and a
+  branch naming no node is never gated.
 
 Two-factor merge verification:
   (1) target-state.md (NOT megawalk-state.md) with
@@ -1362,6 +1364,72 @@ def _find_merge_segment(segments):
     return found[0] if found else None
 
 
+def _find_pr_create_segments(segments):
+    """Every `gh pr create` segment, repo/host globals stripped."""
+    out = []
+    for seg in segments:
+        argv = _effective_argv(seg)
+        if not argv or argv[0].rsplit("/", 1)[-1].lower() != "gh":
+            continue
+        argv = _strip_gh_global_opts(argv)
+        if len(argv) >= 3 and [t.lower() for t in argv[1:3]] == ["pr", "create"]:
+            out.append(" ".join(seg))
+    return out
+
+
+# Third copy of the node-id shape, after fno.graph._constants.NODE_ID_BODY and
+# scripts/lib/node-id.sh. This hook is stdlib-only and runs under a bare
+# interpreter that may not import fno at all, so it cannot defer to either.
+# test_pr_closure_producer.py pins this copy against fno.pr.closure.
+# branch_node_ids so the three cannot drift apart in silence.
+_HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
+_HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+
+
+def _branch_node_ids(head_ref):
+    """Delimiter-bounded node ids in a branch name, in order, deduplicated."""
+    ids = []
+    for match in _HOOK_BRANCH_NODE_ID_RE.finditer(head_ref or ""):
+        if match.group(1) not in ids:
+            ids.append(match.group(1))
+    return ids
+
+
+def _closure_trailer_refusal(command=""):
+    """Deny reason for a `gh pr create` that shows no composed closure trailer.
+
+    Measured 2026-08-19: five PRs in one evening red on
+    scripts/ci/check-pr-node-closure.sh for one reason - the generator
+    (`fno pr closure-trailer`) already existed and nothing ran it. The Python
+    creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
+    this covers the prose path, where an agent types the command.
+
+    The ceiling, stated because it decides what this can promise: the body
+    reaches gh as an unexpanded `"$BODY"`, so the hook cannot read the string
+    that will be sent. It asserts a POSITIVE marker that the composition STEP
+    ran - a literal trailer key, or the CLOSURE_TRAILER variable
+    skills/pr/references/create.md sets - and never an absence. The only
+    failure mode is therefore a false ALLOW, which CI still catches; a
+    correctly composed body is never denied.
+    """
+    if os.environ.get("FNO_PR_CLOSURE_OK", "") == "1":
+        return None
+    ids = _branch_node_ids(get_current_branch())
+    if not ids:
+        return None
+    if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
+        return None
+    return (
+        f"[fno closure trailer] branch names {', '.join(ids)}, so "
+        f"check-pr-node-closure reds this PR unless the body carries the exact "
+        f"trailer. Add this as its own paragraph in the body:\n"
+        f"    Backlog-Closure: {' '.join(ids)}\n"
+        f"Generate it (with contained_in descendants) via "
+        f"`fno pr closure-trailer {ids[0]}`. Ad-hoc PR that closes nothing: "
+        f"re-run with FNO_PR_CLOSURE_OK=1."
+    )
+
+
 def _find_git_segments(segments):
     """Return the executable-onward string of every segment whose command is
     `git` (wrapper/assignment prefix stripped). Catches compound commands a bare
@@ -1820,10 +1888,22 @@ def main():
         _emit("deny", reason)
         sys.exit(0)
 
+    # gh pr create - gated only on the closure trailer (x-49ec). Everything
+    # else about ad-hoc creation stays ungated; the merge gate below is where
+    # pipeline discipline is enforced.
+    if segments is not None:
+        pr_create_segs = _find_pr_create_segments(segments)
+    else:
+        # legacy fallback: unbalanced quotes, so match the whole command.
+        pr_create_segs = re.findall(r"gh\s+pr\s+create", command, re.IGNORECASE)
+    if pr_create_segs:
+        closure_reason = _closure_trailer_refusal(command)
+        if closure_reason:
+            _emit("deny", closure_reason)
+            sys.exit(0)
+
     # ==========================================
-    # gh pr create - always allowed (ad-hoc dev is legit; the merge gate is
-    # where pipeline discipline is enforced). gh pr merge - allow only with
-    # two-factor (state + artifact) verification.
+    # gh pr merge - allow only with two-factor (state + artifact) verification.
     # ==========================================
     if segments is not None:
         merge_segs = _find_merge_segments(segments)

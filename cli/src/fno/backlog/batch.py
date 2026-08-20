@@ -539,6 +539,12 @@ def ship_batch(
                 reason=f"git push failed: {(push.stderr or push.stdout or '').strip()[:200]}",
                 members=members,
             )
+        # Same producer the /pr create and worker/ship.py paths run (x-49ec):
+        # the batch branch carries its members' node ids, and the CI closure
+        # gate reads them off the head ref.
+        from fno.pr.closure import ensure_closure_trailer
+
+        body = ensure_closure_trailer(body, branch, extra_ids=list(members))
         cr = run(
             ["gh", "pr", "create", "--title", pr_title, "--body", body,
              "--base", base, "--head", branch],
