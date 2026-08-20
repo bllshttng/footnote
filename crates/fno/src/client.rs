@@ -18832,6 +18832,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_a_row_menus_bare_bottom_border_chip_dismisses_it() {
+        // (x-020d) A row/tab menu wears Bare chrome (Anchor::At), whose esc
+        // chip rides the inline bottom border rather than a title bar. Same
+        // click target, different chrome level - verified through the real
+        // row_menu_mouse router, same as the Full title-bar chip above.
+        use crate::mouse::MouseReport;
+        let mut v = view_with_agents(vec![agent_row("a", 10, Some(AgentBadge::Working), false)]);
+        assert!(v.open_row_menu(1, Anchor::At { row: 1, col: 1 }));
+        let (fr, fc) = {
+            let r = v.row_menu.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
+                })
+                .expect("the Bare bottom border carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let click = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        row_menu_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(
+            v.row_menu.is_none(),
+            "clicking the Bare menu's bottom-border chip closes it"
+        );
+    }
+
+    #[tokio::test]
     async fn hovering_the_footer_esc_close_keeps_the_selection() {
         // The footer's close target must never surface through `aux_hit` as a
         // row index: ESC_CLOSE_HIT clamps in `Popup::select` to the LAST entry,
