@@ -85,11 +85,7 @@ The workflow guard permits a sharded smoke job, but requires an aggregating job 
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
-One command to run before pushing, on a project that opted in (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's
-**committed HEAD** inside a persistent, hermetic worktree keyed by the full candidate SHA, then runs
-the changed packet, `fno-py test smoke --keep-going`, and the rust-ci legs
-(pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates,
-advisory `cargo audit`). The bounded pool keeps four SHA-keyed worktrees by default, so unrelated candidates can run concurrently without creating an unbounded cache.
+One command to run before pushing, on a project that opted in (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's **committed HEAD** inside a persistent, hermetic worktree keyed by the full candidate SHA. It then runs the changed packet (`fno-py test smoke --keep-going`) and the rust-ci legs. Those legs are pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates, and advisory `cargo audit`. The bounded pool keeps four SHA-keyed worktrees by default, so unrelated candidates can run concurrently without creating an unbounded cache.
 
 The changed packet goes first and stops the whole run on its own failure, so a
 broken nearest-neighbour test costs seconds rather than a full suite. It is

@@ -898,7 +898,7 @@ reserve_pool_victim() {
     fi
     stamp="pid=$$ started=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown) host=$(hostname 2>/dev/null || echo unknown) sha=$sha role=pool-reaper"
     if ! printf '%s\n' "$stamp" > "$POOL_VICTIM_LOCKDIR/holder"; then
-        rm -rf "$POOL_VICTIM_LOCKDIR"
+        srm -rf "$POOL_VICTIM_LOCKDIR"
         POOL_VICTIM_LOCKDIR=""
         return 1
     fi
