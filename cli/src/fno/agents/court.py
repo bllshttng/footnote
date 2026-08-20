@@ -161,6 +161,25 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     for row in live_rows:
         reading = crown_reading(row)
         if reading is None:
+            # crown_reading gates on crown_label, which registry.py returns
+            # None whenever crown_level is None - REGARDLESS of crown_scope.
+            # A corrupted row carrying a scope with no level would otherwise
+            # vanish here: not counted, not flagged unknown, not flagged
+            # disagreeing. That absence-lie is the exact defect this module
+            # exists to prevent, so surface the anomaly instead of skipping a
+            # row that plainly has SOME crown data.
+            if getattr(row, "crown_scope", None):
+                entries.append(
+                    {
+                        "holder": row.name,
+                        "level": row.crown_level,
+                        "scope": row.crown_scope,
+                        "grantor": getattr(row, "crown_grantor", None) or "human",
+                        "status": row.status,
+                        "agree": False,
+                        "reason": "half a crown: scope is set but level is missing",
+                    }
+                )
             continue
         agree, reason = _agreement(reading["level"], reading["scope"], by_id)
         entries.append(

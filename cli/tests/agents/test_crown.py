@@ -44,6 +44,15 @@ def test_split_is_the_inverse_of_canonical() -> None:
     assert split_scope(None) == []
 
 
+def test_split_scope_degrades_on_a_non_string_rather_than_raising() -> None:
+    """A corrupted registry row can carry a non-string crown_scope (a stray
+    int from a hand-edit). Every caller here, including `fno agents court`
+    (which promises to exit 0 on a read), must not crash on it."""
+    from fno.agents.crown import split_scope
+
+    assert split_scope(5) == []  # type: ignore[arg-type]
+
+
 def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) -> None:
     """scope_contains must canonicalize the graph node's project field before
     comparing it to the canonicalized crown scope. Graph intake stores the

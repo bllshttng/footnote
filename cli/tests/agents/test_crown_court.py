@@ -360,6 +360,32 @@ def test_a_half_crown_renders_and_never_certifies_agreement(
     assert "half" in render_court(as_json=False)
 
 
+def test_a_scope_with_no_level_is_surfaced_not_silently_dropped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The mirror corruption: a row carries a scope but no level. crown_reading
+    gates on crown_label, which registry.py returns None whenever crown_level
+    is None regardless of crown_scope - so this row would otherwise vanish
+    from the court entirely: not counted, not flagged unknown, not flagged
+    disagreeing. That is the absence-lie this module exists to prevent."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("half-scope", status="busy", crown_level=None, crown_scope="alpha")],
+        graph_entries=[],
+    )
+
+    court = gather_court()
+
+    assert court["summary"]["total"] == 1
+    assert court["crowns"][0]["holder"] == "half-scope"
+    assert court["crowns"][0]["agree"] is False
+    assert "half a crown" in court["crowns"][0]["reason"]
+    assert court["summary"]["disagreements"] == 1
+
+
 def test_project_rungs_stay_determinate_when_the_graph_is_unreadable(
     tmp_path: Path, monkeypatch
 ) -> None:

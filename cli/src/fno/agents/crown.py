@@ -175,8 +175,14 @@ def canonical_scope(scopes: list[str]) -> str:
 
 
 def split_scope(scope: Optional[str]) -> list[str]:
-    """The members of a stored scope; a single-name scope yields one element."""
-    if not scope:
+    """The members of a stored scope; a single-name scope yields one element.
+
+    Guards on type, not just truthiness: a corrupted registry row can carry a
+    non-string ``crown_scope`` (e.g. a stray int from a hand-edit), and
+    ``5.split(...)`` would raise past every caller here, including
+    ``fno agents court``, which promises to exit 0 on a read.
+    """
+    if not scope or not isinstance(scope, str):
         return []
     return [s for s in (part.strip() for part in scope.split(SCOPE_SEPARATOR)) if s]
 
