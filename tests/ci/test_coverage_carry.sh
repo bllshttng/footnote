@@ -16,6 +16,9 @@
 #         two absences)
 #   T05 - status read fails three times -> no-carry status-read-failed,
 #         distinct from an absent status
+#   T06 - the compare API call itself fails -> no-carry (not a crash): under
+#         `set -euo pipefail` a failing `gh api compare` must degrade to an
+#         empty identity, not abort the script before it prints a decision
 #
 # Exit codes: 0 pass, 1 fail
 set -uo pipefail
@@ -64,19 +67,12 @@ make_stub_gh() {
   cat > "$stub_dir/gh" <<STUB
 #!/usr/bin/env bash
 case "\$*" in
-  *"commits/${BEFORE}/status"*".state"*)
+  *"commits/${BEFORE}/status"*)
     if [ "$status_mode" = "fail" ]; then
       echo "stub gh: simulated status read failure" >&2
       exit 1
     fi
-    printf '%s' "$before_state"
-    ;;
-  *"commits/${BEFORE}/status"*".description"*)
-    if [ "$status_mode" = "fail" ]; then
-      echo "stub gh: simulated status read failure" >&2
-      exit 1
-    fi
-    printf '%s' "$before_desc"
+    printf '%s\t%s' "$before_state" "$before_desc"
     ;;
   *"compare/${BASE}...${BEFORE}"*)
     echo "compare:${BEFORE}" >> "$stub_dir/compare.log"
@@ -160,11 +156,42 @@ t05() {
   rm -rf "$stub_dir"
 }
 
+t06() {
+  local stub_dir out rc
+  stub_dir="$(mktemp -d -t coverage-carry-test-XXXXXX)"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"commits/${BEFORE}/status"*)
+    printf '%s\t%s' success "covered: 2 reviewed at ${BEFORE:0:8}"
+    ;;
+  *"compare/${BASE}...${BEFORE}"*)
+    exit 1
+    ;;
+  *"compare/${BASE}...${HEAD}"*)
+    exit 1
+    ;;
+  *)
+    echo "stub gh: unmatched args: \$*" >&2
+    exit 1
+    ;;
+esac
+STUB
+  chmod +x "$stub_dir/gh"
+  out="$(run_carry "$stub_dir" 2>/dev/null)"; rc=$?
+  if [[ "$rc" -ne 0 ]]; then fail "T06: a failing compare call crashed the script instead of degrading (rc=$rc): $out"; rm -rf "$stub_dir"; return; fi
+  [[ "$out" == "no-carry no-diff-identity" ]] || fail "T06: expected no-carry no-diff-identity on a failed compare, got: $out"
+  pass "T06 a failing compare call degrades to no-carry, never crashes the script"
+  rm -rf "$stub_dir"
+}
+
 t01
 t02
 t03
 t04
 t05
+t06
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then

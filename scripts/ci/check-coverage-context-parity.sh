@@ -105,6 +105,8 @@ expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   'format!("covered' "the Rust publisher (covered description prefix)"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   'covered\*\|"no review lane"\*' "the refresher preserve list"
+expect_line "$ROOT/scripts/ci/coverage-carry.sh" \
+  'covered\*\|"no review lane"\*' "the carry script's publisher allowlist"
 
 # The carry marker: the string coverage-carry.sh WRITES onto a carried
 # verdict's description, and the string the post-merge audit's case pattern
