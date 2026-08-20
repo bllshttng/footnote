@@ -123,11 +123,14 @@ def _update_registry_if_recipient_unchanged(
     lock cannot make a replacement inherit the registry mutation.
 
     `decline_reason`, when passed, gets one of `"row_removed"` (no row this
-    name any more) or `"identity_changed"` (a row exists but is not the one
-    the caller resolved) appended on a declined write -- callers that need to
-    tell those apart for telemetry (self-review finding: both used to log as
-    the same `RecipientIdentityChanged`, hiding a removed-entirely row behind
-    the restamp-race label) read it after the call.
+    name any more), `"duplicate_name"` (more than one row now shares the
+    name, an ambiguous registry state distinct from either a clean removal or
+    a restamp), or `"identity_changed"` (exactly one row exists but is not
+    the one the caller resolved) appended on a declined write -- callers that
+    need to tell those apart for telemetry (self-review finding: row-removed
+    and identity-changed used to log as the same `RecipientIdentityChanged`,
+    hiding a removed-entirely row behind the restamp-race label) read it
+    after the call.
     """
     applied = False
 
@@ -139,9 +142,12 @@ def _update_registry_if_recipient_unchanged(
             or _recipient_identity_key(matches[0]) != expected_identity
         ):
             if decline_reason is not None:
-                decline_reason.append(
-                    "row_removed" if not matches else "identity_changed"
-                )
+                if not matches:
+                    decline_reason.append("row_removed")
+                elif len(matches) > 1:
+                    decline_reason.append("duplicate_name")
+                else:
+                    decline_reason.append("identity_changed")
             return entries
         applied = True
         return updater(entries)
@@ -3101,17 +3107,26 @@ def _mark_stopped_orphaned(name: str, existing: AgentEntry) -> None:
     The next reconcile picks the orphan up via the live reachability probe.
     """
     try:
+        decline_reason: list[str] = []
         status_written = _update_registry_if_recipient_unchanged(
             name,
             _recipient_identity_key(existing),
             _stamp_status(name, status="orphaned", last_message_at_preserve=True),
+            decline_reason=decline_reason,
         )
         if not status_written:
+            reason = {
+                "row_removed": "row_removed",
+                "duplicate_name": "duplicate_name",
+            }.get(
+                decline_reason[0] if decline_reason else "",
+                "recipient_identity_changed",
+            )
             events.emit(
                 "agent_stopped_status_write_failed",
                 name=name,
                 provider="claude",
-                reason="recipient_identity_changed",
+                reason=reason,
             )
     except (OSError, RegistryVersionError):
         events.emit("agent_stopped_status_write_failed", name=name, provider="claude")
@@ -6223,14 +6238,20 @@ def _release_rung2_guard(session_uuid: str, holder: Optional[str]) -> None:
 
 def _stamp_revived_live(entry: AgentEntry) -> None:
     """Make a successful identity-preserving respawn countable before admission ends."""
+    decline_reason: list[str] = []
     applied = _update_registry_if_recipient_unchanged(
         entry.name,
         _recipient_identity_key(entry),
         _stamp_status(entry.name, status="live", last_message_at_preserve=True),
+        decline_reason=decline_reason,
     )
     if not applied:
+        reason_phrase = {
+            "row_removed": "was removed entirely",
+            "duplicate_name": "now has a duplicate name",
+        }.get(decline_reason[0] if decline_reason else "", "changed")
         raise RegistryVersionError(
-            f"registry row {entry.name!r} changed during identity-preserving respawn"
+            f"registry row {entry.name!r} {reason_phrase} during identity-preserving respawn"
         )
 
 
@@ -7006,17 +7027,21 @@ def _stamp_after_delivery(
                     out.append(e)
             return out
 
+        decline_reason: list[str] = []
         stamp_written = _update_registry_if_recipient_unchanged(
             name,
             identity,
             _stamp,
             registry_path=registry_path,
             registry_lock_timeout=registry_lock_timeout,
+            decline_reason=decline_reason,
         )
         if not stamp_written:
+            row_removed = decline_reason and decline_reason[0] == "row_removed"
+            reason_text = "row removed entirely" if row_removed else "recipient identity changed"
             print(
                 f"registry stamp failed after {delivery} delivery for "
-                f"{name!r}: recipient identity changed; delivery succeeded; "
+                f"{name!r}: {reason_text}; delivery succeeded; "
                 "do not retry",
                 file=sys.stderr,
             )
@@ -7027,9 +7052,9 @@ def _stamp_after_delivery(
                     name=name,
                     msg_id=msg_id,
                     delivery=delivery,
-                    reason="recipient_identity_changed",
-                    error="recipient identity changed after delivery",
-                    error_type="RecipientIdentityChanged",
+                    reason="row_removed" if row_removed else "recipient_identity_changed",
+                    error=f"{reason_text} after delivery",
+                    error_type="RecipientRowRemoved" if row_removed else "RecipientIdentityChanged",
                 )
             except (OSError, ValueError):
                 pass  # stderr already carries the non-retryable degradation

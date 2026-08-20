@@ -5115,7 +5115,11 @@ const WORKER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// move on. Best-effort by design — the caller is already on an error path.
 async fn best_effort_worker_shutdown(sock: &std::path::Path) {
     if let Ok(mut conn) = UnixStream::connect(sock).await {
-        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_TIMEOUT,
+            write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
+        )
+        .await;
         let _ = tokio::time::timeout(
             WORKER_ACK_TIMEOUT,
             crate::protocol::read_response(&mut conn),
@@ -5131,11 +5135,17 @@ async fn best_effort_worker_shutdown(sock: &std::path::Path) {
 /// while its PTY keeps running, Codex P1).
 async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
     let sock = ctx.home.worker_sock(&entry.short_id);
-    // 1. Graceful: ask the worker to tear down its PTY child + exit. The ACK
-    //    read is bounded (see WORKER_ACK_TIMEOUT): a worker that is wedged
-    //    must fall through to the escalation below, not park this handler.
+    // 1. Graceful: ask the worker to tear down its PTY child + exit. Both the
+    //    write and the ACK read are bounded (see WORKER_ACK_TIMEOUT): a
+    //    worker that is wedged (including one that has stopped reading its
+    //    socket entirely, which blocks the write side too) must fall through
+    //    to the escalation below, not park this handler.
     if let Ok(mut conn) = UnixStream::connect(&sock).await {
-        let _ = write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))).await;
+        let _ = tokio::time::timeout(
+            WORKER_ACK_TIMEOUT,
+            write_request(&mut conn, &Request::new(1, "worker.shutdown", json!({}))),
+        )
+        .await;
         let _ = tokio::time::timeout(
             WORKER_ACK_TIMEOUT,
             crate::protocol::read_response(&mut conn),
@@ -5530,8 +5540,8 @@ async fn handle_rm_with(
     // session torn down by hand with `claude stop`/`claude rm` never
     // updates it. A claude row absent from the `claude agents --json --all`
     // roster is provably gone, whoever removed it. Anything less than proof
-    // keeps refusing. This reconciliation is claude-only (x-c6d5 tracks
-    // extending it to codex/opencode, self-review finding): `provably_gone`
+    // keeps refusing. This reconciliation is claude-only (codex/opencode
+    // support is unimplemented, self-review finding): `provably_gone`
     // is unconditionally `false` for those harnesses, so they still hit the
     // pre-fix stale-status refusal below with `--force` as the only escape.
     let provably_gone =
