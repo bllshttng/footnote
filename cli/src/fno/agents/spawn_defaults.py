@@ -729,6 +729,7 @@ _MODEL_WORD_VENDORS = {"opus": "anthropic", "sonnet": "anthropic", "haiku": "ant
 _HARNESS_DEFAULT_VENDOR = {
     "claude": "anthropic",
     "codex": "openai",
+    "gemini": "google",
     "agy": "google",
 }
 
@@ -736,12 +737,50 @@ _HARNESS_DEFAULT_VENDOR = {
 def _implied_vendor(model: Optional[str]) -> Optional[str]:
     if not model:
         return None
-    m = model.lower()
-    for prefix, vendor in _MODEL_VENDOR_HINTS:
-        if m.startswith(prefix):
-            return vendor
-    base = m.split("[", 1)[0].split("-", 1)[0]
-    return _MODEL_WORD_VENDORS.get(base)
+    for candidate in (model.lower(), model.lower().rsplit("/", 1)[-1]):
+        for prefix, vendor in _MODEL_VENDOR_HINTS:
+            if candidate.startswith(prefix):
+                return vendor
+        base = candidate.split("[", 1)[0].split("-", 1)[0]
+        word_vendor: Optional[str] = _MODEL_WORD_VENDORS.get(base)
+        if word_vendor:
+            return word_vendor
+    return None
+
+
+def resolve_lane_vendor(
+    argv: Sequence[str],
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    harness: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the model vendor carried by a final spawn argv."""
+    values = list(argv)
+    tokens = values[1:] if values else []
+    explicit_route = _flag_value(tokens, "--route")
+    if explicit_route:
+        return explicit_route.replace(",", "/").split("/", 1)[0].strip().lower() or None
+    explicit_vendor = _flag_value(tokens, "--provider", "-P")
+    if explicit_vendor:
+        return explicit_vendor.strip().lower() or None
+    resolved_harness = (
+        harness or _flag_value(tokens, "--harness", "-H") or ""
+    ).strip().lower()
+    if not resolved_harness and values and values[0] in _HARNESS_DEFAULT_VENDOR:
+        resolved_harness = values[0]
+    if not resolved_harness:
+        try:
+            from fno.dispatch_flags import resolve_dispatch_provider
+
+            resolved_harness = resolve_dispatch_provider(None, env=env)[0]
+        except Exception:
+            resolved_harness = "claude"
+    lane = _HARNESS_DEFAULT_VENDOR.get(resolved_harness)
+    if lane:
+        return lane
+    if resolved_harness == "opencode":
+        return _implied_vendor(_flag_value(tokens, "--model", "-m"))
+    return None
 
 
 def _warn_model_vendor_mismatch(
@@ -765,24 +804,17 @@ def _warn_model_vendor_mismatch(
         # (A config route is never injected beside an explicit model, so a
         # --route in the final argv is always operator-typed.)
         return
-    lane = (_flag_value(toks, "--provider", "-P") or "").strip().lower() or None
-    if not lane:
-        # Same lane resolution as the model/effort branches: an explicit -H,
-        # else harness inference from the ambient session, else builtin claude.
-        # Hardcoding claude here would name anthropic as the lane inside a
-        # codex-ambient session and fire a false warning for a correctly
-        # vendored gpt-* model - the noise shape that hides the real misroute.
-        harness = (_flag_value(toks, "--harness", "-H") or "").strip().lower()
-        if not harness:
-            try:
-                from fno.dispatch_flags import resolve_dispatch_provider
-
-                harness = resolve_dispatch_provider(None, env=env)[0] or ""
-            except Exception:
-                harness = ""
-        lane = _HARNESS_DEFAULT_VENDOR.get(harness or "claude")
+    lane = resolve_lane_vendor(argv, env=env)
     if not lane or lane == implied:
         return
+    from fno.agents import events
+
+    events.emit(
+        "model_vendor_mismatch",
+        model=model,
+        implied_vendor=implied,
+        resolved_vendor=lane,
+    )
     print(
         f"fno agents spawn: --model {model!r} implies vendor {implied}, but the "
         f"resolved lane is {lane}; the model rides that lane's CLI as-is. Name "

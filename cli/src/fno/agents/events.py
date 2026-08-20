@@ -60,7 +60,22 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
     # cannot overwrite the canonical fields. The dict's order-preserving
     # right-to-left merge gives the mandatory fields final say.
     record = {**data, "ts": _utc_now_iso(), "kind": kind}
-    line = json.dumps(record, sort_keys=False, separators=(",", ":")) + "\n"
+    records = [record]
+    diagnostic = " ".join(str(value) for value in data.values())
+    if kind != "provider_rate_limited" and "429" in diagnostic and "1313" in diagnostic:
+        records.append(
+            {
+                "provider": data.get("route_provider") or data.get("provider") or "unknown",
+                "account": data.get("account") or data.get("account_id"),
+                "observed_at": record["ts"],
+                "ts": _utc_now_iso(),
+                "kind": "provider_rate_limited",
+            }
+        )
+    line = "".join(
+        json.dumps(item, sort_keys=False, separators=(",", ":")) + "\n"
+        for item in records
+    )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # 'a' mode is atomic for single writes <= PIPE_BUF (4096 on
@@ -73,6 +88,23 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
             f"fno agents: warning: events.emit({kind!r}) to {target}: {exc}",
             file=sys.stderr,
         )
+
+
+def emit_provider_rate_limited(
+    *,
+    provider: str,
+    account: Optional[str],
+    observed_at: Optional[str] = None,
+    path: Optional[Path] = None,
+) -> None:
+    """Record a provider Fair Usage rate-limit observation."""
+    emit(
+        "provider_rate_limited",
+        path=path,
+        provider=provider,
+        account=account,
+        observed_at=observed_at or _utc_now_iso(),
+    )
 
 
 def emit_with_context(

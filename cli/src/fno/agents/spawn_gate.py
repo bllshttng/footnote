@@ -412,11 +412,14 @@ def provider_live_count(provider: str) -> int:
             raise ProviderCountUnavailable(
                 "registry forward read skipped rows; provider count is incomplete"
             )
-        candidates = [
-            row
-            for row in loaded
-            if row.provider == provider and row.status in LIVE_STATUSES
-        ]
+        live_rows = [row for row in loaded if row.status in LIVE_STATUSES]
+        unreadable = [row.name for row in live_rows if not row.provider]
+        if unreadable:
+            raise ProviderCountUnavailable(
+                "live registry rows have unreadable provider fields: "
+                f"{sorted(unreadable)}"
+            )
+        candidates = [row for row in live_rows if row.provider == provider]
     except Exception as exc:
         raise ProviderCountUnavailable(f"fno registry unreadable: {exc}") from exc
 

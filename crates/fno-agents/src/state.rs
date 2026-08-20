@@ -385,6 +385,13 @@ pub struct RegistryEntry {
     /// stamped from route resolution and never inferred from `harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Requested or verified model id for the lane. Optional so older rows
+    /// remain lossless when a Python writer adds the axis fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning-effort arm used by the lane, when one was selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
     /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,
@@ -1536,6 +1543,8 @@ mod tests {
             short_id: format!("{name}-id"),
             legacy_provider: String::new(),
             provider: None,
+            model: None,
+            effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,
             cwd: "/tmp/x".into(),
@@ -2007,16 +2016,20 @@ mod tests {
         let dual_axis = concat!("open", "code");
         let python_json = format!(
             r#"{{"schema_version":15,"agents":[
-            {{"name":"w","harness":"{dual_axis}","provider":"{dual_axis}","cwd":"/p",
+            {{"name":"w","harness":"{dual_axis}","provider":"{dual_axis}","model":"glm-5.3","effort":"low","cwd":"/p",
              "log_path":"/l","created_at":"2026-08-19T00:00:00Z","status":"live"}}]}}"#
         );
         let reg: Registry = serde_json::from_str(&python_json).unwrap();
         assert_eq!(reg.entries[0].harness.as_deref(), Some(dual_axis));
         assert_eq!(reg.entries[0].provider.as_deref(), Some(dual_axis));
+        assert_eq!(reg.entries[0].model.as_deref(), Some("glm-5.3"));
+        assert_eq!(reg.entries[0].effort.as_deref(), Some("low"));
 
         let out = serde_json::to_value(&reg).unwrap();
         assert_eq!(out["agents"][0]["harness"], dual_axis);
         assert_eq!(out["agents"][0]["provider"], dual_axis);
+        assert_eq!(out["agents"][0]["model"], "glm-5.3");
+        assert_eq!(out["agents"][0]["effort"], "low");
     }
 
     #[test]

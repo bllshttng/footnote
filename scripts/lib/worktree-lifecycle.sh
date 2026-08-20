@@ -448,10 +448,10 @@ case "${1:-status}" in
                 # wins the race makes ours fail here - loop and re-check
                 # rather than mkdir blindly over a peer that just won.
                 unlink "$_WT_SWEEP_LOCK/pid" 2>/dev/null || true
-                if rmdir "$_WT_SWEEP_LOCK" 2>/dev/null && mkdir "$_WT_SWEEP_LOCK" 2>/dev/null; then
-                    _wt_lock_acquired=1
-                    break
-                fi
+                rmdir "$_WT_SWEEP_LOCK" 2>/dev/null || true
+                # Return to the atomic mkdir path. Recreating the directory
+                # in this branch leaves a gap where two reclaimers can both
+                # believe they acquired the lock before either writes its PID.
                 continue
             fi
             # Dir exists but carries no pid yet: a peer may be mid-acquire

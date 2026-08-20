@@ -28,6 +28,7 @@ from typing import Optional, Sequence
 
 from fno.agents import events
 from fno.agents.registry import register_existing_session, restamp_harness_session_id
+from fno.agents.spawn_defaults import resolve_lane_vendor
 
 #: How long a spawned worker waits for its own row to appear before giving up.
 #: Covers the spawner's post-`mux pane run` tail (child-pid lookup, the <=1s
@@ -169,10 +170,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _restamp(args.agent_self, args.harness, args.session_id)
 
     try:
+        vendor = resolve_lane_vendor([args.harness], env=os.environ, harness=args.harness)
         entry = register_existing_session(
-            provider=args.harness,
             session_id=args.session_id,
             cwd=args.cwd,
+            harness=args.harness,
+            provider=vendor,
             name=args.name or None,
             log_path=args.log_path,
             origin="operator",
@@ -189,7 +192,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     events.emit(
         "session_registered",
-        provider=entry.harness,
+        provider=entry.provider,
+        harness=entry.harness,
         name=entry.name,
         session_id=args.session_id,
         cwd=entry.cwd,

@@ -1150,6 +1150,8 @@ fn dispatch_create(
         short_id: String::new(),
         legacy_provider: String::new(),
         provider: None,
+        model: None,
+        effort: None,
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
         cwd: cwd.to_string_lossy().to_string(),

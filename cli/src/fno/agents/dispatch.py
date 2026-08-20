@@ -962,6 +962,7 @@ def _codex_create_path(
     timeout_sec: float,
     lock_handle,
     role: Optional[str] = None,
+    model: Optional[str] = None,
     effort: Optional[str] = None,
     add_dir: Optional[str] = None,
 ) -> DispatchAskResult:
@@ -1051,6 +1052,9 @@ def _codex_create_path(
         cwd=str(cwd),
         log_path=str(output_path),
         harness="codex",
+        provider="openai",
+        model=model,
+        effort=effort,
         harness_session_id=session_id,
     )
 
@@ -1569,6 +1573,11 @@ def _claude_create_path(
     # resolvable-handle guard only checks the field is non-empty, not that
     # the file exists.
     touched_log_path = _touch_log_path(name)
+    from fno.agents.spawn_defaults import resolve_lane_vendor
+
+    lane_provider = route_provider or resolve_lane_vendor(
+        ["claude", *(["--model", model] if model else [])], harness="claude"
+    )
     new_entry = AgentEntry(
         name=name,
         cwd=str(cwd),
@@ -1578,7 +1587,9 @@ def _claude_create_path(
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
-        provider=route_provider,
+        provider=lane_provider,
+        model=model,
+        effort=effort,
         harness_session_id=session_uuid,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
@@ -2774,6 +2785,7 @@ def dispatch_spawn(
                         ),
                         lock_handle=lock_handle,
                         role=launch_role,
+                        model=model,
                         effort=effort,
                         add_dir=add_dir,
                     )
@@ -3863,6 +3875,16 @@ def reconcile_agents(
             exit_code=12,
         ) from exc
 
+    entry_by_name = {entry.name: entry for entry in entries}
+
+    def _vendor_for_name(name: str) -> Optional[str]:
+        entry = entry_by_name.get(name)
+        return entry.provider if entry is not None else None
+
+    def _harness_for_name(name: str) -> Optional[str]:
+        entry = entry_by_name.get(name)
+        return entry.harness if entry is not None else None
+
     orphaned: list[dict] = []
     recovered: list[dict] = []
     skipped: list[dict] = []
@@ -3979,7 +4001,7 @@ def reconcile_agents(
             errors.append(
                 {
                     "name": entry.name,
-                    "provider": "gemini",
+                    "provider": entry.provider, "harness": entry.harness,
                     "id": entry.harness_session_id,
                     "reason": "retired-provider",
                 }
@@ -4005,7 +4027,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "codex",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "mux-pane-liveness-unavailable",
                         }
@@ -4035,7 +4057,7 @@ def reconcile_agents(
                         errors.append(
                             {
                                 "name": entry.name,
-                                "provider": "codex",
+                                "provider": entry.provider, "harness": entry.harness,
                                 "id": None,
                                 "reason": "codex-pane-pid-pending",
                             }
@@ -4051,7 +4073,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "codex",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "codex-process-incarnation-unavailable",
                         }
@@ -4066,7 +4088,7 @@ def reconcile_agents(
                         errors.append(
                             {
                                 "name": entry.name,
-                                "provider": "codex",
+                                "provider": entry.provider, "harness": entry.harness,
                                 "id": None,
                                 "reason": "codex-pane-pid-unconfirmed",
                             }
@@ -4109,7 +4131,7 @@ def reconcile_agents(
                             errors.append(
                                 {
                                     "name": entry.name,
-                                    "provider": "codex",
+                                    "provider": entry.provider, "harness": entry.harness,
                                     "id": None,
                                     "reason": "duplicate-codex-session-id",
                                 }
@@ -4130,7 +4152,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "codex",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": (
                                 "codex-session-probe-failed"
@@ -4157,7 +4179,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": entry.name,
-                        "provider": "codex",
+                        "provider": entry.provider, "harness": entry.harness,
                         "id": None,
                         "reason": "missing-codex-session-id",
                     }
@@ -4175,7 +4197,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": entry.name,
-                        "provider": "codex",
+                        "provider": entry.provider, "harness": entry.harness,
                         "id": entry.harness_session_id,
                         "reason": reason,
                     }
@@ -4215,7 +4237,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "claude",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "mux-pane-liveness-unavailable",
                         }
@@ -4261,7 +4283,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "claude",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "claude-pane-pid-pending",
                         }
@@ -4278,7 +4300,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "claude",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "claude-pane-pid-unconfirmed",
                         }
@@ -4293,7 +4315,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "claude",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": None,
                             "reason": "claude-process-incarnation-unavailable",
                         }
@@ -4316,7 +4338,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": entry.name,
-                        "provider": "claude",
+                        "provider": entry.provider, "harness": entry.harness,
                         "id": entry.short_id,
                         "reason": "claude-cli-not-on-path",
                     }
@@ -4331,7 +4353,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": entry.name,
-                        "provider": "claude",
+                        "provider": entry.provider, "harness": entry.harness,
                         "id": None,
                         "reason": "missing-claude-short-id",
                     }
@@ -4376,7 +4398,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": entry.name,
-                            "provider": "claude",
+                            "provider": entry.provider, "harness": entry.harness,
                             "id": entry.short_id,
                             "reason": f"{probe_label}: {exc.reason}",
                         }
@@ -4405,7 +4427,7 @@ def reconcile_agents(
             errors.append(
                 {
                     "name": entry.name,
-                    "provider": entry.harness,
+                    "provider": entry.provider, "harness": entry.harness,
                     "id": None,
                     "reason": f"unknown-provider-{entry.harness}",
                 }
@@ -4424,7 +4446,7 @@ def reconcile_agents(
 
         change = {
             "name": entry.name,
-            "provider": entry.harness,
+            "provider": entry.provider, "harness": entry.harness,
             # Codex P2 on PR #317: include gemini_session_id so reconcile
             # records carry an identifier for every provider. Pre-fix
             # gemini agents flipped between live/orphaned with "id": null
@@ -4560,7 +4582,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": name,
-                        "provider": "claude",
+                        "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                         "id": None,
                         "reason": write_error,
                     }
@@ -4569,7 +4591,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": name,
-                        "provider": "codex",
+                        "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                         "id": None,
                         "reason": write_error,
                     }
@@ -4580,7 +4602,7 @@ def reconcile_agents(
                     backfilled.append(
                         {
                             "name": name,
-                            "provider": "claude",
+                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                             "harness_session_id": hsid,
                         }
                     )
@@ -4588,7 +4610,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": name,
-                            "provider": "claude",
+                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                             "id": None,
                             "reason": "claude-session-id-backfill-raced",
                         }
@@ -4598,7 +4620,7 @@ def reconcile_agents(
                     backfilled.append(
                         {
                             "name": name,
-                            "provider": "codex",
+                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                             "harness_session_id": hsid,
                         }
                     )
@@ -4606,7 +4628,7 @@ def reconcile_agents(
                     errors.append(
                         {
                             "name": name,
-                            "provider": "codex",
+                            "provider": _vendor_for_name(name), "harness": _harness_for_name(name),
                             "id": None,
                             "reason": "codex-session-id-backfill-raced",
                         }
@@ -4623,7 +4645,7 @@ def reconcile_agents(
                 errors.append(
                     {
                         "name": name,
-                        "provider": probed.harness,
+                        "provider": probed.provider, "harness": probed.harness,
                         "id": probed.short_id or probed.harness_session_id,
                         "reason": "registry-status-update-raced",
                     }

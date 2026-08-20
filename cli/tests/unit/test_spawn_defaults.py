@@ -10,7 +10,7 @@ import io
 
 import pytest
 
-from fno.agents.spawn_defaults import inject_spawn_defaults
+from fno.agents.spawn_defaults import inject_spawn_defaults, resolve_lane_vendor
 
 
 class _Defaults:
@@ -1252,3 +1252,31 @@ def test_explicit_route_with_cross_vendor_model_is_silent():
         model="opus",
     )
     assert "implies vendor" not in err.getvalue()
+
+
+def test_lane_vendor_resolves_unrouted_harness_from_final_argv():
+    assert resolve_lane_vendor(["codex", "-C", "/tmp/workspace"]) == "openai"
+
+
+def test_model_vendor_mismatch_emits_measurement_event(monkeypatch):
+    emitted = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    err = io.StringIO()
+    inject_spawn_defaults(
+        ["spawn", "--name", "w", "-H", "codex", "-m", "opus", "hi"],
+        stderr=err,
+        env={},
+    )
+    assert emitted == [
+        (
+            "model_vendor_mismatch",
+            {
+                "model": "opus",
+                "implied_vendor": "anthropic",
+                "resolved_vendor": "openai",
+            },
+        )
+    ]

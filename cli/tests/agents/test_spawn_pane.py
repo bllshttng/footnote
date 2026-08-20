@@ -31,6 +31,7 @@ from fno.paths_testing import use_tmpdir
 
 AGY_HARNESS = "agy"
 CODEX_HARNESS = "codex"
+OPENCODE_HARNESS = "opencode"
 
 
 class FakeRunner:
@@ -614,6 +615,49 @@ def test_opencode_spawn_stamps_the_captured_session_id(
     assert result.short_id == ""
 
 
+def test_opencode_model_substitution_records_actual_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bound opencode session records the model it reports as loaded."""
+    from fno.agents.registry import load_registry
+
+    ses = "ses_09679f284ffeJv7NdBAoLQLnLZ"
+
+    class ModelRunner(FakeRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.db_calls = 0
+
+        def __call__(self, argv, **kwargs):
+            if argv[:2] == ["opencode", "db"]:
+                self.calls.append(list(argv))
+                self.db_calls += 1
+                stdout = (
+                    f"id\n{ses}\n"
+                    if self.db_calls == 1
+                    else '{"providerID":"zai-coding-plan","modelID":"glm-5.2"}\n'
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+            return super().__call__(argv, **kwargs)
+
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "fno.agents.events.emit",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+    runner = ModelRunner()
+    _spawn(monkeypatch, tmp_path, provider=OPENCODE_HARNESS, runner=runner)
+
+    row = load_registry()[0]
+    assert row.model == "zai-coding-plan/glm-5.2"
+    assert any(
+        kind == "model_substituted"
+        and data["requested_model"] == "zai-coding-plan/glm-5.3"
+        and data["actual_model"] == "zai-coding-plan/glm-5.2"
+        for kind, data in emitted
+    )
+
+
 def test_opencode_spawn_never_claims_another_rows_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -981,20 +1025,21 @@ def test_build_pane_argv_provider_forms(tmp_path: Path) -> None:
     # the EQUAL form (yargs misparses the split form on a flag-shaped value;
     # the positional is a PROJECT PATH, not a prompt), --auto only under
     # yolo, and never the headless `run` subcommand.
-    # x-c772: opencode is always launched with a model (the z-ai/glm-5.3 default).
+    # x-c772: opencode is always launched with a model (the valid
+    # zai-coding-plan/glm-5.3 default).
     opencode = build_pane_argv("opencode", "task", tmp_path, False, "ignored")
-    assert opencode == ["opencode", "--prompt=task", "--model", "z-ai/glm-5.3"]
+    assert opencode == ["opencode", "--prompt=task", "--model", "zai-coding-plan/glm-5.3"]
     assert build_pane_argv("opencode", "", tmp_path, False, None) == [
         "opencode",
         "--model",
-        "z-ai/glm-5.3",
+        "zai-coding-plan/glm-5.3",
     ]
     opencode_yolo = build_pane_argv("opencode", "task", tmp_path, True, None)
     assert opencode_yolo == [
         "opencode",
         "--prompt=task",
         "--model",
-        "z-ai/glm-5.3",
+        "zai-coding-plan/glm-5.3",
         "--auto",
     ]
     assert "run" not in opencode and "--session-id" not in opencode
@@ -1125,8 +1170,9 @@ def test_gemini_direct_slash_spawn_refuses_cleanly(tmp_path: Path, monkeypatch) 
 def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # x-c772: an explicit --model reaches every pane provider's TUI flag
     # (opencode included, now that it is spawnable). Exact passthrough; opencode
-    # uses the provider/model form and always carries a model (z-ai/glm-5.3 default).
-    from fno.agents.mux_spawn import _PER_HARNESS_DEFAULT_MODEL, build_pane_argv
+    # uses the provider/model form and always carries a model
+    # (zai-coding-plan/glm-5.3 default).
+    from fno.agents.mux_spawn import _PER_HARNESS_MODEL_SPELLING, build_pane_argv
 
     cases = [
         ("claude", "u", "opus"),
@@ -1147,7 +1193,20 @@ def test_build_pane_argv_forwards_model(tmp_path: Path) -> None:
     # opencode ALWAYS carries a model: None/empty falls back to the default.
     for m in (None, ""):
         argv = build_pane_argv("opencode", "t", tmp_path, False, None, m)
-        assert argv[argv.index("--model") + 1] == _PER_HARNESS_DEFAULT_MODEL["opencode"]
+        assert argv[argv.index("--model") + 1] == _PER_HARNESS_MODEL_SPELLING["opencode"]
+
+
+def test_ac1_hp_unrouted_codex_pane_stamps_model_vendor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unrouted Codex pane records its model vendor, not its harness."""
+    _spawn(monkeypatch, tmp_path, provider=CODEX_HARNESS)
+
+    from fno.agents.registry import load_registry
+
+    row = load_registry()[0]
+    assert row.harness == "codex"
+    assert row.provider == "openai"
 
 
 def test_opencode_default_is_a_table_lookup(tmp_path: Path, monkeypatch) -> None:
@@ -1158,12 +1217,12 @@ def test_opencode_default_is_a_table_lookup(tmp_path: Path, monkeypatch) -> None
     from fno.agents.mux_spawn import build_pane_argv
 
     # retarget: a sentinel entry flows straight through to argv
-    monkeypatch.setattr(ms, "_PER_HARNESS_DEFAULT_MODEL", {"opencode": "sentinel/x"})
+    monkeypatch.setattr(ms, "_PER_HARNESS_MODEL_SPELLING", {"opencode": "sentinel/x"})
     argv = build_pane_argv("opencode", "t", tmp_path, False, None, None)
     assert argv[argv.index("--model") + 1] == "sentinel/x"
 
     # remove the entry: no --model injected (a hardcoded branch would still add one)
-    monkeypatch.setattr(ms, "_PER_HARNESS_DEFAULT_MODEL", {})
+    monkeypatch.setattr(ms, "_PER_HARNESS_MODEL_SPELLING", {})
     assert "--model" not in build_pane_argv("opencode", "t", tmp_path, False, None, None)
 
     # explicit --model overrides the (now empty) table

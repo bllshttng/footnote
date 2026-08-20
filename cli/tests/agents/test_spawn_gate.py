@@ -505,6 +505,26 @@ class TestRunGate:
         with pytest.raises(spawn_gate.ProviderCountUnavailable):
             spawn_gate.provider_live_count("zai")
 
+    def test_null_provider_live_row_refuses_instead_of_counting_zero(
+        self, monkeypatch
+    ):
+        row = AgentEntry(
+            name="unattributed-live",
+            harness="codex",
+            provider=None,
+            cwd="/tmp",
+            log_path="/tmp/log",
+            pid=101,
+            pid_start_time=1001,
+        )
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
+        with pytest.raises(
+            spawn_gate.ProviderCountUnavailable,
+            match="provider fields.*unattributed-live",
+        ):
+            spawn_gate.provider_live_count("zai")
+
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})
         row = AgentEntry(
