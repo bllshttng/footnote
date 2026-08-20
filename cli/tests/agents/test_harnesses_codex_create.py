@@ -290,8 +290,14 @@ def test_create_bounded_argv_grants_git_metadata_write(tmp_path, fake_popen):
     )
 
     argv = fake_popen.call_args.args[0]
-    assert "--add-dir" in argv
-    assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+    # Located by PAIR: fno's state-root grant rides the same repeatable flag, so
+    # the first --add-dir is no longer necessarily the git one.
+    granted = {
+        Path(argv[i + 1]).resolve()
+        for i, tok in enumerate(argv)
+        if tok == "--add-dir"
+    }
+    assert (repo / ".git").resolve() in granted
     # It is an `exec` flag, so it must follow the subcommand.
     assert argv.index("exec") < argv.index("--add-dir")
 
@@ -321,7 +327,12 @@ def test_create_bounded_argv_grants_plan_directory(
 
 
 def test_create_full_yolo_argv_omits_git_add_dir(tmp_path, fake_popen):
-    """AC2-EDGE: full yolo is already unsandboxed - no grant to make."""
+    """AC2-EDGE: full yolo is already unsandboxed - no GIT grant to make.
+
+    Asserted on the git dir rather than on the bare flag: fno's state-root grant
+    rides the same flag on every posture, so the flag alone no longer names which
+    grant is under test.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -336,7 +347,12 @@ def test_create_full_yolo_argv_omits_git_add_dir(tmp_path, fake_popen):
     )
 
     argv = fake_popen.call_args.args[0]
-    assert "--add-dir" not in argv
+    granted = {
+        Path(argv[i + 1]).resolve()
+        for i, tok in enumerate(argv)
+        if tok == "--add-dir"
+    }
+    assert (repo / ".git").resolve() not in granted
 
 
 def test_create_git_add_dir_composes_with_user_add_dir(tmp_path, fake_popen):
@@ -356,9 +372,16 @@ def test_create_git_add_dir_composes_with_user_add_dir(tmp_path, fake_popen):
         add_dir="/some/shared/dir",
     )
 
+    from fno.agents.writable_dirs import worker_writable_dirs
+
     argv = fake_popen.call_args.args[0]
-    assert argv.count("--add-dir") == 3
+    # git common dir + plan dir + the caller's own, plus fno's state-root set,
+    # whose SIZE is machine-dependent. Counted from the resolver; presence
+    # asserted by name.
+    assert argv.count("--add-dir") == 3 + len(worker_writable_dirs(repo))
     assert "/some/shared/dir" in argv
+    # The caller's explicit grant leads fno's computed set.
+    assert argv.index("/some/shared/dir") < argv.index(worker_writable_dirs(repo)[0])
 
 
 def test_create_routed_openai_provider_injects_config_and_env(

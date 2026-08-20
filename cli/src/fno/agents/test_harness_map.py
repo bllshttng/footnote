@@ -77,7 +77,14 @@ def test_permission_and_submit_contracts_are_per_harness_not_claude_defaults():
     assert capabilities("agy")["ready_marker"] == "unsupported"
     assert claude["send_keys_enter_delay_ms"] == 800
     assert claude["submit_keys"] == ["enter"]
-    assert codex["submit_keys"] == ["unsupported"]
+    # codex submits on a carriage return like claude. Measured against codex
+    # 0.148.0: a message sent to a live pane rendered in the composer under
+    # "tab to queue message" and stayed unsent until a CR pushed it, then
+    # appeared in the transcript as a real user turn. The delay stays 0 because
+    # the CR landed correctly with no wait after the text; claude's 800 is a
+    # claude measurement and is not inherited.
+    assert codex["submit_keys"] == ["enter"]
+    assert codex["send_keys_enter_delay_ms"] == 0
 
 
 def test_permission_response_requires_matching_fingerprinted_rule():
@@ -102,7 +109,7 @@ def test_stop_and_remove_behavior_is_queryable_instead_of_implied():
 def test_dispatch_resolve_exposes_the_machine_readable_harness_contract():
     out = _resolve(harness="codex")
     assert out["ready_marker"] == "idle_prompt"
-    assert out["submit_keys"] == ["unsupported"]
+    assert out["submit_keys"] == ["enter"]
     assert out["send_keys_enter_delay_ms"] == 0
     assert out["stop_strategy"] == "registry-noop"
     assert out["remove_strategy"] == "codex-session-index"
@@ -120,6 +127,13 @@ def test_dispatch_resolve_exposes_the_machine_readable_harness_contract():
         ('ready_marker = "idle_prompt"', 'ready_marker = "missing_rule"', "ready_marker"),
         ('keys = ["1"]', 'keys = ["bogus-key"]', "permission_response"),
         ("send_keys_enter_delay_ms = 800", "send_keys_enter_delay_ms = -1", "send_keys_enter_delay_ms"),
+        # A lane that never submits carrying a delay: a number describing a wait
+        # nothing performs. gemini is the first `unsupported` block in the file.
+        (
+            'send_keys_enter_delay_ms = 0\nsubmit_keys = ["unsupported"]',
+            'send_keys_enter_delay_ms = 42\nsubmit_keys = ["unsupported"]',
+            "send_keys_enter_delay_ms",
+        ),
         ('kind = "subcommand"', 'kind = "mystery"', "resume_strategy"),
     ],
 )
@@ -654,3 +668,26 @@ def test_legacy_token_rewrite_is_position_scoped():
     untouched = "/target fix the no-merge carrier bug x-1"
     assert normalize_legacy_no_merge(untouched) == untouched
     assert not message_carries_no_merge(untouched)
+
+
+def test_submit_refusal_names_the_table_and_the_key():
+    """A refusal that names only the layer that did not run costs two agents and
+    an operator. This one lands the next reader in the file in ONE read."""
+    import io
+    from contextlib import redirect_stderr
+
+    from fno.agents.dispatch import _mux_pane_send
+
+    class _Entry:
+        harness = "gemini"
+        name = "w"
+        delivery_policy = None
+        mux = {"pane_id": 1, "session": "main"}
+
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        assert _mux_pane_send(_Entry(), "hello") is False
+    err = buf.getvalue()
+    assert "harness_capabilities.toml" in err
+    assert "submit_keys" in err
+    assert "capability declaration, not a transport failure" in err

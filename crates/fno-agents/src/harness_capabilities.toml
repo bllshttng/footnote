@@ -68,7 +68,7 @@ manifest_rules = [
   { id = "approval_prompt", state = "blocked" },
 ]
 send_keys_enter_delay_ms = 0
-submit_keys = ["unsupported"]
+submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
 session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_ms = 60000 }

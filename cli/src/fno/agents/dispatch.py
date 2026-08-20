@@ -5746,8 +5746,18 @@ def _mux_pane_send(
     input_caps = capabilities(harness)
     submit_keys = input_caps["submit_keys"]
     if submit_keys == ["unsupported"]:
+        # Name the TABLE and the KEY, not just the layer that did not run. The
+        # old wording ("no pinned submit contract") plus the caller's
+        # "[mux-send-failed]" receipt read as a broken transport, and two agents
+        # plus an operator spent a night on a codex pane before anyone checked
+        # whether something had DECLARED the lane unavailable. The transport was
+        # never tried.
         print(
-            f"mux pane delivery refused: harness {harness!r} has no pinned submit contract",
+            f"mux pane delivery refused: harness {harness!r} declares "
+            f"submit_keys = [\"unsupported\"] in "
+            f"cli/src/fno/agents/harness_capabilities.toml, so the pane lane is "
+            f"refused before it is tried. This is a capability declaration, not "
+            f"a transport failure; the message falls back to the durable queue.",
             file=sys.stderr,
         )
         return False

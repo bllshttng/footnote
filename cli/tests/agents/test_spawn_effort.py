@@ -59,7 +59,11 @@ def test_effort_mapping_fails_closed(provider, value):
     assert exc.value.exit_code == 2
 
 
-def test_pane_argv_threads_effort_and_unset_is_noop():
+def test_pane_argv_threads_effort_and_unset_is_noop(monkeypatch):
+    # This test is about the EFFORT axis. fno's writable-dir grant rides the same
+    # argv with machine-dependent content, so it is neutralized here and asserted
+    # by name in test_writable_dirs.py.
+    monkeypatch.setattr("fno.agents.mux_spawn.worker_writable_dirs", lambda *a, **k: [])
     claude = build_pane_argv("claude", "hi", CWD, False, "uuid", effort="high")
     codex = build_pane_argv("codex", "hi", CWD, False, None, effort="medium")
     assert claude[-4:] == ["--effort", "high", "--", "hi"]
@@ -215,6 +219,7 @@ def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="reply", stderr="")
 
     monkeypatch.setattr(claude, "_subprocess_run", fake_run)
+    monkeypatch.setattr(claude, "worker_writable_dirs", lambda *a, **k: [])
     result = claude.headless_create("hi", tmp_path, effort="high")
     assert captured["argv"] == [
         "claude",

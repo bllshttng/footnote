@@ -232,9 +232,18 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
             raise _contract_error(harness, "send_keys_enter_delay_ms", "must be non-negative")
         if not isinstance(submit, list) or not submit or not all(key in _KEY_TOKENS for key in submit):
             raise _contract_error(harness, "submit_keys", "has an invalid key token")
-        if delay == 0 and submit != ["unsupported"]:
+        # A lane that never submits must not carry a delay: the number would
+        # describe a wait nothing performs. The CONVERSE does not hold and was
+        # asserted here until codex disproved it. A supported contract may
+        # legitimately need no wait - measured against codex 0.148.0, a
+        # carriage return sent immediately after the text submits correctly,
+        # while claude needs 800ms. The old rule read a coincidence across the
+        # then-current harnesses as an invariant.
+        if submit == ["unsupported"] and delay != 0:
             raise _contract_error(
-                harness, "send_keys_enter_delay_ms", "zero requires an unsupported submit contract"
+                harness,
+                "send_keys_enter_delay_ms",
+                "an unsupported submit contract cannot carry a nonzero delay",
             )
         strategy = caps["resume_strategy"]
         forms = strategy.get("forms") if isinstance(strategy, dict) else None
