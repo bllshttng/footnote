@@ -815,6 +815,41 @@ def test_retire_stops_and_removes_nothing():
     assert "resume" in detail, "the receipt must name the undo"
 
 
+def test_a_pending_tool_call_never_retires():
+    """A transcript's last record can be the assistant turn that ISSUED a tool
+    call, which means the tool has not returned. A worker twenty minutes into a
+    build, a `gh pr checks --watch` or a full test run is silent to every other
+    read here, and if that same turn mentioned a promise the tail classifies
+    `done` and this lane stops it mid-call. reap refuses on the same reading."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+    facts = _facts("Running the suite. " + FINISHED_TAIL, age_min=20, kind="tool")
+    [v] = _retire_run([row], {row.row_id: facts})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_question_after_a_prose_mention_still_holds_the_row():
+    """The tag appears in prose in this repo routinely, and a worker can mention
+    it and THEN ask its question. A span-deleting strip matched from that FIRST
+    mention to the only closing tag, took the question with it, and retired the
+    row with the question stranded."""
+    text = (
+        "The loop keys on <promise> here.\n"
+        "Should I widen it to <watching> too?\n"
+        "<promise>MISSION COMPLETE</promise>"
+    )
+    assert watchdog._question_pending(_facts(text, age_min=20)) is True
+    row = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", True)
+    [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+    assert v.verdict != watchdog.RETIRE, "the question outlives the promise"
+
+
+def test_a_bare_prose_mention_alone_is_not_a_question():
+    """The other direction of the same read: over-detection costs a slot that
+    never gets reclaimed, so the cut may not answer yes on a mention alone."""
+    text = "The loop keys on <promise> here.\n" + FINISHED_TAIL
+    assert watchdog._question_pending(_facts(text, age_min=20)) is False
+
+
 def test_retire_is_outside_the_wake_lane():
     """--apply is documented as the one action that cannot destroy work, and
     retire stops a session, so it needs --apply-all."""
@@ -993,7 +1028,7 @@ def test_a_row_needing_input_never_retires():
     assert v.verdict != watchdog.RETIRE
 
 
-def test_an_adopted_store_session_never_retires():
+def test_an_unmarked_row_never_retires():
     """The spawn marker must be MEASURED, not derived from a missing field.
     `store_fallback` adopts any session it finds in the claude store - exactly
     the shape of an operator's own session the SessionStart hook never
@@ -1019,16 +1054,33 @@ def test_an_adopted_store_session_never_retires():
     assert v.verdict == watchdog.RETIRE
 
 
-def test_store_fallback_stamps_a_durable_adoption_marker():
-    """The producer half of the test above. An adopted row must carry the marker
-    at registration, or the consumer has nothing durable to read."""
-    import inspect
+def test_every_registry_row_is_born_with_an_origin():
+    """The producer half, and it has to cover EVERY birth site.
 
-    from fno.agents import store_fallback
+    The consumer above only acts on a positive marker, so a spawn path that
+    forgets one does not open a hole - it makes the lane silently unsatisfiable
+    for the workers that path creates, which is the same defect pointing the
+    other way. A row can only be born through an `AgentEntry(...)` literal, so
+    the check is over all of them rather than over the three that exist today."""
+    import ast
+    import pathlib
 
-    source = inspect.getsource(store_fallback)
-    assert 'origin="adopted"' in source, (
-        "store_fallback must mark adopted rows; status alone is flipped by reconcile"
+    pkg = pathlib.Path(watchdog.__file__).parent
+    missing = []
+    for path in sorted(pkg.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "id", None) != "AgentEntry":
+                continue
+            # `AgentEntry(**row)` rehydrates a row that was already born.
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            if not any(kw.arg == "origin" for kw in node.keywords):
+                missing.append(f"{path.name}:{node.lineno}")
+    assert not missing, (
+        "every registry row must state what created it; unmarked at " + ", ".join(missing)
     )
 
 

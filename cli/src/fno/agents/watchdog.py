@@ -102,38 +102,21 @@ VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
 #: still be asked one more thing before anything stops it.
 RETIRE_GRACE_S = 900
 
-#: The terminal markers a worker emits at the END of its last turn, stripped
-#: before asking whether that turn ends on a question.
+#: Where a terminal marker BEGINS. Only the opening delimiter, because
+#: `_question_pending` cuts at it rather than deleting a span.
 #:
-#: Three alternatives, and the ORDER is load-bearing. A matched pair goes first
-#: and non-greedily, so it takes one block rather than everything up to the last
-#: closing tag. An UNCLOSED opening tag then consumes to end of text, because
-#: that is what an unclosed tag means: a turn cut off mid-promise, where
-#: everything after the tag is promise content. Stripping only the tag there
-#: left its body behind as the apparent end of the turn, which answered "no
-#: question pending" for a turn that ended on one - the exact stranding this
-#: whole check exists to prevent. A self-closing tag is last and takes itself.
-#:
-#: A bare mention still consumes to end of text, so this pattern alone would
-#: lose a question asked after one. `_question_pending` closes that by asking
-#: the RAW text before it strips: a turn already ending on a question needs no
-#: stripping to prove it. Both readings are needed, neither is sufficient.
-_TERMINAL_TAG_RE = re.compile(
-    r"<(promise|watching)\b[^>]*>.*?</\1>"
-    r"|<(?:promise|watching)\b[^>]*(?<!/)>.*"
-    r"|<(?:promise|watching)\b[^>]*/>",
-    re.DOTALL | re.IGNORECASE,
-)
+#: A span-deleting regex was tried and cannot be made correct here. `re` has no
+#: right-most search, so a pattern spanning an open tag to a close tag matches
+#: LEFTMOST: a turn reading "the loop keys on <promise> here. Should I widen
+#: it?" followed by a real `<promise>DONE</promise>` matched from the FIRST tag
+#: to the only closing one, deleted the question with it, and retired a row with
+#: the question stranded. Anchoring the span to end-of-string does not help,
+#: because that leftmost match already reaches the end. Cutting at each marker
+#: start and testing the text before it has no such ordering to get wrong, and
+#: it needs no closing tag, so the cut-off-mid-promise shape falls out rather
+#: than costing its own alternative.
+_TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
 
-#: States that make a transcript-less row a ghost: the row claims a live-ish
-#: session whose recorded id resolves to nothing. A ``stopped`` row with no
-#: transcript is not a ghost - stopped is already the operator's answer.
-#: ``_row_state`` folds claude's ``busy`` onto ``working`` and its ``needs
-#: input`` onto ``blocked`` before the classifier runs, so on rows built by
-#: ``fleet_rows`` the fold is what keeps a ``busy`` ghost from reading as a
-#: healthy leave - not the ``busy`` entry here, which cannot match. It stays
-#: because ``verdicts`` is a pure function anyone can hand a raw row, and a
-#: caller that skips the fold must not silently lose the ghost lane.
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: Membership here is CANDIDACY, not a wake. The lane below wakes only on
 #: ``classify_tail == "stalled"``, the tail asserting the session went silent
@@ -438,28 +421,29 @@ def _question_pending(facts: Optional[TailFacts]) -> bool:
     """
     if facts is None or facts.last_role != "assistant":
         return False
-    text = facts.last_text or ""
+    text = (facts.last_text or "").rstrip()
     if _HELP_RE.search(text) is not None:
         return True
-    # Ask the RAW text first. Stripping terminal tags fixes the promise-last
-    # shape, but any bare `<promise>` mention consumes to end of text, so a turn
-    # ending "the loop keys on <promise> here. Should I widen it?" stripped to
-    # "the loop keys on" and answered no-question-pending - and agents working on
-    # this repo write that tag in prose routinely. This is not a trade against
-    # the promise-last shape: one clause satisfies both, because a turn that
-    # already ends on a question needs no stripping to prove it. It can only
-    # ever DECLINE to retire, never cause a stop.
-    if text.rstrip().endswith("?"):
+    # Where the turn actually ends. The plain reading, and the only one needed
+    # when the worker asked its question last.
+    if text.endswith("?"):
         return True
-    # Strip the terminal markers BEFORE asking where the turn ends. The worker
-    # is instructed to emit its promise last (skills/target/references/
-    # pre-promise.md), so the real shape of the case this function exists for is
-    # "...open the PR too?\n<promise>MISSION COMPLETE</promise>" - a turn that
-    # ends on `>`. Reading `endswith("?")` against the raw text answers False on
-    # exactly the population the docstring above describes, and the row retires
-    # with the question stranded. Removing the tags first puts the question back
-    # at the end where it actually is.
-    return _TERMINAL_TAG_RE.sub("", text).rstrip().endswith("?")
+    # The worker is instructed to emit its promise LAST (skills/target/
+    # references/pre-promise.md), so the modal shape of the case this function
+    # exists for ends on `>`: the question, then a closing promise block. Read
+    # against the raw text that answers False on exactly the population the
+    # docstring describes, and the row retires with the question stranded.
+    #
+    # So ask again in front of every terminal marker, not just the last one. A
+    # turn may mention the tag in prose and THEN ask its question, and agents
+    # working on this repo write it in prose routinely. Testing every cut point
+    # covers both shapes without ordering the two readings against each other.
+    # The failure direction is over-detection: a question mark that happens to
+    # sit before some marker declines to retire, and never stops a row.
+    return any(
+        text[: m.start()].rstrip().endswith("?")
+        for m in _TERMINAL_TAG_START_RE.finditer(text)
+    )
 
 
 def retire_decision(
@@ -532,6 +516,15 @@ def retire_decision(
         return False, ""
     age_s = max(0.0, now_s - facts.last_event_epoch)
     if age_s <= grace_s:
+        return False, ""
+    # The last record being the assistant turn that ISSUED a tool call means the
+    # tool has not returned. A worker twenty minutes into a build, a `gh pr
+    # checks --watch` or a full test run looks quiet to every read above this
+    # line, and when that same turn mentions a promise `classify_tail` answers
+    # `done` and this lane stops it mid-call. `reap_decision` refuses on the
+    # same reading for the same reason, and a lane that ships ARMED must not be
+    # the laxer one.
+    if facts.last_kind == "tool":
         return False, ""
     truth = classify_tail(facts.last_role, facts.last_text, age_s)
     if truth != "done":
@@ -1482,6 +1475,14 @@ _STOPPED_STATES = frozenset({"stopped", "exited", "killed"})
 #: reclaims. `_question_pending` cannot cover it either: that reads the
 #: assistant's own text, and a permission prompt is not assistant text. This
 #: lane ships ARMED, so the ambiguous state stays out.
+#:
+#: `working` is claude's "executing right now", and it is IN because that stamp
+#: is the thing this lane distrusts: a parked worker that never emitted a
+#: closing status keeps wearing it, which is the phantom slot the node reported.
+#: The transcript is the truth source, and every read below has to agree before
+#: a `working` row retires - past the grace, no open rate-limit window, no
+#: pending tool call, a tail that classifies `done`, no question owed. A session
+#: genuinely executing fails the tool-call read or the age read.
 _RETIRABLE_STATES = frozenset({"working", "idle", "done"})
 
 

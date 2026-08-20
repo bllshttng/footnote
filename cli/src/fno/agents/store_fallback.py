@@ -506,6 +506,11 @@ def heal_from_harness_store(
             harness_session_id=hit.session_id,
             status="orphaned",
             short_id=short_id,
+            # Same fact as the registered row above, and it has to be stated
+            # here too: this one is handed straight back to the caller when
+            # registration fails, so it reaches a reader without ever passing
+            # the path that would have marked it.
+            origin="adopted",
         )
         return entry
 
