@@ -587,12 +587,21 @@ pub struct RegistryEntry {
     /// Registration origin (x-944f, v16), mirroring Python's `AgentEntry`:
     /// `Some("operator")` for a session a human started by hand (`fno agents
     /// register`, `/fno-me`), `Some("spawn")` for a footnote-created worker,
-    /// `None` for a row nothing ever stamped. The reap lane reads it as a
-    /// PROTECTOR: an operator row is never reaped. That makes the erasure this
-    /// mirror closes a safety defect, not a cosmetic one -- before it, every
-    /// Rust write dropped the stamp and every reap decision was made without
-    /// the one field that answers "is a human sitting in this session".
-    /// `None` and `"spawn"` are NOT the same fact; only `"operator"` protects.
+    /// `Some("adopted")` for one the harness-store healer found already
+    /// running, `None` for a row nothing ever stamped. The reap lane reads it
+    /// as a PROTECTOR: an operator row is never reaped. That makes the erasure
+    /// this mirror closes a safety defect, not a cosmetic one -- before it,
+    /// every Rust write dropped the stamp and every reap decision was made
+    /// without the one field that answers "is a human sitting in this session".
+    /// `None` and `"spawn"` are NOT the same fact; only `"operator"` protects,
+    /// and only `"spawn"` retires.
+    ///
+    /// The mirror is load-bearing for the same X3 passthrough reason as
+    /// `delivery_policy`: Python stamps this at row birth, the daemon touches
+    /// the same rows, and a field this struct does not know is dropped on
+    /// write-back. Without it the watchdog's retire lane reads every long-lived
+    /// worker as unknown and stops reclaiming slots, and the mail escalation
+    /// loses every operator row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
     /// What caused this spawn (x-42c5), mirroring Python's `AgentEntry`. Same
@@ -2142,6 +2151,37 @@ mod tests {
             back["agents"][0]["route_settings_path"], PATH,
             "the daemon must re-emit a Python-stamped route path, not drop it"
         );
+    }
+
+    #[test]
+    fn origin_survives_a_daemon_read_modify_write() {
+        // Python stamps this at row birth and the watchdog's retire lane reads
+        // it to answer "did footnote make this row?". The daemon touches the
+        // same rows, so dropping it on write-back turns every marked worker
+        // back into UNKNOWN - and unknown never retires, so the lane goes
+        // silently unsatisfiable rather than visibly broken. Measured before
+        // this mirror existed: zero of thirty-six live rows carried an origin,
+        // including operator rows the SessionStart hook had stamped.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("leader"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // (a) An unmarked row OMITS the key, so a pre-marker row stays unknown
+        // rather than gaining a value nothing wrote.
+        assert!(wire["agents"][0].get("origin").is_none());
+
+        // (b) A row written before the field existed reads as unknown.
+        let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(reg.entries[0].origin, None);
+
+        // (c) The daemon must re-emit every marker Python writes, not drop it.
+        for marker in ["spawn", "operator", "adopted"] {
+            wire["agents"][0]["origin"] = serde_json::Value::from(marker);
+            let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(reg.entries[0].origin.as_deref(), Some(marker));
+            let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+            assert_eq!(back["agents"][0]["origin"], marker);
+        }
     }
 
     #[test]

@@ -504,6 +504,8 @@ mod tests {
         state::RegistryEntry {
             name: name.into(),
             short_id: String::new(),
+            // Fixture: makes no claim about what created the row.
+            origin: None,
             legacy_provider: provider.into(),
             provider: None,
             model: None,

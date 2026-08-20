@@ -117,6 +117,22 @@ RETIRE_GRACE_S = 900
 #: than costing its own alternative.
 _TERMINAL_TAG_START_RE = re.compile(r"<(?:promise|watching)\b", re.IGNORECASE)
 
+#: A promise the worker actually CLOSED. `classify_tail` answers `done` on any
+#: `<promise` in the last turn, a prose mention included, and agents working on
+#: this repo write the tag in prose routinely. The question half of this lane
+#: already refuses to trust a bare mention; the done half read the classifier's
+#: single answer and stopped a live worker whose turn merely said "the loop keys
+#: on <promise> here". So retire asks for the closed block itself.
+#:
+#: Closed, not merely opened, and that is the conservative half on purpose. An
+#: unclosed tag means a turn cut off mid-promise, which is not a worker calmly
+#: declaring itself finished. Refusing there costs a slot that stays held; the
+#: other direction stops a session that never said it was done.
+_CLOSED_PROMISE_RE = re.compile(
+    r"<promise\b[^>]*>.*?</promise\s*>|<promise\b[^>]*/>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 _GHOST_STATES = frozenset({"working", "busy", "blocked"})
 #: Membership here is CANDIDACY, not a wake. The lane below wakes only on
 #: ``classify_tail == "stalled"``, the tail asserting the session went silent
@@ -529,6 +545,12 @@ def retire_decision(
     truth = classify_tail(facts.last_role, facts.last_text, age_s)
     if truth != "done":
         return False, ""
+    # `classify_tail` reaches `done` on any `<promise` in the turn, so the
+    # classifier alone cannot tell a declaration from a prose mention. This lane
+    # stops sessions, so it asks for the closed block rather than the loose read
+    # its siblings share.
+    if _CLOSED_PROMISE_RE.search(facts.last_text or "") is None:
+        return False, ""
     if _question_pending(facts):
         return (
             False,
@@ -880,9 +902,17 @@ def reap_decision(
     # has the same shape. The marginal cost is small: a row only reaches here
     # by carrying a parseable stamp already, so what this newly protects is
     # exactly that dangerous set.
-    if row.origin is None:
+    #
+    # `adopted` is the SAME fact wearing a name. The healers now stamp the rows
+    # they adopt rather than leaving the field empty, which is strictly better
+    # for a reader - but only if every reader learns the word. Read as merely
+    # not-"operator" it would walk past this guard, and the population it names
+    # is the one the guard was written for.
+    if row.origin is None or row.origin == "adopted":
+        recorded = "adopted, which does not say who started the session"
         return REAP_UNKNOWN, (
-            f"{reap_basis}, tail reads {truth}, but origin was never recorded, "
+            f"{reap_basis}, tail reads {truth}, but origin "
+            f"{'reads ' + recorded if row.origin else 'was never recorded'}, "
             f"which is not evidence of a worker, and "
             f"{REAP_PROTECTION_RULES['origin']}"
         )
@@ -1462,6 +1492,14 @@ _TERMINAL_STATES = frozenset({"stopped", "done", "completed", "exited", "killed"
 #: claude has already renamed that field once and every row read `""`. Under a
 #: negative test the next rename turns one `--apply-all` into a fleet-wide stop
 #: of every row whose tail carries a promise. Unmeasurable must answer no.
+#:
+#: `done` is IN even though `_TERMINAL_STATES` also carries it, and the two
+#: readings do not conflict. `Done` is a member of claude's own
+#: KNOWN_LIVE_STATUSES: a pane painting it is ALIVE and holding a slot, which is
+#: the whole population this lane reclaims. Measured on a live 36-row fleet: no
+#: row wore `idle`, and every parked worker wore `done`. `_TERMINAL_STATES`
+#: answers a different question, whether the ROSTER considers the work over, and
+#: its own comment records that the roster called a working session done.
 #:
 #: `completed` is deliberately absent: it is not in claude's live vocabulary, so
 #: whether it describes the work or the process is unknown, and unknown does not

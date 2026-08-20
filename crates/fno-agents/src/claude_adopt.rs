@@ -51,6 +51,15 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
     RegistryEntry {
         name: adopted_name(&short),
+        // Birth marker: a claude worker found in the roster, not one footnote
+        // started. "adopted" is the honest answer and neither other stamp
+        // would be: adopt takes in BOTH a session a human started by hand and
+        // a footnote /target orphan (that is what `fno_id` below is for), so
+        // "operator" and "spawn" would each be a confident value nothing
+        // measured. Both watchdog lanes read the word rather than an absence -
+        // retire acts only on "spawn", and reap protects "adopted" the same
+        // way it protects a row nothing ever stamped.
+        origin: Some("adopted".into()),
         short_id: short,
         legacy_provider: String::new(),
         provider: None,
@@ -85,12 +94,6 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
-        // Genuinely unknown, and `None` says exactly that. Adopt takes in BOTH
-        // a session a human started by hand and a footnote /target orphan
-        // (that is what `fno_id` above is for), so neither stamp would be true
-        // of every adopted row. Guessing here would rebuild the defect x-944f
-        // fixes, one field over: a confident value nothing measured.
-        origin: None,
         spawn_trigger: None,
         legacy_claude_short_id: None,
     }

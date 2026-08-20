@@ -1988,6 +1988,8 @@ done
             r.entries.push(state::RegistryEntry {
                 name: sid.clone(),
                 short_id: sid.clone(),
+                // Fixture: makes no claim about what created the row.
+                origin: None,
                 legacy_provider: String::new(),
                 provider: None,
                 model: None,

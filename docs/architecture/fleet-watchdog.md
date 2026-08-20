@@ -16,8 +16,8 @@ Order is precedence. The top row wins.
 |---------|-----------|-----------------|
 | `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `reap` | the node is done or its claim is held live by another session, the worktree has no other occupant, no 429 window is open, and the tail says the session is finished rather than still in play | `node <id> done, tail reads done, quiet <n>m` |
-| `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `retire` | a footnote-spawned worker whose tail says it declared itself done, carries no question the operator owes, and has been quiet past `config.recovery.retire_grace_s` | `worker declared itself done and has been quiet <n>m (grace <n>m); stop only, worktree and row survive` |
+| `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
 | `leave` | everything else, including every healthy injectable row | `state <s>, last turn <n>m ago, no lane applies` |
@@ -76,6 +76,10 @@ The question half asks in front of every terminal marker. It does not delete a s
 `spawned` is read from `origin`. That field is written once, at row birth. Every path that creates a registry row states what it made. The spawn sites write `spawned`. `register_existing_session` takes the caller's word. The harness-store healer writes `adopted`. A row with no marker answers unknown, and no lane acts on it.
 
 Reading the absence instead was wrong twice. A row written before the field existed carries nothing. An operator's own terminal adopted from the claude store is routinely one of those. Keying on `status == "orphaned"` did not cover them. `status` is a liveness stamp. One `fno mail send` flips it to `live`.
+
+Retire sits above `stale`, and only `working` is in both lanes. A `working` row quiet past the ceiling used to escalate as "needs a human". If its tail closes a promise and owes no question, there is nothing for a human to decide, so retire stops it instead. That is an action, not the silence the earlier ordering bug produced. A row that owes an answer still escalates, because the question read refuses first.
+
+The marker only works if every writer preserves it. Rust reads and writes the same registry, and serde drops a field its struct does not declare. Before `RegistryEntry` mirrored `origin`, one daemon write-back erased it. Measured on a live 36-row fleet: no row carried an origin at all, operator rows the SessionStart hook had stamped included. So the lane saw every long-lived worker as unknown. A row born now keeps its marker, and a row that predates the mirror stays unknown until it respawns. Run `fno agents watchdog -J --only retire` to see the current count.
 
 A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake is an attach and a neutral resume, not a paste of a mail body. The wake message is always the bare resume word, never a mail payload.
 

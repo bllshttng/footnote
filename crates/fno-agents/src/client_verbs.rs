@@ -1643,6 +1643,11 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     let is_claude = harness == "claude";
     RegistryEntry {
         name: synthesized_name(&short),
+        // Birth marker: synthesized from a session identity that arrived
+        // without a row, so nothing here observed how that session started.
+        // "adopted" says that; it is not a claim that no human is sitting in
+        // it, and both watchdog lanes treat it as the non-answer it is.
+        origin: Some("adopted".into()),
         short_id: short,
         legacy_provider: String::new(),
         provider: None,
@@ -1681,10 +1686,6 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
             Some(id.fno_id.clone())
         },
         delivery_policy: None,
-        // Synthesized from a session identity that arrived without a row, so
-        // nothing here observed how that session started. `None` is the honest
-        // never-recorded, not a claim that no human is sitting in it.
-        origin: None,
         spawn_trigger: None,
         legacy_claude_short_id: None,
     }

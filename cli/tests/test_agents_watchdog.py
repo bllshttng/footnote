@@ -821,7 +821,7 @@ def test_a_pending_tool_call_never_retires():
     build, a `gh pr checks --watch` or a full test run is silent to every other
     read here, and if that same turn mentioned a promise the tail classifies
     `done` and this lane stops it mid-call. reap refuses on the same reading."""
-    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
     facts = _facts("Running the suite. " + FINISHED_TAIL, age_min=20, kind="tool")
     [v] = _retire_run([row], {row.row_id: facts})
     assert v.verdict != watchdog.RETIRE
@@ -838,7 +838,7 @@ def test_a_question_after_a_prose_mention_still_holds_the_row():
         "<promise>MISSION COMPLETE</promise>"
     )
     assert watchdog._question_pending(_facts(text, age_min=20)) is True
-    row = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", True)
+    row = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", "spawn")
     [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
     assert v.verdict != watchdog.RETIRE, "the question outlives the promise"
 
@@ -1132,6 +1132,48 @@ def test_arming_the_lane_never_demotes_the_stale_escalation():
     assert off.verdict == STALE
     assert armed.verdict == STALE, "arming the lane must not hide a needs-human row"
     assert "needs a human" in armed.basis
+
+
+def test_arming_the_lane_replaces_the_stale_escalation_with_an_action():
+    """The other half, and the one the test above cannot see because it pins
+    `blocked`. `working` is the only state in both the wake lane and
+    `_RETIRABLE_STATES`, so arming retire DOES change that row's verdict.
+
+    That is allowed, and the invariant is narrower than "the verdict must not
+    depend on whether the lane is armed". A stale escalation says a human should
+    look. When the tail closes a promise and owes no question, there is nothing
+    to look at, so arming must replace the escalation with an ACTION - never
+    with `leave`, which is the silence the near-miss ordering bug produced."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    facts = {row.row_id: _facts(FINISHED_TAIL, age_min=13 * 60)}
+
+    [off] = _retire_run([row], facts, grace=0)
+    [armed] = _retire_run([row], facts, grace=RETIRE_GRACE)
+
+    assert off.verdict == STALE
+    assert armed.verdict == watchdog.RETIRE
+    assert armed.action == "stop", "an escalation may become an action, never silence"
+
+
+def test_a_prose_mention_of_the_tag_never_retires():
+    """`classify_tail` answers `done` on any `<promise` in the last turn, prose
+    mention included, and agents working on this repo write the tag in prose
+    routinely. Reading that single answer stopped a live worker whose turn only
+    said it was widening something. The done half asks for the CLOSED block, the
+    same way the question half already refuses to trust a bare mention."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    text = "the loop keys on <promise> here. Widening it now."
+    [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_turn_cut_off_mid_promise_never_retires():
+    """An unclosed tag means the turn was cut off while writing its promise,
+    which is not a worker calmly declaring itself finished. Refusing costs a
+    slot that stays held; acting stops a session that never said it was done."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([row], {row.row_id: _facts("<promise>MISSION COMPL", age_min=20)})
+    assert v.verdict != watchdog.RETIRE
 
 
 def test_an_open_429_window_never_retires():
@@ -2614,10 +2656,15 @@ def test_the_three_origin_values_reach_three_different_verdicts():
     filed against, and the first cut of this predicate committed it: only
     "operator" refused, so `None` fell through to the delete exactly like a
     known worker. Each value now reaches a verdict the others cannot.
+
+    "adopted" is the fourth, and it lands with `None` on purpose: the healers
+    that mint those rows observed a session already running and never observed
+    who started it. Naming the non-answer must not turn it into an answer.
     """
     expected = {
         "operator": watchdog.REAP_NO,
         None: watchdog.REAP_UNKNOWN,
+        "adopted": watchdog.REAP_UNKNOWN,
         "spawn": watchdog.REAP_YES,
     }
     for origin, want in expected.items():
@@ -2634,25 +2681,30 @@ def test_the_three_origin_values_reach_three_different_verdicts():
 def test_an_adopted_row_survives_its_recency_stamp_going_stale():
     """The reachable case the first cut of this predicate would have deleted.
 
-    `mint_adopted_entry` writes `origin: None` beside a FRESH
-    `last_message_at`, and adopt takes in both a session a human started by
-    hand and a footnote orphan. Inside the window the stamp protects the row.
-    This asserts what happens AFTER it goes stale, which is where the two
-    protectors used to fall silent together and hand over a worktree nobody
-    could prove was a worker's.
+    `mint_adopted_entry` writes its marker beside a FRESH `last_message_at`,
+    and adopt takes in both a session a human started by hand and a footnote
+    orphan. Inside the window the stamp protects the row. This asserts what
+    happens AFTER it goes stale, which is where the two protectors used to fall
+    silent together and hand over a worktree nobody could prove was a worker's.
+
+    Both spellings, because the fleet carries both: a row minted before the
+    healers stamped anything reads None, and one minted since reads "adopted".
+    They are the same non-answer and must reach the same refusal.
     """
-    adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
-                  "/wt/solo", origin=None, last_message_at=STALE_MESSAGE_STAMP)
+    for origin, said in ((None, "was never recorded"), ("adopted", "reads adopted")):
+        adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
+                      "/wt/solo", origin=origin,
+                      last_message_at=STALE_MESSAGE_STAMP)
 
-    answer, basis = _decide(
-        adopted,
-        facts=_facts(FINISHED_TAIL, age_min=200),
-        nodes={"x-done": {"status": "done"}},
-    )
+        answer, basis = _decide(
+            adopted,
+            facts=_facts(FINISHED_TAIL, age_min=200),
+            nodes={"x-done": {"status": "done"}},
+        )
 
-    assert answer == watchdog.REAP_UNKNOWN
-    assert "origin was never recorded" in basis
-    assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
+        assert answer == watchdog.REAP_UNKNOWN, origin
+        assert said in basis, basis
+        assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
 
 
 def test_the_unrecorded_origin_read_never_silences_a_more_specific_refusal():
