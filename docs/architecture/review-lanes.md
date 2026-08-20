@@ -56,6 +56,8 @@ The positive marker is what a finished run produces: it returns findings, or it 
 
 Silence alone is not a wedge, so probe before you conclude. `git status` naming modified files is the portable positive marker for writing. `stat` is the precise one. Spell it `stat -f '%m %N' <paths>` on BSD and `stat -c '%Y %n' <paths>` on GNU. Compare either against `date +%s`. Read epoch seconds on both sides, because a local-time format string compared against a UTC clock makes a file written seconds ago look hours stale.
 
+Anchor the probe at the repository root, because a relative pathspec silently matches nothing from the wrong directory. Print the count of files scanned beside the result, because zero writes and a broken probe are otherwise the same output.
+
 The probe answers in the positive direction only. A fresh write proves a live writer. A stale read proves nothing, because a fork thinking between edits and a fork wedged look identical from outside. So a wedge call needs more than a quiet probe, and more than a timer.
 
 A forked review does not appear in `fno agents top --subagents` or in `claude agents --json`. Only the launching session's own agent list shows it. So only that session can judge its fork, and an observer must take that session's answer rather than check an outside surface. A reader who checks the documented subagent verb sees nothing and reads the rule as satisfied. The instrument manufactures the absence it is read for.
