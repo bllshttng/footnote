@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from fno.paths_testing import use_tmpdir
 
@@ -300,7 +299,99 @@ def test_render_court_table_names_scope_holder_and_agreement(
 
     assert "alpha" in text
     assert "king" in text
-    assert "court: 1 crowns, 0 disagreements, 0 unknowns" in text
+    assert "court: 1 crown, 0 disagreements, 0 unknowns" in text
+
+
+def test_unreadable_registry_nulls_the_court_rather_than_reporting_it_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The absence-lie one layer below the agreement verdict. Degrading a failed
+    registry read to [] would print a healthy, empty court, so a caller gating
+    on summary.disagreements == 0 passes on a read that saw nothing."""
+    from fno.agents import court as court_mod
+    from fno.agents.court import gather_court, render_court
+
+    _prepare(monkeypatch, tmp_path, [], graph_entries=[])
+    monkeypatch.setattr(
+        court_mod,
+        "load_registry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("truncated")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("truncated")),
+    )
+
+    court = gather_court()
+
+    assert court["registry_readable"] is False
+    assert court["crowns"] is None
+    # Every count is null, so no naive zero-gate can read this as healthy.
+    assert court["summary"]["total"] is None
+    assert court["summary"]["disagreements"] is None
+    assert court["summary"]["unknowns"] is None
+    text = render_court(as_json=False)
+    assert "CANNOT READ" in text
+    assert "nothing was checked" in text
+
+
+def test_a_half_crown_renders_and_never_certifies_agreement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A row with a level but no scope rules no territory. The court is the read
+    meant to SURFACE that corruption, so it must not crash on it (formatting a
+    null scope to a width raises) and must not certify it as agreeing."""
+    from fno.agents.court import gather_court, render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("half", status="busy", crown_level=1, crown_scope=None)],
+        graph_entries=[],
+    )
+
+    court = gather_court()
+
+    assert court["crowns"][0]["agree"] is False
+    assert "half a crown" in court["crowns"][0]["reason"]
+    assert court["summary"]["disagreements"] == 1
+    # The table renders rather than raising TypeError on the null scope.
+    assert "half" in render_court(as_json=False)
+
+
+def test_project_rungs_stay_determinate_when_the_graph_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only the epic rung consults the graph. A project or portfolio crown
+    resolves entirely from config, so an external tracker backend must not
+    blank out an answer that is fully determinate."""
+    from fno.agents.court import gather_court
+    from fno.tracker import metadata
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "king",
+                status="busy",
+                crown_level=1,
+                crown_scope="alpha",
+                crown_grantor="human",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("external backend")),
+    )
+
+    court = gather_court()
+
+    assert court["crowns"][0]["agree"] is True
+    assert court["summary"]["unknowns"] == 0
 
 
 def test_no_live_crowns_renders_a_plain_statement(tmp_path: Path, monkeypatch) -> None:

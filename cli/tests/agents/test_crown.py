@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Optional
 
@@ -561,6 +561,61 @@ def test_in_place_crown_refuses_a_terminal_target_without_mutation(
     assert "STORED status" in result.output
     assert "fno agents register" in result.output
     assert [asdict(row) for row in load_registry()] == before
+
+
+def test_grantor_whose_own_crown_moved_mid_grant_is_refused_under_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The authority check runs outside the registry lock, so a grantor's crown
+    can move between the check and the stamp. Re-asserted under the lock as a
+    plain attribute compare, and it must fail CLOSED: the caller passed
+    grant_error holding 'alpha,beta', then lost 'alpha' before the write."""
+    from fno.agents import crown as crown_mod
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    # Authority is read here; the demotion lands after, before the stamp.
+    real_calling_agent_row = crown_mod.calling_agent_row
+
+    def _demote_after_reading(*args, **kwargs):
+        row = real_calling_agent_row(*args, **kwargs)
+        rows = load_registry()
+        from fno.agents.registry import write_registry
+
+        write_registry(
+            [
+                replace(r, crown_level=1, crown_scope="beta")
+                if r.name == "caller"
+                else r
+                for r in rows
+            ]
+        )
+        return row
+
+    monkeypatch.setattr(crown_mod, "calling_agent_row", _demote_after_reading)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "moved from" in result.output
+    # The target was never crowned: authority that evaporated grants nothing.
+    # (The caller's own row DID change - this test demotes it on purpose - so a
+    # whole-registry equality check would be asserting the fixture, not the fix.)
+    after = {r.name: r for r in load_registry()}
+    assert after["worker"].crown_scope is None
+    assert after["worker"].crown_level is None
 
 
 def test_terminal_target_refusal_names_the_stale_snapshot_not_a_live_probe(

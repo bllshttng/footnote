@@ -54,16 +54,25 @@ def _agreement(
 ) -> tuple[Optional[bool], Optional[str]]:
     """Does the graph corroborate this crown? ``(agree, reason)``.
 
-    ``by_id is None`` (graph unreadable / external tracker backend) always
-    answers ``(None, reason)`` - never ``True`` and never ``False`` - so an
-    unreadable graph can never render as either agreement or disagreement.
+    A crown the graph cannot adjudicate answers ``(None, reason)`` - never
+    ``True`` and never ``False`` - so an unreadable graph can never render as
+    either agreement or disagreement. That bail is scoped to the rung that
+    actually needs the graph: the epic rung reads it, while the project and
+    portfolio rungs resolve entirely from config, so an external tracker
+    backend must not blank out an answer that is fully determinate.
     """
-    if by_id is None:
-        return None, "graph unreadable"
     members = split_scope(scope)
+    # A row carrying a level but no scope is half a crown: crown_label renders
+    # it "L1 ?", so it reaches this view. It rules no territory, so it can
+    # never agree - and it must not fall through to the emptiness-blind
+    # checks below, where an empty member list reads as "nothing unresolved".
+    if not members:
+        return False, "the row carries a crown level but no scope (half a crown)"
     if level == 2:
-        node_id = members[0] if members else None
-        entry = by_id.get(node_id) if node_id else None
+        if by_id is None:
+            return None, "graph unreadable"
+        node_id = members[0]
+        entry = by_id.get(node_id)
         if entry is None:
             return False, f"{node_id!r} is not in the graph"
         node_type = entry.get("type")
@@ -119,14 +128,32 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
 
     ``rows`` overrides the live registry read for callers that already hold
     it (tests); the default reads the registry once here.
+
+    An unreadable REGISTRY nulls ``crowns`` and every summary count rather
+    than reporting an empty court. Degrading to ``[]`` here would reproduce,
+    one layer below the agreement verdict, exactly the absence-lie this
+    module exists to prevent: a caller gating on ``summary.disagreements ==
+    0`` would read a healthy fleet from a read that saw nothing at all. A
+    null fails that gate instead of passing it.
     """
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
     if rows is None:
         try:
             rows = load_registry()
-        except Exception:
-            rows = []
+        except Exception as exc:
+            return {
+                "crowns": None,
+                "conflicts": None,
+                "registry_readable": False,
+                "graph_readable": None,
+                "summary": {
+                    "total": None,
+                    "disagreements": None,
+                    "unknowns": None,
+                    "reason": f"registry unreadable: {exc}",
+                },
+            }
     live_rows = [r for r in rows if r.status not in TERMINAL_STATUSES]
 
     by_id = _by_id()
@@ -153,6 +180,7 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
     return {
         "crowns": entries,
         "conflicts": _conflicts(live_rows),
+        "registry_readable": True,
         "graph_readable": by_id is not None,
         "summary": {
             "total": len(entries),
@@ -165,9 +193,13 @@ def gather_court(rows: Optional[list] = None) -> dict[str, Any]:
 def _fmt_row(e: dict[str, Any]) -> str:
     agree = "?" if e["agree"] is None else ("yes" if e["agree"] else "no")
     reason = f"   {e['reason']}" if e["reason"] else ""
+    # Every cell goes through str() before padding: a half-crown row carries a
+    # null scope (crown_label still renders it "L1 ?"), and formatting None
+    # with a width raises TypeError - which would crash the one read meant to
+    # SURFACE that corruption, on exactly the input it exists to show.
     return (
-        f"{e['scope']:<16} {e['level']:<5} {e['holder']:<20} "
-        f"{e['grantor']:<16} {e['status']:<7} {agree:<4}{reason}"
+        f"{str(e['scope']):<16} {str(e['level']):<5} {str(e['holder']):<20} "
+        f"{str(e['grantor']):<16} {str(e['status']):<7} {agree:<4}{reason}"
     )
 
 
@@ -179,6 +211,8 @@ def render_court(as_json: bool) -> str:
     if as_json:
         return json.dumps(court, indent=2, sort_keys=True)
 
+    if court["crowns"] is None:
+        return f"court: CANNOT READ - {court['summary']['reason']}. This is not an empty court; nothing was checked."
     if not court["crowns"]:
         return "court: no live crowns"
 
@@ -189,7 +223,8 @@ def render_court(as_json: bool) -> str:
         lines.append(f"\nconflicts: scope {c['scope']!r} held by {len(c['holders'])} live rows ({holders})")
     s = court["summary"]
     lines.append(
-        f"\ncourt: {s['total']} crowns, {s['disagreements']} disagreement"
+        f"\ncourt: {s['total']} crown{'s' if s['total'] != 1 else ''}, "
+        f"{s['disagreements']} disagreement"
         f"{'s' if s['disagreements'] != 1 else ''}, {s['unknowns']} unknown"
         f"{'s' if s['unknowns'] != 1 else ''}"
     )

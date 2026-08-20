@@ -441,12 +441,21 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         raise CrownPromotionError(str(exc)) from exc
 
     # Resolved before update_registry, never inside _stamp: this reads the
-    # registry itself and the closure runs under its lock.
+    # registry itself, and the closure runs under its lock.
     caller = calling_agent_row()
     denial = grant_error(scope, caller)
     if denial is not None:
         raise CrownPromotionError(denial)
     grantor = "human" if caller is None else caller.name
+    # The authority check above ran OUTSIDE the lock, so the grantor's own
+    # crown can move between it and the stamp - a window that did not exist
+    # while every agent caller was refused outright. Re-running grant_error
+    # under the lock is not the fix: it calls scope_contains, which reads the
+    # GRAPH, and this file keeps graph I/O off the lock on purpose. So carry
+    # the scope authority was granted on and re-assert it under the lock as a
+    # plain attribute compare. Fails closed: an agent grantor whose crown moved
+    # mid-call is refused rather than allowed to bestow what it no longer holds.
+    granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
     from fno.agents.registry import (
         AgentResolutionError,
@@ -465,6 +474,17 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     receipt: dict[str, Any] = {}
 
     def _stamp(rows: list) -> list:
+        if caller is not None:
+            live_caller = next((row for row in rows if row.name == grantor), None)
+            live_scope = None if live_caller is None else live_caller.crown_scope
+            if not _same_territory(live_scope, granting_scope):
+                raise CrownPromotionError(
+                    f"refusing to crown {target_name!r}: this session's own crown "
+                    f"moved from {granting_scope!r} to {live_scope!r} while the "
+                    "grant was in flight, so the authority it was checked against "
+                    "no longer holds. Re-read your crown with `fno agents court`, "
+                    "then retry if it still contains the scope."
+                )
         target = next((row for row in rows if row.name == target_name), None)
         if target is None:
             raise CrownPromotionError(
