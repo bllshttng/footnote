@@ -1,0 +1,37 @@
+name: opencode-surface
+
+# check-opencode-surface.sh gates footnote's OpenCode discovery surface: the
+# .opencode/skills/ symlink farm (OpenCode never scans the repo-root skills/
+# dir, so a skill without a link is invisible on a fresh clone) and the five
+# advertised .opencode/commands/ verbs (the stop-hook bridge re-drives with
+# "/target --resume", which needs a /target command to resolve). Runs only on
+# the paths it guards, mirroring internal-refs.yml's minimal-workflow pattern.
+on:
+  push:
+    branches: [main]
+    paths: &surface_paths
+      - skills/**
+      - .opencode/skills/**
+      - .opencode/commands/**
+      - scripts/ci/check-opencode-surface.sh
+      - .github/workflows/opencode-surface.yml
+  pull_request:
+    paths: *surface_paths
+
+concurrency:
+  group: opencode-surface-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-opencode-surface:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: OpenCode discovery surface (skills farm + command verbs)
+        run: bash scripts/ci/check-opencode-surface.sh
