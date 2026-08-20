@@ -23,7 +23,7 @@ Both are explicit on purpose. Automatic classification of "was that a ruling?" i
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine, so the human and JSON surfaces cannot disagree: `operator` authority is `law`, `agent` authority is `coord`, and `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`, `agent` authority is `coord`, and `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
 The fixed cutover is `2026-08-21T00:00:00Z`, chosen to safely postdate every row produced by the old deployed writer. Before that point the writer stamped agent coordination as `operator`, so every pre-cutover operator-shaped row renders as `unattributed`, including rows that answered a question. This deliberately creates a narrow transition window in which a genuine operator ruling is not called law. That under-claim is safer than fabricating authority, and the append-only index is never rewritten. After the cutover, the engine guard makes `operator` an earned value, so new operator rows are law even without a question.
 
