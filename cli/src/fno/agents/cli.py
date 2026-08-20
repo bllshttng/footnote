@@ -1660,7 +1660,13 @@ def cmd_spawn(
         guard_holder = f"spawn-cli:{os.getpid()}"
         from fno.claims.cli import HANDOVER_HOLDER_PREFIX
 
-        handover_holder = f"{HANDOVER_HOLDER_PREFIX}{name}"
+        # The worker's name is the whole proof. A bare `spawn-handover:` is a
+        # string anyone can type, and naming it back is exactly what
+        # `compare_and_rebind` accepts as evidence of successorship - so an
+        # empty name would hand the takeover to any process that guessed the
+        # prefix. Fall back to this dispatch's own pid, which is at least not
+        # guessable, and which the launch-window exemptions still recognize.
+        handover_holder = f"{HANDOVER_HOLDER_PREFIX}{name or f'pid-{os.getpid()}'}"
         guard, guard_exit = _spawn_guard_decision(
             guarded_node,
             guard_holder,

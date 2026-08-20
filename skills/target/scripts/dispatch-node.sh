@@ -603,18 +603,15 @@ for id in "${NODES[@]}"; do
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
-        # An UNTRIED wedge never reaches here: it was rewritten to dispatchable
-        # above so the real spawn can try the recovery. What is left is a wedge
-        # a launch already failed to clear, or a dry run previewing one.
+        # NO remedy read here, and no n_wedged. This arm sees only the PROBE's
+        # verdict, and a probe never carries one: the remedy is force-release
+        # advice that is honest only after a recovery has been tried, so the
+        # guard withholds it under --no-reserve. Reading `.remedy` here found
+        # the empty string every time, so the counter could not increment and
+        # the wedge exit below was unreachable from this arm. The wedge that
+        # matters is counted at the post-spawn refusal, which is the only place
+        # a tried-and-failed recovery can be observed.
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
-        # A remedy is present only when the guard tried to clear this and could
-        # not prove the holder dead - the positive marker for a wedge. A batch
-        # keeps sweeping either way; the exit code below is what changes.
-        remedy="$(printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null || true)"
-        if [[ -n "$remedy" ]]; then
-          echo "$remedy"
-          n_wedged=$((n_wedged + 1))
-        fi
         n_skipped=$((n_skipped + 1))
       else
         # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-

@@ -81,10 +81,6 @@ UNCLAIMED = "unclaimed"
 #: had been producing all along.
 VERDICTS = frozenset({GHOST, REAP, REROUTE, WAKE, STALE, LEAVE, UNCLAIMED})
 
-#: Claim states that mean nobody holds the node. Same cut `fno claim status`
-#: makes for its roster cross-check, so the two readers cannot disagree about
-#: what "unheld" means.
-_UNHELD_CLAIM_STATES = frozenset({"free", "stale"})
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
@@ -696,14 +692,15 @@ def _unclaimed_node_basis(row: Row, claim_for: Callable[[str], dict]) -> str:
         claim = claim_for(row.node)
     except Exception:  # noqa: BLE001 - a failed read is never a finding
         return ""
-    # `stale` counts too, and the cut matches the one `claim status` makes:
-    # both mean nothing holds this node right now. Reading only `free` left a
-    # live worker whose claim had lapsed unflagged, which is the gap this
-    # advisory exists to report.
-    state = claim.get("state")
-    if state not in _UNHELD_CLAIM_STATES:
+    # PLAIN `free` only, and `stale` is deliberately excluded. A stale claim is
+    # the NORMAL reading for a healthy worker parked in a CI wait: the heartbeat
+    # is driven by tool calls, so a session that is waiting on purpose stops
+    # renewing and its claim lapses. Flagging that puts a working fleet in the
+    # digest every tick, which is the permanent noise this advisory must not
+    # become. It is also the reading the never-renewed multi-node claims carry.
+    if claim.get("state") != "free":
         return ""
-    return f"node {row.node} carries a {state} claim while this row is live"
+    return f"node {row.node} carries NO claim while this row is live"
 
 
 def _holder_session(holder: Optional[str]) -> Optional[str]:

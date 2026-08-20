@@ -197,21 +197,13 @@ if [[ -n "$NODE" ]]; then
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi
-      elif [[ "$reason" == "suspect-claim" ]]; then
-        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
-        # An UNTRIED wedge never reaches here: it was rewritten to dispatchable
-        # above so the real spawn can try the recovery. What is left is a wedge
-        # a launch already tried to clear and could not, so nobody is building
-        # this node and nobody will until an operator intervenes.
-        #
-        # The remedy goes to STDERR, never inside the receipt: `fail` renders
-        # `result=failed reason="..."` and this file's contract is ONE line on
-        # stdout. A newline inside the quoted reason breaks every caller that
-        # parses that line. `fail` exits non-zero: exiting 0 here told a caller
-        # reading the exit code that the launch worked (x-05be).
-        printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
-        fail "suspect worker claim holds node:$NODE ($holder); no worker launched"
       else
+        # NO suspect-claim arm here, and the omission is load-bearing. This call
+        # is a probe, a probe reports every wedge as recovery not-attempted, and
+        # the rewrite above turns that into `dispatchable` so the real spawn can
+        # try the recovery. The wedge that survives THAT is handled at the
+        # post-spawn refusal below, which is the only place a wedge can now be
+        # observed. An arm here would look like the handler and never run.
         printf '%s' "$guard_json" | jq -r '.remedy // empty' 2>/dev/null >&2
         fail "family-2 guard blocked node:$NODE; no worker launched"
       fi

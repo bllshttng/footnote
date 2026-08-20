@@ -51,7 +51,7 @@ from .io import (
     serialize_claim,
 )
 from .hostid import is_same_machine
-from .staleness import classify, classify_for_sweep, is_live, now_ms
+from .staleness import classify, classify_for_sweep, is_expired, is_live, now_ms
 from ..harness_identity import resolve_harness_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
@@ -912,6 +912,13 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     prove the renewer shares its session. Closing it needs a session identity in
     the claim record, which is its own change.
     """
+    # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
+    # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
+    # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
+    # this mirrors, has always refused there; without the same refusal here the
+    # two implementations of one operation answered differently.
+    if is_expired(existing):
+        return None
     if is_live(existing) or not is_same_machine(existing.host, existing.machine_id):
         return None
     from .session_pid import resolve_session_pid
