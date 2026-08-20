@@ -2422,6 +2422,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             };
             match adopted {
                 Ok(Some(e)) => e,
+                // `adopt_from_manifest` only ever returns `Ok(None)` or
+                // `Err(Io)` -- `NoEvidence` is `synthesize_and_adopt`'s
+                // variant, unreachable through this call, kept here only for
+                // exhaustiveness over `AdoptError`.
                 Ok(None) | Err(AdoptError::NoEvidence) => {
                     eprintln!(
                         "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",

@@ -6119,6 +6119,13 @@ fn late_bind_codex_sessions(
         })
         .filter_map(|e| e.pid.map(|p| (e.name.clone(), p)))
         .collect();
+    // A collision on one candidate must not starve the rest: every candidate
+    // in this tick gets attempted, and the first write failure is what's
+    // returned (code-review finding on this commit) -- returning early on the
+    // first `Err` left a persistently-colliding row at the front of the scan
+    // starving every sibling candidate's bind, forever, since candidates are
+    // rescanned in the same registry order on every subsequent sweep.
+    let mut first_error: Option<String> = None;
     for (name, pid) in candidates {
         let Some(sid) = probe(pid) else { continue };
         let bound = match state::update_registry(&home.registry_json(), |r| {
@@ -6146,7 +6153,8 @@ fn late_bind_codex_sessions(
                         ("error", Value::String(error.to_string())),
                     ]),
                 );
-                return Err(message);
+                first_error.get_or_insert(message);
+                continue;
             }
         };
         if bound {
@@ -6160,7 +6168,10 @@ fn late_bind_codex_sessions(
             );
         }
     }
-    Ok(())
+    match first_error {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
 }
 
 /// Shell `fno agents codex-session-for-pid <pid>` -- the pane-tree rollout
