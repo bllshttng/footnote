@@ -262,6 +262,25 @@ A `stale` verdict is **recorded, not dropped**.
 
 That is a different fact from `absent`, and it calls for a different response: ask for a re-read, rather than wait for a first read.
 
+### CI carry: the same idea, a second implementation, on purpose
+
+`carried_base_sync` lives in the local runtime, so only a live session can act on it. It reads `~/.fno/events.jsonl` and the local git objects. `review-coverage-gate.yml` posts failure on every `synchronize` unconditionally, because the workflow can read neither. A rebase that changes no code turns the required `fno/review-coverage` status red until a session re-greens it.
+
+`scripts/ci/coverage-carry.sh` closes that gap from inside the workflow. It computes a second, independent identity, rather than sharing one with the local runtime. It reads the `before` and `head` shas from the `synchronize` event. For each it computes `git patch-id --stable` over the diff GitHub's compare API renders (`repos/<repo>/compare/<base>...<sha>`, the `.diff` media type). This needs no checkout of the repository being compared. When the base ref moves under it, three-dot compare semantics keep the identity unchanged. The fix is proven against a real rebase pair. A force-pushed-away head is still servable by the compare API. It yields the same patch-id as the head that actually merged.
+
+`pr_code_diff_identity` was not a candidate here. The workflow has no checkout, and that identity needs one - it hashes `git diff --raw`. Computing the identity from the server-rendered diff is what lets the job skip the checkout.
+
+**Two identity implementations now exist, and that is deliberate, not drift.** `pr_code_diff_identity` decides whether a local verdict counts toward the event row. `coverage-carry.sh`'s patch-id decides whether the CI status carries. They can disagree, and both disagreements fail closed:
+
+- Local carries but CI does not: the status stays red until a session re-greens it. That is today's behavior, unchanged.
+- CI carries but local does not: `fno pr merge` still enforces `covered_conjuncts` (`cli/src/fno/pr/_coverage_gate.py`) on its own. A CI-only carry is refused at merge time.
+
+The two gates are an AND, never an OR. Neither implementation can launder the other's refusal into a merge.
+
+One constraint decided every branch of `coverage-carry.sh`: a patch-id match proves the code is identical. It never proves a bot reviewed it. So the script only ever carries a `success` status that already exists on the previous head. That status must match the publisher allowlist the workflow already preserves: `covered*` or `no review lane*`. All three spellings of `coverage-override*` are refused by name. A green the override label bought must never survive its own withdrawal by riding a rebase onto the next head. Every read failure falls through to today's failure post, and so does a match between two empty diffs.
+
+One shape does not carry, and it is not a bug: a chain of rebases where an intermediate `synchronize` run was cancelled. The cancelled run never posts to its head, so that head carries no status. The next run's `--before` has nothing to carry forward. That falls to failure - the same outcome as today, on a head no run ever finished evaluating.
+
 ### Scope: which PR an attestation is about
 
 When a verdict was rendered is freshness's question. Which PR it was rendered for is scope's question, and the two are independent.

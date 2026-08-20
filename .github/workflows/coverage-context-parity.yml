@@ -18,6 +18,8 @@ on:
       - .github/workflows/review-coverage-gate.yml
       - scripts/ci/check-coverage-context-parity.sh
       - .github/workflows/coverage-context-parity.yml
+      - scripts/ci/coverage-carry.sh
+      - tests/ci/test_coverage_carry.sh
   pull_request:
     paths: *parity_paths
 
@@ -38,3 +40,6 @@ jobs:
 
       - name: Coverage context and label parity
         run: bash scripts/ci/check-coverage-context-parity.sh
+
+      - name: Coverage carry decision (stubbed gh)
+        run: bash tests/ci/test_coverage_carry.sh

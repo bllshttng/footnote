@@ -6,16 +6,22 @@ name: review-coverage-gate
 # The green marker can only come from a machine that actually ran the review:
 # the enforced predicate is a head-pinned LOCAL attestation in events.jsonl,
 # which this workflow cannot see. So this job INVALIDATES, never certifies -
-# it never posts success on its own judgment, with one deliberate exception:
-# the `coverage-override` label, the 3am release valve, where the label event
-# itself is the human decision and the actor is recorded in the description.
+# it never posts success on its own judgment, with two deliberate exceptions.
+# The first is the `coverage-override` label, the 3am release valve, where
+# the label event itself is the human decision and the actor is recorded in
+# the description. The second, narrower than the first, is the patch-id
+# carry on synchronize: it re-posts a verdict a publisher already wrote onto
+# a head whose code is PROVABLY IDENTICAL (git patch-id over the compare
+# API), and it invents nothing - see scripts/ci/coverage-carry.sh.
 #
 # What fires when:
 #   synchronize - the head is new, so no local attestation can exist for it
 #     yet. Post failure "head moved; re-run the review verb at HEAD" so a
 #     previously-green status can never survive onto a commit nobody reviewed
-#     - UNLESS the coverage-override label is applied: the override is durable
-#     shared state that a push does not revoke, so it is re-read first.
+#     - UNLESS the coverage-override label is applied (durable shared state a
+#     push does not revoke, re-read first), OR the previous head already
+#     carried a publisher verdict whose code is provably identical to the new
+#     head (scripts/ci/coverage-carry.sh, checked after the override).
 #   labeled/unlabeled (ANY label) - the override arm. It re-reads the LIVE
 #     label rather than trusting the label this event carries: held posts
 #     success (naming the actor when they are the one who applied the
@@ -70,6 +76,7 @@ concurrency:
 permissions:
   statuses: write
   pull-requests: read
+  contents: read
 
 jobs:
   refresh:
@@ -83,6 +90,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Only the synchronize arm needs the carry script on disk; every other
+      # arm posts from API reads alone. Guarded so no other arm pays for a
+      # checkout it does not use. The BASE version, not the PR's - a PR
+      # cannot edit its own gate script and self-green - at sparse depth 1
+      # to keep the job inside its five-minute budget.
+      - name: Checkout the carry script (base ref, synchronize only)
+        if: github.event.action == 'synchronize'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          sparse-checkout: scripts/ci
       - name: Invalidate or re-evaluate the coverage status
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,6 +115,8 @@ jobs:
           # red-marks a commit on main that no review verb can ever answer for.
           # The dispatch arm resolves the head from its `pr` input instead.
           HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           ctx=fno/review-coverage
@@ -124,8 +145,23 @@ jobs:
               # head is read by the post-merge audit, where a late invalidate
               # would false-red a merge that passed every gate, and nothing
               # can repair it (the branch is gone). Re-read the live state.
-              state="$(gh pr view "${{ github.event.pull_request.number }}" \
-                -R "${GITHUB_REPOSITORY}" --json state --jq .state)"
+              # Retries the same 3x/5s backoff as the reads below it: this is
+              # the first gh call in the step, so an un-retried transient 5xx
+              # here would abort the run earlier than any of its siblings.
+              pr_state_read() {
+                local attempt out
+                for attempt in 1 2 3; do
+                  if out="$(gh pr view "${{ github.event.pull_request.number }}" \
+                    -R "${GITHUB_REPOSITORY}" --json state --jq .state)"; then
+                    printf '%s' "$out"
+                    return 0
+                  fi
+                  echo "review-coverage-gate: PR-state read attempt ${attempt} failed; retrying after a backoff" >&2
+                  sleep 5
+                done
+                return 1
+              }
+              state="$(pr_state_read)"
               if [ "$state" != "OPEN" ]; then
                 echo "PR is ${state}; no status change"
                 exit 0
@@ -135,26 +171,50 @@ jobs:
           # The description our context currently carries on this head, via
           # the COMBINED endpoint (one entry per context, the latest - no
           # same-second tie to break; the same read the post-merge audit
-          # uses). Empty means no status yet. A FAILED read fails the run
-          # (set -e), exactly like the label read below: an unreadable
-          # description must never masquerade as "no status", or the
-          # invalidate arms would clobber a green verdict on a transient
-          # 5xx - the same transient class post() retries for.
+          # uses). Empty means no status yet. Retries the same 3x/5s backoff
+          # as coverage-carry.sh's status_read and the audit's coverage_field
+          # before giving up, so a transient 5xx does not abort this run one
+          # call earlier than either sibling would. A read that still fails
+          # after retrying fails the run (set -e): an unreadable description
+          # must never masquerade as "no status", or the invalidate arms
+          # would clobber a green verdict on the same transient class post()
+          # retries for.
           # No `-R` here: gh api has no repo flag, and the URL path already
           # names the repository (pr view above needs -R; api never did).
           current_desc() {
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
-              --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\""
+            local attempt out
+            for attempt in 1 2 3; do
+              if out="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+                --jq "[.statuses[] | select(.context == \"$ctx\")] | first | .description // \"\"")"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              echo "review-coverage-gate: status read attempt ${attempt} failed; retrying after a backoff" >&2
+              sleep 5
+            done
+            return 1
           }
           # The LIVE label state, read by NAME. A grep over the raw JSON blob
           # also sees each label's description and colour, so an unrelated
           # label described "coverage-override" would re-stamp success on a
-          # head nobody reviewed.
+          # head nobody reviewed. Retries the same 3x/5s backoff as
+          # current_desc() above: this read runs first on every label event
+          # and every synchronize, so an un-retried transient 5xx here aborts
+          # the run one call earlier than current_desc()'s own hardening.
           override_held() {
-            gh pr view "${{ github.event.pull_request.number }}" \
-              -R "${GITHUB_REPOSITORY}" --json labels \
-              --jq '[.labels[].name] | index("coverage-override") != null'
+            local attempt out
+            for attempt in 1 2 3; do
+              if out="$(gh pr view "${{ github.event.pull_request.number }}" \
+                -R "${GITHUB_REPOSITORY}" --json labels \
+                --jq '[.labels[].name] | index("coverage-override") != null')"; then
+                printf '%s' "$out"
+                return 0
+              fi
+              echo "review-coverage-gate: label read attempt ${attempt} failed; retrying after a backoff" >&2
+              sleep 5
+            done
+            return 1
           }
           case "$EVENT:$ACTION" in
             pull_request:labeled|pull_request:unlabeled)
@@ -217,8 +277,30 @@ jobs:
                     echo "synchronize: head ${HEAD_SHA:0:8} already carries a publisher verdict - no change"
                     ;;
                   *)
-                    post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
-                    echo "synchronize: invalidated at ${HEAD_SHA:0:8}"
+                    # The base-ref checkout cannot find the carry script on
+                    # any PR that has not yet merged it to main (this one
+                    # included) - by design, since a PR must never be able to
+                    # edit its own gate script and self-green. That absence,
+                    # like any other failure to run the script, degrades to
+                    # no-carry rather than aborting the step under set -e.
+                    if [ -f scripts/ci/coverage-carry.sh ]; then
+                      decision="$(bash scripts/ci/coverage-carry.sh \
+                        --repo "$GITHUB_REPOSITORY" --context "$ctx" \
+                        --before "$BEFORE_SHA" --head "$HEAD_SHA" --base "$BASE_REF")" || decision="no-carry script-failed"
+                    else
+                      decision="no-carry script-missing"
+                    fi
+                    case "$decision" in
+                      carry\ *)
+                        read -r _ origin pid desc <<<"$decision"
+                        post success "$desc"
+                        echo "synchronize: carried the verdict from ${origin:0:8} (patch-id ${pid}) onto ${HEAD_SHA:0:8}"
+                        ;;
+                      *)
+                        post failure "head moved to ${HEAD_SHA:0:8}; re-run the review verb at HEAD"
+                        echo "synchronize: invalidated at ${HEAD_SHA:0:8} (${decision})"
+                        ;;
+                    esac
                     ;;
                 esac
               fi

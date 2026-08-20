@@ -6,7 +6,25 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
+# sccache was installed 2026-08-19. Before that this wrapper fell through
+# to bare rustc silently, and every worktree compiled cold.
 if command -v sccache >/dev/null 2>&1; then
+    HAS_SCCACHE=1
+else
+    HAS_SCCACHE=0
+fi
+
+case " $* " in
+    *" -vV "*)
+        if [[ "$HAS_SCCACHE" -eq 1 ]]; then
+            echo "cargo-rustc-wrapper: sccache (shared cache)" >&2
+        else
+            echo "cargo-rustc-wrapper: bare rustc (sccache absent)" >&2
+        fi
+        ;;
+esac
+
+if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
     exec sccache "$@"
 fi
