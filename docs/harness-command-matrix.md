@@ -39,7 +39,7 @@ Run `fno dispatch capabilities <h> --json` to read one harness without dispatch 
 
 `ready` means that the configured manifest rule matched. A painted pane with no positive rule stays `live`. Claude and Codex use different readiness rules.
 
-Session binding has a separate type. Codex requires `rollout-fd` evidence and waits for 60 seconds. If no thread ID appears, fno reaps the pane and exits nonzero. The mux grab-work timeout is 75 seconds. A parity test requires 15 seconds more than the longest required binding window.
+Session binding has a separate type. Codex tries two oracles in order and waits up to 60 seconds total. First it reads a rollout-fd from the pane's own process tree. Codex 0.148 hands session ownership to a detached `codex app-server --remote-control` daemon that no longer exposes that fd there. So the second oracle reads the app-server's loaded threads for the pane's cwd instead. If neither oracle answers, fno reaps the pane and exits nonzero. `codex exec` (headless) still owns its own rollout and never needs the daemon oracle. The mux grab-work timeout is 75 seconds. A parity test requires 15 seconds more than the longest required binding window.
 
 Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported.
 

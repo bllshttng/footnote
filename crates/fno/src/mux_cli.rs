@@ -2125,7 +2125,13 @@ fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => tab = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
-                "--at" => {
+                // Bare "at" mirrors the "split" alias above: the outer
+                // pane-run transport (mux_spawn.py placement_args) sends
+                // placement directives unprefixed, and this arm's absence
+                // used to fall through to `_ => break`, folding "at" and
+                // everything after it into the spawned process's own argv
+                // instead of the placement it named.
+                "--at" | "at" => {
                     let v = flag_value(args, &mut i, "--at")?;
                     if v == "current" {
                         at_current = true;
@@ -5521,6 +5527,27 @@ mod tests {
         assert!(parse_pane_args(&os(&["run", "--workspace", " ", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
         assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
+        // Bare "at" (mux_spawn.py's placement_args contract) used to have no
+        // alias, so the parser broke its loop on "at" and folded it plus
+        // everything after into argv instead of recognizing it as placement
+        // - here paired with bare "split", the combo that crashed.
+        let bare_at = parse_pane_args(&os(&[
+            "run", "split", "right", "at", "3", "--json", "--", "codex",
+        ]))
+        .unwrap();
+        assert!(bare_at.json);
+        assert!(matches!(
+            bare_at.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement {
+                    split: Some(crate::tree::Dir::Right),
+                    at: Some(3),
+                    ..
+                },
+                ref argv,
+                ..
+            } if argv == &["codex"]
+        ));
     }
 
     #[test]

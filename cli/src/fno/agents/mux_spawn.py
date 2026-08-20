@@ -23,6 +23,7 @@ pane exists).
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
 import re
@@ -799,6 +800,160 @@ def _backfill_codex_session_id(
     return None
 
 
+#: The rollout-fd probe above stays cheap because it is a local process-tree
+#: walk. The daemon oracle below costs a subprocess plus a websocket round
+#: trip, so the binding loop's caller rate-limits it to this interval even
+#: though the loop itself ticks every ``_BINDING_POLL_S`` (0.75s).
+_CODEX_DAEMON_PROBE_INTERVAL_S = 2.0
+
+
+def _codex_session_ids_loaded(cwd: Path) -> Optional[set[str]]:
+    """Session ids the app-server daemon reports as loaded for ``cwd``.
+
+    None means the daemon could not answer (missing binary, dead socket,
+    timeout, malformed reply) - distinct from an empty set, which means it
+    answered and this cwd currently has zero loaded threads. The correlation
+    in :func:`_codex_daemon_candidate` needs that distinction: an unreachable
+    daemon must leave the fd oracle deciding alone, never manufacture a false
+    "nothing new here".
+
+    Compares ``realpath``-normalized paths, not raw strings: the daemon may
+    report a symlink-resolved cwd (e.g. macOS's ``/tmp`` -> ``/private/tmp``)
+    that never equals our own unresolved ``str(cwd)``, which would silently
+    zero out this oracle for every thread and reintroduce the 0/20-bind
+    defect this correlation exists to fix.
+    """
+    from fno.agents.discover import _codex_daemon_threads_raw
+
+    threads = _codex_daemon_threads_raw()
+    if threads is None:
+        return None
+    resolved_cwd = os.path.realpath(str(cwd))
+    ids: set[str] = set()
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        sid = thread.get("session_id")
+        thread_cwd = thread.get("cwd")
+        if (
+            isinstance(sid, str)
+            and sid
+            and isinstance(thread_cwd, str)
+            and os.path.realpath(thread_cwd) == resolved_cwd
+        ):
+            ids.add(sid)
+    return ids
+
+
+def _codex_daemon_candidate(cwd: Path, baseline_ids: Optional[set[str]]) -> Optional[str]:
+    """The single session id the app-server daemon reports as new for ``cwd``.
+
+    Codex 0.148's TUI hands session ownership to a detached ``codex
+    app-server --remote-control`` daemon, which holds the rollout fd the
+    process-tree probe above expects to find in the pane's own tree - so that
+    probe returns 0/20 binds under measurement. This oracle asks the daemon
+    directly instead, via the already-wired
+    :func:`fno.agents.discover._discover_from_codex_daemon` RPC.
+
+    ``baseline_ids`` is None when the pre-spawn snapshot could not be taken
+    (daemon unreachable at that moment) - refused outright rather than
+    treated as an empty set, because an empty stand-in would let ANY
+    already-loaded stranger session for this cwd read as "the one new id"
+    and bind to it.
+
+    Accepts only when exactly ONE session id is new for this cwd since the
+    baseline - the same rule :func:`_codex_session_id_for_pid` applies to a
+    same-cwd sibling and the comment at line ~3160 states for the no-pid
+    fallback: binding this row to a healthy stranger is worse than leaving it
+    unbound, so two-or-more new ids keeps polling rather than guesses.
+
+    This is a single-shot read with no cross-call memory; the caller
+    (:func:`_make_codex_bind_probe`) is the one that requires the same
+    candidate to repeat before trusting it.
+    """
+    if baseline_ids is None:
+        return None
+    loaded = _codex_session_ids_loaded(cwd)
+    if loaded is None:
+        return None
+    new_ids = loaded - baseline_ids
+    if len(new_ids) == 1:
+        return next(iter(new_ids))
+    return None
+
+
+def _make_codex_bind_probe(
+    *,
+    cwd: Path,
+    spawn_started_ms: int,
+    child_pid: int,
+    codex_sessions_dir: Optional[Path],
+    daemon_baseline_ids: Optional[set[str]],
+    mux: dict,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    oracle_used: Optional[list] = None,
+) -> Callable[[], Optional[str]]:
+    """Build the two-oracle ``bind_probe`` :func:`_await_pane_binding` polls.
+
+    Tries the rollout-fd probe first (cheap, still correct for any build that
+    owns its rollout, and for ``codex exec``). Falls back to the app-server
+    daemon oracle, rate-limited to one call per
+    ``_CODEX_DAEMON_PROBE_INTERVAL_S`` even though the binding loop itself
+    ticks every ``_BINDING_POLL_S``.
+
+    The daemon path is stability-gated the same way
+    :func:`_backfill_codex_session_id`'s no-pid fallback is: the SAME single
+    candidate must repeat across two consecutive daemon probes before it
+    binds. Two panes racing into one cwd can otherwise show only one of them
+    as "the new id" on a given poll (the other's session not yet registered
+    with the daemon) - requiring a repeat means that by the second probe,
+    2s later, the correlating pane's own session has very likely also
+    registered, turning a false single candidate into a correctly-ambiguous
+    pair rather than a mis-bind.
+
+    A daemon-sourced candidate is also liveness-checked before it is
+    trusted: unlike the fd oracle (whose id can only come from a live
+    process's open file), the daemon is detached from the pane, so seeing a
+    session there does not by itself prove the pane is still up. Shared with
+    ``fno doctor --codex-bind`` so a regression here shows up on the canary,
+    not silently.
+    """
+    used = oracle_used if oracle_used is not None else []
+    last_probe_s = [0.0]
+    prev_candidate: list = [None]
+
+    def _mark_oracle(name: str) -> None:
+        used[:] = [name]
+
+    def _probe() -> Optional[str]:
+        sid = _backfill_codex_session_id(
+            cwd,
+            spawn_started_ms,
+            sessions_dir=codex_sessions_dir,
+            child_pid=child_pid,
+            attempts=1,
+        )
+        if sid:
+            _mark_oracle("rollout-fd")
+            return sid
+        now_s = time.monotonic()
+        if now_s - last_probe_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
+            return None
+        last_probe_s[0] = now_s
+        candidate = _codex_daemon_candidate(cwd, daemon_baseline_ids)
+        if candidate is None or candidate != prev_candidate[0]:
+            prev_candidate[0] = candidate
+            return None
+        # The same single candidate repeated - trust it, unless the mux has
+        # just told us the pane itself is already gone.
+        if _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S) is False:
+            return None
+        _mark_oracle("daemon")
+        return candidate
+
+    return _probe
+
+
 def pane_passthrough_tokens(
     passthrough: Optional[Sequence[str]],
     emitted: Sequence[str],
@@ -864,6 +1019,35 @@ def refuse_pane_headless_form(provider: str, argv: Sequence[str]) -> None:
                 "one-shot.",
                 exit_code=2,
             )
+
+
+#: The minimum codex CLI version that ships --dangerously-bypass-hook-trust.
+#: An older codex's clap parser rejects an unrecognized flag outright, so the
+#: flag must never be emitted for a version below this - and an OLDER codex
+#: predates the hook-trust modal it exists to clear, so omitting it there is
+#: not a regression, just a no-op.
+_CODEX_HOOK_TRUST_FLAG_MIN_VERSION = (0, 148, 0)
+
+
+@functools.lru_cache(maxsize=1)
+def _codex_cli_version() -> Optional[tuple]:
+    """The installed ``codex`` CLI's (major, minor, patch), memoized once per
+    process so a version check never costs more than one subprocess call no
+    matter how many panes this process spawns. None on any miss (missing
+    binary, timeout, unparseable output) - treated as "assume incompatible"
+    by every caller, never as "assume compatible"."""
+    try:
+        proc = subprocess.run(
+            ["codex", "--version"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", (proc.stdout or "") + (proc.stderr or ""))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
 
 
 def build_pane_argv(
@@ -950,6 +1134,7 @@ def build_pane_argv(
     if provider == "codex":
         # `codex [OPTIONS] [PROMPT]` with no subcommand is the interactive CLI.
         argv = [*identity, "-C", str(cwd)]
+        bypass_posture = permission_mode == "yolo" if permission_mode else yolo
         if permission_mode:
             argv += permission_pane_tokens("codex", permission_mode)
         else:
@@ -958,13 +1143,22 @@ def build_pane_argv(
                 if yolo
                 else ["--sandbox", "workspace-write"]
             )
+        if bypass_posture and (_codex_cli_version() or (0, 0, 0)) >= _CODEX_HOOK_TRUST_FLAG_MIN_VERSION:
+            # Codex 0.148 parks a fresh pane on a `Hooks need review` modal
+            # whenever a hook is new or changed, and the approvals bypass
+            # above does not clear it. `submit_keys` is unsupported for
+            # codex, so fno cannot answer the modal by keystroke - this flag
+            # is the only lever. Sandboxed postures never opt in. Gated on
+            # the installed version: an older codex's clap parser rejects an
+            # unrecognized flag outright, and an older codex predates the
+            # modal anyway, so omitting the flag there costs nothing.
+            argv += ["--dangerously-bypass-hook-trust"]
         # Any sandboxed posture (including --full-auto and an explicit
         # <sandbox>:<approval>) inherits codex's read-only .git carveout and
         # cannot commit without the grant. Only the two bypass postures skip it.
         from fno.agents.harnesses.codex import git_writable_args, plan_writable_args
 
-        bounded = (permission_mode != "yolo") if permission_mode else not yolo
-        if bounded:
+        if not bypass_posture:
             argv += git_writable_args(cwd)
             argv += plan_writable_args(cwd)
         if model:
@@ -1693,9 +1887,12 @@ def _await_pane_binding(
     while True:
         sid = bind_probe()
         if sid:
-            # pane_alive True is OBSERVED, not assumed: the probe read the id
-            # from a rollout fd held open by a live process in the pane's tree,
-            # so a dead pane cannot produce one.
+            # pane_alive True: the rollout-fd oracle can only read the id from
+            # a live process's open file, so a dead pane cannot produce one.
+            # A daemon-sourced id is not itself process-tied - the daemon
+            # that answers is detached from the pane - so a probe wired to
+            # that oracle (see _make_codex_bind_probe) must verify liveness
+            # itself before returning a candidate here.
             return PaneBinding(sid, True, "", tail)
         # Deadline before the tail read as well: evidence is best-effort, and a
         # slow mux must not buy itself another bounded probe past the ceiling.
@@ -2491,6 +2688,16 @@ def dispatch_spawn_pane(
             # parser owns env identity for every reachable caller (no Python
             # env drift, AC1-ERR).
             placement_args += ["at", at]
+        # Same reasoning as the spawn-clock stamp below, snapshotted first: a
+        # sibling pane starting during the lock-wait or argv-build above would
+        # otherwise widen the daemon oracle's candidate set. Gated to codex
+        # only - every other provider pays nothing for this probe. None (the
+        # daemon could not answer here) is passed through as-is, never
+        # coerced to an empty set: _codex_daemon_candidate refuses to
+        # correlate against a fabricated empty baseline.
+        codex_daemon_baseline_ids: Optional[set[str]] = None
+        if provider == "codex":
+            codex_daemon_baseline_ids = _codex_session_ids_loaded(cwd)
         # Stamp the spawn clock immediately before the pane runs, not at function
         # entry. A sibling pane starting a same-cwd session during the lock-wait
         # or argv-build above would otherwise clear the since_ms lower bound and
@@ -2675,17 +2882,19 @@ def dispatch_spawn_pane(
                 binding_window_s = binding_caps["timeout_ms"] / 1000
                 if _BINDING_WINDOW_ENV in os.environ:
                     binding_window_s = _binding_window_s()
+                # attempts=1 inside the fd half: the binding loop owns the
+                # retry, because it also watches for the pane dying BETWEEN
+                # probes - which a bare retry loop cannot see.
                 binding = _await_pane_binding(
                     {"session": session, "pane_id": pane_id},
-                    # attempts=1: the binding loop owns the retry, because it
-                    # also watches for the pane dying BETWEEN probes - which a
-                    # bare retry loop cannot see, and which is the whole bug.
-                    lambda: _backfill_codex_session_id(
-                        cwd,
-                        spawn_started_ms,
-                        sessions_dir=codex_sessions_dir,
+                    _make_codex_bind_probe(
+                        cwd=cwd,
+                        spawn_started_ms=spawn_started_ms,
                         child_pid=_pid,
-                        attempts=1,
+                        codex_sessions_dir=codex_sessions_dir,
+                        daemon_baseline_ids=codex_daemon_baseline_ids,
+                        mux={"session": session, "pane_id": pane_id},
+                        runner=runner,
                     ),
                     runner=runner,
                     window_s=binding_window_s,
@@ -2742,7 +2951,10 @@ def dispatch_spawn_pane(
                         raise DispatchAskError(
                             f"agent {name!r} required {provider} session binding "
                             f"({unbound_reason or 'not-captured'}); pane {pane_id} reaped, "
-                            "no registry row written",
+                            "no registry row written. Diagnose the lane with "
+                            "'fno doctor --codex-bind'; spawn with --substrate "
+                            "headless meanwhile (headless owns its own session "
+                            "and is unaffected)",
                             exit_code=1,
                         )
                     raise DispatchAskError(
@@ -3200,7 +3412,10 @@ def dispatch_spawn_pane(
                     raise DispatchAskError(
                         f"agent {name!r} required {provider} session binding "
                         f"({unbound_reason}); pane {pane_id} reaped, "
-                        "no registry row written",
+                        "no registry row written. Diagnose the lane with "
+                        "'fno doctor --codex-bind'; spawn with --substrate "
+                        "headless meanwhile (headless owns its own session "
+                        "and is unaffected)",
                         exit_code=1,
                     )
                 raise DispatchAskError(

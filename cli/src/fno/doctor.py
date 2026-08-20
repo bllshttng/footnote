@@ -2190,6 +2190,151 @@ def _codex_app_server_report() -> dict[str, Any]:
     return {"present": socket_path.exists(), "socket_path": str(socket_path)}
 
 
+def _codex_version() -> Optional[str]:
+    """The installed codex CLI's own version string, or None on any miss.
+
+    Delegates to the memoized :func:`fno.agents.mux_spawn._codex_cli_version`
+    rather than shelling out a second time: two independent `codex --version`
+    probes with different timeouts and parsing could otherwise silently
+    disagree on what "the installed codex" is.
+    """
+    from fno.agents.mux_spawn import _codex_cli_version
+
+    version = _codex_cli_version()
+    if version is None:
+        return None
+    return "codex-cli %d.%d.%d" % version
+
+
+#: The production binding window (mirrors the codex harness contract's
+#: 60000ms timeout_ms). A module constant, not an inline literal, so a test
+#: can shrink it rather than spend real wall-clock time on a negative probe.
+_CODEX_BIND_CANARY_WINDOW_S = 60.0
+
+
+def _codex_bind_report() -> dict[str, Any]:
+    """Spawn one throwaway codex pane and time which oracle binds it.
+
+    The lane canary beside ``--codex-hooks``: the pane-binding defect this
+    canary exists to catch was an upstream codex upgrade silently breaking
+    the fallback lane, invisible until a rate-limited primary made it
+    load-bearing. This reports a POSITIVE marker - a returned session id and
+    which oracle produced it - never the absence of an error line, so a
+    future regression reads as a version change on a red canary rather than
+    a mystery some weeks later.
+
+    Drives the exact production binding sequence (``_await_pane_binding`` +
+    ``_make_codex_bind_probe``) rather than a hand-rolled poll loop, so a
+    future regression in that sequence's probe order, deadline handling, or
+    pane-death detection shows up here too instead of passing silently.
+    """
+    import time
+    import uuid as _uuid
+
+    from fno.agents.mux_spawn import (
+        _await_pane_binding,
+        _codex_session_ids_loaded,
+        _lookup_child_pid,
+        _make_codex_bind_probe,
+        _reap_spawned_pane,
+        _run_mux,
+        build_pane_argv,
+        resolve_mux_session,
+    )
+
+    version = _codex_version()
+    cwd = Path.cwd()
+    session = resolve_mux_session()
+    name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
+    argv = build_pane_argv("codex", "", cwd, True, None, name=name)
+    # None (daemon unreachable at this instant) is passed through as-is; the
+    # probe below refuses to correlate against a fabricated empty baseline.
+    baseline_ids = _codex_session_ids_loaded(cwd)
+    spawn_started_ms = int(time.time() * 1000)
+    proc = _run_mux(
+        ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
+        subprocess.run,
+    )
+    if proc.returncode != 0:
+        return {
+            "bound": False,
+            "oracle": None,
+            "elapsed_s": 0.0,
+            "codex_version": version,
+            "error": (proc.stderr or proc.stdout or "no output").strip(),
+        }
+    try:
+        pane_id = int((proc.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        # No pane id to reap by (same unrecoverable shape mux_spawn's own
+        # dispatch raises on): the canary pane may exist without a way to
+        # name it, so point at the manual cleanup path instead of a silent
+        # leak.
+        return {
+            "bound": False,
+            "oracle": None,
+            "elapsed_s": 0.0,
+            "codex_version": version,
+            "error": (
+                f"unparseable pane run output {proc.stdout!r}; a pane may "
+                f"exist without a registry row - inspect with 'fno mux pane "
+                f"ls --session {session}'"
+            ),
+        }
+
+    mux = {"session": session, "pane_id": pane_id}
+    child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
+    started = time.monotonic()
+    oracle_used: list = []
+    if child_pid is not None:
+        binding = _await_pane_binding(
+            mux,
+            _make_codex_bind_probe(
+                cwd=cwd,
+                spawn_started_ms=spawn_started_ms,
+                child_pid=child_pid,
+                codex_sessions_dir=None,
+                daemon_baseline_ids=baseline_ids,
+                mux=mux,
+                runner=subprocess.run,
+                oracle_used=oracle_used,
+            ),
+            runner=subprocess.run,
+            window_s=_CODEX_BIND_CANARY_WINDOW_S,
+            label="codex-bind-canary",
+        )
+        session_id = binding.session_id
+        error = None if session_id else "neither oracle bound within the window"
+    else:
+        # No window was waited out here at all - a missing child pid is a
+        # pane-lookup miss, not a timed-out bind, and reporting the timeout
+        # message would hide that real cause from whoever reads the canary.
+        session_id = None
+        error = "no child pid found for the canary pane"
+    elapsed = time.monotonic() - started
+    _reap_spawned_pane(session, pane_id, subprocess.run)
+    return {
+        "bound": session_id is not None,
+        "oracle": oracle_used[0] if oracle_used else None,
+        "elapsed_s": round(elapsed, 2),
+        "codex_version": version,
+        "error": error,
+    }
+
+
+def _emit_codex_bind_report(result: dict[str, Any]) -> None:
+    if result["bound"]:
+        typer.echo(
+            f"fno doctor: codex bind: ok, oracle={result['oracle']} "
+            f"elapsed={result['elapsed_s']}s codex={result['codex_version'] or 'unknown'}"
+        )
+    else:
+        typer.echo(
+            f"fno doctor: codex bind: FAILED codex={result['codex_version'] or 'unknown'}: "
+            f"{result['error']}"
+        )
+
+
 def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
     """Render one summary plus actionable Codex hook diagnostics."""
 
@@ -3014,6 +3159,12 @@ def doctor_command(
         "--codex-hooks",
         help="Inspect Codex user-level SessionStart hook layers and trust (advisory).",
     ),
+    codex_bind: bool = typer.Option(
+        False,
+        "--codex-bind",
+        help="Spawn one throwaway codex pane and report which binding oracle "
+        "caught it (rollout-fd, daemon, or neither); the pane-binding lane canary.",
+    ),
     context_audit: bool = typer.Option(
         False,
         "--context-audit",
@@ -3047,9 +3198,10 @@ def doctor_command(
 ) -> None:
     """Report skew between the installed fno and its source checkout."""
     if context_audit:
-        if fix or cost_check or codex_hooks:
+        if fix or cost_check or codex_hooks or codex_bind:
             raise typer.BadParameter(
-                "--context-audit cannot be combined with --fix, --cost-check, or --codex-hooks"
+                "--context-audit cannot be combined with --fix, --cost-check, "
+                "--codex-hooks, or --codex-bind"
             )
         from fno.context_audit import (
             SUPPORTED_ENTRY_STATES,
@@ -3103,7 +3255,7 @@ def doctor_command(
         raise typer.Exit(0)
 
     if codex_hooks:
-        if fix or source is not None or cost_check:
+        if fix or source is not None or cost_check or codex_bind:
             raise typer.BadParameter("--codex-hooks may only be combined with --json")
         result = _codex_hooks_report()
         if json_out:
@@ -3112,6 +3264,16 @@ def doctor_command(
         else:
             _emit_codex_hooks_report(result, err=False)
         raise typer.Exit(0)
+
+    if codex_bind:
+        if fix or source is not None or cost_check:
+            raise typer.BadParameter("--codex-bind may only be combined with --json")
+        result = _codex_bind_report()
+        if json_out:
+            typer.echo(json.dumps(result))
+        else:
+            _emit_codex_bind_report(result)
+        raise typer.Exit(0 if result["bound"] else 1)
 
     if cost_check:
         # Dedicated mode: the staleness check stays network-free and
