@@ -566,7 +566,7 @@ def _render_full_menu() -> str:
     roots would make the ten-root taxonomy read as false while the reorg is
     mid-flight, so moved spellings render under their own trailing heading.
     """
-    from fno.verb_moves import move_for
+    from fno.verb_moves import Move, move_for
 
     # Eager inline commands classify too, not only lazy entries: a later
     # wave moves `cost`, which is an eager @app.command, and a move on an
@@ -575,8 +575,14 @@ def _render_full_menu() -> str:
     candidates: dict[str, str] = dict(_EAGER_COMMAND_HELP)
     for name, entry in LAZY_SUBCOMMANDS.items():
         candidates[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
-    rows = {n: s for n, s in candidates.items() if move_for(n) is None}
-    moved_rows = {n: s for n, s in candidates.items() if move_for(n) is not None}
+    rows: dict[str, str] = {}
+    moved_rows: dict[str, tuple[str, Move]] = {}
+    for name, short in candidates.items():
+        move = move_for(name)
+        if move is None:
+            rows[name] = short
+        else:
+            moved_rows[name] = (short, move)
     width = max(len(n) for n in rows)
     lines = [
         "fno-py full top-level surface - every fno-py command, including hidden.",
@@ -594,7 +600,7 @@ def _render_full_menu() -> str:
         lines.append("")
         lines.append("Moved spellings (still work; each prints its new home on use):")
         lines.extend(
-            f"  {name.ljust(mwidth)}  now fno {move_for(name).to}"
+            f"  {name.ljust(mwidth)}  now fno {moved_rows[name][1].to}"
             for name in sorted(moved_rows)
         )
     return "\n".join(lines)
