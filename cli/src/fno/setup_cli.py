@@ -315,6 +315,38 @@ def offer_cli_hooks(
     return True
 
 
+def report_machine_blockers(*, echo_fn: Callable[[str], None]) -> list[str]:
+    """Run the machine doctor at the end of first run and name what blocks.
+
+    The wizard configures PREFERENCES; `fno doctor` knows the MACHINE. Nothing
+    connected them, so a new user met every environmental hurdle later as an
+    unattributable mid-loop failure. Composition of two verbs that both exist.
+
+    Calls `fno.doctor.build_report()` and `fno.doctor._blockers()` in process
+    -- never shells out. A subprocess resolves the DEPLOYED binary on PATH,
+    not this source, so on the exact stale install that is itself blocker #1
+    the wizard would run the wrong bytes to report it.
+
+    Never raises and never fails the wizard: a machine finding the user has
+    just been told about must not look like setup failing.
+    """
+    try:
+        from fno.doctor import _blockers, _emit_blockers, build_report
+
+        result = build_report()
+        blockers = _blockers(result)
+    except Exception as exc:
+        echo_fn(f"fno doctor: could not run ({exc}); skipping machine check.")
+        return []
+
+    if blockers:
+        echo_fn("")
+        _emit_blockers(blockers, echo_fn=echo_fn)
+    else:
+        echo_fn("\nfno doctor: this machine looks clean.")
+    return blockers
+
+
 @app.command("plan")
 def plan_cmd(
     advanced: bool = typer.Option(
@@ -637,7 +669,7 @@ def wizard_cmd(
 
     typer.echo(
         f"\nwizard complete: {n} key(s) written. "
-        "Run `fno config doctor` to verify."
+        "`fno config doctor` checks your paths. `fno doctor --blockers` checks this machine."
     )
 
     # Optional capstone: install footnote's recommended claude-code rules into
@@ -697,6 +729,12 @@ def wizard_cmd(
         # dump a traceback.
         typer.echo("\nintegration cancelled.")
         raise typer.Exit(1)
+
+    # Machine check, last: the wizard configures preferences, `fno doctor`
+    # knows the machine. Run it in process so a stale-install user gets a
+    # real answer, not the deployed binary's (x-75dc).
+    report_machine_blockers(echo_fn=typer.echo)
+
     raise typer.Exit(0)
 
 
