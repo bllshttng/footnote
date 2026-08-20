@@ -41,7 +41,12 @@ def _by_id() -> Optional[dict[str, dict]]:
         entries = read_entries("agents.crown")
     except Exception:
         return None
-    return {e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")}
+    by_id: dict[str, dict] = {}
+    for e in entries:
+        node_id = e.get("id") if isinstance(e, dict) else None
+        if node_id:
+            by_id[node_id] = e
+    return by_id
 
 
 def _agreement(
@@ -88,8 +93,11 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
     conflict here and the one-live-crown guard at grant time can never
     disagree about what "same territory" means.
     """
-    crowned = [(row, crown_reading(row)) for row in rows]
-    crowned = [(row, r) for row, r in crowned if r is not None]
+    crowned: list[tuple[Any, dict]] = []
+    for row in rows:
+        reading = crown_reading(row)
+        if reading is not None:
+            crowned.append((row, reading))
     seen: list[tuple[str, list[str]]] = []
     for row, reading in crowned:
         scope = reading["scope"]
