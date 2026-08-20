@@ -130,8 +130,12 @@ _STAMP_FILE="$SCRIPT_DIR/../.fno/.worktree-stranded-refresh-stamp"
 _RT_HELPER="$SCRIPT_DIR/../scripts/lib/reconcile-throttle.sh"
 [[ -f "$_RT_HELPER" ]] && source "$_RT_HELPER"
 _cache_age() {
-  if ! command -v _reconcile_mtime >/dev/null 2>&1 || [[ ! -f "$_STAMP_FILE" ]]; then
-    echo 999999  # helper unavailable or never claimed: maximally stale, never fresh
+  if ! command -v _reconcile_mtime >/dev/null 2>&1; then
+    echo 0  # no trustworthy mtime read: disable refresh, keep cached reporting
+    return
+  fi
+  if [[ ! -f "$_STAMP_FILE" ]]; then
+    echo 999999  # never claimed: maximally stale, start the first refresh
     return
   fi
   echo $(( $(date +%s) - $(_reconcile_mtime "$_STAMP_FILE") ))
