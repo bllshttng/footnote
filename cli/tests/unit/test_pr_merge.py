@@ -2138,7 +2138,10 @@ def test_coverage_refusal_appends_the_sized_invocation_hint():
     for line in (reason, bare):
         assert "close every finding, commit and push first" in line
         assert "skills/review/scripts/emit-attestation.sh" in line
-    assert bare.endswith("emit-attestation.sh)")
+    # The emitter refuses a call with no reviewer name, so the rendered command
+    # carries the argument. A bare path here would exit 1 for whoever copies it.
+    assert "`bash skills/review/scripts/emit-attestation.sh <reviewer>`" in bare
+    assert bare.endswith("<reviewer>`)")
 
     # The stale-head arm carries the hint the same way.
     stale = {"coverage": "covered", "reviewed_count": 0, "head_sha": "zzz", "verdicts": []}

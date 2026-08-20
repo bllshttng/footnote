@@ -9000,12 +9000,14 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             CiConclusion::Failure(Some(name)) => name.as_str(),
             _ => "CI",
         };
+        // No `hint("ci")` here. This arm is reachable only on Failure(_), and
+        // `async_wait_class` refuses `Some("ci")` for exactly that conclusion,
+        // so the hint is always empty. Rendering it would be dead today and a
+        // contradiction the day someone relaxes that guard: read the log now,
+        // and idle waiting, in one sentence.
         return format!(
-            "CI red on PR #{}: {} failed. Read the failing log: `fno pr logs {}`.{}",
-            pr.number,
-            check_name,
-            pr.number,
-            hint("ci")
+            "CI red on PR #{}: {} failed. Read the failing log: `fno pr logs {}`.",
+            pr.number, check_name, pr.number
         );
     }
 
@@ -9271,17 +9273,53 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
-            let mut names: Vec<String> = pr.missing_bots.clone();
+            // The same-model peer sentinel is a required login by construction
+            // and no review can ever carry its NUL-wrapped name, so it reaches
+            // here through the `_ => missing_bots.push(bot)` arm. Printing it as
+            // a bot name told the operator to move an unmatchable sentinel to
+            // `optional_apps`. The real remedy is the one the stderr line at the
+            // rewrite site gives, and the reviewers-gate arm above already
+            // special-cases its local twin.
+            let mut names: Vec<String> = Vec::new();
+            let mut same_model_peer = false;
+            for b in &pr.missing_bots {
+                if b == SAME_MODEL_PEER_SENTINEL {
+                    same_model_peer = true;
+                } else {
+                    names.push(b.clone());
+                }
+            }
             names.extend(
                 pr.stale_bots
                     .iter()
                     .map(|(b, _)| format!("{b}{}", read_note(b))),
             );
+            if names.is_empty() {
+                // No hint: nothing will ever post for the sentinel, so arming a
+                // watcher parks the session on a wait with no end. Keeping the
+                // loop awake lets the NoProgress backstop reap it instead.
+                return format!(
+                    "PR #{}: the cross-model peer gate is unmet - the configured peer is the \
+                     author's own model, so nothing can satisfy it. Configure a cross-model \
+                     peer or a model route.",
+                    pr.number
+                );
+            }
+            let peer_note = if same_model_peer {
+                " The cross-model peer gate is also unmet: configure a cross-model peer or a model route."
+            } else {
+                ""
+            };
+            // "footnote posts no mention", NOT "a mention will not trigger it":
+            // NotNudgeable means no profile, an override, a disabled nudge, or
+            // the sentinel. Only the last says anything about the bot itself.
             return format!(
-                "PR #{}: {} has not reviewed. A mention will not trigger it. \
-                 Wait for it to post, or move it to config.review.optional_apps if it never will.{}",
+                "PR #{}: {} has not reviewed. footnote has no nudge configured for it, so it \
+                 posts no mention. Wait for it to post, or move it to \
+                 config.review.optional_apps if it never will.{}{}",
                 pr.number,
                 names.join(", "),
+                peer_note,
                 hint("review")
             );
         }
