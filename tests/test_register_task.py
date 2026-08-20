@@ -301,6 +301,7 @@ def test_build_entry_records_lane_axes():
 def test_build_entry_prefers_registry_lane_axes(monkeypatch):
     from types import SimpleNamespace
 
+    manifest_harness = "claude"
     monkeypatch.setattr(
         "fno.agents.registry.load_registry",
         lambda: [
@@ -317,8 +318,8 @@ def test_build_entry_prefers_registry_lane_axes(monkeypatch):
         {
             "input": "x",
             "session_id": "sid",
-            "harness": "claude",
-            "provider": "claude",
+            "harness": manifest_harness,
+            "provider": manifest_harness,
             "harness_session_id": "worker-sid",
             "model": "opus",
             "effort": "high",
