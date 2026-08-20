@@ -1010,6 +1010,7 @@ exit_if_void() {
         # (riding SQUADS_INCLUDED undercounted it on machines with no real
         # squads store, and the receipt validator rejected the step mismatch).
         [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
+        [[ "${SG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(structural-gates:fno)
         REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
         REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
         EXECUTED_COUNT=$REQUIRED_EXECUTED
@@ -1121,6 +1122,7 @@ echo ""
 REQUIRED_EXECUTED=0
 SQUADS_INCLUDED=0
 TG_INCLUDED=0
+SG_INCLUDED=0
 RECEIPT_UNAVAILABLE=0
 if retry_run_leg smoke; then
     echo "preflight: === smoke suite ($([[ $RETRY_FAILED -eq 1 ]] && echo retry-failed || echo keep-going)) ==="
@@ -1209,6 +1211,11 @@ if retry_run_leg structural-gates:fno; then
     run_hermetic bash scripts/ci/check-uv-install-compiles-bytecode.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     run_hermetic bash scripts/ci/check-workflow-manifest.sh; rc=$?; [[ $rc -gt $sgrc ]] && sgrc=$rc
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    # Same contract the tracker leg keeps: a leg that increments
+    # REQUIRED_EXECUTED must also appear in REQUIRED_SCOPE_NAMES, or the
+    # executed count outruns the required count and a skipped leg still reads
+    # as mode=FULL. That is the receipt lying about its own coverage.
+    SG_INCLUDED=1
     if [[ $sgrc -eq 0 ]]; then
         record_leg structural-gates:fno "structural gates (fno)" pass $(( SECONDS - sg0 ))
     else
@@ -1412,6 +1419,7 @@ write_leg_record
 REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
+[[ "${SG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(structural-gates:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}
 REQUIRED_SCOPE="$(_json_array "${REQUIRED_SCOPE_NAMES[@]}")"
 # Coverage-derived mode: a run that executed every required leg is FULL whether
