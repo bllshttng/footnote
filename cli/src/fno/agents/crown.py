@@ -534,14 +534,27 @@ def _stranded_subordinates(
     by_id = {
         e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")
     }
-    return [
-        row.name
-        for row in rows
-        if row.name != target_name
-        and row.status not in TERMINAL_STATUSES
-        and scope_contains(vacated, row.crown_scope, graph_entry=by_id.get)
-        and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get)
-    ]
+    stranded: list[str] = []
+    for row in rows:
+        if row.name == target_name or row.status in TERMINAL_STATUSES:
+            continue
+        members = split_scope(row.crown_scope)
+        # A single-member scope that names no project is an epic id, whose
+        # containment lives in the graph. If the graph does not hold it,
+        # containment is UNKNOWABLE for this row, and letting
+        # scope_contains answer False would print [] ("verified no
+        # strands") about a row the check never evaluated.
+        if (
+            len(members) == 1
+            and members[0] not in by_id
+            and _canonical_project(members[0]) is None
+        ):
+            return None
+        if scope_contains(
+            vacated, row.crown_scope, graph_entry=by_id.get
+        ) and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get):
+            stranded.append(row.name)
+    return stranded
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
