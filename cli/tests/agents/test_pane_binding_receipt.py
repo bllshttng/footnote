@@ -509,6 +509,14 @@ def test_shared_readiness_submits_a_preloaded_seed(harness: str) -> None:
 
 
 def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
+    """A non-zero return code is mux REFUSING the send, and the detail says so.
+
+    It used to read "text delivered, submission unconfirmed", which named the
+    wrong half twice. Whether text was delivered is the `source` field's job,
+    and it is false outright when the seed rode in on argv and the send carried
+    only a submit keystroke. What this arm actually knows is that the send was
+    refused."""
+
     def run(argv, **_kw):
         verb = argv[3]
         if verb == "wait":
@@ -521,8 +529,8 @@ def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     assert state == "unconfirmed"
-    assert detail == "text delivered, submission unconfirmed"
-    assert source == "delivered"
+    assert detail == "submission refused"
+    assert source == "delivered", "this seed was typed, so delivered is true here"
 
 
 def test_a_blank_frame_is_unattempted_not_unconfirmed() -> None:
