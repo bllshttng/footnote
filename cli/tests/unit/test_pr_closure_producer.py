@@ -343,6 +343,13 @@ def _hook_main(command, cwd):
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
         capture_output=True, text=True, cwd=str(cwd),
     )
+    # A crashed hook prints nothing, and silence here is the ALLOW shape. So a
+    # NameError from a bad edit once made every case in a sweep "pass",
+    # including the control. Exit code first, then the payload.
+    assert result.returncode == 0, (
+        f"hook exited {result.returncode}, so its empty stdout is a crash "
+        f"rather than an allow: {result.stderr.strip()[:400]}"
+    )
     return json.loads(result.stdout)["hookSpecificOutput"] if result.stdout.strip() else None
 
 
@@ -398,6 +405,52 @@ def test_hook_ignores_a_hatch_that_is_not_an_assignment_prefix(command, node_bra
     # its own fix.
     payload = _hook_main(command, node_branch_repo)
     assert payload["permissionDecision"] == "deny"
+
+
+# Wrapped creates, which had no test at all before this.
+#
+# Measured against the pre-unification hook rather than assumed: of the seven
+# cases below, exactly ONE changed behavior when `_pr_create_signals` stopped
+# re-implementing the prefix walk. `timeout 60 FNO_PR_CLOSURE_OK=1 gh pr
+# create` denied before and allows now, because the thinner copy treated the
+# wrapper's own option as a hard stop and never reached the assignment. The
+# other six already behaved correctly and are pinned so they keep doing so.
+#
+# Saying that plainly matters more than the count. A comment claiming all
+# seven caught the bug would read as sevenfold proof of a onefold fix.
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A shell runner holds the whole create in one quoted token.
+        'bash -c "gh pr create --title t --body no-trailer-here"',
+        'sh -c "gh pr create --title t --body no-trailer-here"',
+        # A wrapper carrying its OWN option, which used to hide the verb.
+        "timeout 60 gh pr create --title t --body no-trailer-here",
+        "env -i gh pr create --title t --body no-trailer-here",
+    ],
+)
+def test_hook_denies_a_wrapped_create_with_no_trailer(command, node_branch_repo):
+    payload = _hook_main(command, node_branch_repo)
+    assert payload["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The hatch travels INSIDE the runner's quoted command.
+        'bash -c "FNO_PR_CLOSURE_OK=1 gh pr create --title t --body b"',
+        # The hatch sits after a wrapper that took its own option first.
+        "timeout 60 FNO_PR_CLOSURE_OK=1 gh pr create --title t --body b",
+        # And before it, where a shell applies it to the wrapped command too.
+        "FNO_PR_CLOSURE_OK=1 timeout 60 gh pr create --title t --body b",
+    ],
+)
+def test_hook_honors_a_real_hatch_through_a_wrapper(command, node_branch_repo):
+    # The assignment is a real prefix of the command that runs, so it is the
+    # operator's stated intent whichever side of the wrapper it sits on.
+    payload = _hook_main(command, node_branch_repo)
+    assert payload is None or payload["permissionDecision"] != "deny"
 
 
 @pytest.mark.parametrize(
