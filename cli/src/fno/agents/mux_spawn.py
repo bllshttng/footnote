@@ -2597,6 +2597,11 @@ def _submit_spawn_seed(
                      and an alive-but-unpainted child is still a live worker.
                      Folding it into ``unconfirmed`` would reap a healthy pane
                      for the crime of not having painted yet.
+
+    The agy trust gate splits along the same line. A trust submit that raised
+    or exited non-zero is ``unconfirmed``: it was tried and it failed. A trust
+    dialog still on screen afterwards is ``unattempted``, because that is a
+    reading about paint timing rather than about the send.
     """
     try:
         screen = _run_mux(
@@ -2622,10 +2627,10 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            return "unattempted", "agy trust gate did not clear", "trust-cleared"
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            return "unattempted", "agy trust gate did not clear", "trust-cleared"
         trust_source = "trust-cleared"
     else:
         trust_source = ""

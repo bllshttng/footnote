@@ -886,6 +886,29 @@ def test_an_unreadable_transcript_never_retires():
     assert v.verdict != watchdog.RETIRE
 
 
+def test_an_already_stopped_row_never_retires():
+    """Retire exists to reclaim a LIVE slot. None of the terminal states appear
+    in `spawn_gate.LIVE_STATUSES`, so stopping one frees nothing, the receipt's
+    promised undo is false, and the same row draws the verdict on every sweep
+    forever. Found by self-review, not by the original acceptance criteria."""
+    for state in sorted(watchdog._TERMINAL_STATES):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", True)
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, state
+
+
+def test_an_open_429_window_never_retires():
+    """A session waiting out a rate limit is silent and is NOT finished. Retire
+    sits above the reroute lane, so without this it stops exactly the rows
+    reroute exists to move onto a fresh account, and stops them without
+    rotating anything. `reap_decision` refuses on the same reading."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", True)
+    tail = f"{FINISHED_TAIL}\n{RATE_LIMIT_TAIL}"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert v.verdict == REROUTE, "the row belongs to reroute, not retire"
+
+
 def test_reap_outranks_retire_on_the_same_row():
     """Precedence: ghost > reap > retire. A row that satisfies both takes the
     more specific verdict, so the reap lane's config freeze still governs it."""

@@ -425,6 +425,7 @@ def retire_decision(
     facts: Optional[TailFacts],
     now_s: float,
     grace_s: float,
+    window: str = "none",
 ) -> tuple[bool, str]:
     """Should this row be stopped as finished? Returns ``(answer, basis)``.
 
@@ -463,6 +464,20 @@ def retire_decision(
     # and `adopted` is routinely an operator's own terminal the healer found
     # already running. Neither is evidence of a worker, so both decline here.
     if row.origin != "spawn":
+        return False, ""
+    # A row that already stopped holds no slot, so stopping it again frees
+    # nothing and the receipt would claim an undo for a session that is not
+    # running. None of `_TERMINAL_STATES` appear in `spawn_gate.LIVE_STATUSES`,
+    # which is the whole point of the lane: retire exists to reclaim a LIVE
+    # slot. Without this the same finished-and-stopped row draws a retire
+    # verdict on every sweep, forever.
+    if row.state in _TERMINAL_STATES:
+        return False, ""
+    # A session waiting out a rate limit is silent and is NOT finished. The
+    # reap predicate refuses on the same reading, and retire sits ABOVE the
+    # reroute lane, so without this it stops exactly the rows reroute exists to
+    # move onto a fresh account - and stops them without rotating anything.
+    if window == "live":
         return False, ""
     if facts is None or facts.last_event_epoch is None:
         return False, ""
@@ -874,7 +889,11 @@ def _verdict_one(
     now_s: float,
     quiet_after_s: float = REAP_QUIET_AFTER_S,
     cotenants: int = 0,
-    retire_grace_s_value: float = RETIRE_GRACE_S,
+    # No default: `config.recovery.retire_grace_s = 0` is documented as turning
+    # the lane off, and a hardcoded fallback here would arm it for any caller
+    # that skipped `verdicts()`. A switch documented as off-capable must not
+    # have an on-by-default back door.
+    retire_grace_s_value: float,
 ) -> Verdict:
 
     # ghost: the row claims working/blocked but its recorded id resolves to no
@@ -917,7 +936,7 @@ def _verdict_one(
     # declines on its own (stricter) preconditions can still be stopped by this
     # (weaker, non-destructive) one.
     retire_yes, retire_basis = retire_decision(
-        row, facts=facts, now_s=now_s, grace_s=retire_grace_s_value
+        row, facts=facts, now_s=now_s, grace_s=retire_grace_s_value, window=window
     )
     if retire_yes:
         return Verdict(row.row_id, row.name, row.state, RETIRE,

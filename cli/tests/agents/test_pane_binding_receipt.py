@@ -624,7 +624,11 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
         raise AssertionError(argv)
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
-    assert state == "unconfirmed"
+    # A dialog still on screen after our submit is a paint-timing read, not a
+    # send that was refused, so it is `unattempted` and the caller's retry gets
+    # another look. Calling it `unconfirmed` would reap an agy pane whose trust
+    # prompt painted a second late.
+    assert state == "unattempted"
     assert "trust gate did not clear" in detail
     assert source == "trust-cleared"
 
