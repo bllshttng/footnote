@@ -1225,6 +1225,35 @@ def test_a_decorated_question_still_holds_the_row():
         assert v.verdict != watchdog.RETIRE, closing
 
 
+def test_a_quoted_promise_never_retires_and_a_real_one_still_does():
+    """Thirty-four files in this repo carry a literal closing promise tag, this
+    module among them. A worker summarising a diff to one of them quotes the
+    closed block, and every read below answers as if it had declared itself
+    done. The lane ships armed, so that stops a live session by default.
+
+    Both directions are pinned here. The lane must still act on a real promise
+    that happens to sit near quoted material, or the fix would close the leak by
+    emptying the lane."""
+    promise = "<promise>PR is green and reviewed</promise>"
+    cases = {
+        "plain": (promise, True),
+        "fenced": (f"Diff:\n```\n{promise}\n```\nStill working.", False),
+        "tilde fenced": (f"Diff:\n~~~\n{promise}\n~~~\nStill working.", False),
+        "inline span": (f"The tag is `{promise}` here.", False),
+        # A turn that opens a fence and stops is a worker cut off mid-quote, so
+        # everything after the opener is quoted. Requiring the closing fence read
+        # this as a declaration.
+        "unterminated fence": (f"Diff:\n```\n{promise}\n", False),
+        "quote then real": (f"```\n{promise}\n```\n{promise}", True),
+        "real then quote": (f"{promise}\n```\n{promise}\n```", True),
+    }
+    for name, (text, should_retire) in cases.items():
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+        [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+        retired = v.verdict == watchdog.RETIRE
+        assert retired is should_retire, f"{name}: retired={retired}"
+
+
 def test_a_prose_mention_of_the_tag_never_retires():
     """`classify_tail` answers `done` on any `<promise` in the last turn, prose
     mention included, and agents working on this repo write the tag in prose

@@ -155,7 +155,21 @@ _CLOSED_PROMISE_RE = re.compile(
 #: Stripped for the DONE read only. The question read keeps the raw text,
 #: because losing a question there stops a session and gaining one only holds a
 #: slot.
-_QUOTED_CODE_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+#:
+#: An UNTERMINATED fence consumes to the end of the turn, and that alternative
+#: has to come after the matched pair so a closed fence is not swallowed whole.
+#: A turn that opens a block and stops is a worker cut off mid-quote, so
+#: everything after the opener is quoted material. Requiring the closing fence
+#: read that turn's quoted promise as a declaration and retired it - the same
+#: shape as an unclosed `<promise>`, and refused the same way.
+_QUOTED_CODE_RE = re.compile(
+    r"```.*?```"
+    r"|~~~.*?~~~"
+    r"|```.*"
+    r"|~~~.*"
+    r"|`[^`\n]*`",
+    re.DOTALL,
+)
 
 #: States that make a transcript-less row a ghost: the row claims a live-ish
 #: session whose recorded id resolves to nothing. A ``stopped`` row with no
