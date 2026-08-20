@@ -313,14 +313,14 @@ def _resolve_one(
 
     if descriptor.requires == "none":
         # A self-serve verb whose `invocations` map scopes it to specific
-        # harnesses (code-review: claude /code-review, codex /review) draws the
-        # same line the subagent-dispatch branch draws below: a known harness
-        # outside the map (agy/opencode/gemini) has no verb, so resolving it
-        # satisfiable would floor the stop gate onto a reviewer whose
-        # attestation nothing there produces, wedging the loop. The invocations
-        # map IS the allowlist; the scalar `invocation` stays the
-        # unknown-harness default, not a fallback that asserts a claude verb
-        # works everywhere.
+        # harnesses (code-review: claude /code-review, codex /review, opencode
+        # /review-changes, agy /fno:review) draws the same line the
+        # subagent-dispatch branch draws below: a known harness outside the map
+        # (gemini) has no verb, so resolving it satisfiable would floor the
+        # stop gate onto a reviewer whose attestation nothing there produces,
+        # wedging the loop. The invocations map IS the allowlist; the scalar
+        # `invocation` is the unknown-harness default - the portable fno
+        # review, never claude's verb silently.
         per_harness = descriptor.invocations
         if per_harness:
             verb = per_harness.get(session.harness)

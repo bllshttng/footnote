@@ -179,14 +179,34 @@ def coverage_verdict(
     # Same branch order run_merge has always used: the attestation refusal is
     # checked first, so a config requiring code-review with no row names the
     # missing attestation, not the missing row.
+    #
+    # Both refusals carry the sized invocation (rendered once, fail-open to
+    # None): a worker told to "run the review verb" with no flag shape runs it
+    # bare, the bare call still attests, and the gate cannot tell the
+    # difference - the exact delivery gap the render closes.
+    hint = None
+    try:
+        from pathlib import Path
+
+        from fno.review_capability import render_self_review_invocation
+
+        root = Path(_merge._repo_state_dir(repo)).parent
+        hint = render_self_review_invocation(project_root=root)
+    except Exception:  # noqa: BLE001 - advisory text; the refusal still stands
+        hint = None
     if code_review_required and not _merge._coverage_has_local_pass(cov, "code-review"):
+        sized = f" - `{hint}`" if hint else ""
         refusal = (
             "required code-review has no head-pinned local pass attestation; "
-            "run the harness review verb at HEAD, then emit the code-review attestation"
+            f"run the harness review verb at HEAD{sized}, "
+            "then emit the code-review attestation"
         )
     else:
         refusal = _merge._coverage_refused_reason(
-            cov, head, _merge._coverage_sources(repo) if cov is None else None
+            cov,
+            head,
+            _merge._coverage_sources(repo) if cov is None else None,
+            self_review_hint=hint,
         )
     return REFUSED, refusal, "", recompute_note
 

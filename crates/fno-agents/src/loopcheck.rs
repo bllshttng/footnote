@@ -10843,12 +10843,7 @@ mod tests {
 
         let good = stub("#!/bin/sh\nprintf '/code-review from-stub --comment --fix\\n'\n");
         assert_eq!(
-            sized_self_review_hint(
-                good.to_str().unwrap(),
-                dir,
-                Some("claude")
-            )
-            .as_deref(),
+            sized_self_review_hint(good.to_str().unwrap(), dir, Some("claude")).as_deref(),
             Some("/code-review from-stub --comment --fix")
         );
 
@@ -13101,8 +13096,7 @@ mod tests {
             !codex_verb.chars().any(|c| c.is_whitespace()),
             "codex self-review verb must be bare, got {codex_verb:?}"
         );
-        let (opencode_verb, _) =
-            reviewer_invocation_for("code-review", Some("opencode")).unwrap();
+        let (opencode_verb, _) = reviewer_invocation_for("code-review", Some("opencode")).unwrap();
         assert!(
             !opencode_verb.chars().any(|c| c.is_whitespace()),
             "opencode self-review verb must stay bare until its grammar is verified, got {opencode_verb:?}"

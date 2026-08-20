@@ -2121,6 +2121,27 @@ def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
     assert "waiting on" not in reason
 
 
+def test_coverage_refusal_appends_the_sized_invocation_hint():
+    """The refusal hands the worker the exact invocation (rendered by the
+    Python single source), verbatim and backticked, after the instruction.
+    Without a hint the line reads exactly as before - a broken render must
+    never read as a different verdict."""
+    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
+    hint = "/verb-from-the-builder --flags"
+    reason = _merge._coverage_refused_reason(cov, self_review_hint=hint)
+    assert "run the review verb at HEAD" in reason
+    assert f"- `{hint}`" in reason
+    bare = _merge._coverage_refused_reason(cov)
+    assert "verb-from-the-builder" not in bare
+    assert bare.endswith("run the review verb at HEAD)")
+
+    # The stale-head arm carries the hint the same way.
+    stale = {"coverage": "covered", "reviewed_count": 0, "head_sha": "zzz", "verdicts": []}
+    moved = _merge._coverage_refused_reason(stale, head="abc", self_review_hint=hint)
+    assert "re-run the review verb at HEAD" in moved
+    assert f"- `{hint}`" in moved
+
+
 def test_refusal_reason_names_where_it_searched():
     """x-f43c: the absence branch names the logs it read.
 
