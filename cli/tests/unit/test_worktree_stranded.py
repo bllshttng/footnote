@@ -298,6 +298,44 @@ def test_act_on_stranded_stops_at_first_failure(monkeypatch):
     assert not any("backlog" in args for args in calls)
 
 
+@pytest.mark.parametrize(
+    "get_returncode,get_stdout",
+    [
+        pytest.param(1, "", id="get-command-failed"),
+        pytest.param(0, "not-json", id="get-output-malformed"),
+    ],
+)
+def test_act_on_stranded_never_updates_after_backlog_read_failure(
+    monkeypatch, get_returncode, get_stdout
+):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[:3] == ["fno", "backlog", "get"]:
+            return subprocess.CompletedProcess(
+                args, get_returncode, stdout=get_stdout, stderr="read failed"
+            )
+        if args[:3] == ["git", "-C", "/wt/x-abcd"] and "rev-parse" in args:
+            return subprocess.CompletedProcess(args, 0, stdout="abc123def456\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("fno.worktree_stranded.subprocess.run", fake_run)
+
+    row = Row(
+        STRANDED,
+        "x-abcd",
+        3,
+        "1 hour ago",
+        {"path": "/wt/x-abcd", "branch": "feature/x-abcd"},
+    )
+    outcome = act_on_stranded(row)
+
+    assert outcome["stopped_at"] == "backlog_get"
+    assert [act["act"] for act in outcome["acts"]] == ["push", "backlog_get"]
+    assert not any(args[:3] == ["fno", "backlog", "update"] for args in calls)
+
+
 # --- regression: the unsound name-existence probe -----------------------
 
 

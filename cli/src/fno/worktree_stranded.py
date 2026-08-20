@@ -333,10 +333,23 @@ def act_on_stranded(row: Row) -> dict:
         f"onto {push_branch} (stranded sweep)."
     )
     get_p = subprocess.run(["fno", "backlog", "get", node], capture_output=True, text=True)
+    if get_p.returncode != 0:
+        acts.append(
+            {
+                "act": "backlog_get",
+                "ok": False,
+                "detail": (get_p.stderr or "backlog get failed").strip()[:500],
+            }
+        )
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
     try:
-        cur_details = (json.loads(get_p.stdout or "{}").get("details") or "") if get_p.returncode == 0 else ""
-    except json.JSONDecodeError:
-        cur_details = ""
+        current = json.loads(get_p.stdout or "")
+        if not isinstance(current, dict):
+            raise ValueError("backlog get returned a non-object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        acts.append({"act": "backlog_get", "ok": False, "detail": str(exc)[:500]})
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
+    cur_details = current.get("details") or ""
     new_details = f"{cur_details}\n\n{detail_line}" if cur_details else detail_line
     upd_p = subprocess.run(
         ["fno", "backlog", "update", node, "--details", new_details], capture_output=True, text=True
