@@ -246,7 +246,12 @@ def derive_crown_level(scopes: list[str]) -> int:
     return resolve_crown(scopes)[0]
 
 
-def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
+def scope_contains(
+    outer: Optional[str],
+    inner: Optional[str],
+    *,
+    graph_entry=None,
+) -> bool:
     """Does a crown over ``outer`` strictly contain one over ``inner``?
 
     Real containment, not the honor system it replaces. The old rule could only
@@ -254,6 +259,10 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     project>epic>node containment was not derivable. Under this ladder it is: a
     project is in a portfolio by name, and an epic carries the project it belongs
     to, so a grantor can no longer hand down authority it does not hold.
+
+    ``graph_entry`` overrides the per-call graph read (an ``id -> entry``
+    callable), so a caller scanning many rows pays one graph parse instead of
+    one per row.
     """
     def _canon(members: list[str]) -> set[str]:
         # Alias-normalize both sides, or a portfolio stored as `alpha` fails to
@@ -273,7 +282,7 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     name = next(iter(inner_members))
     if name in outer_members:
         return True
-    entry = _graph_entry(name)
+    entry = (graph_entry or _graph_entry)(name)
     if not entry:
         return False
     # Canonicalize the entry's project before the comparison: graph intake stores
@@ -493,34 +502,38 @@ def _stranded_subordinates(
     time only, so a crown granted out of the old territory keeps reigning
     after its grantor moves away. Two deliberate answers beyond the list:
 
-    ``[]`` on a no-op or widening move, where no territory actually left the
-    new scope. ``None`` when the check could not run (graph unreadable, or an
-    external tracker backend) - which is not the same answer as ``[]``, or the
-    receipt would read as "verified no strands" on a machine it could not
-    check. Computed by the caller AFTER the registry write returns, so no
-    graph I/O runs under the registry lock.
+    ``[]`` on a no-op, widening, or FIRST-crown move, where no territory
+    actually left the new scope. ``None`` when the check could not run (graph
+    unreadable, or an external tracker backend) - which is not the same answer
+    as ``[]``, or the receipt would read as "verified no strands" on a machine
+    it could not check. Computed by the caller AFTER the registry write
+    returns, so no graph I/O runs under the registry lock.
     """
-    if _same_territory(vacated, new_scope):
+    if vacated is None or _same_territory(vacated, new_scope):
         return []
     from fno.tracker.metadata import read_entries
 
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
     try:
-        # Availability probe: raises ExternalMetadataUnavailable under an
-        # external tracker backend, where per-row containment checks would
-        # silently degrade to "not contained".
-        read_entries("agents.crown")
+        # One parse serves both the availability probe and every per-row
+        # epic lookup: raises ExternalMetadataUnavailable under an external
+        # tracker backend, where containment checks would silently degrade
+        # to "not contained".
+        entries = read_entries("agents.crown")
         rows = load_registry()
     except Exception:
         return None
+    by_id = {
+        e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")
+    }
     return [
         row.name
         for row in rows
         if row.name != target_name
         and row.status not in TERMINAL_STATUSES
-        and scope_contains(vacated, row.crown_scope)
-        and not scope_contains(new_scope, row.crown_scope)
+        and scope_contains(vacated, row.crown_scope, graph_entry=by_id.get)
+        and not scope_contains(new_scope, row.crown_scope, graph_entry=by_id.get)
     ]
 
 
