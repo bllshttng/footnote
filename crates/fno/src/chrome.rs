@@ -167,7 +167,8 @@ impl BodyLine {
 
 /// A laid-out, framed line: its text, one [`Role`] per char, and the hit spans
 /// (offsets now relative to the framed line's first char, i.e. past the left
-/// border) for mouse hit-testing. Chrome rows carry no hits.
+/// border) for mouse hit-testing. Most chrome rows carry no hits; the ones
+/// that render an esc chip (x-020d) carry exactly one, `ESC_CLOSE_HIT`.
 #[derive(Debug, Clone)]
 pub struct FramedLine {
     pub text: String,
@@ -235,7 +236,8 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
     Framed { lines: out, width }
 }
 
-/// The hit target marking a chrome footer's `esc close` span: `usize::MAX` can
+/// The hit target marking a chrome esc-close span - a footer's `esc close`
+/// words, or a title/border row's ` esc ` chip (x-020d): `usize::MAX` can
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
@@ -380,6 +382,16 @@ fn esc_segs() -> Vec<Seg> {
         .collect()
 }
 
+/// (x-020d) Where the "esc" letters of a chip built by [`esc_segs`] land in
+/// the FULL framed row once `inner` (with the chip already appended) is
+/// wrapped by [`edge_row`]: `pos_in_inner` is `inner.len()` right before
+/// `inner.extend(chip)`, so `+1` skips the row's own left border and `+1`
+/// again skips the chip's leading padding space - the same "past the left
+/// border" shift [`frame`] already applies to the footer's close span.
+fn esc_chip_hit(pos_in_inner: usize) -> (usize, usize, usize) {
+    (ESC_CLOSE_HIT, pos_in_inner + 2, "esc".chars().count())
+}
+
 fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
     match chrome.level {
         Level::Bare => edge_row('┌', '┐', '─', Vec::new(), inner_w),
@@ -401,8 +413,14 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
             for _ in used..inner_w.saturating_sub(reserve) {
                 inner.push(('─', Role::Border));
             }
+            let chip_pos = inner.len();
             inner.extend(chip);
-            edge_row('┌', '┐', '─', inner, inner_w)
+            let mut row = edge_row('┌', '┐', '─', inner, inner_w);
+            // (x-020d) A Left click on the chip closes the modal, identical to
+            // pressing esc - the title bar's chip was decorative chrome only
+            // the footer's ever carried a hit target (x-10ec fixed that one).
+            row.hits.push(esc_chip_hit(chip_pos));
+            row
         }
     }
 }
@@ -419,8 +437,13 @@ fn bottom_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
             for _ in used..inner_w.saturating_sub(reserve) {
                 inner.push(('─', Role::Border));
             }
+            let chip_pos = inner.len();
             inner.extend(chip);
-            edge_row('└', '┘', '─', inner, inner_w)
+            let mut row = edge_row('└', '┘', '─', inner, inner_w);
+            // (x-020d) Same clickable chip as the Full title bar, for an
+            // anchored menu's inline esc hint.
+            row.hits.push(esc_chip_hit(chip_pos));
+            row
         }
     }
 }
@@ -615,6 +638,14 @@ mod tests {
         // Positive markers: the chip and title carry their own roles.
         assert!(top.roles.contains(&Role::Chip));
         assert!(top.roles.contains(&Role::Title));
+        // (x-020d) The chip is a hit target too, not just decoration: a Left
+        // click on it should close the modal like Esc does. The span lands on
+        // the "esc" text itself.
+        assert_eq!(top.hits.len(), 1);
+        let (t, off, len) = top.hits[0];
+        assert_eq!(t, ESC_CLOSE_HIT);
+        let word: String = top.text.chars().skip(off).take(len).collect();
+        assert_eq!(word, "esc");
     }
 
     #[test]
@@ -624,6 +655,12 @@ mod tests {
         let bottom = framed.lines.last().unwrap();
         assert!(bottom.text.contains("esc"));
         assert!(bottom.roles.contains(&Role::Chip));
+        // (x-020d) Same clickable chip as the Full title bar.
+        assert_eq!(bottom.hits.len(), 1);
+        let (t, off, len) = bottom.hits[0];
+        assert_eq!(t, ESC_CLOSE_HIT);
+        let word: String = bottom.text.chars().skip(off).take(len).collect();
+        assert_eq!(word, "esc");
     }
 
     #[test]
@@ -632,7 +669,14 @@ mod tests {
         line.hits.push((0, 0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
-        let body = framed.lines.iter().find(|l| !l.hits.is_empty()).unwrap();
+        // (x-020d) The title bar now carries its own (ESC_CLOSE_HIT) hit, so
+        // find the row with the BODY's target (0) specifically, not just any
+        // non-empty hits.
+        let body = framed
+            .lines
+            .iter()
+            .find(|l| l.hits.iter().any(|(t, _, _)| *t == 0))
+            .unwrap();
         assert_eq!(body.hits[0], (0, 1, 5));
     }
 
@@ -650,23 +694,27 @@ mod tests {
             .find_map(|(i, _)| footer[i..].starts_with("esc close").then_some(i))
             .unwrap();
         let char_off = footer[..off].chars().count();
+        // (x-020d) The title bar's own chip now also carries an ESC_CLOSE_HIT
+        // (a shorter, 3-char span), so find the footer's specifically by its
+        // 9-char "esc close" span length rather than any non-empty hits.
         let row = framed
             .lines
             .iter()
-            .find(|l| !l.hits.is_empty())
+            .find(|l| l.hits.iter().any(|(_, _, len)| *len == 9))
             .expect("the footer line carries the close target");
         assert_eq!(row.hits, vec![(ESC_CLOSE_HIT, char_off + 1, 9)]);
         // The span is inside the line and lands on the words.
         let words: String = row.text.chars().skip(char_off + 1).take(9).collect();
         assert_eq!(words, "esc close");
 
-        // No words, no target: only the footer line ever carries one.
+        // No words, no FOOTER target: a footer without "esc close"/"esc"
+        // carries none of its own (the title bar's chip still does, x-020d -
+        // checked by its 3-char span, distinct from the footer's 9/3-char
+        // word span, which is absent here entirely).
         let c = Chrome::new("t", Anchor::Center).footer("just some text");
         let framed = frame(&[bl("body")], &c, 40, None);
-        assert!(framed
-            .lines
-            .iter()
-            .all(|l| { l.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT) }));
+        let footer_row = &framed.lines[framed.lines.len() - 2]; // above the bottom border
+        assert!(footer_row.hits.iter().all(|(t, _, _)| *t != ESC_CLOSE_HIT));
     }
 
     #[test]

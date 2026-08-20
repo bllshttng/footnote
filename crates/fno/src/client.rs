@@ -3319,11 +3319,14 @@ impl View {
             .unwrap_or(false)
     }
 
-    /// True when `(row, col)` lands on a popup chrome footer's `esc close`
-    /// span - the clickable close every footer-bearing modal inherits from the
-    /// one hit span `chrome::frame` stamps. Checked BEFORE the entry hit
-    /// routers so the footer's target is never mistaken for a row index.
-    fn footer_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
+    /// True when `(row, col)` lands on any of a popup's `esc`-close hit spans:
+    /// the footer's `esc close` words, the Full title bar's ` esc ` chip, or a
+    /// Bare menu's inline bottom-border chip (x-020d) - every one of them is
+    /// `ESC_CLOSE_HIT`-tagged by `chrome::frame`/`top_border`/`bottom_border`,
+    /// so one generic scan over the rendered line's hits covers all three.
+    /// Checked BEFORE the entry hit routers so a close target is never
+    /// mistaken for a row index.
+    fn chrome_close_hit(&self, popup: &Popup, row: u16, col: u16) -> bool {
         let r = popup.render(self.term);
         let (r0, c0) = r.origin;
         let (Some(li), Some(cc)) = (
@@ -11301,12 +11304,12 @@ async fn keys_modal_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // The footer's `esc close` words close the modal (chrome-stamped
-            // target); checked before the entry routers.
+            // Any esc-close chrome target (footer words, title-bar chip)
+            // closes the modal; checked before the entry routers.
             if view
                 .keys_modal
                 .as_ref()
-                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
                 view.keys_modal = None;
                 return Ok(StdinFlow::Continue);
@@ -11897,12 +11900,13 @@ async fn row_menu_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // The footer's `esc close` words close the popup (chrome-stamped
-            // target); checked before the entry routers.
+            // Any esc-close chrome target (footer words, bottom-border chip
+            // on a Bare menu) closes the popup; checked before the entry
+            // routers.
             if view
                 .row_menu
                 .as_ref()
-                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
                 view.row_menu = None;
                 return Ok(());
@@ -12209,12 +12213,12 @@ async fn aux_mouse(
             }
         }
         MouseKind::Press(MouseButton::Left) => {
-            // The footer's `esc close` words close the popup (chrome-stamped
-            // target); checked before the entry routers.
+            // Any esc-close chrome target (footer words, title-bar chip)
+            // closes the popup; checked before the entry routers.
             if view
                 .aux
                 .as_ref()
-                .is_some_and(|m| view.footer_close_hit(&m.popup, rep.row, rep.col))
+                .is_some_and(|m| view.chrome_close_hit(&m.popup, rep.row, rep.col))
             {
                 view.aux = None;
                 return Ok(StdinFlow::Continue);
@@ -18744,6 +18748,9 @@ mod tests {
         v.term = (30, 100);
         v.aux = Some(v.build_settings_modal());
         // Where do the words sit on screen? Render exactly as the router does.
+        // (x-020d) The title bar's chip now ALSO carries an ESC_CLOSE_HIT (a
+        // 3-char span); pick the footer's specifically by its longer span so
+        // this stays a test of the footer words, not whichever comes first.
         let (fr, fc) = {
             let r = v.aux.as_ref().unwrap().popup.render(v.term);
             let (li, row) = r
@@ -18753,13 +18760,13 @@ mod tests {
                 .find(|(_, l)| {
                     l.hits
                         .iter()
-                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                        .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
                 })
                 .expect("the modal footer carries the close target");
             let (off, len) = row
                 .hits
                 .iter()
-                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
                 .map(|(_, o, l)| (*o, *l))
                 .unwrap();
             (r.origin.0 + li, r.origin.1 + off + len / 2)
@@ -18783,6 +18790,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clicking_the_title_bar_esc_chip_dismisses_the_modal() {
+        // (x-020d) The title bar's ` esc ` chip was decorative chrome; it is
+        // now the same kind of mouse target the footer's `esc close` words
+        // already were. Verified through the real mouse router, same as the
+        // footer's own test above.
+        use crate::mouse::MouseReport;
+        let mut v = two_pane_view();
+        v.term = (30, 100);
+        v.aux = Some(v.build_settings_modal());
+        let (fr, fc) = {
+            let r = v.aux.as_ref().unwrap().popup.render(v.term);
+            let (li, row) = r
+                .lines
+                .iter()
+                .enumerate()
+                .find(|(_, l)| {
+                    l.hits
+                        .iter()
+                        .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
+                })
+                .expect("the title bar carries the close target");
+            let (off, len) = row
+                .hits
+                .iter()
+                .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len == 3)
+                .map(|(_, o, l)| (*o, *l))
+                .unwrap();
+            (r.origin.0 + li, r.origin.1 + off + len / 2)
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let click = MouseReport {
+            row: fr as u16,
+            col: fc as u16,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        };
+        aux_mouse(&mut v, click, &mut buf).await.unwrap();
+        assert!(v.aux.is_none(), "clicking the title bar's esc chip closes");
+        assert!(buf.is_empty(), "the close sends nothing on the wire");
+    }
+
+    #[tokio::test]
     async fn hovering_the_footer_esc_close_keeps_the_selection() {
         // The footer's close target must never surface through `aux_hit` as a
         // row index: ESC_CLOSE_HIT clamps in `Popup::select` to the LAST entry,
@@ -18794,6 +18843,8 @@ mod tests {
         let n = v.aux.as_ref().unwrap().popup.targets().len();
         v.aux.as_mut().unwrap().popup.select(0);
         let sel_before = v.aux.as_ref().unwrap().popup.sel;
+        // (x-020d) Same disambiguation as the click test above: pick the
+        // footer's close span specifically, not the title bar chip's.
         let (fr, fc) = {
             let r = v.aux.as_ref().unwrap().popup.render(v.term);
             let (li, row) = r
@@ -18803,13 +18854,13 @@ mod tests {
                 .find(|(_, l)| {
                     l.hits
                         .iter()
-                        .any(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                        .any(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
                 })
                 .expect("the modal footer carries the close target");
             let (off, len) = row
                 .hits
                 .iter()
-                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+                .find(|(t, _, len)| *t == crate::chrome::ESC_CLOSE_HIT && *len > 3)
                 .map(|(_, o, l)| (*o, *l))
                 .unwrap();
             (r.origin.0 + li, r.origin.1 + off + len / 2)
