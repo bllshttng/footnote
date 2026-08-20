@@ -237,13 +237,33 @@ def test_resolve_real_gh_returns_a_path_even_with_no_proxy_dir_to_skip(
     assert os.sep in resolved
 
 
-def test_main_refuses_to_run_when_the_reentry_marker_is_set(monkeypatch, capsys):
-    # os.execve leaves no child, so the marker is the only evidence of a repeat.
+def test_main_refuses_to_run_when_the_marker_carries_our_own_pid(monkeypatch, capsys):
+    # os.execve leaves no child and PRESERVES the pid, so a marker equal to our
+    # own pid is the only evidence of a repeat.
     monkeypatch.setattr(sys, "argv", ["gh", "api", "rate_limit"])
-    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", "1")
-    with pytest.raises(SystemExit, match="1"):
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", str(os.getpid()))
+    with pytest.raises(SystemExit) as exc:
         gh_proxy.main()
+    # `.code`, never `match=`: `match` is a regex SEARCH over the exception
+    # text, so `match="2"` also passes for SystemExit(127) and pins nothing.
+    assert exc.value.code == 2
     assert "re-entered itself" in capsys.readouterr().err
+
+
+def test_a_descendant_inheriting_a_stale_marker_is_not_refused(monkeypatch, capsys):
+    """The marker rides into the real gh's whole process tree, so a descendant
+    that reaches a proxy again carries a value it never earned. Keyed to the
+    pid, its FIRST entry is a first entry: execve preserves the pid and a child
+    never shares it. A bare flag refused here, on a legitimate call."""
+    monkeypatch.setattr(sys, "argv", ["gh", "auth", "status"])
+    monkeypatch.setenv("FNO_GH_PROXY_DEPTH", str(os.getpid() + 1))
+    monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", lambda: "/real/gh")
+    calls = []
+    monkeypatch.setattr(gh_proxy, "delegate", lambda real, args: calls.append(real))
+    with pytest.raises(AssertionError, match="os.execv returned"):
+        gh_proxy.main()
+    assert calls == ["/real/gh"], "a stale marker from an ancestor must not refuse"
+    assert "re-entered itself" not in capsys.readouterr().err
 
 
 def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatch):
@@ -259,7 +279,9 @@ def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatc
     )
     with pytest.raises(RuntimeError, match="exec sentinel"):
         delegate("/real/gh", ["auth", "status"])
-    assert seen["env"]["FNO_GH_PROXY_DEPTH"] == "1"
+    # The successor execve creates keeps this pid, which is what makes the
+    # marker mean "I am myself again" rather than "someone upstream ran gh".
+    assert seen["env"]["FNO_GH_PROXY_DEPTH"] == str(os.getpid())
 
 
 def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, capsys):
@@ -270,8 +292,9 @@ def test_main_turns_a_proxy_identity_failure_into_a_clean_refusal(monkeypatch, c
         raise gh_proxy._quota.ProxyIdentityError("config load failed")
 
     monkeypatch.setattr(gh_proxy._quota, "resolve_real_gh", broken)
-    with pytest.raises(SystemExit, match="2"):
+    with pytest.raises(SystemExit) as exc:
         gh_proxy.main()
+    assert exc.value.code == 2
     assert "cannot identify its own install directory" in capsys.readouterr().err
 
 
