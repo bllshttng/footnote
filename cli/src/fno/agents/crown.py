@@ -355,7 +355,12 @@ def scope_contains(
     return proj in outer_members
 
 
-def grant_error(requested_scope: str, caller_row) -> Optional[str]:
+def grant_error(
+    requested_scope: str,
+    caller_row,
+    *,
+    allow_terminal_recovery: bool = False,
+) -> Optional[str]:
     """Why this caller may not bestow a crown over ``requested_scope``, or None.
 
     The rule the docs have always stated and nothing was enforcing after the
@@ -404,6 +409,13 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
 
     status = getattr(caller_row, "status", None)
     if status in TERMINAL_STATUSES:
+        if allow_terminal_recovery and _same_territory(
+            getattr(caller_row, "crown_scope", None), requested_scope
+        ):
+            # A stale shell may still carry the identity of a terminal holder.
+            # Spawn is the recovery path for that abandoned scope; it must not
+            # require succession from a session that can no longer spawn.
+            return None
         return (
             f"cannot verify the grantor's authority: its STORED status is "
             f"{status!r}, which is terminal, so it cannot bestow a crown. "

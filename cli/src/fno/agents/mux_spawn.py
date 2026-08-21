@@ -2770,7 +2770,11 @@ def dispatch_spawn_pane(
     if crown_level is not None:
         # Same authorization rule as the bg seam: a grant must be a strict subset
         # of what the grantor holds. Both paths check, because either is a door.
-        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        grant_problem = grant_error(
+            crown_scope or "",
+            calling_agent_row(),
+            allow_terminal_recovery=True,
+        )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
 

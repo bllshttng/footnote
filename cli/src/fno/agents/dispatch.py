@@ -2478,7 +2478,11 @@ def dispatch_spawn(
         # authority you do not hold. Refuses BEFORE the launch rather than
         # declining after, because an unauthorized grant is an authority error,
         # not a race - nothing should exist as a result of it.
-        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        grant_problem = grant_error(
+            crown_scope or "",
+            calling_agent_row(),
+            allow_terminal_recovery=True,
+        )
         if grant_problem is not None:
             raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
         if once or headless:
