@@ -4833,6 +4833,13 @@ where
                     "crown_level": e.crown_level,
                     "crown_scope": e.crown_scope,
                     "crown_grantor": e.crown_grantor,
+                    // How this session came to exist: "operator" for one a human
+                    // started by hand, "spawn" for a footnote-created worker, null
+                    // for a row nothing stamped. Emitted on BOTH serializers because
+                    // `fno agents list` auto-routes to this projection whenever an
+                    // installed binary is present, so a Python-only key would be
+                    // missing from the path nearly every reader takes (x-944f).
+                    "origin": e.origin,
                     // Superset of Python's serialize_entry: project_root is retained
                     // as the daemon's native grouping key (existing daemon_e2e
                     // contract) alongside the shared parity fields. Python list

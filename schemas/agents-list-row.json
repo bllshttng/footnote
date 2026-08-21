@@ -25,7 +25,8 @@
     "crown_level",
     "crown_scope",
     "crown_grantor",
-    "mux"
+    "mux",
+    "origin"
   ],
   "removed": {
     "provider": "REMOVED. It was a legacy alias of `harness` and carried the HARNESS value, so a worker routed to another vendor still listed `provider: claude` - read as proof the route had silently fallen back to Anthropic, and it nearly got three healthy workers killed. A key whose name says vendor and whose value is a harness is worse than no key. Read `harness` for the CLI, `observed_model` for the vendor the worker is actually answering as. Do not re-add it to one serializer: present-or-absent depending on which reader answered is worse still."
