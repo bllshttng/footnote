@@ -152,7 +152,7 @@ crates/fno-agents/src/client.rs:30
 crates/fno-agents/src/client_verbs.rs:78
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:3
-crates/fno-agents/src/daemon.rs:165
+crates/fno-agents/src/daemon.rs:168
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:48
