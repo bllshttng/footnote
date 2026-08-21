@@ -30244,6 +30244,60 @@ mod tests {
         }
     }
 
+    /// (x-b465) The group marker costs three columns on every grouped tab, and
+    /// the strip is the surface with the least room to spare. Condensation has
+    /// to survive it: the `+` is still the only mouse route to a new tab, and an
+    /// overflow counter that scrolls away is worse than a missing marker.
+    #[test]
+    fn a_strip_full_of_grouped_tabs_still_condenses() {
+        let names: Vec<String> = (1..=20)
+            .map(|i| format!("release-candidate-{i:02}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for cols in [68u16, 72, 80, 100] {
+            let mut squad = named_meta(1, "readyrule/readyrule-web", &refs, 13);
+            // Every tab a four-pane group, the worst case for width.
+            for (t, tab) in squad.tabs.iter_mut().enumerate() {
+                tab.panes = (0..4)
+                    .map(|p| crate::proto::PaneMeta {
+                        id: (t * 10 + p) as u64,
+                        label: String::new(),
+                    })
+                    .collect();
+            }
+            let view = shot_view((24, cols), vec![squad], vec![]);
+            let window = view.tab_bar_window();
+            let painted: usize = window.iter().map(|s| s.text.chars().count()).sum();
+            let avail = (cols as usize).saturating_sub(view.panel_w() as usize);
+            assert!(
+                painted <= avail,
+                "a grouped strip overflows at {cols} cols: {painted} > {avail}"
+            );
+            assert!(
+                window.iter().any(|s| matches!(s.hit, Some(TabHit::NewTab))),
+                "the + must survive the markers at {cols} cols"
+            );
+        }
+        // And the marker really is rendering, or the widths above prove nothing.
+        let mut squad = named_meta(1, "footnote", &["build"], 0);
+        squad.tabs[0].panes = (0..4)
+            .map(|p| crate::proto::PaneMeta {
+                id: p,
+                label: String::new(),
+            })
+            .collect();
+        let view = shot_view((24, 100), vec![squad], vec![]);
+        let strip: String = view
+            .tab_bar_window()
+            .iter()
+            .map(|s| s.text.clone())
+            .collect();
+        assert!(
+            strip.contains("▤ build·4"),
+            "a four-pane tab names its size in the strip: {strip:?}"
+        );
+    }
+
     /// The before/after pair the operator can compare: the same twenty tabs
     /// under the old paint-until-the-edge rule.
     #[test]
