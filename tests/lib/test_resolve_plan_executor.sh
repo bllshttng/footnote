@@ -3,7 +3,7 @@
 #
 # "Done when": a fixture changeset touching components/**/*.tsx resolves the
 # impeccable executor on the INLINE path (resolve-plan-executor.sh), and a
-# backend-only plan resolves `do`. Mirrors /operator's resolution at the
+# backend-only plan resolves `tdd`. Mirrors /operator's resolution at the
 # flat-plan granularity /execute works at.
 
 set -uo pipefail
@@ -16,6 +16,35 @@ ck() { local l="$1" exp="$2" act="$3"
     else echo "  FAIL: $l (exp=$exp act=$act)"; FAIL=$((FAIL+1)); fi; }
 
 TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# The plan-frontmatter enum is `tdd`. `do` remains accepted for one release,
+# but both inputs must resolve through both implementations to the same
+# canonical stdout bytes. Compare files rather than command substitutions so
+# the trailing newline stays part of the contract.
+printf 'tdd\n' > "$TMP/expected-tdd.out"
+for spelling in tdd do; do
+    cat > "$TMP/alias-$spelling.md" <<EOF
+---
+executor: $spelling
+---
+# Backend task
+**Files:** cli/src/fno/loop.py
+EOF
+    PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m fno.executor.cli resolve \
+        --plan-path "$TMP/alias-$spelling.md" > "$TMP/python-$spelling.out"
+    bash "$R" "$TMP/alias-$spelling.md" > "$TMP/bash-$spelling.out"
+    if cmp -s "$TMP/python-$spelling.out" "$TMP/bash-$spelling.out" \
+        && cmp -s "$TMP/python-$spelling.out" "$TMP/expected-tdd.out"; then
+        echo "  PASS: positive marker: executor=$spelling Python/Bash bytes are identical tdd"
+        PASS=$((PASS+1))
+    else
+        echo "  FAIL: executor=$spelling Python/Bash bytes differ from canonical tdd"
+        od -An -tx1 "$TMP/python-$spelling.out" "$TMP/bash-$spelling.out" "$TMP/expected-tdd.out"
+        FAIL=$((FAIL+1))
+    fi
+done
 
 cat > "$TMP/frontend.md" <<'EOF'
 # Add settings panel
@@ -24,6 +53,20 @@ cat > "$TMP/frontend.md" <<'EOF'
 **Files:** src/components/SettingsPanel.tsx, src/styles/settings.css
 EOF
 ck "frontend plan -> impeccable (inline)" impeccable "$(bash "$R" "$TMP/frontend.md")"
+PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m fno.executor.cli resolve \
+    --plan-path "$TMP/frontend.md" > "$TMP/python-frontend.out"
+bash "$R" "$TMP/frontend.md" > "$TMP/bash-frontend.out"
+printf 'impeccable\n' > "$TMP/expected-impeccable.out"
+if cmp -s "$TMP/python-frontend.out" "$TMP/bash-frontend.out" \
+    && cmp -s "$TMP/python-frontend.out" "$TMP/expected-impeccable.out"; then
+    echo "  PASS: positive marker: frontend Python/Bash bytes are identical impeccable"
+    PASS=$((PASS+1))
+else
+    echo "  FAIL: frontend Python/Bash bytes differ from canonical impeccable"
+    od -An -tx1 "$TMP/python-frontend.out" "$TMP/bash-frontend.out" "$TMP/expected-impeccable.out"
+    FAIL=$((FAIL+1))
+fi
 
 cat > "$TMP/backend.md" <<'EOF'
 # Add migration
@@ -31,7 +74,7 @@ cat > "$TMP/backend.md" <<'EOF'
 ### 1.1 Migrate schema
 **Files:** cli/src/fno/loop.py, migrations/0003.sql
 EOF
-ck "backend plan -> do (inline)" do "$(bash "$R" "$TMP/backend.md")"
+ck "backend plan -> tdd (inline)" tdd "$(bash "$R" "$TMP/backend.md")"
 
 cat > "$TMP/override.md" <<'EOF'
 ---
@@ -40,7 +83,7 @@ executor: do
 # Backend job that happens to touch components/
 **Files:** src/components/Legacy.tsx
 EOF
-ck "plan executor: do wins over tsx inference" do "$(bash "$R" "$TMP/override.md")"
+ck "plan executor: do alias wins over tsx inference" tdd "$(bash "$R" "$TMP/override.md")"
 
 # stdin form
 ck "frontend plan via stdin -> impeccable" impeccable "$(bash "$R" < "$TMP/frontend.md")"
@@ -51,13 +94,13 @@ ck "missing plan file -> exit 2" 2 "$rc"
 
 # Case-sensitive executor match: a capital-E 'Executor:' prose line must NOT
 # be read as a directive (Gemini PR #385 MEDIUM). Backend files -> inference
-# resolves do; the old case-insensitive grep would have routed to impeccable.
+# resolves tdd; the old case-insensitive grep would have routed to impeccable.
 cat > "$TMP/prose.md" <<'EOF'
 # Design note
 Executor: impeccable
 **Files:** cli/src/fno/loop.py
 EOF
-ck "capital-E prose 'Executor:' not a directive -> do" do "$(bash "$R" "$TMP/prose.md")"
+ck "capital-E prose 'Executor:' not a directive -> tdd" tdd "$(bash "$R" "$TMP/prose.md")"
 
 # Line-range suffix on a .tsx path must not defeat the *.tsx arm (Codex P2
 # on PR #385). app/page.tsx relies on the extension arm, not a dir arm.

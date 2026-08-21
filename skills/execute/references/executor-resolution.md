@@ -16,7 +16,7 @@ For each task, in order, highest priority first:
 3. **Surface inference** — runs only when neither task nor plan declared an
    executor. Reads the task's file list and matches against the locked
    inference list (below). Match → `impeccable`. No match → falls through.
-4. **Default** — `do` (TDD-disciplined archer).
+4. **Default** — `tdd` (TDD-disciplined archer).
 
 ## Locked inference list
 
@@ -48,10 +48,10 @@ arms regardless of directory.
 
 | Executor | Subagent | Notes |
 |----------|----------|-------|
-| `do` | `archer` | Default. TDD-disciplined task implementation. |
-| `tdd` | `archer` | Alias for `do`. |
+| `tdd` | `archer` | Default. TDD-disciplined task implementation. |
+| `do` | `archer` | One-release alias for `tdd`. |
 | `impeccable` | `frontend-executor` | `/impeccable craft + critique` loop with score-based convergence. |
-| `research` | `scout` | Retrieve + store: ddgs backbone -> self-fetch -> `sources.jsonl`. Reached via `fno do research "X"` (a research-pipeline alias over `target`), NOT via `/execute waves` surface inference - the surface resolver below only emits `do`/`impeccable`. The `doc` deliverable terminal + verify profile + eval are Group 2. |
+| `research` | `scout` | Retrieve + store: ddgs backbone -> self-fetch -> `sources.jsonl`. Reached via `fno do research "X"` (a research-pipeline alias over `target`), NOT via `/execute waves` surface inference - the surface resolver below only emits `tdd`/`impeccable`. The `doc` deliverable terminal + verify profile + eval are Group 2. |
 
 ## Override paths
 
@@ -62,10 +62,10 @@ block:
 ### 1.4 Backend migration that touches src/components/
 
 **Files:** scripts/migrations/2026-05-add-component-table.sql
-executor: do  # override: this is migration code, not frontend
+executor: tdd  # override: this is migration code, not frontend
 ```
 
-Or override at the plan level by adding `executor: do` to the plan
+Or override at the plan level by adding `executor: tdd` to the plan
 frontmatter to disable inference for the entire plan.
 
 To disable surface inference globally for the project, set in
@@ -78,7 +78,7 @@ config:
       auto_route_frontend: false
 ```
 
-When disabled, tasks without an explicit executor default to `do` regardless
+When disabled, tasks without an explicit executor default to `tdd` regardless
 of their file paths.
 
 ## Failure modes
@@ -92,7 +92,7 @@ of their file paths.
   the resolver produces an empty value and falls closed to `do` via the
   `is_known_executor` check. Surface inference matters only when neither task
   nor plan declared an executor; an explicit declaration bypasses it.
-- **Empty file list with no explicit executor**: defaults to `do`.
+- **Empty file list with no explicit executor**: defaults to `tdd`.
 
 ## Examples
 
@@ -115,7 +115,7 @@ PLAN_EXEC="" TASK_EXEC="" TASK_FILES="src/components/Foo.tsx" \
 # AC1.5-FR: unknown falls closed
 PLAN_EXEC="" TASK_EXEC="nonsense" \
     bash skills/execute/scripts/resolve-executor.sh
-# -> do (with WARN on stderr)
+# -> tdd (with WARN on stderr)
 ```
 
 ## Iteration ceiling: single-budget contract for impeccable

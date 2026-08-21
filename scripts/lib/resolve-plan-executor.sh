@@ -12,7 +12,7 @@
 # plan resolves to `impeccable` on the inline path too.
 #
 # Usage:
-#   resolve-plan-executor.sh path/to/plan.md   # -> do | impeccable
+#   resolve-plan-executor.sh path/to/plan.md   # -> tdd | impeccable
 #   cat plan.md | resolve-plan-executor.sh     # via stdin
 
 set -uo pipefail
@@ -92,13 +92,18 @@ if [[ -f "$RESOLVER" ]]; then
     TASK_EXEC="" PLAN_EXEC="$plan_exec" TASK_FILES="$plan_files" \
         bash "$RESOLVER" 2>/dev/null
 elif [[ -n "$plan_exec" ]]; then
-    # Normalize the same way resolve-executor.sh would (tdd -> do; unknown
-    # falls closed to do).
+    # Normalize the same way resolve-executor.sh would (do -> tdd; unknown
+    # falls closed to tdd).
     case "$plan_exec" in
         impeccable) echo "impeccable" ;;
-        do|tdd)     echo "do" ;;
-        *)          echo "do" ;;
+        do|tdd)     echo "tdd" ;;
+        *)          echo "tdd" ;;
     esac
 else
-    printf '%s\n' "$plan_files" | python3 -m fno.executor._surface 2>/dev/null || echo "do"
+    inferred="$(printf '%s\n' "$plan_files" | python3 -m fno.executor._surface 2>/dev/null)"
+    case "$inferred" in
+        impeccable) echo "impeccable" ;;
+        do|tdd|"")  echo "tdd" ;;
+        *)          echo "tdd" ;;
+    esac
 fi

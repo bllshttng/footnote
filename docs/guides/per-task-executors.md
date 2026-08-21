@@ -14,16 +14,14 @@ You are writing a plan and one of the following is true:
   want different executors per task.
 - Surface inference is misclassifying a task and you want to override it.
 
-If your plan is pure backend or infra, you can skip this guide. The
-default executor is `do` (TDD-disciplined archer), which is what plans
-have always used.
+If your plan is pure backend or infra, you can skip this guide. The default executor is `tdd` (TDD-disciplined archer), which is what plans have always used.
 
 ## Available executors
 
 | Executor | Subagent | When to choose it |
 |----------|----------|------------------|
-| `do` | archer | Default. TDD-disciplined backend, infra, scripts, configs. |
-| `tdd` | archer | Alias for `do`. Same behavior. |
+| `tdd` | archer | Default. TDD-disciplined backend, infra, scripts, configs. |
+| `do` | archer | One-release alias for `tdd`. Same behavior. |
 | `impeccable` | frontend-executor | Frontend tasks where design quality matters. |
 
 ## Declaring at the task level (highest priority)
@@ -94,11 +92,10 @@ If inference picks the wrong executor for one of your tasks, override it:
 ### 2.1 Migration: drop the old session table
 
 **File:** scripts/migrations/2026-05-drop-sessions.sql
-executor: do
+executor: tdd
 ```
 
-Even if your plan happens to live alongside frontend tasks, the migration
-is backend; declaring `executor: do` keeps it routed to archer.
+If your plan lives alongside frontend tasks, the migration is still backend. Declaring `executor: tdd` keeps it routed to archer.
 
 ## Disabling inference globally
 
@@ -112,10 +109,7 @@ config:
       auto_route_frontend: false
 ```
 
-Tasks without an explicit executor will default to `do` regardless of
-file paths. Use this in projects where the inference list is causing
-more friction than help (e.g., a project whose `components/` directory
-holds backend service definitions, not React components).
+Tasks without an explicit executor will default to `tdd` regardless of file paths. When the inference list causes friction, use this setting. For example, a project's `components/` directory can hold backend service definitions instead of React components.
 
 ## Tuning the critique loop
 
@@ -153,11 +147,9 @@ threshold = faster, less polish. Most projects leave both at default.
 **Pure frontend plan**: declare `executor: impeccable` on the plan
 frontmatter. Every task uses the design-aware executor.
 
-**Pure backend plan**: do nothing. Default is `do` and surface inference
-will not match anything.
+**Pure backend plan**: do nothing. Default is `tdd` and surface inference will not match anything.
 
-**Mixed plan**: declare task-level `executor:` on the frontend tasks
-and let everything else fall through to `do`.
+**Mixed plan**: declare task-level `executor:` on the frontend tasks and let everything else fall through to `tdd`.
 
 **Inference is wrong**: add `executor:` to the offending task with the
 correct value.

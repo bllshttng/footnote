@@ -10,28 +10,21 @@ The underlying architecture is documented in
 and `docs/architecture/operator-impeccable-executor.md`
 (predecessor). This guide focuses on usage, not internals.
 
-## When to choose `executor: impeccable` vs `executor: do`
+## Choosing `executor: impeccable` or `executor: tdd`
 
-Use `executor: impeccable` when the task produces a user-visible frontend
-surface where design quality matters beyond correctness. The executor runs the
-full /impeccable pipeline: shape brief synthesis, craft or polish, critique,
-optional audit and layout, and harden. It's meaningfully slower than
-`executor: do` (archer).
+When the task produces a user-visible frontend surface where design quality matters beyond correctness, use `executor: impeccable`. The executor runs the full /impeccable pipeline: shape brief synthesis, craft or polish, critique, optional audit and layout, and harden. It is meaningfully slower than `executor: tdd` (archer).
 
-Use `executor: do` (the default) for:
+Use `executor: tdd` (the default) for:
 
 - Backend logic, API routes, data pipelines, infra changes
-- Frontend utility code with no user-facing rendering (formatters, validators,
-  hooks that don't touch layout)
-- Quick fixes to existing frontend code where convergence speed matters more
-  than design quality
+- Frontend utility code with no user-facing rendering (formatters, validators, hooks that do not touch layout)
+- Quick fixes to existing frontend code where convergence speed matters more than design quality
 
 Use `executor: impeccable` for:
 
 - Net-new components or pages that will be seen by end users
 - Redesigns or visual overhauls of existing screens
-- Anything where the AC list mentions a11y, WCAG, screen reader, responsive,
-  Core Web Vitals, or performance
+- Anything where the AC list mentions a11y, WCAG, screen reader, responsive, Core Web Vitals, or performance
 
 Surface inference (the automatic routing in tier 3 of the resolver) will select
 `impeccable` for tasks whose file list includes `.tsx`/`.jsx` files or paths
@@ -203,6 +196,6 @@ Settings live in `.fno/config.toml` under `config.executors.impeccable`:
 | `critique_floor` | `25` | Score below this exits FAILED. Band between is DONE_WITH_CONCERNS. |
 | `max_iterations_per_task` | `8` | Total stage invocations across the full loop. Not per-stage. |
 | `backlog_filings_per_iteration` | `3` | Cap on latent backlog nodes filed per critique iteration. Overflow is folded into a single batch node. |
-| `auto_route_frontend` | `true` | When false, surface inference is disabled; tasks without an explicit executor default to `do`. |
+| `auto_route_frontend` | `true` | When false, surface inference is disabled; tasks without an explicit executor default to `tdd`. |
 
 All keys are optional. Defaults apply when the key is absent.

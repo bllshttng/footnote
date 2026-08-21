@@ -120,7 +120,7 @@ N. **Executor routing**: plan-level `executor: impeccable` (auto-detected).
 ```
 
 ```markdown
-N. **Executor routing**: plan-level `executor: do` with per-task overrides
+N. **Executor routing**: plan-level `executor: tdd` with per-task overrides
    `executor: impeccable` on tasks touching `**/*.tsx`, `components/**`,
    `routes/**`, `src/styles/**` (auto-detected).
    Rationale: design has a frontend page and a backend migration; impeccable
@@ -128,8 +128,8 @@ N. **Executor routing**: plan-level `executor: do` with per-task overrides
 ```
 
 ```markdown
-N. **Executor routing**: plan-level `executor: do` (cli-flag).
-   Rationale: passed via `/target M --executor do`. Operator overrode the
+N. **Executor routing**: plan-level `executor: tdd` (cli-flag).
+   Rationale: passed via `/target M --executor tdd`. Operator overrode the
    surface-inference default.
 ```
 
@@ -148,18 +148,10 @@ patterns echo `fno.executor._surface`'s locked list:
 **/*.tsx, **/*.jsx, components/**, routes/**, src/styles/**
 ```
 
-`/blueprint` reads those patterns from the Locked Decisions entry, walks each
-phase's file list, and emits `executor: impeccable` blocks on matching
-tasks. Plan-level frontmatter remains `executor: do`. Tasks that match
-nothing inherit the plan default.
+`/blueprint` reads those patterns from the Locked Decisions entry, walks each phase's file list, and emits `executor: impeccable` blocks on matching tasks. Plan-level frontmatter remains `executor: tdd`. Tasks that match nothing inherit the plan default.
 
 ## What this skill does NOT do
 
-- It does not modify `fno.executor._surface`. The runtime
-  inference list is locked by PR #196's plan and stays as-is.
-- It does not pick `/impeccable` subcommands. The choice is
-  `do | impeccable | mixed`. The agent decides which subcommands to run
-  inside `impeccable` (today: `craft` + `critique`).
-- It does not retro-stamp existing plans. Only plans authored via the
-  new `/think → /blueprint` flow get the lock. Older plans rely on surface
-  inference at runtime, which already handles them correctly.
+- It does not modify `fno.executor._surface`. The runtime inference list is locked by PR #196's plan and stays as-is.
+- It does not pick `/impeccable` subcommands. The choice is `tdd | impeccable | mixed`. The agent decides which subcommands to run inside `impeccable` (today: `craft` + `critique`).
+- It does not retro-stamp existing plans. Only plans authored via the new `/think → /blueprint` flow get the lock. Older plans rely on surface inference at runtime, which already handles them correctly.

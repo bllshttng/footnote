@@ -19,7 +19,7 @@ created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
 #                                 # /blueprint writes this automatically; do not
 #                                 # hand-author it except to repair a dangling
 #                                 # node. See SKILL.md "Plan Claims Ingestion".
-# executor: do                    # Plan-level executor (default 'do' = archer / TDD).
+# executor: tdd                   # Plan-level executor (default 'tdd' = archer / TDD).
 #                                 # Transcribed from a /think Locked Decision when
 #                                 # one records executor routing (do | impeccable |
 #                                 # mixed). Omit to let runtime surface inference

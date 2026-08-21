@@ -135,15 +135,15 @@ same frontmatter output. No LLM judgment in this step.
 _PKG_SRC="$(cd "${CLAUDE_PLUGIN_ROOT:-$SKILL_DIR/../..}" 2>/dev/null && pwd)/cli/src"
 [[ -f "${_PKG_SRC}/fno/executor/_locked.py" ]] && export PYTHONPATH="${_PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
 LOCKED_VALUE=$(python3 -m fno.executor._locked < "$DESIGN_DOC_PATH")
-# LOCKED_VALUE is one of: '' | do | impeccable | mixed
+# LOCKED_VALUE is one of: '' | tdd | impeccable | mixed
 ```
 
 Then:
 
-- **`do` or `impeccable`** - write `executor: <value>` to the plan `.md`
+- **`tdd` or `impeccable`** - write `executor: <value>` to the plan `.md`
   frontmatter (the single doc is the only plan shape). Replace any existing
   `# executor:` comment from the template; never duplicate the key.
-- **`mixed`** - write `executor: do` at plan level (the safe default), then
+- **`mixed`** - write `executor: tdd` at plan level (the safe default), then
   emit `executor: impeccable` task blocks for any task whose file list
   matches the operator's locked surface-inference patterns
   (`**/*.tsx`, `**/*.jsx`, `components/**`, `routes/**`, `src/styles/**`).
@@ -177,7 +177,7 @@ LOCKED_SECTION=$(awk '
 
 if [[ -n "$LOCKED_SECTION" && -z "$LOCKED_VALUE" ]] \
     && printf '%s' "$LOCKED_SECTION" | grep -qi 'executor'; then
-    echo "warning: design doc mentions 'executor' inside Locked Decisions but the parser did not extract a canonical value (do|impeccable|mixed). Not transcribed; runtime surface inference will decide." >&2
+    echo "warning: design doc mentions 'executor' inside Locked Decisions but the parser did not extract a canonical value (tdd|impeccable|mixed; do is a one-release alias). Not transcribed; runtime surface inference will decide." >&2
 fi
 ```
 
