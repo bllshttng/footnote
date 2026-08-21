@@ -392,6 +392,43 @@ def test_a_row_with_no_hold_renders_a_null_dnd():
     assert row["dnd"] is None
 
 
+def test_hold_refuses_a_contaminated_env_rather_than_stamping_a_guessed_row(monkeypatch):
+    """`resolve_harness_identity` is precedence-only, so an inherited marker
+    from a parent harness makes it answer with the PARENT session.
+
+    `--to-self` already fails closed here. A hold must too, and the stakes are
+    higher: a misaddressed send delivers one message to the wrong place, while
+    a misaddressed hold stamps a delivery policy on another agent's row and
+    arms a timer against their handle. This was live on the machine that wrote
+    the test, where claude and codex markers were both present.
+    """
+    from types import SimpleNamespace
+
+    import typer
+
+    from fno.mail import cli as mail_cli
+
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: SimpleNamespace(harness="codex", session_id=f"{HANDLE}-full"),
+    )
+    monkeypatch.setattr(
+        "fno.harness_identity.present_harness_markers",
+        lambda: [("CLAUDE_CODE_SESSION_ID", "claude", "x"), ("CODEX_THREAD_ID", "codex", "y")],
+    )
+
+    with pytest.raises(typer.Exit) as caught:
+        mail_cli._self_handle_or_exit()
+    assert caught.value.exit_code == 3
+
+    # One family present is a clean session and must still resolve.
+    monkeypatch.setattr(
+        "fno.harness_identity.present_harness_markers",
+        lambda: [("CODEX_THREAD_ID", "codex", "y")],
+    )
+    assert mail_cli._self_handle_or_exit() == HANDLE
+
+
 def test_an_unreadable_clock_renders_a_question_mark_not_an_empty_cell(monkeypatch):
     """An instrument that declines to answer must not answer anyway.
 

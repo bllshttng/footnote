@@ -3479,13 +3479,35 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
 
 
 def _self_handle_or_exit() -> str:
-    """This session's canonical mail handle, or exit 3 with the reason."""
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    """This session's canonical mail handle, or exit 3 with the reason.
+
+    Fails closed on a contaminated env, for the same reason `--to-self` does
+    and with worse consequences. `resolve_harness_identity` is precedence-only,
+    so an inherited marker from a parent harness makes it answer with the
+    PARENT session. A misaddressed `--to-self` sends one message to the wrong
+    place, which is visible and recoverable. A misaddressed hold stamps a
+    DELIVERY POLICY on another agent's row and arms a timer against their
+    handle, silently holding their mail. Same resolver, same ambiguity, so the
+    same refusal.
+    """
+    from fno.harness_identity import (
+        canonical_handle,
+        present_harness_markers,
+        resolve_harness_identity,
+    )
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
         sys.stderr.write(
             "no ambient harness identity - there is no session to hold mail for\n"
+        )
+        raise typer.Exit(code=3)
+    families = {harness for _, harness, _ in present_harness_markers()}
+    if len(families) > 1:
+        sys.stderr.write(
+            "multiple harness markers present (inherited env?) - cannot decide "
+            "which session is 'self', and a hold stamped on the wrong row holds "
+            f"another agent's mail. Families seen: {', '.join(sorted(families))}\n"
         )
         raise typer.Exit(code=3)
     return canonical_handle(ident.session_id)
