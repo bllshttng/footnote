@@ -4,14 +4,13 @@ Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
 
 - Stdout: one JSON line ``{pr, outcome, reason, strategy[, cleanup]}`` on
-  merged/skipped; failures print the same JSON shape to STDERR.
-  ``outcome`` is merge truth only: whether the PR landed on main. A post-merge
-  cleanup failure (local branch delete, worktree prune, sync) can never retract
-  a landed merge, so it is reported as ``outcome=merged, cleanup=failed`` - the
-  cleanup result in its own field, never fused into ``outcome``. A merge that
-  lands never reports ``failed``.
+  merged/partial/skipped; failures print the same JSON shape to STDERR.
+  ``outcome`` reports the whole requested terminal. A post-merge cleanup
+  failure cannot retract a landed merge, so it is reported as
+  ``outcome=partial, cleanup=failed`` with the landed merge named in the reason.
 - Exit codes: 0 merged, 1 failed (incl. bad args), 2 skipped
-  (auto_merge disabled) or held, 127 gh not installed.
+  or held, 3 merge-landed-but-cleanup-failed,
+  127 gh not installed.
   ``held`` is the retry-later outcome and is never a failure claim: the merge was
   not attempted (lock contention, stale base, unreconciled stub-manifest) or its
   result could not be read back. In particular, when ``gh pr view`` itself fails
@@ -71,11 +70,11 @@ def _emit(
 
     ``cleanup`` is emitted only when a post-merge step ran and must be surfaced
     separately from the merge outcome. A merge that lands while a post-merge
-    cleanup step fails reports ``outcome=merged, cleanup=failed``: the merge
-    truth lives in ``outcome`` (the field callers key on), the cleanup result in
-    its own field, so a cosmetic cleanup failure can never read as a failed
-    merge. Absent means no cleanup step is being reported, never an ambiguous
-    silent success.
+    cleanup step fails reports ``outcome=partial, cleanup=failed``. The reason
+    still records that the server-side merge landed, while the non-success
+    outcome and nonzero exit keep callers from reading incomplete cleanup as a
+    finished terminal. Absent means no cleanup step is being reported, never an
+    ambiguous silent success.
 
     Known over-report (documented, not narrowed): on an autonomous retry of an
     already-merged PR, ``gh pr merge`` exits non-zero ("already merged") and the
@@ -798,14 +797,17 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     """
     if not getattr(auto_merge, "delete_branch_on_merge", False):
         return ""
-    # Tab separator: a nameWithOwner never contains one, and a NULL
-    # headRepository (deleted fork repo) renders as an EMPTY field rather than
-    # collapsing the columns together the way a space join would.
+    # Read the REST pull object. `gh pr view --json` exposes a CLI-specific
+    # GraphQL field set; the baseRepository name disappeared from that set and
+    # broke every cleanup while these stable REST fields remained available.
     ref = _gh(
-        ["pr", "view", str(pr_number), "--json",
-         "headRefName,headRepository,baseRepository",
-         "-q", r'.headRefName + "\t" + (.headRepository.nameWithOwner // "") '
-              r'+ "\t" + (.baseRepository.nameWithOwner // "")'],
+        [
+            "api",
+            "--jq",
+            r'[.head.ref // "", .head.repo.full_name // "", '
+            r'.base.repo.full_name // ""] | @tsv',
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}",
+        ],
         repo,
     )
     fields = ref.stdout.strip().split("\t") if ref.ok else []
@@ -814,15 +816,20 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
         return f"failed: remote branch name unreadable: {(ref.stderr or '').splitlines()[0][:120] if ref.stderr.strip() else 'no error output'}"
     head_repo = fields[1] if len(fields) > 1 else ""
     base_repo = fields[2] if len(fields) > 2 else ""
-    # A fork PR's head branch lives on the fork, not on this repo's origin:
-    # a same-repo delete would remove an unrelated SAME-NAMED branch on the
-    # base repo (or error on a nonexistent one). Delete only on a POSITIVE
-    # same-repo confirmation; a fork, an unreadable repo pair, or a deleted
-    # head repo all skip (fail safe).
-    if not (head_repo and base_repo and head_repo == base_repo):
+    if not base_repo:
+        return (
+            f"failed: remote branch {branch} not deleted: "
+            "base repository identity unreadable"
+        )
+    # A deleted fork repository has no surviving branch to clean. A live fork
+    # owns its head branch, so deleting a same-named base branch would be data
+    # loss. Both are successful no-delete terminals; only unreadable BASE
+    # identity above is a cleanup failure.
+    if not head_repo or head_repo != base_repo:
         sys.stderr.write(
             f"pr-merge: skipping remote branch delete for PR #{pr_number}: "
-            f"head repo {head_repo or '<unreadable>'} is not {base_repo or '<the base repo>'} (fork or deleted head repo)\n"
+            f"head repo {head_repo or '<deleted>'} is not {base_repo} "
+            "(fork or deleted head repo)\n"
         )
         return ""
     # Delete through gh's API against the VERIFIED base repo, never `git push
@@ -841,8 +848,11 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
     _out = (res.stderr or res.stdout or "")
     if "does not exist" in _out or "not found" in _out.lower() or "Reference does not exist" in _out:
         return ""
-    return "failed: remote branch delete: {}".format(
-        _out.splitlines()[0][:160] if _out.strip() else "no error output"
+    detail = _out.splitlines()[0][:160] if _out.strip() else "no error output"
+    delete_path = f"repos/{base_repo}/git/refs/heads/{branch}"
+    return (
+        f"failed: remote branch {branch} delete: {detail}; retry: "
+        f"gh api -X DELETE {delete_path}"
     )
 
 
@@ -1015,6 +1025,47 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
         sys.stderr.write(
             "pr-merge: artifact consolidation failed; merge outcome unaffected\n"
         )
+
+
+def _finish_confirmed_merge(
+    pr_number: int,
+    strategy: str,
+    repo: str,
+    auto_merge,
+    success_reason: str,
+    *,
+    prior_cleanup_failure: str = "",
+) -> int:
+    """Emit and finalize one confirmed merge, including remote cleanup truth."""
+    cleanup_parts = [prior_cleanup_failure] if prior_cleanup_failure else []
+    remote_cleanup = _post_merge_remote_delete(pr_number, repo, auto_merge)
+    if remote_cleanup:
+        cleanup_parts.append(remote_cleanup)
+    cleanup = "; ".join(cleanup_parts)
+
+    if cleanup:
+        _emit(
+            pr_number,
+            "partial",
+            f"merge landed; post-merge cleanup failed: {cleanup}",
+            strategy,
+            err=False,
+            cleanup=cleanup,
+        )
+        rc = 3
+    else:
+        _emit(
+            pr_number,
+            "merged",
+            success_reason,
+            strategy,
+            err=False,
+        )
+        rc = 0
+
+    _on_confirmed_merge(pr_number, repo)
+    _run_post_merge_followups(pr_number, strategy, repo)
+    return rc
 
 
 # ---------------------------------------------------------------------------
@@ -1782,17 +1833,13 @@ def _do_merge(
 
     output = (res.stdout or "") + (res.stderr or "")
     if res.ok:
-        _emit(
+        return _finish_confirmed_merge(
             pr_number,
-            "merged",
-            "merged immediately",
             strategy,
-            err=False,
-            cleanup=_post_merge_remote_delete(pr_number, repo, auto_merge),
+            repo,
+            auto_merge,
+            "merged immediately",
         )
-        _on_confirmed_merge(pr_number, repo)
-        _run_post_merge_followups(pr_number, strategy, repo)
-        return 0
 
     # Failure path. A worktree-local post-merge step can fail even though the
     # SERVER-SIDE merge already landed (recurring PR #393/#395 bite).
@@ -1811,28 +1858,17 @@ def _do_merge(
         landed = view.stdout.strip()
         if landed and landed != "null":
             _git(["fetch", "origin"], repo)
-            # The gh step already reported a cleanup-shaped failure; run the
-            # remote delete anyway and surface both in the cleanup field.
-            remote = _post_merge_remote_delete(pr_number, repo, auto_merge)
-            cleanup = "failed" if not remote else f"failed; remote delete {remote}"
-            _emit(
+            return _finish_confirmed_merge(
                 pr_number,
-                "merged",
-                f"merged server-side; post-merge cleanup failed: {first_line}",
                 strategy,
-                err=False,
-                cleanup=cleanup,
+                repo,
+                auto_merge,
+                "merged server-side",
+                prior_cleanup_failure=(
+                    "failed: gh merge command after server-side merge: "
+                    f"{first_line or 'no error output'}"
+                ),
             )
-            # Arm the post-merge sentinels: the merge landed, so retro/triage and
-            # the memory-pass fire as on a clean merge. On a rare autonomous retry
-            # against an already-merged PR this re-arms them (sentinel churn, not
-            # corruption - graph writes are idempotent); the "already merged"
-            # discriminator is not reliably in the error text, so the guard does
-            # not try to suppress it. This is a deliberate behavior (arm for the
-            # landed merge), not a cosmetic side effect.
-            _on_confirmed_merge(pr_number, repo)
-            _run_post_merge_followups(pr_number, strategy, repo)
-            return 0
 
     # The merge did NOT land. gh can refuse before merging when the branch is
     # checked out in another worktree (the checkout-refused phrasing "is already
@@ -1865,17 +1901,13 @@ def _do_merge(
         api = _gh(api_args, repo)
         if api.ok:
             _git(["fetch", "origin"], repo)
-            _emit(
+            return _finish_confirmed_merge(
                 pr_number,
-                "merged",
-                "merged server-side (worktree fallback)",
                 strategy,
-                err=False,
-                cleanup=_post_merge_remote_delete(pr_number, repo, auto_merge),
+                repo,
+                auto_merge,
+                "merged server-side (worktree fallback)",
             )
-            _on_confirmed_merge(pr_number, repo)
-            _run_post_merge_followups(pr_number, strategy, repo)
-            return 0
 
     # Merge state never became readable: `gh pr view` itself failed, so we cannot
     # tell a landed merge from a failed one. Reporting `failed` here would assert

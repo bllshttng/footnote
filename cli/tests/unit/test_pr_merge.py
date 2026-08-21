@@ -125,7 +125,17 @@ class FakeRun:
                     # emits one filename per line); None serves an empty
                     # diff, which proves no overlap rather than a miss.
                     return Result(0, "\n".join(self.pr_files or []) + "\n", "")
-                if endpoint.startswith("repos/owner/repo/pulls/") and "/comments" not in endpoint:
+                if (
+                    "/pulls/" in endpoint
+                    and "/comments" not in endpoint
+                    and endpoint.rsplit("/", 1)[-1].isdigit()
+                ):
+                    if "--jq" in cmd:
+                        return Result(
+                            0,
+                            f"{self.head_ref}\t{self.head_repo}\t{self.base_repo}\n",
+                            "",
+                        )
                     return Result(
                         0,
                         json.dumps(
@@ -137,8 +147,16 @@ class FakeRun:
                                 "head": {
                                     "sha": self.checks.get("headRefOid", "deadbeefcafe"),
                                     "ref": self.head_ref,
+                                    "repo": (
+                                        {"full_name": self.head_repo}
+                                        if self.head_repo
+                                        else None
+                                    ),
                                 },
-                                "base": {"ref": "main"},
+                                "base": {
+                                    "ref": "main",
+                                    "repo": {"full_name": self.base_repo},
+                                },
                             }
                         )
                         + "\n",
@@ -444,7 +462,9 @@ def test_merge_failed_protected_exit_1(enabled, monkeypatch, capsys, tmp_path):
     assert obj["reason"] == "branch protected"
 
 
-def test_worktree_recovery_already_merged_serverside(enabled, monkeypatch, capsys, tmp_path):
+def test_worktree_recovery_already_merged_serverside_is_partial(
+    enabled, monkeypatch, capsys, tmp_path
+):
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(1, "", "fatal: 'main' is already used by worktree at /x"),
@@ -452,10 +472,10 @@ def test_worktree_recovery_already_merged_serverside(enabled, monkeypatch, capsy
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 3
     obj = _last_json(capsys)
-    assert obj["outcome"] == "merged"
-    assert "server-side" in obj["reason"]
+    assert obj["outcome"] == "partial"
+    assert "merge landed" in obj["reason"]
 
 
 def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
@@ -476,15 +496,14 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     assert api_calls
 
 
-def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, capsys, tmp_path):
+def test_worktree_branch_delete_failure_reports_partial(enabled, monkeypatch, capsys, tmp_path):
     """Primary specimen (PR #742). ``gh pr merge --delete-branch`` exits non-zero
     when the post-merge local branch delete fails because a worktree holds the
     branch, even though the server-side merge landed. git's delete error
     ("cannot delete branch ... used by worktree") is NOT the checkout-refused
     phrasing the recovery block matches, so it falls through to the post-merge
-    guard: outcome=merged with cleanup=failed and the error visible in reason
-    (the step ran and failed - it was not skipped). A landed merge must report
-    merged, and the cleanup failure must stay visible."""
+    guard: outcome=partial with cleanup failed and the error visible in reason.
+    The reason still records the landed merge while the terminal stays non-green."""
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(
@@ -498,19 +517,21 @@ def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, cap
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
-    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 3
     obj = _last_json(capsys)
-    assert obj["outcome"] == "merged"
-    assert obj["cleanup"] == "failed"
+    assert obj["outcome"] == "partial"
+    assert obj["cleanup"].startswith("failed")
     assert "cleanup failed" in obj["reason"]
     assert "cannot delete branch" in obj["reason"]
 
 
-def test_base_branch_held_by_worktree_reports_merged_with_cleanup(enabled, monkeypatch, capsys, tmp_path):
+def test_base_branch_held_by_worktree_reports_partial_with_cleanup(
+    enabled, monkeypatch, capsys, tmp_path
+):
     """The base-branch-checkout failure is also a post-merge cleanup failure, not
     a 'skipped' step: gh merges server-side, then cannot switch to main because
     the canonical worktree holds it ('main is already used by worktree'). The
-    always-re-read guard reports merged + cleanup=failed with the error visible,
+    always-re-read guard reports partial + cleanup failed with the error visible,
     whatever git's phrasing - this is the checkout-phrasing sibling of the delete
     specimen, and both must surface the cleanup result."""
     (tmp_path / ".fno").mkdir()
@@ -520,19 +541,18 @@ def test_base_branch_held_by_worktree_reports_merged_with_cleanup(enabled, monke
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
-    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 3
     obj = _last_json(capsys)
-    assert obj["outcome"] == "merged"
-    assert obj["cleanup"] == "failed"
+    assert obj["outcome"] == "partial"
+    assert obj["cleanup"].startswith("failed")
     assert "cleanup failed" in obj["reason"]
 
 
-def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+def test_post_merge_cleanup_failure_reports_partial(enabled, monkeypatch, capsys, tmp_path):
     """General invariant. A post-merge cleanup failure whose error is NOT the
     worktree phrasing (here a remote branch delete) must still not report failed
-    when the merge landed. The fallthrough re-reads mergedAt and, because the
-    merge landed, reports merged with cleanup=failed - the cleanup result visible
-    in its own field, never swallowed, never the merge's outcome."""
+    when the merge landed. The fallthrough re-reads mergedAt and reports partial
+    with the cleanup result visible while retaining landed-merge truth."""
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(
@@ -544,10 +564,10 @@ def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, c
         toplevel=str(tmp_path),
     )
     monkeypatch.setattr(_merge, "run", fake)
-    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 3
     obj = _last_json(capsys)
-    assert obj["outcome"] == "merged"
-    assert obj["cleanup"] == "failed"
+    assert obj["outcome"] == "partial"
+    assert obj["cleanup"].startswith("failed")
     assert "cleanup failed" in obj["reason"]
 
 
@@ -1414,13 +1434,19 @@ def test_merge_never_passes_delete_branch_and_deletes_remote_after(
     assert len(remote_deletes) == 1, fake.calls
     # The ref path names the PR's verified base repo (owner/repo by default).
     assert remote_deletes[0][-1] == "repos/owner/repo/git/refs/heads/feature/x"
+    pull_reads = [
+        c for c in fake.calls
+        if c[:2] == ["gh", "api"]
+        and c[-1] == "repos/{owner}/{repo}/pulls/42"
+    ]
+    assert len(pull_reads) == 1, fake.calls
+    assert not any("baseRepository" in token for call in fake.calls for token in call)
 
 
-def test_remote_delete_failure_cannot_fail_the_merge(
+def test_remote_delete_failure_reports_partial_with_recovery(
     enabled, monkeypatch, capsys, tmp_path
 ):
-    """A remote-branch delete that fails (protected, already gone) warns in the
-    cleanup field and never retracts the landed merge."""
+    """A landed merge with failed cleanup is partial, never a green receipt."""
     (tmp_path / ".fno").mkdir()
     monkeypatch.setattr(
         _merge,
@@ -1436,10 +1462,13 @@ def test_remote_delete_failure_cannot_fail_the_merge(
 
     fake = _NoDelete(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
-    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 3
     obj = _last_json(capsys)
-    assert obj["outcome"] == "merged"
+    assert obj["outcome"] == "partial"
+    assert "merge landed" in obj["reason"]
     assert obj.get("cleanup", "").startswith("failed")
+    assert "feature/x" in obj["cleanup"]
+    assert "gh api -X DELETE" in obj["cleanup"]
 
 
 def test_fork_pr_skips_remote_delete(
@@ -1489,6 +1518,32 @@ def test_deleted_fork_head_repo_skips_remote_delete(
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys).get("cleanup", "") == ""
+    assert not [c for c in fake.calls if c[:2] == ["gh", "api"] and "DELETE" in c]
+
+
+def test_unreadable_base_repo_reports_partial(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """Missing base identity prevents a verified delete and is not success."""
+    (tmp_path / ".fno").mkdir()
+    monkeypatch.setattr(
+        _merge,
+        "_load_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+    )
+    fake = FakeRun(
+        gh_merge=Result(0, "Merged pull request", ""),
+        head_repo="owner/repo",
+        base_repo="",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 3
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "partial"
+    assert "feature/x" in obj["cleanup"]
+    assert "base repository identity unreadable" in obj["cleanup"]
     assert not [c for c in fake.calls if c[:2] == ["gh", "api"] and "DELETE" in c]
 
 
