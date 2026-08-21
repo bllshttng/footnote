@@ -3784,14 +3784,14 @@ event_types:
           description: "Plan the task belongs to; empty when the caller did not pass PLAN_PATH."
         resolved:
           type: string
-          description: "The resolved executor name (do | impeccable) after alias-normalization and the fail-closed check."
+          description: "The resolved executor name (tdd | impeccable) after alias-normalization and the fail-closed check; do is a one-release input alias."
         tier:
           type: string
           enum: [task-block, plan-frontmatter, surface-inference, default]
           description: "Which resolution tier decided (documented contract; producer is a fixed case in resolve-executor.sh)."
         warn_fallback:
           type: boolean
-          description: "True when an unknown executor triggered the WARN fail-closed to 'do'."
+          description: "True when an unknown executor triggered the WARN fail-closed to 'tdd'."
     consumers: [fno backlog triage health]
 
   - name: triage_applied

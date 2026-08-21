@@ -118,6 +118,12 @@ grep -qi 'cli-flag' "$RULES_DOC" \
 grep -qi 'user-confirmed' "$RULES_DOC" \
     && { echo "  PASS: rules doc documents user-confirmed provenance"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: rules doc missing user-confirmed provenance"; FAIL=$((FAIL+1)); }
+grep -Fq '`1`, `do`, `default`, `tdd` → `tdd`' "$RULES_DOC" \
+    && { echo "  PASS: rules doc accepts do but emits canonical tdd"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: rules doc does not normalize choices to canonical tdd"; FAIL=$((FAIL+1)); }
+grep -q '^  tdd (default)' "$RULES_DOC" \
+    && { echo "  PASS: prompt displays tdd as the default"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: prompt does not display tdd as the default"; FAIL=$((FAIL+1)); }
 
 echo ""
 echo "==="

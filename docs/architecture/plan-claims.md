@@ -61,7 +61,7 @@ quick mode in the single .md file) carries:
 ---
 created: 2026-05-05T04:35
 claims: ab-XXX
-executor: do
+executor: tdd
 kill_criteria: ...
 ---
 ```

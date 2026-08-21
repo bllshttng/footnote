@@ -8,7 +8,7 @@
 #   AC2.4-FR    /spec tolerates Locked Decisions formatting variation
 #
 # The parser is the in-package module fno.executor._locked - it reads a
-# design-doc on stdin and emits one of: '' | 'do' | 'impeccable' | 'mixed'.
+# design-doc on stdin and emits one of: '' | 'tdd' | 'impeccable' | 'mixed'.
 # /spec's SKILL.md calls into it and transcribes the result into plan
 # frontmatter.
 
@@ -20,8 +20,8 @@ if [[ -f "$PKG_SRC/fno/executor/_locked.py" ]]; then
     export PYTHONPATH="${PKG_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 SPEC_SKILL="$REPO_ROOT/skills/blueprint/SKILL.md"
-INDEX_TPL="$REPO_ROOT/skills/blueprint/references/index-template.md"
-FOCUSED_TPL="$REPO_ROOT/skills/blueprint/references/focused-template.md"
+EXECUTOR_GATE="$REPO_ROOT/skills/blueprint/references/blueprint-gates.md"
+QUICK_TPL="$REPO_ROOT/skills/blueprint/references/quick-template.md"
 
 PASS=0
 FAIL=0
@@ -45,8 +45,7 @@ echo "Pre-flight: required artifacts exist"
 python3 -c 'import fno.executor._locked' 2>/dev/null \
     && { echo "  PASS: fno.executor._locked importable"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: fno.executor._locked not importable"; FAIL=$((FAIL+1)); }
-[[ -f "$INDEX_TPL"   ]] && { echo "  PASS: index-template exists"; PASS=$((PASS+1)); } || { echo "  FAIL: $INDEX_TPL missing"; FAIL=$((FAIL+1)); }
-[[ -f "$FOCUSED_TPL" ]] && { echo "  PASS: focused-template exists"; PASS=$((PASS+1)); } || { echo "  FAIL: $FOCUSED_TPL missing"; FAIL=$((FAIL+1)); }
+[[ -f "$QUICK_TPL" ]] && { echo "  PASS: quick-template exists"; PASS=$((PASS+1)); } || { echo "  FAIL: $QUICK_TPL missing"; FAIL=$((FAIL+1)); }
 
 if [[ $FAIL -gt 0 ]]; then
     echo ""
@@ -69,7 +68,7 @@ DOC2='## Locked Decisions
 
 1. **Executor routing**: plan-level `executor: do` (cli-flag).
 '
-assert "canonical do" "do" "$(parse "$DOC2")"
+assert "do compatibility alias" "tdd" "$(parse "$DOC2")"
 
 DOC3='## Locked Decisions
 
@@ -108,7 +107,7 @@ DOC7='## Locked Decisions
 
 1. Executor routing: plan-level `executor: do`
 '
-assert "no bold" "do" "$(parse "$DOC7")"
+assert "no bold do alias" "tdd" "$(parse "$DOC7")"
 
 # extra whitespace
 DOC8='## Locked Decisions
@@ -150,7 +149,7 @@ assert "last wins on duplicates" "impeccable" "$(parse "$DOC11")"
 
 echo ""
 echo "Unknown values rejected"
-# Per the plan failure modes: parser must reject values outside do|impeccable|mixed
+# Per the plan failure modes: parser rejects values outside tdd|do|impeccable|mixed
 DOC12='## Locked Decisions
 
 1. **Executor routing**: plan-level `executor: garbage`.
@@ -180,18 +179,12 @@ assert "executor mentioned outside Locked Decisions" "" "$(parse "$DOC14")"
 
 echo ""
 echo "Templates carry guidance comment"
-grep -q '# executor:' "$INDEX_TPL" \
-    && { echo "  PASS: index-template has commented executor placeholder"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: index-template missing commented executor placeholder"; FAIL=$((FAIL+1)); }
-grep -q '# executor:' "$FOCUSED_TPL" \
-    && { echo "  PASS: focused-template has commented executor placeholder"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: focused-template missing commented executor placeholder"; FAIL=$((FAIL+1)); }
-grep -q -i 'think\|locked decision' "$INDEX_TPL" \
-    && { echo "  PASS: index-template references the think handoff"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: index-template doesn't mention think/Locked Decision"; FAIL=$((FAIL+1)); }
-grep -q -i 'think\|locked decision' "$FOCUSED_TPL" \
-    && { echo "  PASS: focused-template references the think handoff"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: focused-template doesn't mention think/Locked Decision"; FAIL=$((FAIL+1)); }
+grep -q '# executor: tdd' "$QUICK_TPL" \
+    && { echo "  PASS: quick-template has canonical tdd executor placeholder"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: quick-template missing canonical tdd executor placeholder"; FAIL=$((FAIL+1)); }
+grep -q -i 'think\|locked decision' "$QUICK_TPL" \
+    && { echo "  PASS: quick-template references the think handoff"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: quick-template doesn't mention think/Locked Decision"; FAIL=$((FAIL+1)); }
 
 echo ""
 echo "SKILL.md orphan-mention warning is section-scoped (regression guard)"
@@ -201,15 +194,15 @@ echo "SKILL.md orphan-mention warning is section-scoped (regression guard)"
 # second grep to the Locked Decisions section only. This regression guard
 # verifies the SKILL.md keeps an awk-extracted LOCKED_SECTION variable in
 # scope and does NOT grep the raw design doc.
-grep -q 'LOCKED_SECTION' "$SPEC_SKILL" \
-    && { echo "  PASS: SKILL.md uses awk-extracted LOCKED_SECTION for the warning grep"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: SKILL.md warning grep is doc-global (false-positive risk regression)"; FAIL=$((FAIL+1)); }
+grep -q 'LOCKED_SECTION' "$EXECUTOR_GATE" \
+    && { echo "  PASS: executor gate uses awk-extracted LOCKED_SECTION for the warning grep"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: executor gate warning grep is doc-global (false-positive risk regression)"; FAIL=$((FAIL+1)); }
 
 echo ""
 echo "SKILL.md wires the parser"
-grep -q 'fno.executor._locked' "$SPEC_SKILL" \
-    && { echo "  PASS: spec SKILL.md references parser"; PASS=$((PASS+1)); } \
-    || { echo "  FAIL: spec SKILL.md does not reference parser"; FAIL=$((FAIL+1)); }
+grep -q 'fno.executor._locked' "$EXECUTOR_GATE" \
+    && { echo "  PASS: executor gate references parser"; PASS=$((PASS+1)); } \
+    || { echo "  FAIL: executor gate does not reference parser"; FAIL=$((FAIL+1)); }
 grep -qi 'transcrib' "$SPEC_SKILL" \
     && { echo "  PASS: spec SKILL.md describes transcription step"; PASS=$((PASS+1)); } \
     || { echo "  FAIL: spec SKILL.md missing transcription verb"; FAIL=$((FAIL+1)); }

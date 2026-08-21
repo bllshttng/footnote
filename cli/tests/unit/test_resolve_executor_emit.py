@@ -57,8 +57,10 @@ def test_inference_tier_emits_and_stdout_is_only_the_value(stub_fno):
 def test_default_tier(stub_fno):
     env, log = stub_fno
     r = _run(env, {})
-    assert r.stdout.strip() == "do"
-    assert '"tier":"default"' in log.read_text()
+    assert r.stdout == "tdd\n"
+    payload = log.read_text()
+    assert '"resolved":"tdd"' in payload
+    assert '"tier":"default"' in payload
 
 
 def test_task_started_emitted_at_dispatch_boundary(stub_fno):
@@ -84,7 +86,7 @@ def test_task_started_emitted_at_dispatch_boundary(stub_fno):
 def test_warn_fallback_flagged(stub_fno):
     env, log = stub_fno
     r = _run(env, {"TASK_EXEC": "bogus"})
-    assert r.stdout.strip() == "do"  # fail-closed
+    assert r.stdout == "tdd\n"  # fail-closed
     payload = log.read_text()
     assert '"warn_fallback":true' in payload
     assert '"tier":"task-block"' in payload  # tier that produced the bad value

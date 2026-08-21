@@ -18,10 +18,10 @@
 #   1. TASK_EXEC if set and non-empty
 #   2. PLAN_EXEC if set and non-empty
 #   3. Surface inference via fno.executor._surface (if AUTO_ROUTE_FRONTEND != false)
-#   4. 'do' (default)
+#   4. 'tdd' (default)
 #
 # Failure mode: an unrecognized explicit executor name (anything other than
-# do|tdd|impeccable) logs a WARN to stderr and falls through to 'do'. This is
+# do|tdd|impeccable) logs a WARN to stderr and falls through to 'tdd'. This is
 # the fail-closed behavior cited by AC1.5-FR.
 
 set -uo pipefail
@@ -44,7 +44,7 @@ TASK_TITLE="${TASK_TITLE:-}"
 # KNOWN_EXECUTORS holds canonical names only. Aliases are normalized before
 # the validation check (normalize_alias runs first), so adding an alias
 # means only updating normalize_alias - KNOWN_EXECUTORS stays stable.
-KNOWN_EXECUTORS="do impeccable"
+KNOWN_EXECUTORS="tdd impeccable"
 
 is_known_executor() {
     local candidate="$1"
@@ -56,7 +56,7 @@ is_known_executor() {
 
 normalize_alias() {
     case "$1" in
-        tdd) echo "do" ;;
+        do) echo "tdd" ;;
         *) echo "$1" ;;
     esac
 }
@@ -149,22 +149,22 @@ resolve() {
         # lines, so printf '%s\n' is safe even when TASK_FILES already ends in a
         # newline (the module just sees an extra empty line, which is filtered).
         # If the module is unavailable, value is empty and the is_known_executor
-        # check below falls closed to 'do' (matching the old helper-missing path).
+        # check below falls closed to 'tdd' (matching the helper-missing path).
         value="$(printf '%s\n' "$TASK_FILES" | python3 -m fno.executor._surface 2>/dev/null)"
     else
         source="default"
-        value="do"
+        value="tdd"
     fi
 
-    # Normalize before validating: aliases like 'tdd' map to canonical 'do'
+    # Normalize before validating: the one-release 'do' alias maps to 'tdd'
     # before the KNOWN_EXECUTORS check, so KNOWN_EXECUTORS only needs to
     # carry canonical names. Inverting this order would force adding every
     # alias to KNOWN_EXECUTORS as well, creating hidden coupling.
     value="$(normalize_alias "$value")"
 
     if ! is_known_executor "$value"; then
-        echo "resolve-executor: WARN: unknown executor '$value' from $source - falling closed to 'do'" >&2
-        value="do"
+        echo "resolve-executor: WARN: unknown executor '$value' from $source - falling closed to 'tdd'" >&2
+        value="tdd"
         warn_fired=1
     fi
 

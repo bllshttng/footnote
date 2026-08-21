@@ -85,7 +85,7 @@ cmd_skeleton() {
     printf 'created_at: %s\n' "$created"
     printf 'slug: %s\n' "$slug"
     printf 'messaged_peers: []\n'
-    printf 'executor: do\n'
+    printf 'executor: tdd\n'
     printf 'scope: single-project\n'
     printf -- '---\n\n'
     # Native plan body, VERBATIM. cat preserves it byte-for-byte.

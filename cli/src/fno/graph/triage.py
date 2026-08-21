@@ -329,6 +329,8 @@ def fold_routing_health(events: list[dict]) -> Optional[dict]:
             continue
         key = (d.get("plan_path") or "", task)
         resolved = d.get("resolved")
+        if resolved == "do":
+            resolved = "tdd"
         if tier == "surface-inference":
             if isinstance(resolved, str):
                 inferred.setdefault(key, resolved)
