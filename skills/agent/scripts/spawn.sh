@@ -180,8 +180,14 @@ if [[ -n "$NODE" ]]; then
   case "$verdict" in
     already-running)
       reason="$(printf '%s' "$guard_json" | jq -r '.reason // empty' 2>/dev/null)"
-      if [[ "$reason" == "live-claim" ]]; then
-        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+      holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+      # `unproven-claim` is a held node NOTHING has booted a worker for: the
+      # guard found a holder but no target init behind it. It answers here
+      # beside `live-claim` because it is the same outcome for this caller (do
+      # not dispatch), and only the sentence changes. Reading it into the
+      # fail-closed arm below would be truthful but would lose the self-handoff
+      # receipt for a caller holding its own unproven claim.
+      if [[ "$reason" == "live-claim" || "$reason" == "unproven-claim" ]]; then
         # Self-handoff: the live claim is the CALLER's own (holder == --self).
         # Distinguish it from a foreign collision, but do NOT spawn and do NOT
         # release the claim here. A node claim can be released ONLY by the two
@@ -194,6 +200,12 @@ if [[ -n "$NODE" ]]; then
         # to the sanctioned handoff rather than reassign from the wrong layer.
         if [[ -n "$SELF" && "$holder" == "$SELF" ]]; then
           printf 'result=self-handoff name=%s reason="you already hold node:%s (%s); /agent cannot reassign it from here. Hand off via /target self-handoff (archives state, emits the delegated event, releases the claim atomically), or run '"'"'fno backlog unclaim %s'"'"' then re-dispatch."\n' "$NAME" "$NODE" "$holder" "$NODE"
+        elif [[ "$reason" == "unproven-claim" ]]; then
+          # Report what was MEASURED. A held claim proves a holder, never a
+          # worker: `fno backlog next --claim <h> --external` and a hand
+          # `fno claim acquire` both write this key with nobody behind it, and
+          # a launch window is a worker that may still never boot.
+          printf 'result=already-running name=%s reason="node:%s is held by %s but no target init took that claim; no worker has reached target init"\n' "$NAME" "$NODE" "$holder"
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"
         fi

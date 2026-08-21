@@ -412,3 +412,111 @@ def test_expired_dead_dispatch_reservation_reaped(claims_tmp, monkeypatch):
     assert obj["reservation_holder"] == "dispatch-node:fresh"
     # The orphan was reaped; the fresh dispatcher now holds the reservation.
     assert claim_status("dispatch:x-7777")["holder"] == "dispatch-node:fresh"
+
+
+# --- x-2fe6: a held claim proves a HOLDER, never a WORKER --------------------
+#
+# AC6-HP / AC7-HP / AC8-HP / AC9-EDGE. Both directions in every pair, so the
+# discriminator is proven to discriminate rather than to answer one way.
+
+
+def _write_manifest(root: Path, *, claim_key: str, holder: str) -> Path:
+    """A minimal target manifest binding CLAIM_KEY, as init writes it.
+
+    The body `key: value` lines below the frontmatter are the real shape:
+    `read_target_manifest` merges them, and `target_claim_key` lives there.
+    """
+    project = root / "proj"
+    (project / ".fno").mkdir(parents=True, exist_ok=True)
+    (project / ".fno" / "target-state.md").write_text(
+        "---\n"
+        "session_id: s-1\n"
+        "harness: claude\n"
+        "---\n"
+        "# Target Session State\n"
+        f'target_claim_key: "{claim_key}"\n'
+        f'target_claim_holder: "{holder}"\n',
+        encoding="utf-8",
+    )
+    return project
+
+
+def test_a_held_claim_with_no_target_init_reads_unproven(claims_tmp):
+    """AC6-HP: a hand-acquired node claim has no worker behind it.
+
+    `fno backlog next --claim <holder> --external` and a bare `fno claim
+    acquire` both write this key with nobody launched. Calling that a live
+    worker tells a king the opposite of the truth at the moment it decides
+    whether to staff the node.
+    """
+    import os
+
+    acquire_claim("node:x-1111", "probe-holder", pid=os.getpid())
+    res = _invoke("x-1111", "--holder", "probe:1", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["verdict"] == "already-running"
+    assert obj["reason"] == "unproven-claim"
+    assert obj["init_reached"] is False
+
+
+def test_a_manifest_bound_claim_reads_live(claims_tmp):
+    """AC7-HP: the same claim flips to `live-claim` once a manifest binds it.
+
+    Byte-identical to the pre-x-2fe6 verdict, so no existing consumer branch
+    moves for a node somebody really is building.
+    """
+    import os
+
+    project = _write_manifest(
+        claims_tmp, claim_key="node:x-2222", holder="probe-holder"
+    )
+    acquire_claim("node:x-2222", "probe-holder", pid=os.getpid())
+    res = _invoke("x-2222", "--holder", "probe:1", "--no-reserve", "--cwd", str(project), "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["reason"] == "live-claim"
+    assert obj["init_reached"] is True
+
+
+def test_a_target_session_holder_reads_live_without_a_reachable_manifest(claims_tmp):
+    """AC7-HP, the worktree case.
+
+    A real worker's manifest lives under its OWN worktree root, not the
+    dispatcher's cwd, so the manifest read alone would report every worktree
+    worker as unproven - a worse lie by volume than the one being fixed. The
+    holder prefix is the second positive marker: `fno target init` is the sole
+    writer of `target-session:`.
+    """
+    import os
+
+    acquire_claim("node:x-3333", "target-session:owner", pid=os.getpid())
+    res = _invoke("x-3333", "--holder", "probe:1", "--no-reserve", "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["reason"] == "live-claim"
+    assert obj["init_reached"] is True
+
+
+def test_an_unreadable_manifest_never_manufactures_a_worker(claims_tmp, monkeypatch):
+    """AC9-EDGE: a read fault answers unproven, never live.
+
+    An instrument that could not run is not a finding. Failing the other way
+    would let a crashing manifest read assert a worker nothing had tested.
+    """
+    import os
+
+    project = _write_manifest(
+        claims_tmp, claim_key="node:x-4444", holder="probe-holder"
+    )
+    acquire_claim("node:x-4444", "probe-holder", pid=os.getpid())
+
+    def boom(*a, **k):
+        raise OSError("manifest unreadable")
+
+    monkeypatch.setattr("fno.target.manifest.read_target_manifest", boom)
+    res = _invoke("x-4444", "--holder", "probe:1", "--no-reserve", "--cwd", str(project), "--json")
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["reason"] == "unproven-claim"
+    assert obj["init_reached"] is False

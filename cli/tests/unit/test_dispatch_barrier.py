@@ -317,7 +317,11 @@ def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_pa
     """The spawn-side claim carries the pid of `fno agents spawn`, which exits
     the moment it has forked the worker. So it reads SUSPECT for its whole TTL
     by construction, and a second dispatcher used to call a healthy in-flight
-    launch a wedge and hand back force-release advice for it."""
+    launch a wedge and hand back force-release advice for it.
+
+    x-2fe6: the reason is now `unproven-claim`, which is what a launch window
+    actually is - a worker that may still never boot. It is still NOT a wedge
+    and still earns no remedy, which is what this test pins."""
     _route_to(monkeypatch, tmp_path)
     from fno.claims.cli import HANDOVER_HOLDER_PREFIX
     from fno.claims.core import acquire_claim, claim_status
@@ -330,7 +334,8 @@ def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_pa
     _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
 
     verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
-    assert verdict["reason"] == "live-claim"
+    assert verdict["reason"] == "unproven-claim"
+    assert verdict["init_reached"] is False
     assert "remedy" not in verdict
     assert exit_code == 0
 

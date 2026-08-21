@@ -104,6 +104,26 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder"
 ok  'foreign holder + --self -> still already-running' "$(field "$out")" 'already-running'
 no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
+# --- unproven-claim -> already-running, and the receipt says what it MEASURED -
+# x-2fe6 AC8-HP. A held claim proves a holder, never a worker. The old receipt
+# asserted "live worker holds node" for a launch window that may never boot and
+# for an external `backlog next --claim`, which is a claim with nobody behind it.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"unproven-claim","holder":"spawn-handover:t-x-7777","init_reached":false}' \
+  run --name w2u --provider claude --message '/target x' --node "$NODE")"
+ok  'unproven-claim -> already-running' "$(field "$out")" 'already-running'
+has 'unproven-claim names the untested condition' "$out" 'no worker has reached target init'
+has 'unproven-claim names the holder' "$out" 'spawn-handover:t-x-7777'
+no  'unproven-claim does NOT assert a live worker' "$out" 'live worker holds node'
+no  'unproven-claim did NOT spawn' "$(calllog)" 'agents spawn --harness'
+
+# --- an unproven claim that is the CALLER's own still routes to handoff -------
+# The self-handoff receipt must stay reachable: reading unproven-claim into the
+# fail-closed arm would lose it for a caller holding its own unbooted claim.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"unproven-claim","holder":"target-session:owner","init_reached":false}' \
+  run --name w2uh --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
+ok  'unproven + --self -> self-handoff receipt' "$(field "$out")" 'self-handoff'
+no  'unproven self-handoff did NOT spawn' "$(calllog)" 'agents spawn --harness'
+
 # --- reservation acquired by a peer between probe and launch -> NO worker ----
 out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=reservation-held \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"

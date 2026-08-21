@@ -197,6 +197,48 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
         release_dir_mutex(lock, token)
 
 
+def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
+    """True when a `fno target init` PROVABLY took this node claim.
+
+    A live `node:<id>` claim proves a HOLDER exists. It does not prove a WORKER
+    exists: `fno backlog next --claim <holder> --external` acquires the key
+    directly with no worker anywhere, and a hand `fno claim acquire` does the
+    same. Reporting either as a live worker tells a king the opposite of the
+    truth at the moment the king decides whether to staff the node.
+
+    Two POSITIVE markers, either of which only `fno target init` produces. This
+    never reads an absence as a yes:
+
+    1. The holder shape. Init acquires under `target-session:<id>`
+       (``hooks/helpers/init-target-state.sh``), the sole writer of that prefix.
+       A `spawn-handover:` holder is a launch window whose worker may never
+       boot, which is exactly the "starting versus never started" case a reader
+       could not tell apart before.
+    2. A manifest under CWD binding `target_claim_key: node:<id>`. The stronger
+       fact, and never the only one: a worktree worker's manifest lives under
+       its own root, not the dispatcher's, so requiring it alone would report
+       every real worktree worker as unproven.
+
+    Any read fault answers False. An unreadable manifest must never manufacture
+    a worker.
+    """
+    from fno.agents.truth_status import _HOLDER_PREFIX
+
+    if str(holder or "").startswith(_HOLDER_PREFIX):
+        return True
+    if not cwd:
+        return False
+    try:
+        from pathlib import Path
+
+        from fno.target.manifest import read_target_manifest
+
+        raw = read_target_manifest(Path(cwd)) or {}
+        return str(raw.get("target_claim_key") or "") == f"node:{node_id}"
+    except Exception:  # noqa: BLE001 - an unreadable manifest proves nothing
+        return False
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -257,6 +299,11 @@ def _spawn_guard_decision(
     common = {
         "holder": observation.holder,
         "truth_status": observation.truth_status,
+        # Whether a `fno target init` provably took this claim. It travels in
+        # `common` so every consumer branch can tell a worker that is starting
+        # from one that never started, instead of every holder reading as a
+        # live worker.
+        "init_reached": _init_reached(node_id, observation.holder, cwd),
     }
     if observation.action in ("auto-deferred", "defer-failed"):
         return {
@@ -305,6 +352,9 @@ def _spawn_guard_decision(
                 common = {
                     "holder": observation.holder,
                     "truth_status": observation.truth_status,
+                    "init_reached": _init_reached(
+                        node_id, observation.holder, cwd
+                    ),
                 }
                 # The cleared claim makes this the first reading with the node
                 # free, so the failure-limit arm can fire here for the first
@@ -344,9 +394,21 @@ def _spawn_guard_decision(
                 current = state
             wedged = current == "suspect" and not in_launch_window
             recovery = "not-attempted" if wedged and no_reserve else None
+            # THREE reasons, not two. `live-claim` now asserts only what was
+            # measured: a holder AND a target init behind it. A held claim
+            # nobody has booted a worker for reads `unproven-claim`, so a
+            # reader can tell a worker that is starting from one that never
+            # started. `live-claim` and `suspect-claim` stay byte-identical
+            # wherever init was reached, so no existing consumer branch moves.
             return {
                 "verdict": "already-running",
-                "reason": "suspect-claim" if wedged else "live-claim",
+                "reason": (
+                    "suspect-claim"
+                    if wedged
+                    else "live-claim"
+                    if common["init_reached"]
+                    else "unproven-claim"
+                ),
                 **({"recovery": recovery} if recovery else {}),
                 **({"remedy": _remedy_for(node_key)}
                    if wedged and not no_reserve else {}),
@@ -490,10 +552,20 @@ def _spawn_guard_decision(
             # inside its TTL. Leaving it blocked every dispatcher for 3m over a
             # node somebody else legitimately holds.
             _release_dispatch_claims((res_key, holder))
+            # Same split as the verdict above, for the same reason. A guard
+            # placed on one of two paths producing one lie is decorative: this
+            # arm fires when the read said free and the acquire lost the race,
+            # and the winner is no more proven to be a worker than any other
+            # holder.
+            race_holder = getattr(exc, "holder", "") or "unknown"
             return {
                 "verdict": "already-running",
-                "reason": "live-claim",
-                "holder": getattr(exc, "holder", "") or "unknown",
+                "reason": (
+                    "live-claim"
+                    if _init_reached(node_id, race_holder, cwd)
+                    else "unproven-claim"
+                ),
+                "holder": race_holder,
                 "detail": f"node:{node_id} is held ({exc}); no worker launched",
             }, 0
         except Exception as exc:  # noqa: BLE001 - visibility is best-effort here
@@ -2262,7 +2334,11 @@ def cmd_spawn_guard(
                       now held by ``--holder`` (the line carries reservation_key +
                       reservation_holder); under ``--no-reserve`` no reservation is
                       taken.
-    - already-running a live ``node:<id>`` claim (reason=live-claim, holder=<owner>),
+    - already-running a live ``node:<id>`` claim with a target init behind it
+                      (reason=live-claim, holder=<owner>), a held claim with NO
+                      target init behind it (reason=unproven-claim: a launch
+                      window, an external ``backlog next --claim``, or a hand
+                      ``claim acquire`` - a holder exists, a worker is unproven),
                       a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
                       a respawned worker - the caller maps this to skipped-contested,
                       x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
