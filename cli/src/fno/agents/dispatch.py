@@ -1259,8 +1259,10 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     """Capture the spawning session's ambient identity from environment variables.
 
     Returns ``(session_id, harness, cwd)`` — all three are strings or None.
-    The shared harness identity precedence applies when multiple vars are set.
-    Never raises; always returns a triple (missing fields degrade to None).
+    Precedence applies within one harness family; markers from two families
+    attribute NOTHING (a foreign inherited marker must not be laundered into
+    the parent record, x-b57a). Never raises; always returns a triple
+    (missing fields degrade to None).
 
     Harness detection order (Task 2.2, x-30f6):
       CODEX_THREAD_ID        -> harness="codex"

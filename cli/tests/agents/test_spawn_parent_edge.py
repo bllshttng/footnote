@@ -254,12 +254,12 @@ def test_spawn_parent_edge_no_env_vars(workdir_claude, captured_emits, monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_parent_edge_codex_thread_wins(
+def test_spawn_parent_edge_codex_thread_wins_within_family(
     workdir_claude, captured_emits, monkeypatch
 ):
-    """AC-EDGE-multi: CODEX_THREAD_ID outranks all legacy session markers."""
+    """AC-EDGE-multi: CODEX_THREAD_ID outranks the legacy codex session marker
+    WITHIN one family."""
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-wins-session")
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-loses-session")
     monkeypatch.setenv("CODEX_SESSION_ID", "codex-legacy-loses-session")
 
     from fno.agents.cli import agents_app
@@ -284,6 +284,39 @@ def test_spawn_parent_edge_codex_thread_wins(
     assert len(spawned_events) == 1
     assert spawned_events[0][1].get("spawned_by_harness") == "codex"
     assert spawned_events[0][1].get("spawned_by_session") == "thread-wins-session"
+
+
+def test_spawn_parent_edge_mixed_markers_attribute_nothing(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """AC-EDGE-multi (x-b57a): markers from two harness families attribute
+    NOTHING. Recording the precedence winner here would launder a foreign
+    inherited id - a claude parent carrying its codex parent's
+    CODEX_THREAD_ID recording its spawns as codex's."""
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-wins-session")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-loses-session")
+    monkeypatch.setenv("CODEX_SESSION_ID", "codex-legacy-loses-session")
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-mixed", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "test-mixed"), None)
+    assert entry is not None
+    assert entry.spawned_by_session is None
+
+    spawned_events = [(k, d) for k, d in captured_emits if k == "agent_spawned"]
+    assert len(spawned_events) == 1
+    assert spawned_events[0][1].get("spawned_by_session") is None
 
 
 # ---------------------------------------------------------------------------

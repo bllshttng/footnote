@@ -23,6 +23,7 @@ import pytest
 
 from fno.harness_identity import (
     AMBIENT_IDENTITY_ENV,
+    ambient_identity_env_unset_args,
     current_session_id,
     current_session_ids,
     resolve_harness_identity,
@@ -215,3 +216,115 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
     assert explicit_envs
     assert explicit_envs[-1]["PATH"].startswith("/proxy:")
     assert "FNO_REAL_GH" not in explicit_envs[-1]
+
+
+# --- the codex adapter crosses the same floor (x-b57a) ------------------------
+# The scrub used to live per adapter: claude's adapter scrubbed, codex's never
+# did, so a codex worker spawned from a claude parent inherited
+# CLAUDE_CODE_SESSION_ID and stamped harness="claude-code" on every mail
+# envelope. The floor (worker_environment) is where it belongs: an adapter
+# cannot decline what it cannot bypass. These two tests are the both-directions
+# pair - covering one direction only is the decorative-guard shape.
+
+
+def test_codex_spawn_scrubs_inherited_identity_from_claude_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A codex child sheds a claude parent's identity markers (direction one).
+    The no-agent_self path is the leak's sharpest shape: it used to pass the
+    env kwarg None, inheriting the parent env verbatim, markers included."""
+    from fno.agents.harnesses import codex as codex_mod
+
+    claude_markers = [
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDECODE_SESSION_ID",
+        "CLAUDE_SESSION_ID",
+    ]
+    captured: dict = {}
+
+    def fake_popen(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        raise codex_mod.CodexInvocationError(1)
+
+    monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
+    for index, marker in enumerate(claude_markers):
+        monkeypatch.setenv(marker, f"claude-parent-{index:04d}")
+
+    output_path = tmp_path / "out.jsonl"
+    output_path.touch()
+    with pytest.raises(codex_mod.CodexInvocationError):
+        codex_mod.create(
+            cwd=tmp_path,
+            prompt="hi",
+            from_name="orchestrator",
+            yolo=False,
+            output_path=output_path,
+            # agent_self omitted: the path that used to inherit verbatim
+        )
+
+    child_env = captured["env"]
+    assert child_env is not None, (
+        "codex child env kwarg was None: the child inherits the parent env "
+        "verbatim, identity markers included"
+    )
+    for marker in claude_markers:
+        assert marker not in child_env, f"codex child inherited {marker}"
+
+
+def test_codex_spawn_scrubs_inherited_codex_identity_set(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A child sheds the parent's full CODEX_* identity set (direction two):
+    the seven variables a live poisoned claude session measured. Each harness
+    re-mints its own, so the scrub is lossless."""
+    from fno.agents.harnesses import codex as codex_mod
+
+    captured: dict = {}
+
+    def fake_popen(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        raise codex_mod.CodexInvocationError(1)
+
+    monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
+    for index, marker in enumerate(ALL_MARKERS):
+        monkeypatch.setenv(marker, f"parent-{index:04d}")
+
+    output_path = tmp_path / "out.jsonl"
+    output_path.touch()
+    with pytest.raises(codex_mod.CodexInvocationError):
+        codex_mod.create(
+            cwd=tmp_path,
+            prompt="hi",
+            from_name="orchestrator",
+            yolo=False,
+            output_path=output_path,
+            agent_self="beta",
+        )
+
+    child_env = captured["env"]
+    assert child_env is not None
+    for marker in ALL_MARKERS:
+        assert marker not in child_env, f"codex child inherited identity marker {marker}"
+
+
+def test_scrub_list_covers_the_measured_codex_identity_env() -> None:
+    """AMBIENT_IDENTITY_ENV covers every CODEX_* identity variable a live
+    codex session exports (x-b57a). It held two of these seven when the node
+    was filed; stripping the two did nothing, stripping all seven restored
+    self-compaction. CODEX_HOME is routing/config and deliberately absent."""
+    measured = {
+        "CODEX_CI",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "CODEX_SESSION_ID",
+        "CODEX_SHELL",
+        "CODEX_THREAD_ID",
+        "CODEX_COMPANION_SESSION_ID",
+        "CODEX_COMPANION_TRANSCRIPT_PATH",
+    }
+    missing = measured - set(AMBIENT_IDENTITY_ENV)
+    assert not missing, f"identity names invisible to the scrub: {sorted(missing)}"
+    assert "CODEX_HOME" not in AMBIENT_IDENTITY_ENV
+    # Both scrub forms read the one list, so the argv shape cannot drift.
+    flags = ambient_identity_env_unset_args()
+    for name in measured:
+        assert name in flags, f"{name} missing from the env -u strip flags"

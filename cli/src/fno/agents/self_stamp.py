@@ -26,17 +26,42 @@ class IdentityAmbiguousError(RuntimeError):
 
 
 def identity_ambiguity_message(identity) -> str:
-    """Render the single refusal sentence for an unproven mixed environment."""
+    """Render the single refusal sentence for an unproven mixed environment.
+
+    The strip lines are the self-rescue: the session cannot prove which
+    harness it is (that is the ambiguity), but the operator knows, and
+    stripping the foreign family's markers - every one the scrub knows about,
+    not just the two the resolver consults - restores self-resolution. Built
+    from :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads
+    the same list the scrub reads, so the text cannot drift from behavior
+    (x-b57a: a poisoned claude session stripped two codex names and nothing
+    changed; all seven restored it).
+    """
+    from fno.harness_identity import ambient_identity_strip_flags
+
     markers = ", ".join(marker for marker, _harness, _value in identity.markers_present)
     lookup_id = next(
         (value for _marker, _harness, value in identity.markers_present), "<session-id>"
+    )
+    families = []
+    for _marker, harness, _value in identity.markers_present:
+        if harness not in families:
+            families.append(harness)
+    strip_lines = "".join(
+        f"  if this is a {family} session: env {' '.join(ambient_identity_strip_flags(family))}"
+        " <command>\n"
+        for family in families
+        if ambient_identity_strip_flags(family)
     )
     return (
         "cannot decide which session is 'self': multiple harness markers present "
         "(inherited env?)\n"
         f"markers: {markers}\n"
         "resolve with: find ~/.codex/sessions ~/.claude/projects -name "
-        f"'*{lookup_id}*'"
+        f"'*{lookup_id}*'\n"
+        "or strip the foreign family's markers and retry:\n"
+        f"{strip_lines}keeping your own harness's markers; each harness re-mints "
+        "its own for a child"
     )
 
 

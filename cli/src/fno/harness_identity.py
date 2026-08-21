@@ -79,13 +79,40 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # in the scrub anyway, for the same reason as the markers: carveout/core.py
 # matches live claims through it, so a suite or spawned child that inherits it
 # resolves (or stamps) the live run's identity instead of its own.
+#
+# The five CODEX_* names below are the rest of a live codex session's identity
+# env, measured 2026-08-21 (node x-b57a): a poisoned claude session carrying
+# them could not self-compact until all seven codex names were stripped, and
+# the list held only the two the resolver consults. They are identity-only -
+# CODEX_HOME is routing/config and deliberately NOT here - and stay out of
+# HARNESS_SESSION_MARKERS for the reason two paragraphs up.
+_EXTRA_IDENTITY_NAMES: tuple[tuple[str, str], ...] = (
+    ("CLAUDECODE_SESSION_ID", "claude"),
+    ("HERMES_SESSION_ID", "hermes"),
+    ("TARGET_SESSION_ID", "fno"),
+    ("CODEX_CI", "codex"),
+    ("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex"),
+    ("CODEX_SHELL", "codex"),
+    ("CODEX_COMPANION_SESSION_ID", "codex"),
+    ("CODEX_COMPANION_TRANSCRIPT_PATH", "codex"),
+)
+
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
-    "CLAUDECODE_SESSION_ID",
-    "HERMES_SESSION_ID",
-    "TARGET_SESSION_ID",
+    *(name for name, _ in _EXTRA_IDENTITY_NAMES),
 )
+
+# Name -> harness family for every scrubbed identity name, so a refusal can
+# name the strip set for one whole foreign family: the resolver markers alone
+# are two of codex's seven, and a strip line built from two of seven did
+# nothing (x-b57a). Family here labels which harness a name belongs to, not
+# which harness resolves - TARGET_SESSION_ID belongs to fno itself.
+AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
+    **{marker: family for marker, family in HARNESS_SESSION_MARKERS},
+    **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
+    **dict(_EXTRA_IDENTITY_NAMES),
+}
 
 
 def scrub_ambient_identity(environ: Optional[dict] = None) -> tuple[str, ...]:
@@ -116,6 +143,28 @@ def ambient_identity_env_unset_args() -> list[str]:
     flags: list[str] = []
     for _name in AMBIENT_IDENTITY_ENV:
         flags += ["-u", _name]
+    return flags
+
+
+def ambient_identity_strip_flags(
+    keep_family: str, env: Optional[Mapping[str, str]] = None
+) -> list[str]:
+    """``env -u`` flag pairs for identity names PRESENT in ``env`` that belong
+    to a family OTHER than ``keep_family``.
+
+    The one-line self-rescue for a poisoned session: it cannot prove which
+    harness it is (that is the ambiguity), but the operator reading the
+    refusal knows, and stripping the foreign family restores self-resolution
+    while keeping the session's own markers. Names not in
+    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here.
+    """
+    environ = os.environ if env is None else env
+    flags: list[str] = []
+    for name in AMBIENT_IDENTITY_ENV:
+        if AMBIENT_IDENTITY_FAMILY.get(name) == keep_family:
+            continue
+        if (environ.get(name) or "").strip():
+            flags += ["-u", name]
     return flags
 
 
@@ -288,20 +337,33 @@ class HarnessIdentity:
 def resolve_harness_identity(
     env: Optional[Mapping[str, str]] = None,
 ) -> HarnessIdentity:
-    """Resolve the first nonblank ambient harness marker by shared precedence.
+    """Resolve the ambient harness identity, or refuse on mixed families.
 
-    Returns the precedence winner. This is the raw precedence primitive: it is
-    correct when exactly one harness family is present (the dominant case), and
-    callers that STAMP identity onto a durable record must instead use
-    :func:`resolve_owned_identity`, which refuses to guess when two harness
-    families disagree (an inherited marker must not be laundered into ownership).
+    Precedence applies WITHIN one harness family (codex thread id over the
+    legacy codex session id). Across families there is no precedence: markers
+    from two harness families mean one is foreign and inherited - a claude
+    child carrying its codex parent's ``CODEX_THREAD_ID`` - and the answer is
+    ``(None, None)`` so no caller can launder the foreign marker into this
+    session's identity. This is the same disposition
+    :func:`fno.dispatch_flags.infer_invoking_harness` gives the same
+    environment; the two must not diverge (x-b57a).
+
+    Byte-identical to :func:`resolve_owned_identity`'s ``single`` disposition
+    whenever exactly one family is present (the dominant case).
     """
     environ = os.environ if env is None else env
+    families: list[str] = []
+    winner: Optional[HarnessIdentity] = None
     for marker, harness in HARNESS_SESSION_MARKERS:
         session_id = (environ.get(marker) or "").strip()
         if session_id:
-            return HarnessIdentity(session_id=session_id, harness=harness)
-    return HarnessIdentity(session_id=None, harness=None)
+            if harness not in families:
+                families.append(harness)
+            if winner is None:
+                winner = HarnessIdentity(session_id=session_id, harness=harness)
+    if len(families) > 1:
+        return HarnessIdentity(session_id=None, harness=None)
+    return winner if winner is not None else HarnessIdentity(session_id=None, harness=None)
 
 
 def present_harness_markers(
@@ -457,11 +519,19 @@ def resolve_owned_identity(
 
 
 def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
-    """Return the canonical ambient session id, with legacy Claude fallback."""
+    """Return the canonical ambient session id, with legacy Claude fallback.
+
+    The legacy fallback serves an env with NO canonical marker (a pre-migration
+    claude session), never one whose canonical markers disagree: falling
+    through there would pick the claude-legacy id in a mixed env, the same
+    cross-family launder :func:`resolve_harness_identity` just refused.
+    """
     environ = os.environ if env is None else env
     identity = resolve_harness_identity(environ)
     if identity.session_id:
         return identity.session_id
+    if present_harness_markers(environ):
+        return None
     for marker, _ in LEGACY_HARNESS_SESSION_MARKERS:
         session_id = (environ.get(marker) or "").strip()
         if session_id:

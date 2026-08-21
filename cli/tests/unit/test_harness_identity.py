@@ -40,13 +40,55 @@ def test_resolves_each_supported_marker(marker, session_id, harness):
 
 
 def test_precedence_favors_codex_thread_id():
+    """Within ONE family, higher-precedence markers still win (thread id over
+    the legacy codex session id). Cross-family never gets here - see the
+    refusal test below."""
+    env = {
+        "CODEX_THREAD_ID": "thread",
+        "CODEX_SESSION_ID": "codex-session",
+    }
+    assert resolve_harness_identity(env) == HarnessIdentity("thread", "codex")
+
+
+def test_cross_family_markers_refuse_instead_of_precedence():
+    """x-b57a: markers from two harness families refuse, they do not pick.
+
+    The precedence winner here is a foreign inherited marker laundered into
+    this session's identity - the leak that made whoami report harness codex
+    for a claude session carrying CODEX_THREAD_ID. The refusal makes this
+    resolver agree with infer_invoking_harness on every environment."""
     env = {
         "CODEX_THREAD_ID": "thread",
         "CLAUDE_CODE_SESSION_ID": "claude",
         "CODEX_SESSION_ID": "codex-session",
         "GEMINI_SESSION_ID": "gemini",
     }
-    assert resolve_harness_identity(env) == HarnessIdentity("thread", "codex")
+    assert resolve_harness_identity(env) == HarnessIdentity(None, None)
+
+
+def test_resolvers_agree_on_every_disposition():
+    """One environment, both resolvers, same answer (x-b57a acceptance).
+
+    infer_invoking_harness refuses multi-family ambiguity;
+    resolve_harness_identity must not answer where it refuses, nor refuse
+    where it answers."""
+    from fno.dispatch_flags import infer_invoking_harness
+
+    cases = [
+        {},  # empty
+        {"CODEX_THREAD_ID": "t"},  # single codex marker
+        {"CODEX_SESSION_ID": "s", "CODEX_THREAD_ID": "t"},  # one family, two markers
+        {"CLAUDE_CODE_SESSION_ID": "c"},  # single claude marker
+        {"OPENCODE_SESSION_ID": "ses_1", "GEMINI_SESSION_ID": "g"},  # two families
+        {"CODEX_THREAD_ID": "t", "CLAUDE_CODE_SESSION_ID": "c"},  # the leak shape
+    ]
+    for env in cases:
+        inferred = infer_invoking_harness(env)
+        resolved = resolve_harness_identity(env)
+        if inferred is None:
+            assert (resolved.session_id, resolved.harness) == (None, None), env
+        else:
+            assert resolved.harness == inferred and resolved.session_id, env
 
 
 def test_whitespace_markers_are_skipped_in_precedence_order():
@@ -423,14 +465,21 @@ def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():
 
 
 
-def test_current_session_helpers_share_precedence_and_legacy_fallback():
-    env = {
+def test_current_session_helpers_refuse_mixed_and_fall_back_to_legacy():
+    """One family: precedence winner. Mixed canonical families: the id helper
+    refuses like the resolver instead of laundering the claude-legacy marker
+    (x-b57a); the ids helper still enumerates every marker, its own job."""
+    one_family = {"CODEX_THREAD_ID": " thread ", "CODEX_SESSION_ID": "session"}
+    assert current_session_id(one_family) == "thread"
+    assert current_session_ids(one_family) == {"thread", "session"}
+    mixed = {
         "CODEX_THREAD_ID": " thread ",
         "CLAUDE_CODE_SESSION_ID": "claude",
         "CLAUDE_SESSION_ID": "legacy",
     }
-    assert current_session_id(env) == "thread"
-    assert current_session_ids(env) == {"thread", "claude", "legacy"}
+    assert current_session_id(mixed) is None
+    assert current_session_ids(mixed) == {"thread", "claude", "legacy"}
+    # No canonical marker at all: the pre-migration claude fallback fires.
     assert current_session_id({"CLAUDE_SESSION_ID": " legacy "}) == "legacy"
     assert current_session_ids({}) == set()
 
