@@ -5915,22 +5915,25 @@ impl Core {
         // Which registry agents a pane row already claimed (so they don't
         // double-render as watch-only). Indexed like `self.agents`.
         let mut consumed = vec![false; self.agents.len()];
-        // (x-9c5f) holder name -> pr_number, joining the live-claim holders map
-        // (node -> holder) with the graph's node -> pr map, so a row whose name
-        // holds a live claim on a pr-carrying node gets the peek `PR #N` label.
-        // Harness-native claims make holder == worker name (x-3e70); a session-id
-        // holder simply yields no label (Open Question 2: graceful absence).
+        // Holder name -> pr_number, joining the live-claim holders map
+        // (node -> holder) with the graph's node -> pr map. The row-name join
+        // below is primary; this remains the fallback for harness-native claims
+        // whose holder equals the worker name.
         let pr_by_holder: HashMap<&str, u64> = self
             .backlog_holders
             .iter()
             .filter_map(|(node, holder)| self.backlog_pr.get(node).map(|pr| (holder.as_str(), *pr)))
             .collect();
+        let pr_from_name = |name: &str| -> Option<u64> {
+            let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
+            self.backlog_pr.get(&node_id).copied()
+        };
         // A paneless row whose name resolves to a node inside an active
         // mission is grouped under that mission's synthetic squad, taking
         // precedence over the owns_path fallback below. A pane-hosted row
         // keeps its real session squad (it lives in an actual tab tree).
         let mission_squad_for = |name: &str| -> Option<u64> {
-            let node_id = agents_view::parse_node_id_from_name(name)?;
+            let node_id = agents_view::resolve_node_id(name, &self.missions.node_to_epic)?;
             self.missions
                 .node_to_epic
                 .get(&node_id)
@@ -6002,7 +6005,8 @@ impl Core {
                                     .clone()
                                     .or_else(|| pane_entry.and_then(|e| e.account.clone())),
                                 updated_at: a.updated_at,
-                                pr: pr_by_holder.get(a.name.as_str()).copied(),
+                                pr: pr_from_name(&a.name)
+                                    .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
@@ -6089,7 +6093,8 @@ impl Core {
                         subline: self.compose_subline(&a.cwd),
                         account: a.account.clone(),
                         updated_at: a.updated_at,
-                        pr: pr_by_holder.get(a.name.as_str()).copied(),
+                        pr: pr_from_name(&a.name)
+                            .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
@@ -6135,7 +6140,8 @@ impl Core {
                         // foreign row carries its source account here (piece 3).
                         account: a.account.clone(),
                         updated_at: a.updated_at,
-                        pr: pr_by_holder.get(a.name.as_str()).copied(),
+                        pr: pr_from_name(&a.name)
+                            .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
@@ -13929,22 +13935,24 @@ mod tests {
 
     #[test]
     fn agent_rows_join_pr_from_holder_map() {
-        // US8: a watch-only worker whose name holds a live claim on a node with a
-        // pr_number gets AgentRow.pr; a non-holder row gets None. updated_at
-        // passes through from the registry row.
+        // A name-resolved row gets its pr without a claim; a holder-only row
+        // keeps the harness-native fallback. updated_at passes through.
         let mut core = empty_core();
         core.session_name = "main".into();
-        let mut worker = bg_row("target-x-9c5f", "/w", None);
+        let mut worker = bg_row("t-xdae5-reviewflags-glm", "/w", None);
         worker.updated_at = Some(42);
-        core.agents = vec![worker, bg_row("other-worker", "/x", None)];
-        core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "target-x-9c5f".to_string())]);
-        core.backlog_pr = HashMap::from([("x-9c5f".to_string(), 385)]);
+        core.agents = vec![worker, bg_row("holder-only", "/x", None)];
+        core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "holder-only".to_string())]);
+        core.backlog_pr = HashMap::from([("x-dae5".to_string(), 999), ("x-9c5f".to_string(), 385)]);
         let rows = core.agent_rows();
-        let joined = rows.iter().find(|r| r.name == "target-x-9c5f").unwrap();
-        assert_eq!(joined.pr, Some(385));
+        let joined = rows
+            .iter()
+            .find(|r| r.name == "t-xdae5-reviewflags-glm")
+            .unwrap();
+        assert_eq!(joined.pr, Some(999));
         assert_eq!(joined.updated_at, Some(42));
-        let other = rows.iter().find(|r| r.name == "other-worker").unwrap();
-        assert_eq!(other.pr, None);
+        let fallback = rows.iter().find(|r| r.name == "holder-only").unwrap();
+        assert_eq!(fallback.pr, Some(385));
     }
 
     #[test]
@@ -13960,13 +13968,13 @@ mod tests {
                 total: 2,
             }],
             node_to_epic: HashMap::from([
-                ("x-bbbb".to_string(), "x-aaaa".to_string()),
-                ("x-cccc".to_string(), "x-aaaa".to_string()),
+                ("x-c1b9".to_string(), "x-aaaa".to_string()),
+                ("x-cd1e".to_string(), "x-aaaa".to_string()),
             ]),
         };
         core.agents = vec![
-            bg_row("target-x-bbbb-foo", "/w", None),
-            bg_row("target-x-cccc-bar", "/w", None),
+            bg_row("king-cliverbs-x-c1b9-g2", "/w", None),
+            bg_row("build-xcd1e", "/w", None),
         ];
         let sid = mission_sid("x-aaaa");
         let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
