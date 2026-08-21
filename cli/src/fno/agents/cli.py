@@ -938,8 +938,15 @@ def cmd_court(
     the coronations work" without trusting the absence of a disagreement.
 
     Exit 0 always: this is a read, and a caller gates on the JSON keys
-    (``agree``, ``summary.disagreements``, ``summary.unknowns``), not the
-    process status.
+    (``agree``, ``summary.disagreements``, ``summary.unknowns``, and
+    ``conflicts``), not the process status.
+
+    ``conflicts`` belongs in that list and is not derivable from the counts.
+    Two live rows holding one territory are each individually corroborated by
+    the graph, so both report ``agree: true`` and the summary reads zero
+    disagreements while the fleet has two kings over one scope. A caller that
+    gates on the counts alone reads that as a healthy court, which is the
+    precise failure this command exists to end.
     """
     from fno.agents.court import render_court
 

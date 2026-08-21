@@ -1109,6 +1109,42 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_a_king_cannot_crown_itself_even_to_a_strict_subset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """"The crown is stamped by a grantor, never self-declared" held for free
+    while every agent caller was refused. Once a king may grant, self-crowning
+    needs its own check: the row would record ITSELF as its own grantor, the
+    one claim an external reader cannot verify.
+
+    A strict SUBSET is the case the succession refusal misses, since that one
+    fires only on an equal scope. Here a portfolio king over alpha,beta narrows
+    itself to alpha, which passes containment AND passes succession, and used
+    to land - vacating the wider scope on the way."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("caller", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "never self-declared" in result.output
+    # The mutation this refusal exists to prevent: no self-grantor, and the
+    # wider scope is not vacated on the way out.
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -494,6 +494,22 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             f"{exc}. `fno agents list` shows every handle you can crown."
         ) from exc
 
+    # A crown is stamped BY a grantor, never self-declared. That held for free
+    # while every agent caller was refused outright; once a king may grant, the
+    # invariant needs its own check, because the grantor recorded on the row
+    # would otherwise be the row itself. The succession refusal above does not
+    # cover this: it fires only on an EQUAL scope, so a king narrowing its own
+    # crown to a strict SUBSET sails past it and re-stamps itself, vacating the
+    # wider scope on the way. Identity, not territory, is the thing to test.
+    if caller is not None and target_name == grantor:
+        raise CrownPromotionError(
+            f"refusing to crown {target_name!r}: that is this session, and a "
+            "crown is stamped by a grantor, never self-declared. The row would "
+            "record itself as its own grantor, which is exactly the claim an "
+            "external reader cannot verify. Ask a king whose scope contains "
+            f"{scope!r}, or crown a different row."
+        )
+
     receipt: dict[str, Any] = {}
 
     def _stamp(rows: list) -> list:
