@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-const HEAD: &str = "deadbeefdeadbeefdeadbeef00000001";
-const LOCAL_HEAD: &str = "localheadlocalheadlocalhead00000001";
+const HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
+const LOCAL_HEAD: &str = "cafebabecafebabecafebabecafebabe00000001";
 
 /// gh: OPEN PR #1 at HEAD, green CI, one COMMENTED review by the configured
 /// bot at HEAD (counts as reviewed), no inline comments. git: HEAD echo, with
