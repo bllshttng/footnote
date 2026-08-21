@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use fno::{bootstrap, mux_cli, proto};
 
-use fno::mux_cli::PANE_VERBS;
+use fno::mux_cli::{PANE_REFERENCE_USAGE, PANE_VERBS};
 
 /// Verbs removed from the mux front, and what replaced each one.
 ///
@@ -297,7 +297,7 @@ fn main() {
                  | fno mux kill-server [<name>] [--json] \
                  | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
                  | fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] \
-                 | fno mux pane {PANE_VERBS} ... \
+                 | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
                  | fno mux block pipe|annotate ... \
                  | fno mux tab ls|create|rename|join ... \
                  | fno mux layout get|apply|graft ... \

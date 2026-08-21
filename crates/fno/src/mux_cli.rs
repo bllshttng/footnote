@@ -1937,18 +1937,31 @@ pub enum FocusTarget {
     Pick,
 }
 
+/// A pane reference: `<pane-id>` or `<session>:<pane-id>`.
+fn parse_pane_ref(raw: &str) -> Result<(Option<String>, u64), String> {
+    match raw.rsplit_once(':') {
+        Some((session, pane)) if !session.is_empty() => match pane.parse::<u64>() {
+            Ok(id) => Ok((Some(session.to_string()), id)),
+            Err(_) => Err(format!("pane id needs a number, got {raw:?}")),
+        },
+        _ => Ok((None, parse_u64(raw, "pane id")?)),
+    }
+}
+
 /// Parse one focus argument (already flag-split). All digits is the legacy
-/// pane id, byte-identical in behavior; anything else is a selector.
-fn parse_focus_target(raw: Option<&String>) -> Result<FocusTarget, String> {
+/// pane id, byte-identical in behavior; a session-qualified pane reference
+/// uses the shared pane grammar; anything else is a selector.
+fn parse_focus_target(raw: Option<&String>) -> Result<(FocusTarget, Option<String>), String> {
     let raw = raw.ok_or_else(|| "pane focus needs a pane id, a selector, or --fzf".to_string())?;
     let s = raw.trim();
     if s.is_empty() {
         return Err("pane focus selector is empty".into());
     }
-    if s.bytes().all(|b| b.is_ascii_digit()) {
-        Ok(FocusTarget::Pane(parse_u64(s, "pane id")?))
+    if s.contains(':') || s.bytes().all(|b| b.is_ascii_digit()) {
+        let (session, pane) = parse_pane_ref(s)?;
+        Ok((FocusTarget::Pane(pane), session))
     } else {
-        Ok(FocusTarget::Selector(s.to_string()))
+        Ok((FocusTarget::Selector(s.to_string()), None))
     }
 }
 
@@ -2105,12 +2118,17 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// typed a bare `fno mux pane` to discover the surface was told verbs that
 /// exist do not.
 pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus";
+pub const PANE_REFERENCE_USAGE: &str =
+    "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
         .and_then(|a| a.to_str())
         .ok_or_else(|| format!("pane needs a verb: {PANE_VERBS}"))?;
+    if matches!(verb, "-h" | "--help") {
+        return Err(format!("{PANE_REFERENCE_USAGE}; verbs: {PANE_VERBS}"));
+    }
 
     // `run` is special: leading options/directives, then the command argv
     // verbatim (its own flags are NOT ours to parse), optionally after `--`.
@@ -2301,18 +2319,11 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let raw = positionals
             .first()
             .ok_or_else(|| format!("pane {what} needs a pane id"))?;
-        match raw.split_once(':') {
-            Some((session, pane)) if !session.is_empty() => match pane.parse::<u64>() {
-                Ok(id) => {
-                    if selector_session.is_none() {
-                        selector_session = Some(session.to_string());
-                    }
-                    Ok(id)
-                }
-                Err(_) => Err(format!("pane id needs a number, got {raw:?}")),
-            },
-            _ => parse_u64(raw, "pane id"),
+        let (session, pane) = parse_pane_ref(raw)?;
+        if selector_session.is_none() {
+            selector_session = session;
         }
+        Ok(pane)
     };
 
     let cmd = match verb {
@@ -2336,13 +2347,15 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             if fzf && !positionals.is_empty() {
                 return Err("--fzf takes no pane id or selector".into());
             }
-            PaneCmd::Focus {
-                target: if fzf {
-                    FocusTarget::Pick
-                } else {
-                    parse_focus_target(positionals.first())?
-                },
+            let (target, session) = if fzf {
+                (FocusTarget::Pick, None)
+            } else {
+                parse_focus_target(positionals.first())?
+            };
+            if selector_session.is_none() {
+                selector_session = session;
             }
+            PaneCmd::Focus { target }
         }
         "send" => {
             let pane = pane_arg("send")?;
@@ -4816,6 +4829,70 @@ mod tests {
         let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
         assert_eq!(parsed.session, None);
         assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+    }
+
+    #[test]
+    fn pane_focus_accepts_a_session_colon_pane_selector() {
+        let parsed = pane_args(&["focus", "main:76"]).expect("selector must parse");
+        assert_eq!(parsed.session.as_deref(), Some("main"));
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Pane(76)
+            }
+        );
+    }
+
+    #[test]
+    fn pane_focus_rejects_a_non_numeric_session_colon_pane_selector() {
+        assert_eq!(
+            pane_args(&["focus", "main:x"]).unwrap_err(),
+            r#"pane id needs a number, got "main:x""#
+        );
+    }
+
+    #[test]
+    fn pane_focus_explicit_session_flag_beats_the_selector_session() {
+        let parsed = pane_args(&["focus", "--session", "other", "main:76"]).expect("must parse");
+        assert_eq!(parsed.session.as_deref(), Some("other"));
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Focus {
+                target: FocusTarget::Pane(76)
+            }
+        );
+    }
+
+    #[test]
+    fn pane_help_names_the_two_pane_reference_forms() {
+        let help = pane_args(&["--help"]).unwrap_err();
+        assert!(help.contains("<pane-id>"), "{help}");
+        assert!(help.contains("<session>:<pane-id>"), "{help}");
+        assert!(help.contains("--session overrides"), "{help}");
+    }
+
+    #[test]
+    fn pane_positional_session_colon_parity_covers_every_pane_reference_verb() {
+        let cases: &[&[&str]] = &[
+            &["read", "3"],
+            &["split", "3", "--direction", "left"],
+            &["break", "3"],
+            &["focus", "3"],
+            &["send", "3", "--text", "hi"],
+            &["wait", "3"],
+            &["kill", "3"],
+            &["claim", "3"],
+            &["release", "3"],
+        ];
+        for bare in cases {
+            let mut qualified = bare.to_vec();
+            qualified[1] = "main:3";
+            let bare = pane_args(bare).expect("bare pane ref must parse");
+            let qualified = pane_args(&qualified).expect("qualified pane ref must parse");
+            assert_eq!(bare.cmd, qualified.cmd, "verb {:?}", bare.cmd);
+            assert_eq!(bare.session, None);
+            assert_eq!(qualified.session.as_deref(), Some("main"));
+        }
     }
 
     #[test]
