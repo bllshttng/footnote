@@ -2718,9 +2718,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // non-critical, so running it on the idle tick is fine.
                 // Runs off-loop under spawn_blocking behind a one-in-flight
                 // gate, like the scrape and worktree sweeps above (x-ef7f). Its
-                // dormant gate shells `fno agents truth` ONCE PER REGISTRY ROW,
-                // each child bounded at 5s and retried once on a crash, so a
-                // 28-row roster could hold this select arm for minutes at a
+                // dormant gate shells `fno agents truth` ONCE PER SWEEP: one
+                // child answers every escalated handle, bounded on the handle
+                // count and retried once on a crash. It shelled once per ROW
+                // before, each child bounded at 5s, so a 28-row roster could
+                // hold this select arm for minutes at a
                 // time. Inline, that starved accept() -- clients' connects timed
                 // out and lazy-started competing daemons, each adding rows and
                 // lengthening the next sweep -- and it starved the SIGTERM arm

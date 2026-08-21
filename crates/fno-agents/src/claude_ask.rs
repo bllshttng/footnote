@@ -317,6 +317,7 @@ impl TruthAttempt {
 /// The outcome of running one truth subprocess to a deadline, before any
 /// decoding. Shared by the single-handle attempt and the batch one so the
 /// spawn, the poll loop, and the WARN wording have exactly one implementation.
+#[derive(Debug)]
 enum BoundedRun {
     /// Never started. `uv tool install --reinstall` replaces the `fno` console
     /// script itself, not just the package tree, so that window shows up out
@@ -347,10 +348,35 @@ fn run_truth_subprocess(
             return BoundedRun::SpawnFailed;
         }
     };
+    // Drain both pipes for the WHOLE run, on their own threads. Waiting for
+    // exit before reading deadlocks against a child that fills the pipe
+    // buffer: it blocks in write() and can never reach exit, so `try_wait`
+    // never reports one and the deadline kills a process that was healthy.
+    // Batching is what put this in reach. One handle's answer is ~535 bytes
+    // measured against the live roster, so a single probe had a hundredfold
+    // margin under the 64 KiB buffer, while N handles cross it near 120 rows
+    // -- and an 88-row roster is already on the record in `daemon.rs`, with
+    // `last_message` free text able to inflate any one entry.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        buf
+    });
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -358,22 +384,27 @@ fn run_truth_subprocess(
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("WARN: family-1 truth probe for {label} timed out");
-                return BoundedRun::NoOutput;
+                break None;
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 eprintln!("WARN: family-1 truth probe for {label} wait failed: {error}");
-                return BoundedRun::NoOutput;
+                break None;
             }
         }
-    }
-    match child.wait_with_output() {
-        Ok(output) => BoundedRun::Output(output),
-        Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {label} output failed: {error}");
-            BoundedRun::NoOutput
-        }
+    };
+    // Joined on every path, timeout included: the kill above closes the pipes,
+    // so both readers end rather than outliving the call.
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    match status {
+        Some(status) => BoundedRun::Output(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        None => BoundedRun::NoOutput,
     }
 }
 
@@ -535,6 +566,28 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
+    // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
+    // put on the wire: the reader would split it into two handles that match
+    // no row, and that row would go unanswered on every list, silently and
+    // forever. It takes the single-handle path instead, where it rides its own
+    // argv element and no splitting happens. The canonical namer sanitizes to
+    // [a-z0-9-] and cannot produce one, but that guard sits on ONE of the
+    // paths that write a row's name, and this seam is where the assumption
+    // actually lives.
+    let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
+        handles.iter().cloned().partition(|h| !h.contains(','));
+    let mut probes = family1_truth_probe_batchable(&batchable);
+    for handle in unrepresentable {
+        if let Some(probe) = family1_truth_probe(&handle) {
+            probes.insert(handle, probe);
+        }
+    }
+    probes
+}
+
+fn family1_truth_probe_batchable(
+    handles: &[String],
+) -> std::collections::HashMap<String, TruthProbe> {
     match family1_truth_batch_retrying(
         handles,
         family1_truth_batch_command,
@@ -636,6 +689,15 @@ fn family1_truth_batch_attempt(
         // than an underfunded batch, and retrying would double a wait already
         // measured in tens of seconds. The bound is the fix for a slow batch;
         // a retry never was.
+        //
+        // This one flag also withholds the per-handle FALLBACK, which is a
+        // second decision and is meant here too. A batch slow enough to blow a
+        // bound that already scales at 300ms a handle will not be rescued by N
+        // probes each carrying its own 5s: that trades one long wait for a
+        // longer one, on a box already struggling. The outage a fallback
+        // exists to prevent is a batch that CANNOT answer, not one that is
+        // merely slow. A timeout nulls this page and the next sweep tries
+        // again in seconds.
         BoundedRun::NoOutput => {
             return TruthBatchAttempt {
                 probes: empty(),
@@ -4777,6 +4839,53 @@ mod tests {
         let started = Instant::now();
         assert_eq!(probe_state(hung, Duration::from_millis(50), "h1"), None);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_batch_answer_larger_than_the_pipe_buffer_still_comes_back_whole() {
+        // The reader used to wait for exit before reading a word, which
+        // deadlocks against a child blocked in write() once its answer passes
+        // the pipe buffer -- 64 KiB, measured on the machine this was written
+        // on. The child then cannot exit, the deadline kills a healthy
+        // process, and the batch reports NoOutput. That maps to `crashed:
+        // false`, so it buys no retry and no per-handle fallback either: every
+        // row on the page renders null reachability at once.
+        //
+        // Sized well past the buffer on purpose. One handle's answer measured
+        // ~535 bytes against the live roster, so this stands in for a roster
+        // of a few hundred rows -- and for a smaller one carrying a single fat
+        // `last_message`.
+        const PAYLOAD: usize = 400 * 1024;
+        let mut fat = std::process::Command::new("sh");
+        fat.args(["-c", &format!("head -c {PAYLOAD} /dev/zero | tr '\\0' 'x'")]);
+        let started = Instant::now();
+        let run = run_truth_subprocess(fat, Duration::from_secs(20), "a fat batch", false);
+        match run {
+            BoundedRun::Output(output) => {
+                assert_eq!(
+                    output.stdout.len(),
+                    PAYLOAD,
+                    "the whole answer must survive, not just the first bufferful"
+                );
+                assert!(output.status.success(), "the child exited on its own");
+            }
+            other => panic!("a large answer must not read as a failed run: {other:?}"),
+        }
+        // Bounded well under the deadline: proves it returned because the
+        // child finished, not because the timeout fired.
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_child_that_never_exits_is_still_bounded_after_the_drain() {
+        // The drain must not cost the bound: a child holding its pipes open
+        // forever still has to be killed on the deadline.
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 30"]);
+        let started = Instant::now();
+        let run = run_truth_subprocess(hung, Duration::from_millis(100), "a hung batch", false);
+        assert!(matches!(run, BoundedRun::NoOutput));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
