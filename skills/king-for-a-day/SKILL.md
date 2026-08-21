@@ -47,7 +47,7 @@ State your level, altitude, and scope in your own opening line, so the transcrip
 **The crown is stamped by a grantor, never self-declared.**
 Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio.
 
-When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. A live king can also run this path to re-scope a subordinate, but only when its own crown strictly contains the scope it grants. The registry records the actual grantor, either the attended `human` or the granting king. It preserves the target's transcript and placement and never performs succession.
+When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. When its own crown strictly contains the scope, a live king can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting king. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
 Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
