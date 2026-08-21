@@ -2555,20 +2555,23 @@ def _guard_env(
     tmp_path: Path,
     *,
     source_rev: str = "deadbeefcafe1234",
-) -> tuple[list, Path]:
+) -> tuple[list, Path, list]:
     """Isolation for update_command guard tests.
 
     Redirects the claims root and the installed-rev marker into tmp, stubs
-    source discovery / session guard / rust leg, fakes uv on PATH, and
-    replaces os with a recorder so a test that reaches the install exec
-    records it instead of exec'ing. Returns (exec_calls, marker_path).
+    source discovery / session guard, fakes uv on PATH, and replaces os with
+    a recorder so a test that reaches the install exec records it instead of
+    exec'ing. Returns (exec_calls, marker_path, rust_calls).
     """
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-home"))
     src = tmp_path / "src"
     _write_pyproject(src)
     monkeypatch.setattr(update, "_discover_source", lambda source=None: src)
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
-    monkeypatch.setattr(update, "_refresh_rust_bins", lambda *a, **k: None)
+    rust_calls: list = []
+    monkeypatch.setattr(
+        update, "_refresh_rust_bins", lambda *a, **k: rust_calls.append((a, k))
+    )
     monkeypatch.setattr(update, "_cache_source_path", lambda source: None)
     monkeypatch.setattr(update, "_source_rev", lambda source: source_rev)
     marker = tmp_path / "installed-rev"
@@ -2582,7 +2585,7 @@ def _guard_env(
         "os",
         types.SimpleNamespace(getpid=lambda: 424242, execvp=lambda *a, **k: exec_calls.append(a)),
     )
-    return exec_calls, marker
+    return exec_calls, marker, rust_calls
 
 
 def _pre_hold_update_claim(reason: str = "test pre-hold") -> None:
@@ -2604,9 +2607,10 @@ def test_update_refuses_not_queues_when_claim_held_by_live_other(monkeypatch, tm
 
     The loser reports the holder, exits clean (no exception, no exec), and
     never queues: two concurrent `uv tool install --reinstall` runs is the
-    defect this guard exists to make impossible.
+    defect this guard exists to make impossible. The rust leg is refused
+    too - it mutates the same machine-global install surface.
     """
-    exec_calls, _marker = _guard_env(monkeypatch, tmp_path)
+    exec_calls, _marker, rust_calls = _guard_env(monkeypatch, tmp_path)
     _pre_hold_update_claim()
 
     update.update_command()
@@ -2615,6 +2619,7 @@ def test_update_refuses_not_queues_when_claim_held_by_live_other(monkeypatch, tm
     assert "another session is updating" in out
     assert "other-update-session" in out
     assert exec_calls == []
+    assert rust_calls == []
 
 
 def test_update_reports_already_landed_when_marker_matches_source_rev(monkeypatch, tmp_path, capsys):
@@ -2625,7 +2630,7 @@ def test_update_reports_already_landed_when_marker_matches_source_rev(monkeypatc
     post-install chain, and the loser's update_readiness inputs (marker ==
     source rev) prove there is nothing left to do.
     """
-    exec_calls, marker = _guard_env(monkeypatch, tmp_path)
+    exec_calls, marker, _rust_calls = _guard_env(monkeypatch, tmp_path)
     marker.write_text("deadbeefcafe1234\n", encoding="utf-8")
     _pre_hold_update_claim()
 
@@ -2636,11 +2641,39 @@ def test_update_reports_already_landed_when_marker_matches_source_rev(monkeypatc
     assert exec_calls == []
 
 
+def test_update_corrupt_claim_file_refuses_with_repair_hint(monkeypatch, tmp_path, capsys):
+    """A mangled update:fno lockfile must not brick the verb with a traceback.
+
+    acquire_claim propagates ClaimCorrupted for an unparseable file; the
+    guard catches it, names the file to remove, and exits 1 rather than
+    racing unguarded or crashing.
+    """
+    from fno.claims.io import claim_path, claims_root_for
+
+    exec_calls, _marker, rust_calls = _guard_env(monkeypatch, tmp_path)
+    bad = claim_path("update:fno", root=claims_root_for("update:fno"))
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("not: [parseable\n", encoding="utf-8")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        update.update_command()
+
+    assert excinfo.value.exit_code == 1
+    err = capsys.readouterr().err
+    assert "corrupt" in err
+    assert "update:fno" in err or "update%3Afno" in err
+    assert exec_calls == []
+    assert rust_calls == []
+
+
 def test_update_proceeds_to_exec_once_when_claim_free(monkeypatch, tmp_path):
-    """AC1-HP: with the claim free, the guard is invisible: one install exec."""
-    exec_calls, _marker = _guard_env(monkeypatch, tmp_path)
+    """AC1-HP: with the claim free, the guard is invisible: rust leg then one
+    install exec, in that order."""
+    exec_calls, _marker, rust_calls = _guard_env(monkeypatch, tmp_path)
 
     update.update_command()
 
     assert len(exec_calls) == 1
     assert exec_calls[0][0] == "/bin/sh"
+    assert len(rust_calls) == 1
+    assert rust_calls[0][1].get("dry_run") is False
