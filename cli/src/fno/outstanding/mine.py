@@ -149,9 +149,7 @@ def list_mine(
         typer.echo(f"{row['n']}. [{mark}] {row['text']}{node}")
 
 
-@mine_app.command("add")
-def add(text: str = typer.Argument(..., help="Text for the new unticked item.")) -> None:
-    """Append one unticked item, creating the lane when missing."""
+def _add(text: str) -> None:
     if not text.strip() or "\n" in text or "\r" in text:
         typer.echo("mine: failed: item text must be one non-empty line", err=True)
         raise typer.Exit(2)
@@ -164,23 +162,29 @@ def add(text: str = typer.Argument(..., help="Text for the new unticked item."))
     _run_mutation(change)
 
 
-@mine_app.command("done")
-def done(visible_index: int = typer.Argument(..., metavar="N")) -> None:
-    """Toggle one item's checkbox by visible item number."""
+def _parse_visible_index(raw: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        typer.echo(f"mine: failed: not a number: {raw}", err=True)
+        raise typer.Exit(2)
+
+
+def _done(raw_index: str) -> None:
+    visible_index = _parse_visible_index(raw_index)
 
     def change(lines: list[str], read: LaneRead) -> None:
         item = _selected(read, visible_index)
-        raw_index = item.line - 1
-        raw = lines[raw_index]
+        idx = item.line - 1
+        raw = lines[idx]
         mark = " " if item.done else "x"
-        lines[raw_index] = raw[:3] + mark + raw[4:]
+        lines[idx] = raw[:3] + mark + raw[4:]
 
     _run_mutation(change)
 
 
-@mine_app.command("drop")
-def drop(visible_index: int = typer.Argument(..., metavar="N")) -> None:
-    """Remove one parsed item by visible item number."""
+def _drop(raw_index: str) -> None:
+    visible_index = _parse_visible_index(raw_index)
 
     def change(lines: list[str], read: LaneRead) -> None:
         item = _selected(read, visible_index)
@@ -189,21 +193,50 @@ def drop(visible_index: int = typer.Argument(..., metavar="N")) -> None:
     _run_mutation(change)
 
 
-@mine_app.command("link")
-def link(
-    visible_index: int = typer.Argument(..., metavar="N"),
-    node_id: str = typer.Argument(..., metavar="NODE_ID"),
-) -> None:
-    """Link one item to a backlog node."""
+def _link(raw_index: str, node_id: str) -> None:
+    visible_index = _parse_visible_index(raw_index)
     if _NODE_RE.fullmatch(node_id) is None:
         typer.echo(f"mine: failed: invalid node id: {node_id}", err=True)
         raise typer.Exit(2)
 
     def change(lines: list[str], read: LaneRead) -> None:
         item = _selected(read, visible_index)
-        raw_index = item.line - 1
-        ending = _ending(lines[raw_index])
+        idx = item.line - 1
+        ending = _ending(lines[idx])
         mark = "x" if item.done else " "
-        lines[raw_index] = f"- [{mark}] {item.text} -> {node_id}{ending}"
+        lines[idx] = f"- [{mark}] {item.text} -> {node_id}{ending}"
 
     _run_mutation(change)
+
+
+# One dispatched leaf instead of four (add/done/drop/link): the CLI-surface
+# ratchet (scripts/ci/verb-collapse-map.tsv, test_verb_collapse_map.py) caps
+# total registered Click leaves; four separate commands, doubled by the
+# pre-existing bare `outstanding` alias, would blow that budget.
+_ACTIONS = {"add": 1, "done": 1, "drop": 1, "link": 2}
+
+
+@mine_app.command("do", context_settings={"ignore_unknown_options": True})
+def do(
+    action: str = typer.Argument(..., help="add | done | drop | link"),
+    args: list[str] = typer.Argument(None, help="add TEXT | done N | drop N | link N NODE_ID"),
+) -> None:
+    """Dispatch one MINE mutation: add TEXT | done N | drop N | link N NODE_ID."""
+    args = args or []
+    want = _ACTIONS.get(action)
+    if want is None:
+        typer.echo(f"mine: failed: unknown action {action!r} (add|done|drop|link)", err=True)
+        raise typer.Exit(2)
+    if len(args) != want:
+        typer.echo(
+            f"mine: failed: {action} takes {want} argument(s), got {len(args)}", err=True
+        )
+        raise typer.Exit(2)
+    if action == "add":
+        _add(args[0])
+    elif action == "done":
+        _done(args[0])
+    elif action == "drop":
+        _drop(args[0])
+    else:
+        _link(args[0], args[1])

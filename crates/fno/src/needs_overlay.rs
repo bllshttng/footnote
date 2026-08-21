@@ -182,7 +182,12 @@ pub enum MineMutation {
 /// CLI writes `mine: failed: ...` to stderr, which is captured here) - the
 /// operator sees WHY a write failed, never a silent no-op.
 pub async fn mine_mutate(mutation: MineMutation) -> Result<(), String> {
-    let mut args: Vec<String> = vec!["inbox".into(), "outstanding".into(), "mine".into()];
+    let mut args: Vec<String> = vec![
+        "inbox".into(),
+        "outstanding".into(),
+        "mine".into(),
+        "do".into(),
+    ];
     match mutation {
         MineMutation::Toggle(n) => {
             args.push("done".into());

@@ -138,7 +138,10 @@ def test_live_baseline_matches_the_projected_allocation():
         for row in rows
     }
     assert {leaf for leaf in leaves if leaf.split()[0] in mapped_groups} == projected
-    assert len(leaves) <= 99
+    # 99 -> 100: the operator lane's `mine` verbs collapsed add/done/drop/link
+    # into one dispatched `do` leaf (x-f730), but the pre-existing bare
+    # `outstanding` alias still doubles it, netting +2 over the prior 98.
+    assert len(leaves) <= 100
     assert "fno-agents" in leaves
 
 
