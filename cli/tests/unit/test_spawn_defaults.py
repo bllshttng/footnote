@@ -67,6 +67,29 @@ def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
     )
 
 
+@pytest.mark.parametrize(
+    ("provider", "computed_dirs", "expected"),
+    [
+        ("codex", ["/tmp/state", "/tmp/claims-root"], True),
+        ("codex", ["/tmp/state"], False),
+        ("gemini", ["/tmp/state", "/tmp/claims-root"], None),
+    ],
+)
+def test_claim_store_writable_is_tri_state(provider, computed_dirs, expected, monkeypatch):
+    from pathlib import Path
+
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(
+        "fno.claims.io.global_claims_root", lambda: Path("/tmp")
+    )
+    monkeypatch.setattr(
+        "fno.claims.io.claims_dir", lambda root=None: Path("/tmp/claims-root")
+    )
+
+    assert mux_spawn._claim_store_writable(provider, computed_dirs) is expected
+
+
 def test_non_spawn_verb_untouched():
     assert _inject(["ask", "w", "hi"], provider="codex") == ["ask", "w", "hi"]
 

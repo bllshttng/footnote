@@ -46,7 +46,11 @@ from fno.agents.dispatch import (
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
-from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+from fno.agents.writable_dirs import (
+    ADD_DIR_PROVIDERS,
+    add_dir_tokens,
+    worker_writable_dirs,
+)
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.registry import (
@@ -122,6 +126,9 @@ class MuxSpawnResult:
     # signal rather than a formatting detail.
     bound: Optional[bool] = None
     pane_alive: Optional[bool] = None
+    # Whether the computed writable set reaches the live global claim store.
+    # None means this harness has no additive --add-dir cell to probe.
+    claim_store_writable: Optional[bool] = None
     # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
     # set when bound.
     unbound_reason: Optional[str] = None
@@ -144,6 +151,21 @@ class MuxSpawnResult:
     seed: Optional[str] = None
     seed_source: Optional[str] = None
     fno_id: Optional[str] = None
+
+
+def _claim_store_writable(
+    provider: str, computed_dirs: Sequence[str]
+) -> Optional[bool]:
+    """Return whether this spawn's computed grant reaches the live claim store."""
+    if provider not in ADD_DIR_PROVIDERS:
+        return None
+    from fno.claims.io import claims_dir, global_claims_root
+
+    target = claims_dir(global_claims_root()).resolve()
+    return any(
+        target == root or target.is_relative_to(root)
+        for root in (Path(directory).expanduser().resolve() for directory in computed_dirs)
+    )
 
 
 def _fno_bin() -> str:
@@ -1101,6 +1123,7 @@ def build_pane_argv(
     deny_tools: Optional[str] = None,
     name: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
+    computed_dirs: Optional[Sequence[str]] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -1147,7 +1170,9 @@ def build_pane_argv(
         # the claude/codex/agy arms below cannot disagree about which spawn gets
         # the grant. Without it a bounded worker cannot write ~/.fno/claims, so
         # it holds no claim and the graph reads free while it works.
-        computed_dirs=worker_writable_dirs(cwd),
+        computed_dirs=(
+            worker_writable_dirs(cwd) if computed_dirs is None else computed_dirs
+        ),
         agent=agent,
         tools=tools,
         deny_tools=deny_tools,
@@ -2959,6 +2984,8 @@ def dispatch_spawn_pane(
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     if provider == "agy":
         _ensure_agy_folder_trusted(cwd)
+    computed_writable_dirs = worker_writable_dirs(cwd)
+    claim_store_writable = _claim_store_writable(provider, computed_writable_dirs)
     argv = build_pane_argv(
         provider,
         message,
@@ -3895,12 +3922,19 @@ def dispatch_spawn_pane(
                             ],
                             path=registry_path,
                         )
+                        row_removed = True
                     except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-                        pass
+                        row_removed = False
+                    if row_removed:
+                        cleanup_detail = "pane reaped, registry row removed"
+                    else:
+                        cleanup_detail = (
+                            "pane reaped, but registry row removal failed; a "
+                            f"`spawning` row for {name!r} may linger"
+                        )
                     raise DispatchAskError(
                         f"agent {name!r} required {provider} session binding "
-                        f"({unbound_reason}); pane {pane_id} reaped, "
-                        "no registry row written. Diagnose the lane with "
+                        f"({unbound_reason}); {cleanup_detail}. Diagnose the lane with "
                         "'fno doctor --codex-bind'; spawn with --substrate "
                         "headless meanwhile (headless owns its own session "
                         "and is unaffected)",
@@ -3944,6 +3978,7 @@ def dispatch_spawn_pane(
         status=row_status,
         bound=bound_val,
         pane_alive=pane_alive,
+        claim_store_writable=claim_store_writable,
         unbound_reason=_resolve_unbound_reason(bound_val, unbound_reason, provider),
         log_path=death_log_path,
         effective_message=effective_message,
