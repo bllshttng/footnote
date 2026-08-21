@@ -544,8 +544,9 @@ pub fn family1_truth_probe_many(
         None => {
             eprintln!(
                 "WARN: family-1 truth batch of {} handles failed twice; \
-                 falling back to one probe per handle (is `fno` older than \
-                 `--handles`? try `fno update`)",
+                 falling back to one probe per handle. Either this `fno` \
+                 predates `--handles` (run `fno update`), or no `fno` is on \
+                 PATH right now (a `uv tool install --reinstall` window).",
                 handles.len()
             );
             handles
