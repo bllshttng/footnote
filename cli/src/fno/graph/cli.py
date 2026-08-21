@@ -3536,6 +3536,34 @@ def cmd_update(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    # Mutation receipts read the committed, recomputed row. Flags express the
+    # caller's intent; only the reread can say whether ownership and dispatch
+    # state actually landed.
+    from fno.graph.load import load_graph
+
+    stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    if add_pr is not None and stored_node.get("status") == "ready":
+        typer.echo(
+            f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
+            f"bind ownership and the primary PR with --locked-by <worker> "
+            f"--pr-number {add_pr}",
+            err=True,
+        )
+    if pr_number is not None and not clearing_number:
+        stored_owner = stored_node.get("locked_by") or "unknown"
+        stored_pr = stored_node.get("pr_number")
+        stored_status = stored_node.get("status") or "unknown"
+        ready_effect = (
+            "still offered by ready"
+            if stored_status == "ready"
+            else "not offered by ready"
+        )
+        typer.echo(
+            f"ownership: node={stored_node.get('id', task_id)} "
+            f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
+            f"{ready_effect}"
+        )
     typer.echo(f"Updated {task_id}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row

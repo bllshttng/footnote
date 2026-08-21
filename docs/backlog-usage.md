@@ -69,6 +69,8 @@ fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
 `<id>` resolves by canonical id (`ab-1a2b3c4d`), title-derived slug
 (`dashless-spawn`), or bare hex (`1a2b3c4d`).
 
+When a PR opens outside the Footnote PR path, repair its node with `fno backlog update <id> --locked-by <worker> --pr-number <n>`. This command binds the owner and primary PR together. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. A bare `--pr-number` removes the node from ready but leaves its owner unknown. The update receipt rereads the stored row and reports its owner, PR, and status.
+
 ## Moving cards
 
 ### Between columns
