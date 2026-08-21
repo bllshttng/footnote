@@ -413,11 +413,16 @@ def provider_live_count(provider: str) -> int:
                 "registry forward read skipped rows; provider count is incomplete"
             )
         live_rows = [row for row in loaded if row.status in LIVE_STATUSES]
-        unreadable = [row.name for row in live_rows if not row.provider]
-        if unreadable:
-            raise ProviderCountUnavailable(
-                "live registry rows have unreadable provider fields: "
-                f"{sorted(unreadable)}"
+        unattributed: dict[tuple[str, str], int] = {}
+        for row in live_rows:
+            if row.provider:
+                continue
+            shape = (row.harness or "unknown", row.origin or "unknown")
+            unattributed[shape] = unattributed.get(shape, 0) + 1
+        for (harness, origin), count in sorted(unattributed.items()):
+            _warn(
+                f"{count} live row(s) were minted without a provider stamp "
+                f"(harness={harness}, origin={origin})"
             )
         candidates = [row for row in live_rows if row.provider == provider]
     except Exception as exc:
@@ -532,9 +537,11 @@ def _provider_live_slot_claims(provider: str, counted_names: set[str]) -> int:
             metadata.get("model_provider") if isinstance(metadata, dict) else None
         )
         if not isinstance(model_provider, str) or not model_provider:
-            raise ProviderCountUnavailable(
-                f"live worker reservation {key} has no model_provider"
+            _warn(
+                f"live worker reservation {key} was minted without "
+                "model_provider; skipping"
             )
+            continue
         if model_provider == _KNOWN_UNROUTED_PROVIDER:
             continue
         if model_provider != provider:

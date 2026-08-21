@@ -1160,7 +1160,7 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),
-        provider: None,
+        provider: Some("openai".to_string()),
         model: None,
         effort: None,
         harness: Some("codex".to_string()),

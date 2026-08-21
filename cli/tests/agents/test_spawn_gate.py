@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -505,13 +506,14 @@ class TestRunGate:
         with pytest.raises(spawn_gate.ProviderCountUnavailable):
             spawn_gate.provider_live_count("zai")
 
-    def test_null_provider_live_row_refuses_instead_of_counting_zero(
-        self, monkeypatch
+    def test_null_provider_live_row_warns_and_skips(
+        self, monkeypatch, capsys
     ):
         row = AgentEntry(
             name="unattributed-live",
-            harness="codex",
+            harness="claude",
             provider=None,
+            origin="spawn",
             cwd="/tmp",
             log_path="/tmp/log",
             pid=101,
@@ -519,11 +521,71 @@ class TestRunGate:
         )
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
         monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _start: True)
-        with pytest.raises(
-            spawn_gate.ProviderCountUnavailable,
-            match="provider fields.*unattributed-live",
-        ):
-            spawn_gate.provider_live_count("zai")
+        assert spawn_gate.provider_live_count("zai") == 0
+        assert (
+            "1 live row(s) were minted without a provider stamp "
+            "(harness=claude, origin=spawn)"
+        ) in capsys.readouterr().err
+
+    def test_missing_claim_provider_warns_and_skips(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        claims = tmp_path / ".fno" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "worker%3Aplain-peer.lock").write_text("claim")
+        monkeypatch.setattr(spawn_gate, "_gate_claims_root", lambda: tmp_path)
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+        monkeypatch.setattr(
+            "fno.claims.core.claim_status",
+            lambda *_args, **_kwargs: {"state": "live", "metadata": {}},
+        )
+
+        assert spawn_gate.provider_live_count("zai") == 0
+        assert (
+            "live worker reservation worker:plain-peer was minted without "
+            "model_provider; skipping"
+        ) in capsys.readouterr().err
+
+    def test_every_registry_mint_site_stamps_model_provider(self):
+        root = Path(__file__).resolve().parents[3]
+        claude_rust = (root / "crates/fno-agents/src/claude_ask.rs").read_text()
+        adopt_rust = (root / "crates/fno-agents/src/claude_adopt.rs").read_text()
+        codex_rust = (root / "crates/fno-agents/src/codex_ask.rs").read_text()
+        dispatch_python = (root / "cli/src/fno/agents/dispatch.py").read_text()
+        mux_python = (root / "cli/src/fno/agents/mux_spawn.py").read_text()
+
+        def section(text: str, start: str, end: str) -> str:
+            assert start in text and end in text.split(start, 1)[1]
+            return text.split(start, 1)[1].split(end, 1)[0]
+
+        rust_claude_spawn = section(
+            claude_rust, "fn create(\n", "#[cfg(test)]"
+        )
+        rust_claude_adopt = section(
+            adopt_rust, "pub fn mint_adopted_entry", "pub fn upsert_adopted_row"
+        )
+        rust_codex_create = section(
+            codex_rust, "fn dispatch_create(\n", "fn dispatch_resume(\n"
+        )
+        python_codex_create = section(
+            dispatch_python, "def _codex_create_path(\n", "def _codex_followup_path(\n"
+        )
+        python_claude_spawn = section(
+            dispatch_python, "def _claude_create_path(\n", "def dispatch_ask(\n"
+        )
+        assert "def dispatch_spawn_pane(\n" in mux_python
+        python_pane_spawn = mux_python.split("def dispatch_spawn_pane(\n", 1)[1]
+
+        assert 'provider: Some("anthropic".to_string())' in rust_claude_spawn
+        assert 'provider: Some("anthropic".into())' in rust_claude_adopt
+        assert 'provider: Some("openai".to_string())' in rust_codex_create
+        assert 'provider="openai"' in python_codex_create
+        assert (
+            "lane_provider = route_provider or resolve_lane_vendor("
+            in python_claude_spawn
+        )
+        assert "provider=lane_provider" in python_claude_spawn
+        assert "provider=resolved_lane_provider" in python_pane_spawn
 
     def test_force_does_not_bypass_provider_cap(self, monkeypatch):
         _settings(monkeypatch, max_live=99, max_lanes={"zai": 1})

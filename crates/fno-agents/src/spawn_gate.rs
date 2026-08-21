@@ -51,6 +51,7 @@ const MUTEX_WAIT_BUDGET: Duration = Duration::from_secs(60);
 /// worker:<name> headless slot TTL: bounds a one-shot that outlives its
 /// client pid record; PID liveness is the primary release.
 const WORKER_CLAIM_TTL_MS: i64 = 4 * 60 * 60 * 1000;
+const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";
 
 /// Registry statuses that can hold a live process (idle counts: an
 /// idle-but-unreaped process still holds RAM; a reaped pid drops out via the
@@ -566,6 +567,10 @@ fn acquire_worker_slot(guard: &mut GateGuard, name: &str, holder: &str) {
         holder,
         claims::AcquireOpts {
             ttl_ms: Some(WORKER_CLAIM_TTL_MS),
+            metadata: Some(serde_json::Map::from_iter([(
+                "model_provider".to_string(),
+                serde_json::Value::String(KNOWN_UNROUTED_PROVIDER.to_string()),
+            )])),
             root: guard.root.clone(),
             ..Default::default()
         },
@@ -839,6 +844,41 @@ MemAvailable:    8000000 kB\n";
         let key = "worker:my agent/x";
         assert_eq!(urldecode(&claims::encode_key(key)).as_deref(), Some(key));
         assert_eq!(urldecode("bad%zz"), None);
+    }
+
+    #[test]
+    fn rust_headless_slot_claim_stamps_unrouted_provider() {
+        let root = std::env::temp_dir().join(format!(
+            "fno-gate-provider-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut guard = GateGuard {
+            gate_key: None,
+            worker_key: None,
+            root: Some(root.clone()),
+        };
+
+        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test");
+
+        let claim_path = root
+            .join(".fno/claims")
+            .join(format!("{}.lock", claims::encode_key("worker:plain-codex")));
+        let raw = std::fs::read_to_string(claim_path).unwrap();
+        let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
+        assert_eq!(
+            record
+                .metadata
+                .get("model_provider")
+                .and_then(serde_json::Value::as_str),
+            Some("__uncapped__")
+        );
+        guard.release();
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

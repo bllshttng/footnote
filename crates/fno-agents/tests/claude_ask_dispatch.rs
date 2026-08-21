@@ -178,9 +178,8 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     // spawn returns JSON receipt, not bare short_id.
     let receipt: serde_json::Value =
         serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
-    // harness axis under `harness`; an unrouted claude spawn carries no
-    // provider (vendor) or model key (AC5) - a provider key holding "claude"
-    // is the axis defect this shape corrects.
+    // The receipt names the harness axis only; provider attribution lives on
+    // the registry row consumed by the provider-cap gate.
     assert_eq!(receipt["harness"], "claude");
     assert!(receipt.get("provider").is_none());
     assert!(receipt.get("model").is_none());
@@ -195,7 +194,16 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     let row = &v["agents"][0];
     assert_eq!(row["short_id"], "7c5dcf5d");
     assert_eq!(row["harness"], "claude");
+    assert_eq!(row["provider"], "anthropic");
     assert_eq!(row["status"], "live");
+    assert_eq!(
+        row["log_path"],
+        home.root()
+            .join("logs")
+            .join("alice.log")
+            .to_string_lossy()
+            .as_ref()
+    );
     assert!(
         row.get("project_root").is_none(),
         "leaked rust-only key: {}",

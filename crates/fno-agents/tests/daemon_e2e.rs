@@ -513,7 +513,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
             Err(e) => failures.push(format!("task join failed: {e}")),
         }
     }
-    let storm_took = storm_started.elapsed();
     // Clear the process-wide seam BEFORE the first assertion. Every panic
     // between the set and the clear leaks a 3s startup delay into every daemon
     // a later test in this binary spawns, so nothing that can panic may sit in
@@ -522,6 +521,25 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     let outcome = restart_result
         .expect("restart task joins")
         .expect("restart over a large roster succeeds");
+    // Every concurrent verb above may legitimately have reached the incumbent
+    // before SIGTERM and lost that socket during teardown. Prove the successor
+    // is serving with a fresh positive probe inside the same latency window,
+    // instead of requiring one raced verb to win scheduler timing. The old
+    // awaited-startup implementation still cannot answer this before the 3s
+    // delay, so the 2.5s discriminator below remains load-bearing.
+    let post_restart = call(
+        &home,
+        &daemon_bin,
+        &Request::new(1000, "agent.status", json!({})),
+    )
+    .await
+    .expect("the restarted daemon answers the positive probe");
+    assert!(
+        !post_restart.is_err(),
+        "the restarted daemon rejected the positive probe: {:?}",
+        post_restart.error()
+    );
+    let storm_took = storm_started.elapsed();
     // The teardown shapes, named exhaustively so that anything else still
     // fails this test. All three describe one event: the incumbent's socket
     // went away with a request in flight. Which one surfaces depends on where
@@ -538,12 +556,6 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
              racing the teardown: {f}"
         );
     }
-    assert!(
-        answered > 0,
-        "the restart storm answered nothing at all ({teardown_casualties} raced teardown): \
-         {failures:?}"
-    );
-
     // The discriminating assertion, and the reason it is a LATENCY bound rather
     // than a success count or a process count. Neither of those can fail on the
     // old code: the flock already forced one supervisor, and the client's 10s
@@ -555,7 +567,9 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
     // margin available on a slow runner while still failing the old ordering.
     assert!(
         storm_took < Duration::from_millis(2500),
-        "a restart storm over {rows} rows must clear in under 2.5s; took {storm_took:?}"
+        "a restart storm over {rows} rows must clear in under 2.5s; took \
+         {storm_took:?} ({answered} raced verbs answered, {teardown_casualties} \
+         raced teardown, failures: {failures:?})"
     );
 
     assert_eq!(
