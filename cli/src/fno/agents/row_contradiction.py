@@ -56,4 +56,3 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     else:
         projected["liveness_origin"] = "survivor"
     return projected
-
