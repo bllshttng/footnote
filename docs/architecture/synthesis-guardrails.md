@@ -29,7 +29,7 @@ flowchart TD
 
 ### Layer 1 - Operator Synthesis Protocol
 
-**Location:** `skills/do/references/waves.md` Section 3a, `skills/do/references/synthesis-checklist.md`
+**Location:** `skills/execute/references/waves.md` Section 3a, `skills/execute/references/synthesis-checklist.md`
 
 Before every `Task` tool invocation the operator runs a five-point checklist:
 
@@ -69,8 +69,8 @@ A fourth writing principle (synthesis-readiness) is added to the task template. 
 
 | File | Layer | Change |
 |------|-------|--------|
-| `skills/do/references/waves.md` | 1 | Section 3a: pre-dispatch checklist |
-| `skills/do/references/synthesis-checklist.md` | 1 | Five-point checklist (new file) |
+| `skills/execute/references/waves.md` | 1 | Section 3a: pre-dispatch checklist |
+| `skills/execute/references/synthesis-checklist.md` | 1 | Five-point checklist (new file) |
 | `agents/target.md` + `agents/archer.md` | 2 | Step 1b (vague prompt detection) + Step 1c (schema read) |
 | `skills/setup/SKILL.md` | 2 | Schema Sources onboarding step |
 | `skills/plan/SKILL.md` | 3 | 4th writing principle: synthesis-readiness |

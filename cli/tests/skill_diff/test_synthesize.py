@@ -93,3 +93,15 @@ def test_build_prompt_bounds_evidence_and_flags_driver_skill():
     )
     assert "DRIVER skill" in prompt
     assert "x" * 500 in prompt and "x" * 501 not in prompt  # evidence truncated to 500
+
+
+def test_execute_spelling_remains_a_driver_skill():
+    prompt = synthesize.build_prompt(
+        skill_id="fno:execute",
+        skill_files={"skills/execute/SKILL.md": "body"},
+        findings=[],
+        ranking=[],
+        history=[],
+        additive_threshold=15,
+    )
+    assert "DRIVER skill" in prompt

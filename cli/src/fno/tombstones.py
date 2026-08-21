@@ -185,8 +185,8 @@ TOMBSTONES: dict[str, str] = {
     # so the verb is gone (a TOMBSTONES entry, not a VERB_MOVES forward: the
     # capability moved nowhere, it was already where the replacement names).
     "executor": (
-        "`skills/do/scripts/resolve-executor.sh` - the live resolver on the "
-        "do path (TASK_EXEC, PLAN_EXEC, TASK_FILES env vars). The old flags "
+        "`skills/execute/scripts/resolve-executor.sh` - the live resolver on the "
+        "execute path (TASK_EXEC, PLAN_EXEC, TASK_FILES env vars). The old flags "
         "map to the in-package modules that stay: --plan-path -> "
         "`python3 -m fno.executor._locked`, --task-files -> "
         "`python3 -m fno.executor._surface`"

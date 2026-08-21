@@ -18,7 +18,7 @@ Reference for handling failures during wave execution.
 **Recovery:**
 1. Review failure output
 2. Fix the issue manually or with `/fix investigate`
-3. Resume: `/do --resume`
+3. Resume: `/execute --resume`
 
 ### 2. Partial Wave Failure (Parallel Wave)
 
@@ -36,21 +36,21 @@ Wave 2 (parallel):
 
 **Option A: Retry Failed Tasks**
 ```
-/do --retry 2.2
-/do --retry 2.3
+/execute --retry 2.2
+/execute --retry 2.3
 ```
 Retry each failed task individually.
 
 **Option B: Retry Entire Wave**
 ```
-/do --retry-wave 2
+/execute --retry-wave 2
 ```
 Re-runs all tasks in wave 2 (successful ones will be quick).
 
 **Option C: Manual Fix + Resume**
 1. Fix issues manually
 2. Update STATE.md to mark tasks complete
-3. `/do --resume`
+3. `/execute --resume`
 
 ### 3. Executor Timeout
 
@@ -58,7 +58,7 @@ Re-runs all tasks in wave 2 (successful ones will be quick).
 
 **Recovery:**
 1. Check if executor is still running (Task tool status)
-2. If stuck, kill and retry: `/do --kill-and-retry 2.1`
+2. If stuck, kill and retry: `/execute --kill-and-retry 2.1`
 3. If persistent, investigate resource constraints
 
 ### 4. Verification Failure
@@ -80,7 +80,7 @@ Issues:
 1. Do NOT claim "done"
 2. Review verification output
 3. Fix issues
-4. Re-run verification: `/do --verify-only`
+4. Re-run verification: `/execute --verify-only`
 5. If PASS, then report completion
 
 ### 5. Context Exhaustion
@@ -95,17 +95,17 @@ Issues:
 **Recovery:**
 1. Ensure STATE.md is current
 2. Trigger context compaction (new conversation)
-3. `/do --resume` in fresh context
+3. `/execute --resume` in fresh context
 
 ## Recovery Commands Reference
 
 | Command | Action |
 |---------|--------|
-| `/do --resume` | Continue from last checkpoint in STATE.md |
-| `/do --retry <task>` | Re-run specific task |
-| `/do --retry-wave <n>` | Re-run entire wave |
-| `/do --verify-only` | Run verification without execution |
-| `/do --status` | Show current STATE.md summary |
+| `/execute --resume` | Continue from last checkpoint in STATE.md |
+| `/execute --retry <task>` | Re-run specific task |
+| `/execute --retry-wave <n>` | Re-run entire wave |
+| `/execute --verify-only` | Run verification without execution |
+| `/execute --status` | Show current STATE.md summary |
 
 ## Prevention
 
@@ -165,8 +165,8 @@ When some tasks in a parallel wave fail:
 2. **Update STATE.md** - Mark succeeded tasks complete, failed with `[!]`
 3. **Report Clearly** - Show exact failures with details
 4. **Offer Options**:
-   - Retry failed tasks: `/do waves --retry 2.2`
-   - Skip and continue: `/do waves --continue`
+   - Retry failed tasks: `/execute waves --retry 2.2`
+   - Skip and continue: `/execute waves --continue`
    - Abort: User decides next steps
 
 ### Error Report Format
@@ -189,15 +189,15 @@ TypeError: Cannot read property 'user' of undefined
   at authenticate (auth.ts:45)
 
 **Options:**
-1. `/do waves --retry 2.2` - Re-run failed task only
-2. `/do waves --continue` - Skip to wave 3 (not recommended)
-3. Manual fix then `/do waves --resume`
+1. `/execute waves --retry 2.2` - Re-run failed task only
+2. `/execute waves --continue` - Skip to wave 3 (not recommended)
+3. Manual fix then `/execute waves --resume`
 ```
 
 ### Task Retry
 
 ```
-/do waves --retry <task-id>
+/execute waves --retry <task-id>
 
 Behavior:
 1. Spawn single archer for specified task

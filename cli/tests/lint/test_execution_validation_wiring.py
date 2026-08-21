@@ -17,13 +17,13 @@ def test_target_validates_quick_plans_before_execution() -> None:
     assert "validate-plan.sh" in target
 
 
-def test_flat_do_uses_bundled_plan_validator() -> None:
-    flat = _read("skills/do/references/flat.md")
+def test_flat_execute_uses_bundled_plan_validator() -> None:
+    flat = _read("skills/execute/references/flat.md")
     bundles = _read("skill-bundles.yaml")
 
     assert 'scripts/validate-plan.sh" "$PLAN_PATH"' in flat
-    do_bundle = bundles.split("- skill: do", 1)[1]
-    assert "source: scripts/validate-plan.sh" in do_bundle
+    execute_bundle = bundles.split("- skill: execute", 1)[1]
+    assert "source: scripts/validate-plan.sh" in execute_bundle
 
 
 def test_blueprint_enriches_and_validates_before_intake() -> None:

@@ -11,7 +11,7 @@ Read this for a from-idea or multi-phase run when you want the whole phase map a
 ┌─────────────────────────────────────────────────────────────┐
 │  discovery gate  → Surface unknowns before planning         │
 │  /blueprint      → Create implementation plan with waves    │
-│  /do waves {expertise} → Execute with TDD (archer agents)    │
+│  /execute waves {expertise} → Execute with TDD (archer agents)    │
 │  /simplify       → Remove AI slop patterns (clean modifier)  │
 │  review        → Native review (sigma opt-in)               │
 │  validate        → Run tests / typecheck / build            │
@@ -37,7 +37,7 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 | Phase | Skill Used | Purpose | When to Run | Model |
 |-------|------------|---------|-------------|-------|
 | Plan | `/blueprint` | Create waves + tasks | If no plan exists (self-grounds via its own discovery gate; never awaits a `/think` doc - x-42c5) | Opus (inline) |
-| Execute |`/do waves` | Wave orchestration + TDD | Always | Opus (inline) |
+| Execute |`/execute waves` | Wave orchestration + TDD | Always | Opus (inline) |
 | Clean | `/simplify` | Remove AI slop patterns | Only with `clean` modifier | Opus (inline) |
 | Review | advisory self-review | Self-review of the changed files (BEFORE push); sigma panel only when `config.review.reviewers` names it | Always | Opus (inline) |
 | Validate | _(bash)_ | npm run build / pytest | Always | Opus (inline) |
@@ -52,7 +52,7 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 **Phase applicability is judgment, not a gate.** Every phase above is available; run the ones the work needs. User skip flags (CLI) and project config (`.fno/config.toml`) still force-skip. Otherwise judge by what the change is:
 
 - **/blueprint**: run it whenever you started from a bare idea, or the bound plan is still design-stage. It self-grounds on a bare idea via its own discovery gate (`fno think inspect` + up to 3-5 targeted questions). It never awaits a `/think` doc (x-42c5). A prior `/think` doc is consumed as already-cited findings, never required. A blueprint-complete plan skips straight to implement.
-- **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
+- **/execute waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
 - **review**: run it; it is cheap insurance - an advisory self-review of the diff by the invoking agent, not the sigma panel (sigma only when `config.review.reviewers` names it). For a tiny prose/config change a light self-review is enough.
 - **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.

@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: "Test-Driven Development: Write test first, watch it fail, implement minimal code. Use when: implementing any feature or bugfix, before writing production code, during /do workflow, whenever acceptance criteria exist."
+description: "Test-Driven Development: Write test first, watch it fail, implement minimal code. Use when: implementing any feature or bugfix, before writing production code, during /execute workflow, whenever acceptance criteria exist."
 ---
 
 # Test-Driven Development (TDD)
@@ -231,7 +231,7 @@ If you catch yourself:
 
 ## Integration with Abilities
 
-In `/do` workflow:
+In `/execute` workflow:
 ```
 Read task from phase file
        │

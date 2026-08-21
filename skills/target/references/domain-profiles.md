@@ -9,7 +9,7 @@ Domain profiles define what skill or command runs at each pipeline phase, enabli
 domains:
   {domain-name}:
     phases:
-      execute: {skill-name}     # default: fno:do waves
+      execute: {skill-name}     # default: fno:execute waves
       review: {skill-name}      # default: advisory self-review; fno:review (sigma) only when sigma is a configured reviewer
       validate: {bash-command}  # default: detected from project
       ship: {skill-name}        # default: fno:pr create
@@ -28,7 +28,7 @@ The `code` domain is never declared — it's the implicit fallback. These are it
 
 | Phase | Default Skill/Command | Purpose |
 |-------|----------------------|---------|
-| execute | `fno:do waves` | Wave orchestration with TDD |
+| execute | `fno:execute waves` | Wave orchestration with TDD |
 | review | advisory self-review (sigma via `fno:review` only when `config.review.reviewers` names it) | Code quality + integration tests |
 | validate | *(project-detected)* | `npm run build` / `pytest` / etc. |
 | ship | `fno:pr create` | Create GitHub PR |

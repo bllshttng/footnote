@@ -78,7 +78,7 @@ Three validation scripts enforce structural and process rules:
 
 | Script | Purpose |
 |--------|---------|
-| `skills/do/orchestrator.py` | Wave orchestration engine with a testable CLI interface |
+| `skills/execute/orchestrator.py` | Wave orchestration engine with a testable CLI interface |
 | `scripts/roadmap-tasks.py` | Task lifecycle management - status tracking, dependency resolution |
 | `scripts/metrics/register-task.py` | Task registration for metrics tracking |
 | `scripts/metrics/session-cost.py` | Session cost calculation and reporting |
@@ -117,13 +117,13 @@ bash scripts/lib/test_config.sh
 
 ```bash
 # Show help and available options
-python skills/do/orchestrator.py --help
+python skills/execute/orchestrator.py --help
 
 # Parse and validate a plan's execution strategy
-python skills/do/orchestrator.py path/to/00-INDEX.md
+python skills/execute/orchestrator.py path/to/00-INDEX.md
 
 # Route a task description to the correct agent
-python skills/do/orchestrator.py --agent "Build React component" --tags ui,frontend
+python skills/execute/orchestrator.py --agent "Build React component" --tags ui,frontend
 ```
 
 ### Reading a gate's result (assert a positive marker)
@@ -473,7 +473,7 @@ The target pipeline manages three state files. Test scripts validate their lifec
 | File | Purpose | Owner |
 |------|---------|-------|
 | `.fno/target-state.md` | Pipeline iteration tracking, gate status | target |
-| `.fno/STATE.md` | Wave and task progress within a plan | /do, /do waves |
+| `.fno/STATE.md` | Wave and task progress within a plan | /execute, /execute waves |
 | `.fno/SUMMARY.md` | Task completion notes and concerns | archer agents |
 
 **What tests verify:**

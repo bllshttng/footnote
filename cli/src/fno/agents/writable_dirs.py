@@ -202,7 +202,7 @@ def worker_writable_dirs(
     """Absolute, deduplicated, existing-only write grants for a worker spawned at ``cwd``.
 
     Stable order: state root(s), this spawn's plan directory, then any
-    caller-supplied sibling project roots (a multi-repo wave; ``/do`` spawns
+    caller-supplied sibling project roots (a multi-repo wave; ``/execute`` spawns
     foreign waves with ``--cwd <root>`` and grants nothing for that root today).
 
     Existing-only: a grant naming a directory that is not there is refused by

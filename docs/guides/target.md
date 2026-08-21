@@ -54,9 +54,9 @@ Target uses t-shirt sizes to control ceremony level:
 
 | Size | Flag | What it does |
 |------|------|-------------|
-| Small | `-S` | Uses /do executor. Build, review, PR. No docs, no external review, no verification. For bug fixes and quick features. |
-| Medium | `-M` | Uses /do waves. Adds fresh verification, external review, docs. This is the default. |
-| Large | `-L` | Uses /do waves with everything: research phase, adversarial challenge, browser testing, goal verification, clean pass, how-to guide. For critical production features. |
+| Small | `-S` | Uses /execute executor. Build, review, PR. No docs, no external review, no verification. For bug fixes and quick features. |
+| Medium | `-M` | Uses /execute waves. Adds fresh verification, external review, docs. This is the default. |
+| Large | `-L` | Uses /execute waves with everything: research phase, adversarial challenge, browser testing, goal verification, clean pass, how-to guide. For critical production features. |
 
 No flag means medium. Set a project default with `default_size: M` in `.fno/config.toml`.
 
@@ -160,8 +160,8 @@ footnote has five levels of execution, each wrapping the one below:
 |-------|-------|-------------|-------------|
 | 5 | `/fno:target` per node | Multi-feature roadmap: pick ready features (`fno backlog next`), run `/fno:target` on each. | Multi-feature roadmap |
 | 4 | `/target` | Idea to shipped PR. Won't quit until done. | Single feature |
-| 3 | `/do waves` | Execute multi-phase plans with waves and verification. | Plan already exists |
-| 2 | `/do` | Execute a focused plan in one shot. | Bug fix, small change |
+| 3 | `/execute waves` | Execute multi-phase plans with waves and verification. | Plan already exists |
+| 2 | `/execute` | Execute a focused plan in one shot. | Bug fix, small change |
 | 1 | `archer` (agent) | Execute a single task with TDD. | Called by operator |
 
 Each level composes the one below. A roadmap runs `/fno:target` per node. Target calls operator. Operator dispatches archer. You pick the level that matches your task.

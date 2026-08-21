@@ -20,7 +20,7 @@ Each transition corresponds to a pipeline phase:
 |--------|--------|
 | `design` | `/think` at doc creation time |
 | `ready` | `/blueprint` after appending execution sections |
-| `in_progress` | `/do` or `/target` when execution starts |
+| `in_progress` | `/execute` or `/target` when execution starts |
 | `in_review` | `/pr create` on PR creation |
 | `done` | the merge, via the write-time projection |
 
@@ -52,7 +52,7 @@ Any attempt to write outside this set exits with code 2 and names the offending 
 | File Ownership Map | `/blueprint` (brownfield only) |
 | Patterns to Reuse | `/blueprint` (brownfield only) |
 | kill_criteria | `/blueprint` |
-| Implementation Log | `/do` or `/target` |
+| Implementation Log | `/execute` or `/target` |
 | Review Verdicts | `/review sigma` |
 | Ship Record | `/pr create` and `/ship` |
 
@@ -78,7 +78,7 @@ A plan finalized after this boundary is stamped `acceptance_contract: compiled-v
 
 Exit codes: 0 success, 1 plan not found, 2 contract violation (missing sections, task-id absent from Execution Strategy), 3 malformed content requiring human inspection.
 
-For operator's detection and dispatch logic, see [skills/do/references/single-doc-shape.md](../../skills/do/references/single-doc-shape.md).
+For operator's detection and dispatch logic, see [skills/execute/references/single-doc-shape.md](../../skills/execute/references/single-doc-shape.md).
 
 ## Migration path
 
@@ -90,6 +90,6 @@ For operator's detection and dispatch logic, see [skills/do/references/single-do
 
 - Skill body: [skills/blueprint/SKILL.md](../../skills/blueprint/SKILL.md)
 - Section-ownership + mutation spec: [skills/blueprint/references/single-doc-spec.md](../../skills/blueprint/references/single-doc-spec.md)
-- Operator detection: [skills/do/references/single-doc-shape.md](../../skills/do/references/single-doc-shape.md)
+- Operator detection: [skills/execute/references/single-doc-shape.md](../../skills/execute/references/single-doc-shape.md)
 - Status state machine: `fno.plan._status` (`cli/src/fno/plan/_status.py`)
 - Ownership allowlist: `fno.plan._ownership` (`cli/src/fno/plan/_ownership.py`)

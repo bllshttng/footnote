@@ -571,6 +571,10 @@ def _default_read_transcript(session_id: str) -> list[str] | None:
 # both flagged the naive per-row subprocess as a real latency risk).
 _SKILL_COMMIT_HISTORY_CACHE: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
 
+# The ledger phase and skill directory are separate vocabularies. Keep old
+# phase rows pointed at the renamed skill until the compatibility shim retires.
+_PHASE_TO_SKILL_DIR = {"do": "execute"}
+
 
 def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
     """All commits touching rel, oldest first: [(commit datetime, short hash), ...].
@@ -583,7 +587,7 @@ def _skill_commit_history(root: Path, rel: str) -> list[tuple[datetime, str]]:
     history: list[tuple[datetime, str]] = []
     try:
         out = subprocess.run(
-            ["git", "log", "--format=%h %aI", "--", rel],
+            ["git", "log", "--follow", "--format=%h %aI", "--", rel],
             cwd=root,
             capture_output=True,
             text=True,
@@ -609,6 +613,7 @@ def _default_skill_version(skill_id: str, ts_raw: str | None) -> str:
     from fno.paths import resolve_repo_root
 
     name = skill_id.split(":", 1)[1] if ":" in skill_id else skill_id
+    name = _PHASE_TO_SKILL_DIR.get(name, name)
     rel = f"skills/{name}/SKILL.md"
     try:
         root = resolve_repo_root()

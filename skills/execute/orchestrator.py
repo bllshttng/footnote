@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wave orchestration logic for /fno:do waves
+Wave orchestration logic for /fno:execute waves
 
 Handles:
 - Parsing execution strategy from the plan doc
@@ -470,7 +470,7 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
 # Providers whose stable baseline cannot spawn concurrent Task-tool subagents,
 # so a conflict-free parallel wave still downgrades to sequential main-thread
 # dispatch. Claude and Codex support parallel subagents; Gemini's baseline is
-# sequential (skills/do/references/waves.md). This is the one provider fact the
+# sequential (skills/execute/references/waves.md). This is the one provider fact the
 # wave-mode resolver still needs after the static capability matrix was removed.
 SEQUENTIAL_FALLBACK_PROVIDERS = frozenset({"gemini"})
 
@@ -912,7 +912,7 @@ def parse_task_result(output: str) -> Optional[TaskResult]:
 # Barrier vocabulary: a worker return classified for the deterministic fan-in
 # count in fno.events.verify_child_promise.tally_fan_in. The two files connect
 # through this (task_id, kind) tuple, NOT a cross-package import - orchestrator
-# stays free of `fno.*` imports so `python skills/do/orchestrator.py --help`
+# stays free of `fno.*` imports so `python skills/execute/orchestrator.py --help`
 # runs under the ambient python that lacks the fno package.
 #   kind "completed" -> SUCCESS | DONE_WITH_CONCERNS
 #   kind "failed"    -> FAILED | BLOCKED (unresolved; the barrier must not release)
@@ -1055,7 +1055,7 @@ def handle_blocked_task(
 
 # Self-contained frontmatter-schema check. Duplicated (not shared) with
 # skills/blueprint: driver skills are CI-enforced self-contained and cannot
-# cross-import. Validation runs under a pydantic-capable python because /do's
+# cross-import. Validation runs under a pydantic-capable python because /execute's
 # ambient python3 lacks pydantic (same reason finalize.rs shells the cli venv).
 _VALIDATE_SNIPPET = r"""
 import json, sys
@@ -1068,9 +1068,9 @@ except ValidationError as e:
     # Block only on STRUCTURAL corruption (a bad size, a garbage timestamp).
     # A missing required field is tolerated (a plan binds its node later), and
     # a drifted-but-recognizable `status` (planned/designed/superseded/...) is
-    # NOT a /do concern: `fno plan reconcile-status` normalizes it, and /do
+    # NOT a /execute concern: `fno plan reconcile-status` normalizes it, and /execute
     # executes the Execution Strategy section, which does not depend on the
-    # frontmatter status. Blocking /do on status drift would refuse ~5% of real
+    # frontmatter status. Blocking /execute on status drift would refuse ~5% of real
     # plans that run fine today.
     present = [
         x for x in e.errors()

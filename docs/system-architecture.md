@@ -42,12 +42,12 @@ footnote is structured as a layered plugin with six architectural layers:
 ```mermaid
 graph TB
     subgraph "Entry Points"
-        CMD["/target, /blueprint, /do, /do waves, /fix investigate, /fix, /review sigma, /think, /think what-if"]
+        CMD["/target, /blueprint, /execute, /execute waves, /fix investigate, /fix, /review sigma, /think, /think what-if"]
     end
 
     subgraph "Skills Layer (25 skills)"
         direction TB
-        WF["Workflow Skills<br/>target, plan, do, operator,<br/>megawalk"]
+        WF["Workflow Skills<br/>target, plan, execute, operator,<br/>megawalk"]
         DS["Design Skills<br/>think, what-if, audit"]
         EX["Execution Skills<br/>tdd, fix, debug, speculate"]
         RV["Review Skills<br/>sigma-review, create-pr,<br/>check-pr"]
@@ -107,7 +107,7 @@ sequenceDiagram
     participant R as /target
     participant T as /think
     participant P as /blueprint
-    participant O as /do waves or /do
+    participant O as /execute waves or /execute
     participant A as Agents (target/archer)
     participant CR as /review sigma
     participant GV as goal-verifier
@@ -217,14 +217,14 @@ Three execution paths with increasing autonomy:
 
 ```mermaid
 graph LR
-    subgraph "Lightweight - /do"
+    subgraph "Lightweight - /execute"
         DO_IN["Plan path<br/>(flat plan)"] --> DO_READ["Read plan"]
         DO_READ --> DO_EXEC["Execute sequentially<br/>in main session"]
         DO_EXEC --> DO_COMMIT["Atomic commit"]
         DO_COMMIT --> DO_DONE["Done"]
     end
 
-    subgraph "Heavy - /do waves"
+    subgraph "Heavy - /execute waves"
         OP_IN["Plan path<br/>(00-INDEX.md)"] --> OP_PARSE["Parse waves<br/>(orchestrator.py)"]
         OP_PARSE --> OP_W1["Wave 1<br/>(sequential)"]
         OP_W1 --> OP_W2["Wave 2<br/>(parallel subagents)"]
@@ -237,7 +237,7 @@ graph LR
         RA_IN["Feature string<br/>or plan path"] --> RA_INIT["Init target-state.md"]
         RA_INIT --> RA_THINK["Think"]
         RA_THINK --> RA_PLAN["Plan"]
-        RA_PLAN --> RA_DO["Execute<br/>(/do waves or /do)"]
+        RA_PLAN --> RA_DO["Execute<br/>(/execute waves or /execute)"]
         RA_DO --> RA_REVIEW["Code Review<br/>(6 agents)"]
         RA_REVIEW --> RA_VERIFY["Goal Verify<br/>(3-level)"]
         RA_VERIFY --> RA_SHIP["Ship PR"]
@@ -253,11 +253,11 @@ graph LR
 
 ### Execution Path Comparison
 
-| Aspect | /do (Lightweight) | /do waves (Heavy) | /target (Autonomous) |
+| Aspect | /execute (Lightweight) | /execute waves (Heavy) | /target (Autonomous) |
 |--------|-------------------|--------------------|---------------------|
 | Input | Flat plan file | 00-INDEX.md with waves | Feature string or plan path |
 | Session | Single | Single | Multi-iteration, stop-hook enforced |
-| Parallelism | None | Wave-based via subagents | Inherits from /do waves |
+| Parallelism | None | Wave-based via subagents | Inherits from /execute waves |
 | State tracking | None | STATE.md | target-state.md + STATE.md |
 | Completion | Manual | Manual | External truth: PR green + reviewed (loop-check) |
 | Exit control | Normal | Normal | Stop hook blocks until loop-check confirms done |
@@ -485,7 +485,7 @@ Degradation is resolved per wave at dispatch time, not stamped into the session 
 
 ## Wave Orchestration Engine
 
-The orchestrator (`skills/do/orchestrator.py`) parses `00-INDEX.md` and dispatches tasks to agents.
+The orchestrator (`skills/execute/orchestrator.py`) parses `00-INDEX.md` and dispatches tasks to agents.
 
 ### 00-INDEX.md Format
 

@@ -8,7 +8,7 @@ Build it, PR it, done. Minimal ceremony.
 
 | Capability | Value | Notes |
 |------------|-------|-------|
-| Spec mode | quick | Single-file plan for `/do` |
+| Spec mode | quick | Single-file plan for `/execute` |
 | Executor | do | Lightweight, no wave orchestration |
 | Dynamic parallelization | off | do doesn't use it |
 | Research phase | off | |
@@ -28,7 +28,7 @@ Build it well. Standard ceremony.
 
 | Capability | Value | Notes |
 |------------|-------|-------|
-| Spec mode | full (default) | Folder plan for `/do waves` |
+| Spec mode | full (default) | Folder plan for `/execute waves` |
 | Executor | operator | Wave orchestration with verification |
 | Dynamic parallelization | auto | When file ownership map exists |
 | Research phase | off | Operator auto-detects if invoked directly |
@@ -48,7 +48,7 @@ Build it bulletproof. Full treatment.
 
 | Capability | Value | Notes |
 |------------|-------|-------|
-| Spec mode | full (default) | Folder plan for `/do waves` |
+| Spec mode | full (default) | Folder plan for `/execute waves` |
 | Executor | operator | With all coordinator capabilities |
 | Dynamic parallelization | auto | |
 | Research phase | on | Forces research even under target |
@@ -87,7 +87,7 @@ Build it bulletproof. Full treatment.
 Each toggle maps to existing config keys in target-state.md:
 
 ```yaml
-executor: do | operator        # determines /do vs /do waves invocation
+executor: do | operator        # determines /execute vs /execute waves invocation
 no_research: true | false      # from operator upgrade
 no_verify_fresh: true | false  # from operator upgrade
 adversarial: true | false      # from operator upgrade

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT = REPO_ROOT / "skills/do/scripts/resolve-executor.sh"
+SCRIPT = REPO_ROOT / "skills/execute/scripts/resolve-executor.sh"
 
 
 @pytest.fixture()

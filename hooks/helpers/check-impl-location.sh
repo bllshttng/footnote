@@ -2,7 +2,7 @@
 # check-impl-location.sh - shared, read-only location verdict.
 #
 # One source of truth for "is it safe to implement here?", consumed by the
-# implementation entry points (/target, /do, /fix), by init-target-state.sh
+# implementation entry points (/target, /execute, /fix), by init-target-state.sh
 # (which keeps its own hard refusal), and by the universal SessionStart
 # heads-up. Extracting it here is what keeps the canonical-main guard from
 # drifting across the three skills (design: Worktree Scope Hygiene, US2).
@@ -10,7 +10,7 @@
 # Contract:
 #   - Emits a key=value block on stdout and ALWAYS exits 0. It is advisory;
 #     the CONSUMER decides whether to block (init-target-state.sh exits 1,
-#     /do and /fix refuse, SessionStart only warns).
+#     /execute and /fix refuse, SessionStart only warns).
 #   - Degrades silently to the safe default (verdict=ok, nested_count=0)
 #     outside a git repo or when any git command fails.
 #

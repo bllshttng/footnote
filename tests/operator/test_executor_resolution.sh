@@ -14,7 +14,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RESOLVER="$REPO_ROOT/skills/do/scripts/resolve-executor.sh"
+RESOLVER="$REPO_ROOT/skills/execute/scripts/resolve-executor.sh"
 
 PASS=0
 FAIL=0

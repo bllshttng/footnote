@@ -18,8 +18,8 @@ project:
 config:
   # Plan paths (prefer plansDirectory in .claude/settings.json)
   plans:
-    focused_path: ""                     # where /do plans save (no default — read from .claude/settings.json plansDirectory)
-    full_path: ""                        # where /do waves plans save (no default — read from .claude/settings.json plansDirectory)
+    focused_path: ""                     # where /execute plans save (no default — read from .claude/settings.json plansDirectory)
+    full_path: ""                        # where /execute waves plans save (no default — read from .claude/settings.json plansDirectory)
 
   # Documentation
   docs:

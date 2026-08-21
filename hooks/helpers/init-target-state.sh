@@ -113,7 +113,7 @@ unset FNO_TARGET_INIT_GATED
 # target session started there is felt by every sibling terminal.
 #
 # The canonical-vs-worktree + protected-branch classification is delegated
-# to the shared helper (check-impl-location.sh) so /target, /do, /fix, and
+# to the shared helper (check-impl-location.sh) so /target, /execute, /fix, and
 # the SessionStart heads-up all consult ONE rule and never drift (design:
 # Worktree Scope Hygiene, US2). This script keeps its own hard refusal; the
 # helper only classifies. Verdict `canonical-protected` means "block here";

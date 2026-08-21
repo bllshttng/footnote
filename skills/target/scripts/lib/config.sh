@@ -320,7 +320,7 @@ get_auto_merge_conflict_resolution() {
 _code_default_phase() {
     local phase="$1"
     case "$phase" in
-        execute)  echo "fno:do waves" ;;
+        execute)  echo "fno:execute waves" ;;
         review)   echo "fno:review" ;;
         validate) echo "" ;;  # detected from project (npm run build, pytest, etc.)
         ship)     echo "fno:pr create" ;;

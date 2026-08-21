@@ -228,9 +228,9 @@ otherwise proceed without the prerequisite.
 |------|--------|
 | `agents/frontend-executor.md` | Full rewrite; dispatch envelope, gate artifact tables, all 9 decisions wired |
 | `skills/blueprint/SKILL.md` | PRODUCT.md prereq check + `impeccable_stages` validator |
-| `skills/do/references/waves.md` | Dispatch-time PRODUCT.md re-check + iteration ceiling |
-| `skills/do/orchestrator.py` | Iteration ceiling refactor (full-loop, not per-stage) |
-| `skills/do/references/executor-resolution.md` | `impeccable_stages` override documentation |
+| `skills/execute/references/waves.md` | Dispatch-time PRODUCT.md re-check + iteration ceiling |
+| `skills/execute/orchestrator.py` | Iteration ceiling refactor (full-loop, not per-stage) |
+| `skills/execute/references/executor-resolution.md` | `impeccable_stages` override documentation |
 | `tests/agents/test_frontend_executor.py` | BDD tests: stage selection, verdict, finding classification |
 | `tests/blueprint/test_product_md_check.py` | /blueprint gate tests |
 | `tests/operator/test_iteration_ceiling.py` | Ceiling tests |

@@ -349,7 +349,7 @@ gh pr view --json number,url
 ## Integration with Workflow
 
 ```
-/think → /blueprint → /do → /review → /pr create → /pr check
+/think → /blueprint → /execute → /review → /pr create → /pr check
 ```
 
 **Flow:**

@@ -5577,7 +5577,7 @@ def cmd_session_add(
                 typer.echo(f"session add: no node matches {node!r} (phase={phase}).", err=True)
                 raise typer.Exit(code=2)
             node_id = match.candidates[0]["id"]
-            # Plan agreement (mirrors /do Step 1.5): only a POSITIVE disagreement
+            # Plan agreement (mirrors /execute Step 1.5): only a POSITIVE disagreement
             # skips. An unreadable plan or an absent `claims:` is agreement-
             # unknown, and absent evidence of conflict is not conflict.
             #

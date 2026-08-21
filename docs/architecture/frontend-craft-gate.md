@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Frontend-craft gate
 
 Stops frontend work from silently skipping the frontend-craft (`/impeccable`)
@@ -8,7 +9,7 @@ could ship a new UI surface as plain code with no craft pass and no warning:
    changes. The changeset does not exist at init time, so the planner could
    not pre-declare it correctly. This silently skipped the browser gate too.
 2. Executor resolution (`impeccable` for frontend files) only ran on the
-   `/do waves` dispatch path. The inline `/do` path and the
+   `/execute waves` dispatch path. The inline `/execute` path and the
    substituted-executor path bypassed it, so frontend work ran as plain `do`.
 3. Nothing enforced that a craft pass ran. Skipping it was invisible.
 
@@ -34,9 +35,9 @@ copy of the patterns.
 ## Bug 2: executor resolution on the inline path
 
 `scripts/lib/resolve-plan-executor.sh` resolves the executor for a flat plan
-(the `/do` granularity), extracting the plan's declared file list plus any
-plan-level `executor:` and running the same three-tier resolver `/do waves`
-uses per task. `/do`'s skill body (step 1b) consults it so a frontend plan
+(the `/execute` granularity), extracting the plan's declared file list plus any
+plan-level `executor:` and running the same three-tier resolver `/execute waves`
+uses per task. `/execute`'s skill body (step 1b) consults it so a frontend plan
 routes to `/impeccable` on the inline path too, making the gate satisfiable
 rather than a deadlock.
 
@@ -45,7 +46,7 @@ rather than a deadlock.
 `scripts/lib/frontend-craft-gate.sh` provides a pure decision function plus
 config/presence resolvers; `gate-audit.sh` calls them at promise time. The
 gate is **path-independent**: it does not care whether frontend work ran via
-`/do waves`, inline `/do`, or substitution, only whether frontend surfaces
+`/execute waves`, inline `/execute`, or substitution, only whether frontend surfaces
 were touched and the craft pass ran.
 
 ```
@@ -68,8 +69,8 @@ hard stop. Set `config.gates.frontend_craft: block` to make it bite.
 
 ### Satisfying the gate
 
-The craft owner (`frontend-executor` via `/do waves`, or `/impeccable` via
-`/do`) flips the gate and writes the artifact:
+The craft owner (`frontend-executor` via `/execute waves`, or `/impeccable` via
+`/execute`) flips the gate and writes the artifact:
 
 ```bash
 fno gate set frontend_craft_passed true

@@ -10,6 +10,7 @@ requires:
     - "jq >= 1.6"
 ---
 
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Agents
 
 **Describe the agent outcome you want; this skill remembers the command.**
@@ -460,7 +461,7 @@ claude payload lands harness-native under `<repo>/.claude/worktrees/`); never
 assume a fixed base. "Writes code" is keyed off `payload_mode`,
 not the message text: a node `build` dispatch (claude `/target <id>`, opencode
 `/fno:target <id>`, or codex `$fno:target <id>`) and an explicit claude
-`/target`|`/do`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code
+`/target`|`/execute`|`/fix` passthrough all isolate; a `seed`/`handoff` and a non-code
 claude slash command (`/think` writes a design doc) stay in repo root. An already-isolated
 worktree cwd is not re-isolated; any creation error fails safe to repo root. This
 is in `spawn.sh` (deterministic), so you do nothing here except relay the receipt

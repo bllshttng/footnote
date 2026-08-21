@@ -290,7 +290,7 @@ The script:
    - Prints a warning to stderr (never blocks; plan ships regardless):
      ```
      warning: this plan locks executor: impeccable but no PRODUCT.md was found.
-     Run /impeccable teach before /target dispatch, or /do waves will hard-block.
+     Run /impeccable teach before /target dispatch, or /execute waves will hard-block.
      ```
 
 DESIGN.md gets softer treatment: if DESIGN.md is missing, add to

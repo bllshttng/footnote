@@ -14,7 +14,7 @@ In emit order, inside the single plan doc's `## Execution Strategy` waves:
 
 | Header | Required | Purpose |
 |--------|----------|---------|
-| `## Execution Strategy` | yes | Machine-readable YAML wave manifest for `/do waves` |
+| `## Execution Strategy` | yes | Machine-readable YAML wave manifest for `/execute waves` |
 | `## Wave N: <name>` (one per wave) | optional | Human or legacy wikilink target for a shippable unit |
 | `## Phase Dependencies` | optional | Human-readable phase DAG when YAML alone is insufficient |
 | `## User Stories Summary` | optional | BDD acceptance criteria roll-up by epic |

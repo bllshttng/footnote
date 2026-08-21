@@ -17,7 +17,7 @@ human-friendly summary on stdout; errors always go to stderr.
 do provenance: why the claim verbs write it
 -------------------------------------------
 A node's `do` lifecycle row used to be written only at a clean terminal
-(release --stamp-do, the finalize backstop, /do Step 1.5). A session killed
+(release --stamp-do, the finalize backstop, /execute Step 1.5). A session killed
 mid-phase reaches none of those, so the whole row was lost - including a
 started_at that sat in its claim file the entire time. A node finished to an
 open, green, attested PR read `sessions=[blueprint only]`, and a groom pass

@@ -183,7 +183,7 @@ argument-hint: "[expertise] [plan-path]"
 
 `fno:operator` remains as a compatibility shim.
 
-Use `fno:operator` (`skills/do/references/waves.md`) for the primary flow.
+Use `fno:operator` (`skills/execute/references/waves.md`) for the primary flow.
 
 When invoked through this alias, follow the exact same workflow as `fno:operator`.
 ```
@@ -375,7 +375,7 @@ think -> plan -> do -> review -> ship
 |-------|-------|---------|
 | **Think** | `/think` | Explore design, generate acceptance criteria |
 | **Plan** | `/blueprint` | Create implementation plan with tasks and waves |
-| **Do** | `/do` or `/do waves` or `/target` | Execute the plan |
+| **Execute** | `/execute` or `/execute waves` or `/target` | Execute the plan |
 | **Review** | `/review sigma` | Review changes against guidelines |
 | **Ship** | `/pr create` | Create PR from commits |
 
@@ -388,20 +388,20 @@ Three tiers of execution, escalating in complexity and cost:
 
 | Tier | Skill | Use When | State | Agents |
 |------|-------|----------|-------|--------|
-| **Lightweight** | `/do` | Focused plan, single session, 2-5 files | `.fno/STATE.md` | None (inline) |
-| **Heavy** | `/do waves` | Multi-phase plan with waves, parallel tasks | `.fno/STATE.md` + `SUMMARY.md` | Spawns target agents |
+| **Lightweight** | `/execute` | Focused plan, single session, 2-5 files | `.fno/STATE.md` | None (inline) |
+| **Heavy** | `/execute waves` | Multi-phase plan with waves, parallel tasks | `.fno/STATE.md` + `SUMMARY.md` | Spawns target agents |
 | **Autonomous** | `/target` | End-to-end from idea to PR, loop until done | `.fno/target-state.md` | Full pipeline with stop hook |
 
 #### Decision Tree
 
 ```
 Is it a quick focused change (< 1 session)?
-  YES -> /do path/to/plan.md
+  YES -> /execute path/to/plan.md
   NO  -> Does the plan have waves/parallel tasks?
-    YES -> /do waves path/to/plan/
+    YES -> /execute waves path/to/plan/
     NO  -> Do you want full autonomy (idea to PR)?
       YES -> /target "feature description"
-      NO  -> /do waves path/to/plan/
+      NO  -> /execute waves path/to/plan/
 ```
 
 ### Quality Gate Pattern
@@ -661,7 +661,7 @@ The target autonomous loop uses a stop hook to enforce completion:
 | Main file | Always `SKILL.md` (uppercase) | `skills/fix/SKILL.md` |
 | References dir | Always `references/` | `skills/target/references/` |
 | Reference files | kebab-case `.md` | `iteration-loop.md` |
-| Scripts dir | Always `scripts/` | `skills/do/scripts/` |
+| Scripts dir | Always `scripts/` | `skills/execute/scripts/` |
 | Script files | kebab-case `.sh` or `.py` | `orchestrator.py` |
 
 ### Agents

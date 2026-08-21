@@ -324,7 +324,7 @@ chore: sync codex agent definitions
 - Keep the subject line under 72 characters
 - No emdashes in commit messages (use hyphens)
 
-**NON-NEGOTIABLE for Medium and Large size profiles:** Each completed task or wave in `/do waves` MUST produce a commit before execution moves to the next task. Never accumulate all changes into a single kitchen-sink commit at the end. Stage only files relevant to the task (never `git add .` or `git add -A`). Include a task reference in the commit body:
+**NON-NEGOTIABLE for Medium and Large size profiles:** Each completed task or wave in `/execute waves` MUST produce a commit before execution moves to the next task. Never accumulate all changes into a single kitchen-sink commit at the end. Stage only files relevant to the task (never `git add .` or `git add -A`). Include a task reference in the commit body:
 
 ```
 feat|fix|refactor(scope): what changed

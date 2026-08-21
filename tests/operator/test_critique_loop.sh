@@ -8,14 +8,14 @@
 #   AC2.5-EDGE max-iter bail recorded with last score
 #   parser fallbacks: unparseable score, unparseable next-subcommand
 #
-# Drives skills/do/scripts/run-critique-loop.sh against the
+# Drives skills/execute/scripts/run-critique-loop.sh against the
 # _impeccable_stub.sh fake. The shell script is the testable port of the
 # frontend-executor agent's inner loop; the contract is shared.
 
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-LOOP_SCRIPT="$REPO_ROOT/skills/do/scripts/run-critique-loop.sh"
+LOOP_SCRIPT="$REPO_ROOT/skills/execute/scripts/run-critique-loop.sh"
 STUB="$REPO_ROOT/tests/operator/_impeccable_stub.sh"
 
 PASS=0

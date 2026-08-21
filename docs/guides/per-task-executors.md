@@ -165,5 +165,5 @@ correct value.
 ## Further reading
 
 - Architecture: [operator-impeccable-executor.md](../architecture/operator-impeccable-executor.md)
-- Resolver reference: [skills/do/references/executor-resolution.md](../../skills/do/references/executor-resolution.md)
+- Resolver reference: [skills/execute/references/executor-resolution.md](../../skills/execute/references/executor-resolution.md)
 - Agent definition: [agents/frontend-executor.md](../../agents/frontend-executor.md)

@@ -64,7 +64,7 @@ Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-l
 It emits `verdict=ok|canonical-protected` plus a nested-worktree advisory, and always exits 0.
 
 - **SessionStart heads-up** (`hooks/session-start.sh`): on the canonical protected branch, it prints a non-blocking note.
-- **Implementation-entry refusal** (`/target`, `/do`, `/fix`): on `canonical-protected` these refuse before the first write. The escape is `TARGET_LOCATION_OK=main-acknowledged`.
+- **Implementation-entry refusal** (`/target`, `/execute`, `/fix`): on `canonical-protected` these refuse before the first write. The escape is `TARGET_LOCATION_OK=main-acknowledged`.
 - **Config-driven relocation** (`hooks/worktree-setup.sh`): refuses outright on `policy = "never"`. With `worktrees_base` set, it relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>`. With the knob unset, it leaves the placement harness-native. `scripts/setup/worktree-create-hook.sh` is the user-global wiring for non-footnote repos and does the same, reading its base from config.
 
 Wire exactly one `WorktreeCreate` hook per repo.

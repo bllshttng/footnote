@@ -198,7 +198,7 @@ if [[ "$PLATFORM" != "codex" && -f "${SCRIPT_DIR}/inject-fno-agent-whoami.sh" ]]
 fi
 
 # 4. worktree-scope hygiene heads-up — universal, advisory, never blocks.
-#    Consumes the SAME shared verdict as /target, /do, /fix (one rule, no
+#    Consumes the SAME shared verdict as /target, /execute, /fix (one rule, no
 #    drift). Emits at most two one-line notes and stays silent on a clean
 #    worktree, a non-git dir, or any git error (the helper degrades to
 #    verdict=ok / nested_count=0). This is the heads-up that today only

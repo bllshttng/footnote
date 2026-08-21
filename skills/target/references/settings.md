@@ -73,7 +73,7 @@ config:
 | File | Purpose | Owner |
 |------|---------|-------|
 | `.fno/target-state.md` | Iteration tracking | target |
-| `.fno/STATE.md` | Wave/task progress | /do waves |
+| `.fno/STATE.md` | Wave/task progress | /execute waves |
 | `.fno/SUMMARY.md` | Task completion notes | archer |
 | `.fno/ledger.json` | Feature metrics | target |
 

@@ -1,4 +1,4 @@
-"""Tests for the /do orchestrator's explicit-harness input (AC15).
+"""Tests for the /execute orchestrator's explicit-harness input (AC15).
 
 AC15-HP: a Codex session with ``CODEX_PLUGIN_ROOT`` unset, running normal wave
 execution with an explicit Codex harness argument, must take the harness from
@@ -14,11 +14,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-ORCH_DIR = REPO_ROOT / "skills" / "do"
+ORCH_DIR = REPO_ROOT / "skills" / "execute"
 if str(ORCH_DIR) not in sys.path:
     sys.path.insert(0, str(ORCH_DIR))
 
-import orchestrator  # noqa: E402  (skills/do is not a package; added to sys.path)
+import orchestrator  # noqa: E402  (skills/execute is not a package; added to sys.path)
 
 
 def test_explicit_harness_wins_with_env_absent():

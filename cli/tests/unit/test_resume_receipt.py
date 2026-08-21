@@ -44,7 +44,7 @@ def _receipt(**overrides):
         worktree="/wt/x-c3a2",
         branch="feature/x-c3a2",
         head="abc123def456",
-        next_verb="/fno:do waves",
+        next_verb="/fno:execute waves",
         next_target="x-c3a2",
         written_at="2026-07-26T02:00:00Z",
         completed_tasks=["1.1"],
@@ -121,7 +121,7 @@ def test_write_and_load_round_trip(tmp_path):
     assert loaded.head == r.head
     assert loaded.remaining_tasks == ("2.1", "2.2")
     assert loaded.idempotency_keys == ("pr_create:abc123d", "comment:abc123d")
-    assert loaded.next_action.verb == "/fno:do waves"
+    assert loaded.next_action.verb == "/fno:execute waves"
     assert loaded.content_sha == r.content_sha
 
 

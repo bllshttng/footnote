@@ -544,6 +544,8 @@ def _default_resolver(short_id: str) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 _PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# Keep the old spelling on the canonical profile key for one release.
+_VERB_ALIASES = {"do": "execute"}
 
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
@@ -617,7 +619,7 @@ def _profile_key(seed: Optional[str]) -> Optional[str]:
     rest = tok[1:]
     if rest.startswith("fno:"):
         rest = rest[len("fno:"):]
-    return rest if _PROFILE_KEY_RE.match(rest) else None
+    return _VERB_ALIASES.get(rest, rest) if _PROFILE_KEY_RE.match(rest) else None
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
@@ -1027,10 +1029,18 @@ def inject_spawn_defaults(
     # the injection below - so the provider-scoped model rule, effort degrade, and
     # unknown-provider refusal all run once, on the merged fields.
     verb = _profile_key(_seed_of(out[1:]))
-    profile = (getattr(agents, "profiles", None) or {}).get(verb) if verb else None
+    profiles = getattr(agents, "profiles", None) or {}
+    profile_verb = verb
+    profile = profiles.get(verb) if verb else None
+    if profile is None and verb:
+        legacy_verb = next((old for old, new in _VERB_ALIASES.items() if new == verb), None)
+        if legacy_verb:
+            profile = profiles.get(legacy_verb)
+            if profile is not None:
+                profile_verb = legacy_verb
     lane: Optional[object] = None
     lane_index: Optional[int] = None
-    if profile is not None and verb is not None:
+    if profile is not None and profile_verb is not None:
         # Scanned BEFORE lane selection: an all-capped refusal must know whether
         # the caller named the lane themselves, and that fact lives in the argv.
         # -P/--provider counts: it names the VENDOR, which is the axis a cap is
@@ -1043,7 +1053,7 @@ def inject_spawn_defaults(
             or _flag_value(list(out[1:]), "--provider", "-P") is not None
         )
         lane, lane_index = _select_profile_lane(
-            profile, verb, agents, err, explicit_lane=_explicit_lane
+            profile, profile_verb, agents, err, explicit_lane=_explicit_lane
         )
 
     # A lane is a COMPLETE routing coordinate, so the two fields that select
@@ -1065,13 +1075,13 @@ def inject_spawn_defaults(
         if lane is not None and lane_index is not None:
             lv = _lane_value(lane, name)
             if lv:
-                return lv, f"agents.profiles.{verb}.lanes[{lane_index}]"
+                return lv, f"agents.profiles.{profile_verb}.lanes[{lane_index}]"
             if name in _LANE_EXCLUSIVE:
                 return "", None
         if profile is not None:
             pv = (getattr(profile, name, "") or "").strip()
             if pv:
-                return pv, f"agents.profiles.{verb}"
+                return pv, f"agents.profiles.{profile_verb}"
         dv = (getattr(defaults, name, "") or "").strip()
         if dv:
             return dv, "agents.defaults"

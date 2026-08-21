@@ -460,10 +460,10 @@ def test_ac4_check3_fails_on_late_crown():
 def test_check1_same_basename_does_not_suppress_violation():
     """Regression (review finding: basename arm): a read of an unrelated
     same-basename file in another directory must NOT cover a claim. Without this,
-    a read of skills/do/SKILL.md would silently cover a claim about
+    a read of skills/execute/SKILL.md would silently cover a claim about
     skills/target/SKILL.md and check 1 would report clean on a real violation."""
     entries = [
-        {"index": 0, "kind": "tool_use", "tool": "Read", "target": "skills/do/SKILL.md"},
+        {"index": 0, "kind": "tool_use", "tool": "Read", "target": "skills/execute/SKILL.md"},
         {"index": 1, "kind": "assistant_text", "text": "skills/target/SKILL.md:40 pins the executor."},
     ]
     res = check1_claim_before_read(entries)

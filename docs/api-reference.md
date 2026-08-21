@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # footnote Plugin - API Reference
 
 The **footnote** plugin is an autonomous development workflow for Claude Code that takes features from idea to shipped PR. It provides 26 skills, 12 agents, and a hook system that work together as a pipeline: think, spec, do, review, ship.
@@ -43,7 +44,7 @@ The core pipeline - from idea to shipped PR.
 |-------|---------|-------|---------|
 | `think` | `/fno:think` | inherit | Brainstorming and design exploration with BDD criteria |
 | `blueprint` | `/fno:blueprint "feature"` | inherit | Implementation planning with wave execution strategy. Use `--full` for BDD acceptance criteria |
-| `do` | `/fno:do` | inherit | Lightweight single-session plan execution. Supports `--resume` and `--retry <task-id>` |
+| `execute` | `/fno:execute` | inherit | Lightweight single-session plan execution. Supports `--resume` and `--retry <task-id>` |
 | `operator` | `/fno:operator` | inherit | Heavy multi-phase wave orchestration with subagent dispatch |
 | `target` | `/fno:target "feature"` | inherit | Autonomous end-to-end pipeline (think, blueprint, do, review, ship). Also accepts a plan path to skip think/blueprint |
 | `megawalk` | `/fno:megawalk` | inherit | Multi-session task orchestration from a vision document |
@@ -63,7 +64,7 @@ Input ("feature" or path/to/plan)
 
 #### do / operator Differences
 
-| Aspect | `/fno:do` | `/fno:operator` |
+| Aspect | `/fno:execute` | `/fno:operator` |
 |--------|------------------|--------------------|
 | Weight | Lightweight, in-session | Heavy, multi-agent |
 | Orchestration | Reads 00-INDEX.md, runs waves inline | Spawns subagent per task via orchestrator.py |
@@ -149,7 +150,7 @@ Configuration, analysis, and operational tools.
 
 #### Multi-repo features
 
-There is no cross-project orchestration skill. A multi-repo feature is decomposed into one backlog node per project (linked by `blocked_by`); each ships its own PR from its own repo, and spawn-into-project dispatches the cross-repo handoff (`/do` auto-spawns foreign unblocked waves; `fno backlog advance` dispatches dependents on merge).
+There is no cross-project orchestration skill. A multi-repo feature is decomposed into one backlog node per project (linked by `blocked_by`); each ships its own PR from its own repo, and spawn-into-project dispatches the cross-repo handoff (`/execute` auto-spawns foreign unblocked waves; `fno backlog advance` dispatches dependents on merge).
 
 ---
 
@@ -473,17 +474,17 @@ roles:
 
 The operator skill includes a Python orchestrator for wave-based execution.
 
-**File**: `skills/do/orchestrator.py`
+**File**: `skills/execute/orchestrator.py`
 
 ```bash
 # Show help
-python skills/do/orchestrator.py --help
+python skills/execute/orchestrator.py --help
 
 # Execute a plan
-python skills/do/orchestrator.py path/to/00-INDEX.md
+python skills/execute/orchestrator.py path/to/00-INDEX.md
 
 # Run a single agent with tags
-python skills/do/orchestrator.py --agent "Build React component" --tags ui,frontend
+python skills/execute/orchestrator.py --agent "Build React component" --tags ui,frontend
 ```
 
 ### Agent Routing

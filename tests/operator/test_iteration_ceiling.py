@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(REPO_ROOT / "skills" / "do"))
+sys.path.insert(0, str(REPO_ROOT / "skills" / "execute"))
 
 from orchestrator import (  # noqa: E402
     ImpeccableStageLoop,
@@ -163,7 +163,7 @@ def test_ac4_edge_default_critique_floor_is_25():
 
 def test_executor_resolution_doc_mentions_single_budget_contract():
     """executor-resolution.md must document the single-budget contract for impeccable."""
-    doc = (REPO_ROOT / "skills" / "do" / "references" / "executor-resolution.md").read_text()
+    doc = (REPO_ROOT / "skills" / "execute" / "references" / "executor-resolution.md").read_text()
     assert "single" in doc.lower() and "budget" in doc.lower(), (
         "executor-resolution.md must document the single-budget contract"
     )
@@ -174,7 +174,7 @@ def test_executor_resolution_doc_mentions_single_budget_contract():
 
 def test_executor_resolution_doc_mentions_two_tier_verdict_at_ceiling():
     """executor-resolution.md must state two-tier verdict is the exit when ceiling trips."""
-    doc = (REPO_ROOT / "skills" / "do" / "references" / "executor-resolution.md").read_text()
+    doc = (REPO_ROOT / "skills" / "execute" / "references" / "executor-resolution.md").read_text()
     assert "two-tier" in doc.lower() or "done_with_concerns" in doc.lower(), (
         "executor-resolution.md must document two-tier verdict as canonical ceiling exit"
     )

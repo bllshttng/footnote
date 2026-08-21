@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Retro / auto-triage of left-out work
 
 Work that is *decided but not done* during a PR used to evaporate: skipped reviewer suggestions, deferred-for-clarity decisions, and out-of-scope bugs found while building something else rarely became backlog nodes. This feature harvests those left-out items at merge time and turns each into an *expanded* backlog node (or a queued draft, or an inbox line), deduped against existing nodes.
@@ -47,7 +48,7 @@ The refile path mints a new id, so any id already quoted in a PR body or a mail 
 It is also lossy: two writes, and a failure between them leaves the ledger holding neither row.
 `update` is one rewrite under the same mutex and never touches `id`, `ts`, or `session_id`.
 
-It appends one JSON line to `.fno/carveouts.jsonl` via the events.jsonl mkdir-mutex convention. `session_id` resolves from `target-state.md` then `$CLAUDECODE_SESSION_ID`; a missing session records unscoped (exit 0 + stderr warn) so capture is never lost. A failed write exits non-zero (no silent success). The instruction lives in the `using-fno` preamble so every pipeline (`/target`, `/do` (incl. waves), `/goal`, loops) emits carve-outs. Advisory, not gate-enforced — the merge-time harvest is the backstop.
+It appends one JSON line to `.fno/carveouts.jsonl` via the events.jsonl mkdir-mutex convention. `session_id` resolves from `target-state.md` then `$CLAUDECODE_SESSION_ID`; a missing session records unscoped (exit 0 + stderr warn) so capture is never lost. A failed write exits non-zero (no silent success). The instruction lives in the `using-fno` preamble so every pipeline (`/target`, `/execute` (incl. waves), `/goal`, loops) emits carve-outs. Advisory, not gate-enforced — the merge-time harvest is the backstop.
 
 ### Waves 3-4 — the shared retro-triage routine
 

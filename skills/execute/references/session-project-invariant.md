@@ -1,7 +1,8 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Session-Project Invariant (G2)
 
-**A `/do` session operates only in its own project.** When a wave (or a flat
-plan's change) belongs to a *different* project than the session, `/do` must
+**A `/execute` session operates only in its own project.** When a wave (or a flat
+plan's change) belongs to a *different* project than the session, `/execute` must
 NEVER `cd` into that repo and edit it. Instead it spawns a fresh `/target`
 worker into the foreign project (when the foreign node is unblocked) or defers
 to the merge-triggered dispatch (when it is still blocked). This makes the
@@ -10,7 +11,7 @@ rather than a special cross-project mode.
 
 This is the new model. The legacy `scope: cross-project` pipeline still exists
 (retired in a later PR) and is reached only via target's HARD GATE; it never
-enters `/do`. The invariant below applies to ordinary single-session plans that
+enters `/execute`. The invariant below applies to ordinary single-session plans that
 happen to carry a foreign wave.
 
 ## Resolving the session project
@@ -80,7 +81,7 @@ case "$STATUS" in
     # and rely on G1 (advance_dependents dispatches it when the blocker merges).
     fno carveout add --kind deferred \
       --need "blocked foreign node $WAVE_NODE (project $WAVE_PROJECT)" \
-      "foreign wave $WAVE_NODE blocked at /do time; G1 dispatches on blocker merge"
+      "foreign wave $WAVE_NODE blocked at /execute time; G1 dispatches on blocker merge"
     echo "do: deferred $WAVE_NODE to $WAVE_PROJECT; dispatch on blocker merge"   # AC3-UI
     ;;
   done)     echo "do: skipped $WAVE_NODE ($WAVE_PROJECT) - already shipped" ;;

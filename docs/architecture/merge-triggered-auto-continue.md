@@ -1,3 +1,4 @@
+<!-- style-exception: mechanical verb rename preserves pre-existing prose -->
 # Merge-triggered auto-continue
 
 When a backlog node's PR merges, footnote dispatches a fresh background `/target --no-merge` worker for the next now-unblocked node. A merge-gated epic then walks itself group-by-group across merges with no manual re-invocation. The trigger is the **merge event**, not the loop terminal.
@@ -139,7 +140,7 @@ Do not reuse the defer horizon here - it answers the opposite question.
 - **Root from the work map, never guessed.** The dependent's `--cwd` is `project_root_from_settings(dep.project)` (exposed standalone as `fno backlog project-root <project>`). An unmapped project is refused by name (`advance_skipped{unmapped-project, detail=<project>}`), never launched against a guessed cwd.
 - **At most one worker.** Reuses the same `dispatch:<id>` TTL reservation + `node:<id>` liveness gate, so a successor seen by both `advance()` and `advance_dependents()` - or by reconcile and the explicit `backlog advance --closed` (both fire in `/pr merged`) - dispatches exactly once. One decision event per dependent; strictly non-fatal.
 
-Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/do` session-project invariant): a `/do` wave in a foreign project is spawned (unblocked) or deferred via `fno carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/do/references/session-project-invariant.md`.
+Wired alongside `advance()` in `reconcile` and `cmd_advance`. The session-side mirror is **G2** (the `/execute` session-project invariant): a `/execute` wave in a foreign project is spawned (unblocked) or deferred via `fno carveout` (blocked, picked up later by this G1 path on merge), never executed in place. See `skills/execute/references/session-project-invariant.md`.
 
 ## Scope
 
@@ -161,7 +162,7 @@ Four kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 - `cli/src/fno/backlog/advance.py` - the verb (resolver + decision matrix + seams) + `advance_dependents()` (G1 cross-project edge dispatch).
 - `cli/src/fno/config/__init__.py` - `AutoContinueBlock`.
 - `cli/src/fno/graph/cli.py` - `fno backlog advance` command + the reconcile trigger (both also call `advance_dependents`); `fno backlog project-root` (the unmapped-project detector G2 uses).
-- `skills/do/references/waves.md`, `skills/do/references/flat.md`, `skills/do/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
+- `skills/execute/references/waves.md`, `skills/execute/references/flat.md`, `skills/execute/references/session-project-invariant.md` - the G2 session-project invariant (spawn/defer/refuse foreign waves).
 - `skills/pr/references/merged.md` - trigger (`skills/megawalk` and its campaign-arm modifier are gone, see "Enable resolution" above).
 - `cli/src/fno/events/schema.yaml` - the three event kinds (+ G1 `cross_project` field and reasons).
 - Tests: `cli/tests/unit/test_auto_continue.py`, `cli/tests/unit/test_advance.py`, `cli/tests/unit/test_project_root_cmd.py`, `cli/tests/integration/test_backlog_reconcile.py`.
