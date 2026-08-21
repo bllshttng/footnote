@@ -534,7 +534,9 @@ sleep 5
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and not prompt_file.exists():
             time.sleep(0.05)
-        assert prompt_file.read_text(encoding="utf-8") == "AUTONOMOUS-PANE-TASK"
+        prompt = prompt_file.read_text(encoding="utf-8")
+        assert prompt.startswith("AUTONOMOUS-PANE-TASK\n\n")
+        assert prompt.count("<fno_relay_compression>") == 1
 
         settled = subprocess.run(
             [
@@ -885,7 +887,9 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     # The seed rides behind its own `--` fence: a leading-flag seed must reach
     # claude as the prompt positional, never its flag parser.
     assert tail[claude_at + 5] == "--"
-    assert tail[claude_at + 6] == "hello"
+    seed = tail[claude_at + 6]
+    assert seed.startswith("hello\n\n")
+    assert seed.count("<fno_relay_compression>") == 1
 
     assert result.pane_id == 7
     assert result.session == "main"
@@ -3800,7 +3804,9 @@ def test_ac1_passthrough_reaches_the_launched_pane(tmp_path: Path, monkeypatch) 
     assert "--verbose" in pane_argv
     # Spliced INSIDE the arm: the token rides the provider argv ahead of the
     # seed, never appended past the happy/billing guards on the wrapper.
-    assert pane_argv.index("--verbose") < pane_argv.index("hello")
+    seed = next(token for token in pane_argv if token.startswith("hello\n\n"))
+    assert seed.count("<fno_relay_compression>") == 1
+    assert pane_argv.index("--verbose") < pane_argv.index(seed)
 
 
 def test_ac2_passthrough_p_hits_the_billing_guard(tmp_path: Path, monkeypatch) -> None:

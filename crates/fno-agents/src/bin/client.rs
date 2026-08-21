@@ -837,6 +837,14 @@ fn validate_spawn_placement(params: &Value, substrate: &str) -> Result<(), Strin
     Ok(())
 }
 
+fn effective_spawn_message(message: &str, substrate: &str) -> String {
+    if substrate == "pane" {
+        message.to_owned()
+    } else {
+        fno_agents::spawn_payload::enrich_spawn_payload(message)
+    }
+}
+
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
 /// x-2c27 names the session substrate as one axis with three values; this arm
@@ -912,7 +920,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         None => infer_dispatch_provider(|k| std::env::var(k).ok()),
     };
 
-    let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let message = effective_spawn_message(
+        params.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+        substrate,
+    );
     let from_name = params
         .get("from_name")
         .and_then(|v| v.as_str())
@@ -1137,7 +1148,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // The message-derived refusal carrier (see message_carries_no_merge
             // above) rides extra_env so a worker that drops the flag
             // post-compaction still folds the refusal at init.
-            let no_merge_env: Vec<(&str, &str)> = if message_carries_no_merge(message) {
+            let no_merge_env: Vec<(&str, &str)> = if message_carries_no_merge(&message) {
                 vec![("TARGET_NO_MERGE", "1")]
             } else {
                 Vec::new()
@@ -1146,7 +1157,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 home,
                 &claude_home,
                 name,
-                message,
+                &message,
                 from_name,
                 &cwd,
                 yolo,
@@ -1201,7 +1212,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             emit!(dispatch_claude_headless(
                 &claude_home,
                 name,
-                message,
+                &message,
                 from_name,
                 &cwd,
                 yolo,
@@ -1217,16 +1228,16 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
         ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
+            home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
         )),
         ("gemini", "headless") => emit!(dispatch_gemini_once(
-            home, name, message, from_name, &cwd, yolo, timeout, model,
+            home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
         // opencode headless: the client-side one-shot `opencode run --auto`
         // (x-567d wires the documented lane; the bare `opencode` TUI stays the
         // `pane` form). Stateless plain-text, like agy.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
-            home, name, message, from_name, &cwd, yolo, timeout, model,
+            home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
 
         ("agy", "headless") => {
@@ -1234,7 +1245,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // It ignores `yolo` (headless create always passes
             // --dangerously-skip-permissions) and honors an optional --model.
             emit!(dispatch_agy_once(
-                home, name, message, from_name, &cwd, model, timeout, add_dir,
+                home, name, &message, from_name, &cwd, model, timeout, add_dir,
             ))
         }
 
@@ -3875,6 +3886,17 @@ mod tests {
         let (_m, params) = build_request("spawn", &args).expect("gate flags must parse");
         assert_eq!(params["force"], true);
         assert_eq!(params["no_wait"], true);
+    }
+
+    #[test]
+    fn rust_owned_substrates_append_spawn_payload_brevity_but_python_pane_does_not() {
+        let original = "$fno:target --no-merge x-1234";
+        for substrate in ["bg", "headless"] {
+            let enriched = effective_spawn_message(original, substrate);
+            assert!(enriched.starts_with(&format!("{original}\n\n")));
+            assert_eq!(enriched.matches("<fno_relay_compression>").count(), 1);
+        }
+        assert_eq!(effective_spawn_message(original, "pane"), original);
     }
 
     /// AC4-HP: spawn with provider and no --argv succeeds (uses provider-derived argv).

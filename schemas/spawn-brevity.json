@@ -1,0 +1,5 @@
+{
+  "marker": "<fno_relay_compression>",
+  "end_marker": "</fno_relay_compression>",
+  "instruction": "Keep reports and handoffs at 80 words or fewer unless this payload requires a longer artifact or exact output schema. Think fully; write only the requested result, essential reason, and next action. Drop filler, pleasantries, hedges, repeated context, and articles where clear. Fragments work. Keep technical terms, commands, errors, numbers, units, negation, and code blocks exact. Put long detail in durable artifacts when available; return a path or link."
+}
