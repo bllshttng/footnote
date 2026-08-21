@@ -196,7 +196,13 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # king would otherwise exit clean on its first quiet turn while its board
     # still held work, which is the exact failure the king loop exists to fix,
     # reproduced on the one path that never got the fix.
-    if [[ -f "$ROOT/.fno/king-state.md" ]]; then
+    KING_STATE_FILE=""
+    if [[ -n "$CONVERSATION_ID" ]] && command -v fno >/dev/null 2>&1; then
+        KING_STATE_FILE=$(cd "$ROOT" && fno king manifest-path \
+            --harness-session-id "$CONVERSATION_ID" --harness agy \
+            --state-root "$ROOT/.fno" 2>/dev/null || true)
+    fi
+    if [[ -n "$KING_STATE_FILE" && -f "$KING_STATE_FILE" ]]; then
         # BOUNDED, mirroring unavailable_continue_or_allow rather than inventing
         # a second ceiling. An unbounded continue here can never stop: nothing
         # deletes a king manifest, kings run in the canonical checkout where
@@ -211,7 +217,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         king_count=$((10#$king_count + 1))
         echo "$king_count" > "$king_counter" 2>/dev/null || true
         if (( king_count <= MAX_UNAVAIL_RETRIES )); then
-            echo "agy stop-hook: REFUSING to gate .fno/king-state.md (${king_count}/${MAX_UNAVAIL_RETRIES}) - the king loop is claude-only in v1." >&2
+            echo "agy stop-hook: REFUSING to gate ${KING_STATE_FILE} (${king_count}/${MAX_UNAVAIL_RETRIES}) - the king loop is claude-only in v1." >&2
             echo "agy stop-hook: this king is running unsupervised on agy; run it on claude, or remove the manifest to stop unsupervised." >&2
             emit "$(printf '{"decision":"continue","reason":"king manifest present but the king loop is claude-only (%s/%s); this adapter cannot decide its terminal"}' "$king_count" "$MAX_UNAVAIL_RETRIES")"
         fi

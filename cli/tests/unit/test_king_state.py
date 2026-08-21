@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,81 @@ from fno.king.state import (
     parse_manifest,
     write_manifest,
 )
+
+
+def test_scope_keyed_manifest_paths_are_independent(tmp_path):
+    import fno.king.state as state
+
+    path_for = getattr(state, "king_manifest_path", None)
+    assert path_for is not None, "scope-keyed king manifest path is missing"
+
+    epic = path_for("x-f3d0", state_root=tmp_path / ".fno")
+    project = path_for("fno", state_root=tmp_path / ".fno")
+    write_manifest(epic, scope="x-f3d0", harness_session_id="epic-session")
+    write_manifest(project, scope="fno", harness_session_id="project-session")
+
+    assert epic == tmp_path / ".fno" / "kings" / "x-f3d0.md"
+    assert project == tmp_path / ".fno" / "kings" / "fno.md"
+    assert parse_manifest(epic)["harness_session_id"] == "epic-session"
+    assert parse_manifest(project)["harness_session_id"] == "project-session"
+
+
+@pytest.mark.parametrize("scope", ["../escape", "a/b", r"a\b", ".."])
+def test_scope_keyed_manifest_path_refuses_escape_spellings(tmp_path, scope):
+    import fno.king.state as state
+
+    path_for = getattr(state, "king_manifest_path", None)
+    assert path_for is not None, "scope-keyed king manifest path is missing"
+    with pytest.raises(ValueError, match="scope"):
+        path_for(scope, state_root=tmp_path / ".fno")
+
+
+def test_live_registry_crown_resolves_scope_path_after_session_id_changes(tmp_path):
+    import fno.king.state as state
+
+    resolve = getattr(state, "resolve_king_manifest_path", None)
+    assert resolve is not None, "live crown manifest resolver is missing"
+    row = SimpleNamespace(
+        status="live",
+        crown_scope="x-f3d0",
+        harness="codex",
+        harness_session_id="new-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+    path = state.king_manifest_path("x-f3d0", state_root=tmp_path / ".fno")
+    write_manifest(path, scope="x-f3d0", harness_session_id="old-session")
+
+    assert resolve(
+        "new-session",
+        "codex",
+        state_root=tmp_path / ".fno",
+        registry=[row],
+    ) == path
+
+
+def test_stale_scope_file_without_a_live_crown_resolves_nothing(tmp_path):
+    import fno.king.state as state
+
+    resolve = getattr(state, "resolve_king_manifest_path", None)
+    assert resolve is not None, "live crown manifest resolver is missing"
+    path = tmp_path / ".fno" / "kings" / "x-f3d0.md"
+    write_manifest(path, scope="x-f3d0", harness_session_id="old-session")
+    row = SimpleNamespace(
+        status="exited",
+        crown_scope="x-f3d0",
+        harness="codex",
+        harness_session_id="old-session",
+        cc_session_id=None,
+        short_id=None,
+    )
+
+    assert resolve(
+        "old-session",
+        "codex",
+        state_root=tmp_path / ".fno",
+        registry=[row],
+    ) is None
 
 
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
@@ -199,7 +275,7 @@ def test_a_disabled_king_loop_writes_no_manifest(monkeypatch, tmp_path):
     code, _ = _init(monkeypatch, tmp_path, enabled=False)
 
     assert code == 3
-    assert not (tmp_path / ".fno" / "king-state.md").exists()
+    assert not (tmp_path / ".fno" / "kings" / "drain.md").exists()
 
 
 def test_a_manifest_that_names_nobody_is_refused(monkeypatch, tmp_path):
@@ -212,7 +288,7 @@ def test_a_manifest_that_names_nobody_is_refused(monkeypatch, tmp_path):
 
     assert code == 2
     assert "harness-session-id" in out
-    assert not (tmp_path / ".fno" / "king-state.md").exists()
+    assert not (tmp_path / ".fno" / "kings" / "drain.md").exists()
 
 
 def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
@@ -220,6 +296,6 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     code, _ = _init(monkeypatch, tmp_path)
 
     assert code == 0
-    manifest = tmp_path / ".fno" / "king-state.md"
+    manifest = tmp_path / ".fno" / "kings" / "drain.md"
     assert manifest.exists()
     assert "harness_session_id: sess-1" in manifest.read_text()
