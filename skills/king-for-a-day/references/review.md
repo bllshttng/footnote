@@ -90,15 +90,15 @@ If it refuses, retry; if it still refuses, report the LITERAL refusal string and
 Verify each finding against source before accepting it. The reviewer is advisory, not authoritative - push back with a file:line argument where you disagree."
 ```
 
-Substitute the worker's own verb from "The verb, per harness" above. Claude's order is `/code-review <level> --comment [--fix]`. Codex's is bare `/review` - anything after it changes the review target.
+Substitute the worker's own verb from "The verb, per harness" above. Claude's order is `/code-review <level> --comment`. Codex's is bare `/review` - anything after it changes the review target.
 
 Three details in that template are load-bearing, so do not smooth them out:
 
-- **The verb sits alone on its own indented line.** Its own flags can follow it: claude's `<level> --comment [--fix]`, codex's nothing. Prose after a codex `/review` changes the review target.
+- **The verb sits alone on its own indented line.** Its own flags can follow it: claude's `<level> --comment`, codex's nothing. Prose after a codex `/review` changes the review target.
 - **"INVOKE IT FOR REAL. Type the verb."** A bare verb as the entire message body has been observed failing where this framing fired. That is one observation each way, so it is a lead rather than a mechanism - but it costs nothing to keep and the shape with it has never failed.
 - **Name the substitutes.** `fno:code-reviewer`, `/fno:review`, a Bash approximation - these exactly, not "do not substitute another reviewer". The refusal text forbids these by name, a worker DID quietly take one of them and report success, and a generic prohibition leaves the worker deciding what counts as a substitute.
 
-Pick `<level>` from the diff (`low|medium|high|xhigh|max`), never `ultra`. The sizing is codified, not judged. `level_for_diff` in `cli/src/fno/review_capability.py` tiers the level from the changed-file and line counts against the merge base. Add `--fix` only on a branch the worker can commit to. An auto-applied fix from the wrong worktree writes into the wrong tree.
+Pick `<level>` from the diff (`low|medium|high|xhigh|max`), never `ultra`. The sizing is codified, not judged. `level_for_diff` in `cli/src/fno/review_capability.py` tiers the level from the changed-file and line counts against the merge base. Never add `--fix` here. A fix pass writes, which moves HEAD, and an attestation is head-pinned. The round that wrote it also voids it. An auto-applied fix from the wrong worktree writes into the wrong tree as well. The worker applies findings itself, then reviews again at the final head.
 
 ## When the verb refuses
 

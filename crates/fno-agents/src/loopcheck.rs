@@ -1096,6 +1096,21 @@ struct PrInfo {
     coverage: CoverageReport,
 }
 
+/// The ordering every "you are not reviewed yet" remedy must teach, and the
+/// producer it ends at. A verb name alone leaves two ways to waste the round:
+/// attesting over an open finding (the gate then lies to the whole board), and
+/// reviewing before the last commit is pushed (a later code commit voids the
+/// attestation). The emitter is named because the fallback arms of these
+/// messages render where `fno` does not resolve, so nothing else in the line
+/// tells the reader what actually produces the event.
+///
+/// `_coverage_refused_reason` in `cli/src/fno/pr/_merge.py` carries the sentence
+/// for the merge guard. Two gates refuse the same uncovered head, so they must
+/// not teach two different remedies.
+const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
+     attest at the final head (`bash skills/review/scripts/emit-attestation.sh \
+     <reviewer>`, which the claude attest hook runs for you on a clean pass)";
+
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
 /// the `invocation` field of `_RESOLVABLE_REVIEWERS` in
 /// `cli/src/fno/config/__init__.py`. A block message that names a reviewer
@@ -1107,8 +1122,10 @@ struct PrInfo {
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
 /// rendering. The self-review verb is the one case: `/code-review <level>
-/// --comment --fix` on claude (the Python builder sizes `<level>` from the
-/// diff; `ultra` is not issuable), `/review` bare on codex, `/review-changes`
+/// --comment` on claude (the Python builder sizes `<level>` from the
+/// diff; `ultra` is not issuable). No `--fix`: this table is the machinery
+/// hint for a worker held at a head-pinned gate, and a fix pass moves HEAD
+/// and voids the attestation. `/review` bare on codex, `/review-changes`
 /// bare on opencode (its flag grammar is unverified against its docs, and an
 /// appended guess is the codex trap in a new coat). The codex value
 /// must stay bare - prose after the verb flips codex to a no-merge-base review
@@ -1124,7 +1141,7 @@ const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
         "code-review",
         "/fno:review",
         false,
-        "claude=/code-review <level> --comment --fix;codex=/review;opencode=/review-changes;agy=/fno:review",
+        "claude=/code-review <level> --comment;codex=/review;opencode=/review-changes;agy=/fno:review",
     ),
     ("declare", "/fno:review declare", true, ""),
 ];
@@ -3252,11 +3269,19 @@ fn publish_coverage_status(
             "no covered review at {}; run the review verb at HEAD",
             short_sha(pr_head_oid)
         );
+        // No hint (or no room for one) is the case a CI runner hits, where
+        // `fno` does not resolve. The bare stem names no producer, so it sends
+        // the human reading the PR page nowhere. Name the emitter instead - it
+        // fits inside the 140-char cap, and the sized verb still wins when the
+        // bridge did resolve.
         let description = match self_review_hint.as_deref() {
             Some(hint) if base.len() + hint.len() + 6 <= 140 => {
                 format!("{base} - `{hint}`")
             }
-            _ => base,
+            _ => format!(
+                "no covered review at {}; review at HEAD, then skills/review/scripts/emit-attestation.sh <reviewer>",
+                short_sha(pr_head_oid)
+            ),
         };
         ("failure", description)
     };
@@ -5161,9 +5186,16 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                     stale.join(", ")
                 )
             } else {
+                // Both arms carry the ordering, because the verb alone does not
+                // teach it: close findings, commit, push, review at the final
+                // head, attest last. The None arm is the one a CI runner prints
+                // (no `fno` on PATH there), so it must still name a producer -
+                // a bare "run the review verb" names none.
                 match self_review_hint {
-                    Some(hint) => format!("run the review verb at HEAD - `{hint}`"),
-                    None => "run the review verb at HEAD".to_string(),
+                    Some(hint) => {
+                        format!("run the review verb at HEAD - `{hint}` - {REVIEW_ORDER}")
+                    }
+                    None => format!("run the review verb at HEAD - {REVIEW_ORDER}"),
                 }
             };
             // `stale` counts in the tally and is NAMED in the next action, like
@@ -8924,9 +8956,22 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         }
     };
     if !pr.state.is_open_or_merged() {
+        // `None` is the pre-ship state EVERY session sits in before the PR
+        // exists, not an error, so it gets the create verb. Sending it to
+        // GitHub to "verify" a PR that was never opened is an errand with no
+        // end. The catch-all keeps the verify wording, because it means gh
+        // answered a state this build does not know.
+        let guidance = match pr.state {
+            PrState::Closed => {
+                "PR is closed. Reopen with `gh pr reopen`, or create a new PR: `gh pr create`"
+            }
+            PrState::None => "No PR for HEAD yet. Create one: `/fno:pr create`, or `gh pr create`",
+            _ => "PR state is not open or merged - verify on GitHub and update locally",
+        };
         return format!(
-            "no PR for HEAD (pr_state={}); keep working",
-            pr.state.as_str()
+            "no open/merged PR for HEAD (pr_state={}). {}",
+            pr.state.as_str(),
+            guidance
         );
     }
 
@@ -8957,7 +9002,15 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             CiConclusion::Failure(Some(name)) => name.as_str(),
             _ => "CI",
         };
-        return format!("CI red on PR #{}: {} failed", pr.number, check_name);
+        // No `hint("ci")` here. This arm is reachable only on Failure(_), and
+        // `async_wait_class` refuses `Some("ci")` for exactly that conclusion,
+        // so the hint is always empty. Rendering it would be dead today and a
+        // contradiction the day someone relaxes that guard: read the log now,
+        // and idle waiting, in one sentence.
+        return format!(
+            "CI red on PR #{}: {} failed. Read the failing log: `fno pr logs {}`.",
+            pr.number, check_name, pr.number
+        );
     }
 
     if !pr.reviewed {
@@ -9111,7 +9164,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                 n => format!(" ({n} unparseable attestation line(s) ignored)"),
             };
             return format!(
-                "PR #{}: reviewers gate unmet - no head-pinned review_attestation at {} for {}{}. \
+                "PR #{}: reviewers gate unmet at {} - missing attestation for: {}{}. \
                  This is local work to DO, not a wait: no GitHub reviewer posts these, \
                  so do not arm a watcher.",
                 pr.number,
@@ -9213,21 +9266,62 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     hint("review")
                 );
             }
-            // All NotNudgeable (or not classified): today's exact string + hint
-            // (AC5 - a non-nudgeable required bot keeps the pre-x-b167 behavior).
+            // All NotNudgeable (or not classified) + hint (AC5 - a non-nudgeable
+            // required bot keeps the pre-x-b167 behavior). The remedy must NOT
+            // say "trigger it": `nudge_class_idlable` counts NotNudgeable as
+            // idlable, so `hint("review")` renders the arm-and-tag ritual right
+            // after this sentence, and telling a session to act and to idle in
+            // one line is the contradiction x-cdc7 removed.
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
-            let mut names: Vec<String> = pr.missing_bots.clone();
+            // The same-model peer sentinel is a required login by construction
+            // and no review can ever carry its NUL-wrapped name, so it reaches
+            // here through the `_ => missing_bots.push(bot)` arm. Printing it as
+            // a bot name told the operator to move an unmatchable sentinel to
+            // `optional_apps`. The real remedy is the one the stderr line at the
+            // rewrite site gives, and the reviewers-gate arm above already
+            // special-cases its local twin.
+            let mut names: Vec<String> = Vec::new();
+            let mut same_model_peer = false;
+            for b in &pr.missing_bots {
+                if b == SAME_MODEL_PEER_SENTINEL {
+                    same_model_peer = true;
+                } else {
+                    names.push(b.clone());
+                }
+            }
             names.extend(
                 pr.stale_bots
                     .iter()
                     .map(|(b, _)| format!("{b}{}", read_note(b))),
             );
+            if names.is_empty() {
+                // No hint: nothing will ever post for the sentinel, so arming a
+                // watcher parks the session on a wait with no end. Keeping the
+                // loop awake lets the NoProgress backstop reap it instead.
+                return format!(
+                    "PR #{}: the cross-model peer gate is unmet - the configured peer is the \
+                     author's own model, so nothing can satisfy it. Configure a cross-model \
+                     peer or a model route.",
+                    pr.number
+                );
+            }
+            let peer_note = if same_model_peer {
+                " The cross-model peer gate is also unmet: configure a cross-model peer or a model route."
+            } else {
+                ""
+            };
+            // "footnote posts no mention", NOT "a mention will not trigger it":
+            // NotNudgeable means no profile, an override, a disabled nudge, or
+            // the sentinel. Only the last says anything about the bot itself.
             return format!(
-                "PR #{}: {} has not reviewed.{}",
+                "PR #{}: {} has not reviewed. footnote has no nudge configured for it, so it \
+                 posts no mention. Wait for it to post, or move it to \
+                 config.review.optional_apps if it never will.{}{}",
                 pr.number,
                 names.join(", "),
+                peer_note,
                 hint("review")
             );
         }
@@ -9235,9 +9329,10 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
         return format!(
-            "PR #{} not yet reviewed and no reviewer is outstanding; \
-             re-check config.review (required_bots / reviewers) - nothing here will \
-             arrive on its own.",
+            "PR #{} not yet reviewed and no reviewer is outstanding. \
+             Check config.review: github_apps (GitHub App logins) and \
+             reviewers (local reviewers like sigma). \
+             Nothing here will arrive on its own.",
             pr.number
         );
     }
@@ -10885,7 +10980,7 @@ mod tests {
         // An unsized render keeps its `<level>` placeholder; embedding that in
         // a copy-me slot hands the reader a string it cannot run, so the
         // filter reads it as no hint at all.
-        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment --fix\\n'\n");
+        let placeholder = stub("#!/bin/sh\nprintf '/code-review <level> --comment\\n'\n");
         assert_eq!(
             sized_self_review_hint(placeholder.to_str().unwrap(), dir, None),
             None
@@ -13102,7 +13197,7 @@ mod tests {
         );
         assert_eq!(
             reviewer_invocation_for("code-review", Some("claude")),
-            Some(("/code-review <level> --comment --fix", false))
+            Some(("/code-review <level> --comment", false))
         );
         assert_eq!(
             reviewer_invocation_for("code-review", Some("opencode")),

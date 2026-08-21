@@ -327,10 +327,19 @@ def _coverage_refused_reason(
             f"{'; '.join(waits)} - if a reviewer there is uninstalled or no "
             "longer configured, check config.review)"
         )
+    # Same state, same remedy as the stop gate. `REVIEW_ORDER` in
+    # `crates/fno-agents/src/loopcheck.rs` is the other copy of this sentence.
+    # A worker that meets the merge guard first and the stop gate second must
+    # not be told two different things about how to clear one uncovered head.
+    # The `<reviewer>` argument is part of the command, not decoration: the
+    # emitter's second line is `reviewer="${1:?reviewer name required}"`, so
+    # the bare path exits 1 for anyone who copies it verbatim.
     return (
         prefix
         + "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD"
-        + (f" - `{self_review_hint}`)" if self_review_hint else ")")
+        + (f" - `{self_review_hint}`" if self_review_hint else "")
+        + " - close every finding, commit and push first, then attest at the "
+        + "final head with `bash skills/review/scripts/emit-attestation.sh <reviewer>`)"
     )
 
 

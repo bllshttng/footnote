@@ -91,7 +91,7 @@ def test_code_review_is_self_servable():
     # self_review_invocation substitutes a validated level (never ultra).
     # The scalar is the portable fallback an unknown harness receives.
     assert d.invocations == {
-        "claude": "/code-review <level> --comment --fix",
+        "claude": "/code-review <level> --comment",
         "codex": "/review",
         "opencode": "/review-changes",
         "agy": "/fno:review",

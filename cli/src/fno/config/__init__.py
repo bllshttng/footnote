@@ -632,13 +632,17 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         # The claude value carries the full arg grammar with a `<level>`
         # placeholder; `self_review_invocation` substitutes a validated level
         # (never `ultra` - it is billed separately and absent from
-        # ALLOWED_REVIEW_LEVELS). Codex stays bare - prose after the verb flips
-        # it to a no-merge-base review target. opencode stays bare for the same
-        # reason: its flag grammar is unverified against its docs, and an
-        # appended guess is the codex trap in a new coat. agy has no native
-        # verb, so it takes the fno review.
+        # ALLOWED_REVIEW_LEVELS). No `--fix` here: this table is what the
+        # machinery hands a worker held at a head-pinned reviewers gate, and
+        # `--fix` writes, which moves HEAD and voids the attestation the round
+        # just earned. A reviewer that writes invalidates its own approval.
+        # `--fix` stays legal for a caller who asks for it directly. Codex
+        # stays bare - prose after the verb flips it to a no-merge-base review
+        # target. opencode stays bare for the same reason: its flag grammar is
+        # unverified against its docs, and an appended guess is the codex trap
+        # in a new coat. agy has no native verb, so it takes the fno review.
         invocations={
-            "claude": "/code-review <level> --comment --fix",
+            "claude": "/code-review <level> --comment",
             "codex": "/review",
             "opencode": "/review-changes",
             "agy": "/fno:review",

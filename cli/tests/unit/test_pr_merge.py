@@ -2133,7 +2133,15 @@ def test_coverage_refusal_appends_the_sized_invocation_hint():
     assert f"- `{hint}`" in reason
     bare = _merge._coverage_refused_reason(cov)
     assert "verb-from-the-builder" not in bare
-    assert bare.endswith("run the review verb at HEAD)")
+    # The ordering and the producer ride on both arms, hint or no hint: the
+    # stop gate says the same thing about the same uncovered head.
+    for line in (reason, bare):
+        assert "close every finding, commit and push first" in line
+        assert "skills/review/scripts/emit-attestation.sh" in line
+    # The emitter refuses a call with no reviewer name, so the rendered command
+    # carries the argument. A bare path here would exit 1 for whoever copies it.
+    assert "`bash skills/review/scripts/emit-attestation.sh <reviewer>`" in bare
+    assert bare.endswith("<reviewer>`)")
 
     # The stale-head arm carries the hint the same way.
     stale = {"coverage": "covered", "reviewed_count": 0, "head_sha": "zzz", "verdicts": []}

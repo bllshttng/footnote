@@ -140,7 +140,7 @@ def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
     root = repo("")
     monkeypatch.setattr(rc, "_git_out", lambda cwd, *a: None)
     line = _done_when_line({}, root)
-    assert "/code-review <level> --comment --fix" in line
+    assert "/code-review <level> --comment" in line
     # 20 files, 2000 added lines: over the medium file cap, inside high's.
     # Expected is built through the same sizing function, so this asserts the
     # wiring (diff shape -> sized invocation) without spelling a level here.
@@ -153,7 +153,7 @@ def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
         lambda cwd, *a: "abc123" if a[0] == "merge-base" else rows,
     )
     line = _done_when_line({}, root)
-    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment --fix" in line
+    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment" in line
 
 
 def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatch):
@@ -181,7 +181,7 @@ def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatc
 
     monkeypatch.setattr(rc, "_git_out", git_out)
     line = _done_when_line({}, root)
-    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment --fix" in line
+    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment" in line
 
 
 def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(

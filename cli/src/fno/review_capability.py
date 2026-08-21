@@ -477,12 +477,14 @@ def self_review_invocation(harness: Optional[str], level: Optional[str] = "mediu
 
     Codex is `/review` bare - prose after the verb flips it to a no-merge-base
     review target, so nothing is appended. Claude is `/code-review <level>
-    --comment --fix`: it takes its own argument grammar, and that form actually
-    posts comments and applies findings. opencode is `/review-changes` bare
-    (same no-appended-prose caution; its flag grammar is unverified against its
-    docs). The verb AND the arg grammar are read from the `code-review`
-    descriptor's per-harness map (the parity-checked source of truth), so this
-    is not a second copy of either.
+    --comment`: it takes its own argument grammar, and that form posts comments
+    without writing. `--fix` is absent on purpose. Every caller of this function
+    is machinery telling a worker how to clear a head-pinned gate, and a fix
+    pass moves HEAD, which voids the attestation the round just earned.
+    opencode is `/review-changes` bare (same no-appended-prose caution; its flag
+    grammar is unverified against its docs). The verb AND the arg grammar are
+    read from the `code-review` descriptor's per-harness map (the parity-checked
+    source of truth), so this is not a second copy of either.
 
     An unknown harness gets the descriptor's scalar fallback (`/fno:review`),
     never claude's verb silently: a confidently wrong answer where no answer
