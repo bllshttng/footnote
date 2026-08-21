@@ -418,7 +418,7 @@ def is_deliverable(env: Envelope) -> bool:
     Missing delivery metadata is the legacy durable shape. A hosted row records
     a delivery that already succeeded and exists only for sender/operator audit.
     """
-    return env.delivery != HOSTED_DELIVERY
+    return getattr(env, "delivery", None) != HOSTED_DELIVERY
 
 
 def record_hosted_delivery(
