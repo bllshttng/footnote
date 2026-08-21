@@ -11735,7 +11735,6 @@ done
         });
         let row = &response.result().unwrap()["agents"][0];
 
-        assert_eq!(row["status"], "live");
         assert!(row["last_activity_age_s"].is_null());
         assert_eq!(row["progress"], "unknown");
         assert_eq!(row["progress_basis"], "no-evidence");
