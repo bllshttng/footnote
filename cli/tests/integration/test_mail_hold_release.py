@@ -23,27 +23,36 @@ import pytest
 
 HANDLE = "ac0eptrun"
 
-# The venv console script, so the timer runs THIS worktree's source rather than
-# whatever `fno` is on PATH (a deployed binary can be several merges behind).
-_FNO = str(Path(sys.executable).parent / "fno-py")
 
-pytestmark = pytest.mark.skipif(
-    not Path(_FNO).exists(), reason="no fno console script in this environment"
-)
+def _cli_argv() -> list:
+    """How to invoke THIS checkout's CLI as a separate process.
+
+    Prefer the venv console script, so the timer runs this worktree's source
+    rather than whatever `fno` is on PATH; a deployed binary can be several
+    merges behind. Fall back to running the app through this interpreter, which
+    needs nothing but the importable package.
+
+    Deliberately NO skipif. This file is the one proof that busy mode drains
+    with no operator, and it used to skip when the console script was absent. A
+    skip reads as a pass in a wall of green, which is the same defect as the
+    `check-pr-body-length.sh` specimen this PR also fixes - and here it would
+    have hidden the node's whole acceptance criterion rather than a line count.
+    A missing interpreter is not a thing to tiptoe around, so this always runs.
+    """
+    script = Path(sys.executable).parent / "fno-py"
+    if script.exists():
+        return [str(script)]
+    return [sys.executable, "-c", "from fno.cli import app; app()"]
+
+
+_FNO_ARGV = _cli_argv()
 
 
 def _run_release(env, *, poll_s=1):
     """Start the release timer as its own process and wait for it to finish."""
     return subprocess.run(
-        [
-            _FNO,
-            "mail",
-            "hold-release",
-            "--handle",
-            HANDLE,
-            "--poll-s",
-            str(poll_s),
-        ],
+        _FNO_ARGV
+        + ["mail", "hold-release", "--handle", HANDLE, "--poll-s", str(poll_s)],
         env=env,
         capture_output=True,
         text=True,
@@ -184,9 +193,8 @@ def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
 
     first_deadline = _arm_clock(hold_dir, seconds_out=2)
     proc = subprocess.Popen(
-        [
-            _FNO, "mail", "hold-release", "--handle", HANDLE, "--poll-s", "1",
-        ],
+        _FNO_ARGV
+        + ["mail", "hold-release", "--handle", HANDLE, "--poll-s", "1"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
