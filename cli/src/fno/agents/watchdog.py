@@ -599,7 +599,31 @@ def reap_decision(
             f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m, "
             f"but the tail reads {truth}, which is a session still in play"
         )
-    # Read seven: recency, as the LAST protector. The mirror of x-9de7, not a
+    # Read seven: an UNRECORDED owner is UNKNOWN, never "not a human's".
+    #
+    # The early read above protects the literal "operator". This one closes the
+    # hole underneath it, and the hole was the node's own thesis turned back on
+    # the fix: absent read as not-an-operator-session rather than as
+    # never-recorded, one value carrying two facts. The recency read below has
+    # always treated its own absence that way. Origin did not, so the two
+    # protectors applied opposite rules to the same kind of silence.
+    #
+    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
+    # beside a FRESH last_message_at, and adopt takes in both a session a human
+    # started by hand and a footnote orphan. For two hours the stamp protects
+    # the row. After that both protectors fall silent and a hand-started
+    # session's worktree is deletable. The synthesized-row minter has the same
+    # shape.
+    #
+    # LATE, beside recency, for the reason the recency read is late. Placed up
+    # at the early origin read it would answer first on every refusal and
+    # silence the shared-worktree, unreadable-transcript and still-in-play
+    # guards, which is the exact bug already fixed once in this predicate.
+    #
+    # The marginal cost is small, because a row only reaches here by carrying a
+    # parseable stamp already. What it newly protects is precisely the
+    # dangerous set: a stamped row whose owner nothing ever recorded.
+    # Read eight: recency, as the LAST protector. The mirror of x-9de7, not a
     # repeat of it: that node forbade inferring DEATH from silence, this one
     # makes a recent message an active refusal whatever the pid says, because
     # the operator drives sessions by hand in ways no probe observes.
@@ -621,19 +645,49 @@ def reap_decision(
     # plainly: measured 2026-08-20, 12 of 23 live rows carried the stamp, so
     # reap now declines the rest and hands them to a human instead. That is the
     # direction this lane is allowed to fail in.
+    # POSITIVE evidence first, then the two absences. A recent message is a
+    # reading that ANSWERED, so it outranks both "nobody recorded the owner"
+    # and "nobody recorded a message" - each of which is only a silence. Order
+    # them the other way and a protected row reports an absence as its reason,
+    # which is the same wrong-reason defect the placement above exists to stop.
     recent_age_s = _stamp_age_s(row.last_message_at, now_s)
-    if recent_age_s is None:
-        return REAP_UNKNOWN, (
-            f"{reap_basis}, tail reads {truth}, but last_message_at is "
-            f"{'absent' if not row.last_message_at else 'unparseable'}, so "
-            f"recency is unproven and {REAP_PROTECTION_RULES['recency']}"
-        )
-    if recent_age_s <= REAP_RECENT_MESSAGE_S:
+    if recent_age_s is not None and recent_age_s <= REAP_RECENT_MESSAGE_S:
         return REAP_NO, (
             f"{reap_basis}, tail reads {truth}, but last message was "
             f"{int(recent_age_s / 60)}m ago, inside the "
             f"{int(REAP_RECENT_MESSAGE_S / 60)}m protection window: "
             f"{REAP_PROTECTION_RULES['recency']}"
+        )
+
+    # An UNRECORDED owner is UNKNOWN, never "not a human's".
+    #
+    # The early read protects the literal "operator". This closes the hole
+    # underneath it, and the hole was the node's own thesis turned back on the
+    # fix: absent read as not-an-operator-session rather than as
+    # never-recorded, one value carrying two facts. The recency read has always
+    # treated its own absence that way. Origin did not, so the two protectors
+    # applied opposite rules to the same silence.
+    #
+    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
+    # beside a FRESH last_message_at, and adopt takes in both a session a human
+    # started by hand and a footnote orphan. For two hours the stamp protects
+    # the row. After that both protectors fell silent together and a
+    # hand-started session's worktree was deletable. The synthesized-row minter
+    # has the same shape. The marginal cost is small: a row only reaches here
+    # by carrying a parseable stamp already, so what this newly protects is
+    # exactly that dangerous set.
+    if row.origin is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis}, tail reads {truth}, but origin was never recorded, "
+            f"which is not evidence of a worker, and "
+            f"{REAP_PROTECTION_RULES['origin']}"
+        )
+
+    if recent_age_s is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis}, tail reads {truth}, but last_message_at is "
+            f"{'absent' if not row.last_message_at else 'unparseable'}, so "
+            f"recency is unproven and {REAP_PROTECTION_RULES['recency']}"
         )
 
     return REAP_YES, (

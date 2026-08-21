@@ -1056,6 +1056,11 @@ def _codex_create_path(
         model=model,
         effort=effort,
         harness_session_id=session_id,
+        # The THIRD Python path that mints a worker row, after the pane and bg
+        # paths. Its Rust counterpart in codex_ask.rs stamps this, so leaving it
+        # off here made one codex worker read "spawn" and another read absent
+        # purely by which language created it.
+        origin="spawn",
     )
 
     try:

@@ -288,10 +288,14 @@ class AgentEntry:
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
     # Registration origin: "operator" for a session a human started by hand (the
-    # SessionStart register hook / ``fno agents register``); absent for a
-    # spawn/host worker row. Additive-optional (None default) so pre-existing
-    # rows and the Rust RegistryEntry round-trip losslessly, and absence reads
-    # as worker -- the attended-miss escalation lane fails toward silence.
+    # SessionStart register hook / ``fno agents register``), "spawn" for a
+    # footnote-created worker, None for a row nothing ever stamped. Those are
+    # THREE values, not two. Absence does NOT read as worker: the reap lane
+    # treats a never-recorded origin as UNKNOWN and refuses, because an absence
+    # cannot separate "no human here" from "nobody wrote it down". Reading it
+    # the other way is the defect this field's own node was filed against.
+    # Additive-optional so pre-existing rows and the Rust RegistryEntry
+    # round-trip losslessly.
     origin: Optional[str] = None
 
     # ----------------------------------------------------------------------

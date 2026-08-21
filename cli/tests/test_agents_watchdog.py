@@ -219,7 +219,7 @@ def test_identity_joins_on_claim_holder_not_name():
     # node differs (x-2222 vs none). Only the claim/manifest join may decide.
     rows = [
         Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a",
-            last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -239,7 +239,7 @@ def test_identity_joins_on_claim_holder_not_name():
 def test_node_done_reaps_and_own_claim_does_not():
     rows = [
         Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1",
-            last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -309,7 +309,8 @@ def test_deliverable_reaps_regardless_of_age():
     # A row whose node is done with its PR merged reaps at any age; age
     # decides what to do with an UNKNOWN row, never a finished one.
     rows = [Row("e65d5fff-0000", "t-xd214-mail-raw-onto-rpc", "blocked",
-                "x-d214", "/canonical", last_message_at=STALE_MESSAGE_STAMP)]
+                "x-d214", "/canonical", origin="spawn",
+                last_message_at=STALE_MESSAGE_STAMP)]
     [v] = _run(
         rows,
         {"e65d5fff-0000": _facts("blocked mid turn", age_min=87852)},
@@ -1363,7 +1364,7 @@ def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
         Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5"),
         Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5"),
         Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo",
-            last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1563,9 +1564,9 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     # A live sibling by TRANSCRIPT, while its roster state says stopped.
     rows = [
         Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one",
-            last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
         Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one",
-            last_message_at=STALE_MESSAGE_STAMP),
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1664,7 +1665,7 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     only way to YES is through three positive markers.
     """
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-              last_message_at=STALE_MESSAGE_STAMP)
+              origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
     quiet = _facts(FINISHED_TAIL, age_min=120)
 
     def boom(_n):
@@ -1771,7 +1772,7 @@ def test_a_session_still_in_play_is_never_reaped():
     work is over. A worker parked on <watching>, one holding a question, and
     one waiting out a rate limit are all silent and all still in play."""
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-              last_message_at=STALE_MESSAGE_STAMP)
+              origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
     nodes = {"x-done": {"status": "done"}}
 
     parked = _facts("<watching>ci</watching>", age_min=200)
@@ -2124,11 +2125,20 @@ def test_the_operator_refusal_outranks_every_later_read():
     assert "origin=operator" in basis
 
 
-def test_only_the_operator_value_protects():
-    """`None` is never-recorded and "spawn" is a worker. Collapsing those two
-    into one not-an-operator reading is the defect this node was filed
-    against, so each reaches a verdict the operator row cannot."""
-    for origin in (None, "spawn"):
+def test_the_three_origin_values_reach_three_different_verdicts():
+    """`None`, "spawn" and "operator" are THREE facts, not two.
+
+    Collapsing never-recorded into not-an-operator is the defect this node was
+    filed against, and the first cut of this predicate committed it: only
+    "operator" refused, so `None` fell through to the delete exactly like a
+    known worker. Each value now reaches a verdict the others cannot.
+    """
+    expected = {
+        "operator": watchdog.REAP_NO,
+        None: watchdog.REAP_UNKNOWN,
+        "spawn": watchdog.REAP_YES,
+    }
+    for origin, want in expected.items():
         row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
                   origin=origin, last_message_at=STALE_MESSAGE_STAMP)
         answer, basis = _decide(
@@ -2136,7 +2146,54 @@ def test_only_the_operator_value_protects():
             facts=_facts(FINISHED_TAIL, age_min=200),
             nodes={"x-done": {"status": "done"}},
         )
-        assert answer == watchdog.REAP_YES, f"origin={origin!r}: {basis}"
+        assert answer == want, f"origin={origin!r} gave {answer}: {basis}"
+
+
+def test_an_adopted_row_survives_its_recency_stamp_going_stale():
+    """The reachable case the first cut of this predicate would have deleted.
+
+    `mint_adopted_entry` writes `origin: None` beside a FRESH
+    `last_message_at`, and adopt takes in both a session a human started by
+    hand and a footnote orphan. Inside the window the stamp protects the row.
+    This asserts what happens AFTER it goes stale, which is where the two
+    protectors used to fall silent together and hand over a worktree nobody
+    could prove was a worker's.
+    """
+    adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
+                  "/wt/solo", origin=None, last_message_at=STALE_MESSAGE_STAMP)
+
+    answer, basis = _decide(
+        adopted,
+        facts=_facts(FINISHED_TAIL, age_min=200),
+        nodes={"x-done": {"status": "done"}},
+    )
+
+    assert answer == watchdog.REAP_UNKNOWN
+    assert "origin was never recorded" in basis
+    assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
+
+
+def test_the_unrecorded_origin_read_never_silences_a_more_specific_refusal():
+    """The same late placement the recency read needed, for the same reason.
+
+    Put up beside the early operator read, this answers first on every refusal
+    and the specific guards below it stop speaking. Each row here carries an
+    unrecorded origin, so an early read would have swallowed all three.
+    """
+    quiet = _facts(FINISHED_TAIL, age_min=200)
+    nodes = {"x-done": {"status": "done"}}
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared",
+              origin=None, last_message_at=STALE_MESSAGE_STAMP)
+
+    _, basis = _decide(row, facts=quiet, nodes=nodes, cotenants=1)
+    assert "share /wt/shared" in basis
+
+    _, basis = _decide(row, facts=_facts("<watching>ci</watching>", age_min=200),
+                       nodes=nodes)
+    assert "watching" in basis
+
+    _, basis = _decide(row, facts=None, nodes=nodes)
+    assert "no transcript to read" in basis
 
 
 def test_a_recent_message_protects_and_the_basis_names_recency_and_the_age():
@@ -2148,7 +2205,7 @@ def test_a_recent_message_protects_and_the_basis_names_recency_and_the_age():
     stamp refuses the reap whatever any pid says.
     """
     row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-              last_message_at=RECENT_MESSAGE_STAMP)
+              origin="spawn", last_message_at=RECENT_MESSAGE_STAMP)
 
     answer, basis = _decide(
         row,
@@ -2170,7 +2227,7 @@ def test_an_unreadable_stamp_is_unknown_and_never_reaps():
     positive marker, never as the absence of a reap."""
     for stamp in (None, "", "not-a-timestamp"):
         row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
-                  last_message_at=stamp)
+                  origin="spawn", last_message_at=stamp)
         answer, basis = _decide(
             row,
             facts=_facts(FINISHED_TAIL, age_min=200),

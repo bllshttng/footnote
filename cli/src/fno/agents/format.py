@@ -395,10 +395,16 @@ def render_table(
         if row.get("crown"):
             name = f"{name} [{row['crown']}]"
         # Same ASCII-marker treatment for the one origin value that CHANGES a
-        # decision: the reap lane never deletes an operator row's worktree, and
-        # a human reading that refusal should be able to see the fact in the
-        # ordinary table rather than only in --json. "spawn" gets no marker -
-        # it is the common case and a badge on every worker row is noise.
+        # decision: the reap lane never deletes an operator row's worktree.
+        # "spawn" gets no marker - it is the common case and a badge on every
+        # worker row is noise.
+        #
+        # Scope, stated so nobody reads more into this than it does: this is the
+        # PYTHON table only. `fno agents list` routes to the Rust renderer
+        # whenever an installed binary is present, and that table carries
+        # neither this marker nor the older crown one. The auditable surface for
+        # a reap refusal is --json, which BOTH projections emit and which
+        # schemas/agents-list-row.json pins.
         if row.get("origin") == "operator":
             name = f"{name} [operator]"
         display_rows.append(
