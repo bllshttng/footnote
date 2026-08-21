@@ -22,6 +22,10 @@
 #   T11  counter is per-session_id (a sibling session's budget is untouched)
 #   T12  clean decision self-heals the counter (removed before honoring)
 #
+# x-7f52 harness-neutral foreign-session guard:
+#   T13  codex-authored manifest + a CLAUDE stop -> exit 0, binary not called
+#   T14  codex-authored manifest + that codex session's own stop -> binary called
+#
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
 
@@ -76,6 +80,34 @@ created_at: 2026-06-05T00:00:00Z
 claude_transcript_id: ${ctid}
 attended: true
 status: IN_PROGRESS
+---
+STATE
+}
+
+# A codex-authored manifest: claude_session_id is EMPTY and the id lives in
+# harness_session_id. Codex names its transcript rollout-<utc>-<thread-uuid>,
+# so the basename is not the bare id, it ends with it.
+setup_env_codex() {
+    local transcript_basename="$1"   # what the STOPPING session's transcript is called
+    local thread_uuid="$2"           # what the manifest says the OWNER is
+
+    TMP_DIR="$(mktemp -d)"
+    HOME_DIR="${TMP_DIR}/home"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+
+    TRANSCRIPT_FILE="${TMP_DIR}/${transcript_basename}.jsonl"
+    printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"
+
+    STATE_FILE="${TMP_DIR}/.fno/target-state.md"
+    cat > "$STATE_FILE" <<STATE
+---
+session_id: test-session-codex
+created_at: 2026-06-05T00:00:00Z
+harness: codex
+harness_session_id: ${thread_uuid}
+claude_session_id:
+codex_thread_id: ${thread_uuid}
+attended: false
 ---
 STATE
 }
@@ -472,6 +504,77 @@ STUB
         fail "T12: counter should have been removed on a clean decision"; t12_ok=false
     fi
     [[ "$t12_ok" == "true" ]] && pass "T12: clean decision removed the counter"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T13: a codex-authored manifest must not capture a claude session (x-7f52)
+# ─────────────────────────────────────────────────────────────────────────────
+# The bug: the guard read claude_session_id ONLY. A codex manifest leaves that
+# key empty, so MANIFEST_CTID was empty, the guard was skipped, and a claude
+# session stopping in a codex session's worktree was judged against - and could
+# finalize - a run it did not own.
+log "T13: codex manifest + claude stop -> exit 0, binary not called"
+{
+    setup_env_codex "0a7ec164-eb6b-452d-b25c-8fd11f8c70b6" "01a021d0-b1fa-7750-af25-8d89dc01e2a3"
+
+    MARKER="${TMP_DIR}/stub_was_called"
+    STUB="${TMP_DIR}/fno-agents-stub"
+    cat > "$STUB" <<STUB_EOF
+#!/usr/bin/env bash
+touch "${MARKER}"
+printf '{"decision":"block","termination_reason":null,"message":"not ours to judge","fires":1,"fingerprint":"f"}\n'
+exit 0
+STUB_EOF
+    chmod +x "$STUB"
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+
+    t13_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T13: expected exit 0 for a foreign codex manifest, got $HOOK_RC"; t13_ok=false
+    fi
+    if [[ -f "$MARKER" ]]; then
+        fail "T13: binary was invoked against another harness's manifest"; t13_ok=false
+    fi
+    [[ "$t13_ok" == "true" ]] && pass "T13: codex manifest + claude stop -> exit 0, stub not called"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T14: the codex OWNER's own stop still reaches the gate (x-7f52 inversion)
+# ─────────────────────────────────────────────────────────────────────────────
+# Widening the guard must not over-fire. Codex wires this same hook
+# (hooks/codex-hooks.json), and its transcript basename is rollout-<utc>-<uuid>,
+# so a plain equality test would read the owner as foreign and exit 0 - which
+# does not wedge codex, it silently turns the ship gate OFF for every codex run.
+log "T14: codex manifest + its own rollout stop -> binary called"
+{
+    UUID="01a021d0-b1fa-7750-af25-8d89dc01e2a3"
+    setup_env_codex "rollout-2026-08-20T17-55-20-${UUID}" "$UUID"
+
+    MARKER="${TMP_DIR}/stub_was_called"
+    STUB="${TMP_DIR}/fno-agents-stub"
+    cat > "$STUB" <<STUB_EOF
+#!/usr/bin/env bash
+touch "${MARKER}"
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"f"}\n'
+exit 0
+STUB_EOF
+    chmod +x "$STUB"
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+
+    t14_ok=true
+    if [[ ! -f "$MARKER" ]]; then
+        fail "T14: the codex owner's own stop was treated as foreign (ship gate off)"; t14_ok=false
+    fi
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T14: expected exit 2 (block honored), got $HOOK_RC"; t14_ok=false
+    fi
+    [[ "$t14_ok" == "true" ]] && pass "T14: codex owner's own stop reached the gate"
     cleanup
 }
 
