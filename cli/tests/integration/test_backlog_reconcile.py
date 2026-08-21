@@ -1112,7 +1112,7 @@ def test_reconcile_real_stamp_marks_never_shipped_plan_done(cli_env, monkeypatch
 # ---------------------------------------------------------------------------
 
 def _stub_closure_ctx(body: str, *, number: int = 900, url: str | None = None,
-                       state: str = "MERGED"):
+                       state: str = "MERGED", changed_files: list[str] | None = None):
     from fno.pr.closure import PrClosureContext
 
     return PrClosureContext(
@@ -1121,6 +1121,7 @@ def _stub_closure_ctx(body: str, *, number: int = 900, url: str | None = None,
         url=url or f"https://github.com/test-owner/test-repo/pull/{number}",
         state=state,
         merged_at="2026-08-18T00:00:00Z" if state == "MERGED" else None,
+        changed_files=changed_files or [],
     )
 
 
@@ -1273,6 +1274,85 @@ def test_reconcile_pr_number_binds_and_closes_both_claims(cli_env, monkeypatch):
         assert n["pr_number"] == 900
         assert n["completed_at"] is not None
         assert (sentinel_dir / f"{nid}.json").exists()
+
+
+def test_reconcile_verifies_pending_supersession_from_merged_pr_files(cli_env, monkeypatch, tmp_path):
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    old = _node("ab-old001", cwd=str(tmp_path))
+    old.update({
+        "superseded_by": "ab-new001",
+        "supersession": {
+            "successor": "ab-new001",
+            "cause": "old implementation replaced",
+            "surfaces": ["src/old.py"],
+            "verified_at": None,
+            "evidence_pr": None,
+            "matched_surfaces": [],
+        },
+    })
+    new = _node(
+        "ab-new001", pr_number=901,
+        pr_url="https://github.com/test-owner/test-repo/pull/901",
+        cwd=str(tmp_path),
+    )
+    _make_graph(graph_path, [old, new])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-new001\n", number=901,
+            changed_files=["src/old.py", "src/new.py"],
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({901: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "901", "--json"])
+    assert result.exit_code == 0, result.output
+    updated = {e["id"]: e for e in _read_entries(graph_path)}["ab-old001"]
+    assert updated["status"] == "superseded"
+    assert updated["supersession"]["verified_at"]
+    assert updated["supersession"]["evidence_pr"] == 901
+    assert updated["supersession"]["matched_surfaces"] == ["src/old.py"]
+
+
+def test_reconcile_keeps_pending_supersession_when_files_do_not_cover_cause(cli_env, monkeypatch, tmp_path):
+    import fno.pr.closure as closure_mod
+
+    graph_path, _ = cli_env
+    old = _node("ab-old002", cwd=str(tmp_path))
+    old.update({
+        "superseded_by": "ab-new002",
+        "supersession": {
+            "successor": "ab-new002",
+            "cause": "old implementation replaced",
+            "surfaces": ["src/old.py"],
+            "verified_at": None,
+            "evidence_pr": None,
+            "matched_surfaces": [],
+        },
+    })
+    new = _node(
+        "ab-new002", pr_number=902,
+        pr_url="https://github.com/test-owner/test-repo/pull/902",
+        cwd=str(tmp_path),
+    )
+    _make_graph(graph_path, [old, new])
+    monkeypatch.setattr(
+        closure_mod, "fetch_pr_closure_context",
+        lambda pr_number, **kw: _stub_closure_ctx(
+            "Backlog-Closure: ab-new002\n", number=902,
+            changed_files=["src/new.py"],
+        ),
+    )
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({902: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--pr-number", "902", "--json"])
+    assert result.exit_code == 0, result.output
+    updated = {e["id"]: e for e in _read_entries(graph_path)}["ab-old002"]
+    assert updated["status"] == "blocked"
+    assert updated["supersession"]["verified_at"] is None
+    assert "supersession_unverified" in result.output
 
 
 def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, monkeypatch):

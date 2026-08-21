@@ -78,6 +78,9 @@ def _derive_status(data: dict) -> str:
     if data.get("completed_at"):
         return "done"
     if data.get("superseded_by"):
+        supersession = data.get("supersession")
+        if isinstance(supersession, dict) and not supersession.get("verified_at"):
+            return "in_progress"
         return "superseded"
     if data.get("deferred_at"):
         return "deferred"
@@ -210,6 +213,10 @@ class Entry(BaseModel):
     # here so computed_field can reference it cleanly without going through
     # model_extra.
     superseded_by: Optional[str] = None
+    # Proposed supersession remains active until merged-PR evidence verifies
+    # every inherited cause surface. The legacy superseded_by edge remains for
+    # compatibility; this record carries the proof state.
+    supersession: Optional[dict] = None
 
     # Parent-edge provenance (x-30f6). Declared first-class (typed, default
     # None) so model_dump round-trips them and they validate as strings. The
@@ -347,6 +354,7 @@ class Entry(BaseModel):
         return _derive_status({
             "completed_at": self.completed_at,
             "superseded_by": self.superseded_by,
+            "supersession": self.supersession,
             "deferred_at": self.deferred_at,
             "pr_number": self.pr_number,
             "blocked_by": self.blocked_by,

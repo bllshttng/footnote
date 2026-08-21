@@ -238,6 +238,7 @@ class PrClosureContext:
     url: Optional[str]
     state: str
     merged_at: Optional[str]
+    changed_files: list[str] = field(default_factory=list)
 
 
 class ClosureQueryError(Exception):
@@ -263,7 +264,7 @@ def fetch_pr_closure_context(
     cmd = ["gh", "pr", "view", str(pr_number)]
     if repo:
         cmd += ["--repo", repo]
-    cmd += ["--json", "number,body,url,state,mergedAt"]
+    cmd += ["--json", "number,body,url,state,mergedAt,files"]
     try:
         result = runner(
             cmd, capture_output=True, text=True, check=False, timeout=timeout_s, cwd=cwd
@@ -292,12 +293,19 @@ def fetch_pr_closure_context(
         row = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ClosureQueryError(f"gh stdout was not JSON: {exc}") from exc
+    raw_files = row.get("files") or []
+    changed_files = [
+        item.get("path") if isinstance(item, dict) else item
+        for item in raw_files
+        if isinstance(item, str) or isinstance(item, dict)
+    ]
     return PrClosureContext(
         number=row.get("number", pr_number),
         body=row.get("body") or "",
         url=row.get("url"),
         state=row.get("state", "UNKNOWN"),
         merged_at=row.get("mergedAt"),
+        changed_files=[path for path in changed_files if isinstance(path, str) and path],
     )
 
 

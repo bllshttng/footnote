@@ -204,6 +204,7 @@ class PrMergeState:
     # mergeCommit.oid - the dedup key for post-merge-ritual auto-dispatch
     # (x-47be). Optional: absent on a non-merged PR or when gh omits it.
     merge_sha: Optional[str] = None
+    changed_files: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -233,10 +234,64 @@ class MergeDriftRecord:
     # (branch-name match has no SHA); the dispatcher falls back to a pr-number
     # key there.
     merge_sha: Optional[str] = None
+    changed_files: list[str] = field(default_factory=list)
 
     @property
     def closeable(self) -> bool:
         return self.error is None and self.pr_state == "MERGED"
+
+
+def verify_pending_supersessions(
+    entries: list[dict],
+    *,
+    successor: str,
+    changed_files: Iterable[str],
+    evidence_pr: int,
+    verified_at: Optional[str] = None,
+) -> list[dict]:
+    """Verify predecessor cause surfaces against one merged PR's file set.
+
+    Returns positive receipts for predecessors that remain pending. A
+    predecessor never becomes terminal from the relationship alone: every
+    declared repo-relative surface must appear in the merged PR's changed-file
+    evidence.
+    """
+    changed = {
+        str(path).strip().replace("\\", "/").lstrip("./")
+        for path in changed_files
+        if isinstance(path, str) and path.strip()
+    }
+    receipts: list[dict] = []
+    stamp = verified_at or datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("superseded_by") != successor:
+            continue
+        record = entry.get("supersession")
+        if not isinstance(record, dict) or record.get("verified_at"):
+            continue
+        surfaces = [
+            str(surface).strip().replace("\\", "/").lstrip("./")
+            for surface in record.get("surfaces") or []
+            if isinstance(surface, str) and surface.strip()
+        ]
+        matched = [surface for surface in surfaces if surface in changed]
+        uncovered = [surface for surface in surfaces if surface not in changed]
+        if uncovered:
+            receipts.append({
+                "kind": "supersession_unverified",
+                "predecessor": entry.get("id"),
+                "successor": successor,
+                "cause": record.get("cause"),
+                "uncovered_surfaces": uncovered,
+                "evidence_pr": evidence_pr,
+            })
+            continue
+        record.update({
+            "verified_at": stamp,
+            "evidence_pr": evidence_pr,
+            "matched_surfaces": matched,
+        })
+    return receipts
 
 
 def node_is_open(node: dict) -> bool:
@@ -246,7 +301,13 @@ def node_is_open(node: dict) -> bool:
     predicate holds even on an entries list that has not been through
     ``recompute_statuses`` (e.g. a raw test fixture).
     """
-    return not node.get("completed_at") and not node.get("superseded_by")
+    if node.get("completed_at"):
+        return False
+    successor = node.get("superseded_by")
+    if not successor:
+        return True
+    record = node.get("supersession")
+    return isinstance(record, dict) and not record.get("verified_at")
 
 
 def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
@@ -928,7 +989,7 @@ def query_pr_merge_state(
     cmd = ["gh", "pr", "view", str(pr_number)]
     if repo:
         cmd += ["--repo", repo]
-    cmd += ["--json", "number,state,url,mergedAt,mergeCommit"]
+    cmd += ["--json", "number,state,url,mergedAt,mergeCommit,files"]
     try:
         result = runner(
             cmd,
@@ -956,12 +1017,19 @@ def query_pr_merge_state(
     except json.JSONDecodeError as exc:
         raise ReconcileError(f"gh stdout was not JSON: {exc}") from exc
 
+    raw_files = row.get("files") or []
+    changed_files = [
+        item.get("path") if isinstance(item, dict) else item
+        for item in raw_files
+        if isinstance(item, str) or isinstance(item, dict)
+    ]
     return PrMergeState(
         number=row.get("number", pr_number),
         state=row.get("state", "UNKNOWN"),
         url=row.get("url"),
         merged_at=row.get("mergedAt"),
         merge_sha=(row.get("mergeCommit") or {}).get("oid"),
+        changed_files=[path for path in changed_files if isinstance(path, str) and path],
     )
 
 
@@ -1376,6 +1444,7 @@ def scan_merge_drift(
                     session_id=node.get("session_id"),
                     cwd=cwd,
                     merge_sha=merged.merge_sha,
+                    changed_files=list(merged.changed_files),
                 )
             )
         elif first_error is not None:

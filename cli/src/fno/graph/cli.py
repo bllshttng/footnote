@@ -7225,9 +7225,12 @@ def _is_live(entry: dict) -> bool:
     dispatchable, so killing its owner without releasing it leaves it
     unbuildable under the dead-ancestor guard.
     """
-    return not (
-        entry.get("completed_at") or entry.get("superseded_by") or entry.get("deferred_at")
-    )
+    if entry.get("completed_at") or entry.get("deferred_at"):
+        return False
+    if not entry.get("superseded_by"):
+        return True
+    supersession = entry.get("supersession")
+    return isinstance(supersession, dict) and not supersession.get("verified_at")
 
 
 def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
@@ -8958,6 +8961,7 @@ def cmd_reconcile(
     closure_claims: list[str] = []
     closure_bound: list[str] = []
     closure_refused: Optional[str] = None
+    supersession_files_by_pr: dict[int, list[str]] = {}
     entries = read_graph(_graph_path())
     if pr_number is not None:
         from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
@@ -8999,6 +9003,7 @@ def cmd_reconcile(
             pr_ctx = None
 
         if pr_ctx is not None:
+            supersession_files_by_pr[pr_number] = list(pr_ctx.changed_files)
             closure_claims = parse_closure_trailer(pr_ctx.body)
             if closure_claims:
                 closure_refused, closure_bound = _bind_and_report(
@@ -9126,6 +9131,7 @@ def cmd_reconcile(
             except ClosureQueryError:
                 continue  # best-effort discovery: the forward scan already has this PR's state
             _claims = parse_closure_trailer(_ctx.body)
+            supersession_files_by_pr[_pr_num] = list(_ctx.changed_files)
             if not _claims:
                 continue
             closure_claims = sorted(set(closure_claims) | set(_claims))
@@ -9206,6 +9212,7 @@ def cmd_reconcile(
     healed_epics: list[str] = []
     contained_closed: list[str] = []
     contained_errors: list[dict] = []
+    supersession_unverified: list[dict] = []
     # Set below only on the dry-run simulate branch; epics_waiting reuses it
     # (x-59a6 review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
@@ -9235,6 +9242,7 @@ def cmd_reconcile(
         # and discards stderr - so a repeatedly-failing cascade left contained
         # nodes open forever with no signal reaching any automated reader.
         contained_errors_acc: list = []
+        supersession_unverified_acc: list[dict] = []
 
         # Ledger rollup, precomputed outside the lock (ledger I/O must not block
         # other graph mutations). Reconcile is the MAINSTREAM close: a session
@@ -9255,10 +9263,24 @@ def cmd_reconcile(
         def mutator(entries):
             actually_closed.clear()
             cascade_closed_acc.clear()
+            supersession_unverified_acc.clear()
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj and not node_obj.get("completed_at"):
                     _apply_completion_fields(node_obj, merge_status="merged")
+                    from fno.graph._reconcile import verify_pending_supersessions
+                    supersession_unverified_acc.extend(
+                        verify_pending_supersessions(
+                            entries,
+                            successor=record.node_id,
+                            changed_files=(
+                                record.changed_files
+                                or supersession_files_by_pr.get(record.pr_number, [])
+                            ),
+                            evidence_pr=record.pr_number,
+                            verified_at=record.merged_at,
+                        )
+                    )
                     if record.node_id in reconcile_rollups:
                         try:
                             from fno.done.cli import _apply_rollup
@@ -9375,6 +9397,7 @@ def cmd_reconcile(
         # a concurrent reparent/reproject landed between scan and lock, and a
         # cascade parent only reachable in the locked graph would resolve to None.
         post_entries = locked_mutate_graph(_graph_path(), mutator)
+        supersession_unverified.extend(supersession_unverified_acc)
 
         def _auto_continue_after_close(node_id, project, root):
             """Merge-triggered auto-continue dispatch for one just-closed node:
@@ -9778,6 +9801,7 @@ def cmd_reconcile(
             "closure_claims": closure_claims,
             "closure_bound": closure_bound,
             "closure_refused": closure_refused,
+            "supersession_unverified": supersession_unverified,
             # Parent epics of this run's closure claims that are still open,
             # each naming its still-open sibling children exactly (x-59a6).
             "epics_waiting": epics_waiting,
@@ -12075,7 +12099,9 @@ cli.add_typer(collisions_app, name="collisions", hidden=True)
 def cmd_supersede(
     new_id: str = typer.Argument(..., help="The new node ID that replaces the old"),
     replaces: str = typer.Option(..., "--replaces", help="The old node ID being superseded"),
-    reason: str = typer.Option(..., "--reason", "-R", help="Why supersede (free text, surfaces in triage)"),
+    cause: Optional[str] = typer.Option(None, "--cause", help="Inherited cause being replaced"),
+    surface: list[str] = typer.Option([], "--surface", help="Repo-relative cause surface; repeatable"),
+    reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Optional human rationale"),
     force: bool = typer.Option(
         False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
     ),
@@ -12103,11 +12129,25 @@ def cmd_supersede(
         typer.echo("Error: cannot supersede self", err=True)
         raise typer.Exit(code=1)
 
-    cleaned_reason = reason.strip()
-    if not cleaned_reason:
-        typer.echo("Error: --reason cannot be blank", err=True)
+    cleaned_cause = (cause or "").strip()
+    if not cleaned_cause:
+        typer.echo("Error: --cause is required and cannot be blank", err=True)
         raise typer.Exit(code=1)
-
+    if not surface:
+        typer.echo("Error: at least one --surface is required", err=True)
+        raise typer.Exit(code=1)
+    normalized_surfaces: list[str] = []
+    for raw_surface in surface:
+        candidate = str(raw_surface).strip().replace("\\", "/")
+        parts = candidate.split("/")
+        if not candidate or candidate.startswith("/") or any(part in ("", ".", "..") for part in parts):
+            typer.echo(
+                f"Error: --surface must be a non-empty repo-relative path: {raw_surface!r}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if candidate not in normalized_surfaces:
+            normalized_surfaces.append(candidate)
     _freed_box: list[list] = [[]]
     _parent_freed_box: list[list] = [[]]
     _proj_kids_box: list[list] = [[]]
@@ -12189,8 +12229,16 @@ def cmd_supersede(
         old_node["superseded_by"] = canonical_new
         old_node["locked_by"] = None
         old_node["claimed_at"] = None
-        old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
-        old_node["deferred_reason"] = f"superseded by {canonical_new}: {cleaned_reason}"
+        old_node["supersession"] = {
+            "successor": canonical_new,
+            "cause": cleaned_cause,
+            "surfaces": normalized_surfaces,
+            "verified_at": None,
+            "evidence_pr": None,
+            "matched_surfaces": [],
+        }
+        old_node["deferred_at"] = None
+        old_node["deferred_reason"] = None
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
@@ -12309,6 +12357,7 @@ def cmd_unsupersede(
                 s for s in (new_node.get("supersedes") or []) if s != node["id"]
             ]
         node["superseded_by"] = None
+        node["supersession"] = None
         node["deferred_at"] = None
         node["deferred_reason"] = None
         return entries
