@@ -689,6 +689,17 @@ fn base_command(
         cmd.env("USERPROFILE", &home.0);
     });
     cmd.env("TERM", "xterm-256color");
+    // Stated, never inherited. `CommandBuilder::new` seeds from the SERVER's
+    // `std::env::vars_os()`, so without this a pane's color depends on where
+    // the detached `fno --server` happened to be launched from - and a server
+    // reparented to init carries whatever env that launch had, forever. The
+    // symptom is a hosted TUI rendering monochrome while `TERM` still claims
+    // 256 colors, because `COLORTERM` is the signal apps actually read
+    // (`mux_cli::truecolor_check` says so). We already assert `TERM` here; a
+    // pane that advertises 256 colors and withholds the 24-bit signal is
+    // asserting half a capability. Stating both is one unconditional rule,
+    // which cannot be wrong about a launch context the way inheritance can.
+    cmd.env("COLORTERM", "truecolor");
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
     // Unique per pane-host spawn: descendants (incl. a nested claude) inherit
@@ -966,6 +977,61 @@ mod tests {
     // an executor). `blocking_lock` below is the sync `#[test]` fns' way in -
     // it panics only inside an async context, and these tests have none.
     static PTY_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A pane must STATE its color capability, never inherit it.
+    ///
+    /// The regression this pins: `CommandBuilder::new` seeds from the server
+    /// process's own `std::env::vars_os()`, so a detached `fno --server`
+    /// reparented to init hands every pane whatever env its launch context
+    /// had, for the life of that server. A server started without `COLORTERM`
+    /// rendered every hosted TUI monochrome while `TERM` still advertised 256
+    /// colors - half a capability, asserted.
+    ///
+    /// Asserts the VALUES, not merely that the keys exist. `TERM` set and
+    /// `COLORTERM` missing IS the broken state, so a test checking only
+    /// `is_some()` on each would have passed throughout the bug.
+    ///
+    /// The sentinel is load-bearing and this test is worthless without it.
+    /// `CommandBuilder::new` seeds from `std::env::vars_os()`, so a plain
+    /// `get_env("COLORTERM") == "truecolor"` assertion reads the value this
+    /// TEST PROCESS inherited from the developer's terminal and passes
+    /// whether or not the code under test sets anything. Verified: with
+    /// `cmd.env("COLORTERM", ...)` deleted, that naive form still passed.
+    /// Poisoning the parent env with a value the code must OVERRIDE is what
+    /// separates "stated by base_command" from "inherited from whoever ran
+    /// the test" - the exact distinction the shipped bug turned on.
+    #[test]
+    fn pane_env_states_both_color_signals() {
+        // Serialized: `set_var`/`remove_var` are process-wide, and this is the
+        // same hazard PTY_GATE already exists to serialize.
+        let _gate = PTY_GATE.blocking_lock();
+        let restore = std::env::var_os("COLORTERM");
+        std::env::set_var("COLORTERM", "fno-test-sentinel-must-be-overridden");
+
+        let cmd = base_command(OsStr::new("/bin/sh"), None, "main", 7);
+        let term = cmd.get_env("TERM").map(|v| v.to_owned());
+        let colorterm = cmd.get_env("COLORTERM").map(|v| v.to_owned());
+
+        // Restore before asserting so a failure cannot leak the sentinel into
+        // every test that runs after this one.
+        match restore {
+            Some(v) => std::env::set_var("COLORTERM", v),
+            None => std::env::remove_var("COLORTERM"),
+        }
+
+        assert_eq!(
+            term.as_deref(),
+            Some(OsStr::new("xterm-256color")),
+            "a pane must state TERM"
+        );
+        assert_eq!(
+            colorterm.as_deref(),
+            Some(OsStr::new("truecolor")),
+            "a pane must STATE COLORTERM and override the parent's value; \
+             inheriting it leaves a hosted TUI monochrome whenever the \
+             detached server was launched without one"
+        );
+    }
 
     /// Reset the globals a wedge test can leave dirty: the cooldown Instant,
     /// the hang-injection thread-local a worker thread may have carried over
