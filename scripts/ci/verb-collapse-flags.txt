@@ -21,6 +21,7 @@ backlog idea !--tag
 backlog intake !--batch
 backlog update !--tag
 backlog update !--untag
+mail hold-release !--poll-s
 mail send !--provider
 paths handoff !--session
 resume receipt validate !--session

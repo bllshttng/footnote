@@ -81,12 +81,18 @@ def read(handle: str) -> Optional[Hold]:
     """This handle's clock, or None when there is no readable one.
 
     A corrupt or unparseable file reads as None, the same as an absent one.
-    Both mean "no clock", and both lift the hold at :func:`lapsed` - a clock
-    nobody can read is not evidence that a hold is still running.
+    Both mean "no clock", and neither is evidence that a hold is running.
+
+    Never raises. The catch is deliberately broad because resolving the
+    directory runs the whole path resolver, which loads settings and can fail
+    in ways a file read cannot - a narrow ``(OSError, ValueError)`` here let an
+    ``AttributeError`` from the resolver escape into ``fno mail notify-self``,
+    which runs on every ``UserPromptSubmit``. Busy mode must never be able to
+    break the turn-boundary render: an unreadable clock means the mail flows.
     """
     try:
         raw = json.loads(hold_path(handle).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except Exception:  # noqa: BLE001 - see above; a clock read never breaks a caller
         return None
     if not isinstance(raw, dict):
         return None

@@ -65,6 +65,27 @@ def state(tmp_path, monkeypatch):
     return env, home
 
 
+def _arm_clock(hold_dir, *, seconds_out, window_s=2):
+    """Write a hold clock and return the exact epoch deadline it encodes.
+
+    Truncates to a whole second BEFORE adding the offset, so the deadline the
+    caller asserts against is the one the timer reads. Deriving it the other
+    way loses up to a second to `strftime`, which is a real difference at these
+    durations.
+    """
+    deadline = float(int(time.time()) + seconds_out)
+    (hold_dir / f"{HANDLE}.json").write_text(
+        json.dumps(
+            {
+                "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(deadline)),
+                "window_s": window_s,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return deadline
+
+
 def _send_to_held_session(body, *, sender="worker", ts):
     """Put one durable message on the bus addressed to the held session."""
     from fno.bus.log import Envelope, append, new_msg_id
@@ -98,23 +119,17 @@ def test_a_held_message_lands_after_expiry_with_no_operator_input(state, tmp_pat
     # Arm a two-second hold by writing the clock directly: this test is about
     # the RELEASE trigger, and `fno mail hold` needs an ambient harness
     # identity a subprocess does not have.
-    until = time.gmtime(time.time() + 2)
-    (hold_dir / f"{HANDLE}.json").write_text(
-        json.dumps(
-            {
-                "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", until),
-                "window_s": 2,
-            }
-        ),
-        encoding="utf-8",
-    )
+    deadline = _arm_clock(hold_dir, seconds_out=2)
 
-    started = time.monotonic()
     proc = _run_release(env)
-    elapsed = time.monotonic() - started
 
     assert proc.returncode == 0, proc.stderr
-    assert elapsed >= 1.5, "the timer returned before its own deadline"
+    # Assert against the deadline the timer was actually given, not against an
+    # elapsed budget. The clock is stored to whole seconds, so a wall time of
+    # X.9 truncates to X and the real wait is up to a second shorter than the
+    # number asked for. An elapsed-time assertion measures the truncation as
+    # much as the timer, and that is what made this flake on CI at 1.41s.
+    assert time.time() >= deadline - 0.2, "the timer returned before its deadline"
 
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["handle"] == HANDLE
@@ -167,20 +182,7 @@ def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
     hold_dir.mkdir(parents=True, exist_ok=True)
     clock = hold_dir / f"{HANDLE}.json"
 
-    def _write_deadline(seconds_out):
-        clock.write_text(
-            json.dumps(
-                {
-                    "until": time.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds_out)
-                    ),
-                    "window_s": 2,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-    _write_deadline(2)
+    first_deadline = _arm_clock(hold_dir, seconds_out=2)
     proc = subprocess.Popen(
         [
             _FNO, "mail", "hold-release", "--handle", HANDLE, "--poll-s", "1",
@@ -192,10 +194,11 @@ def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
     )
     try:
         time.sleep(1)
-        _write_deadline(4)  # the operator typed: the idle window restarts
-        started = time.monotonic()
+        # The operator typed: the idle window restarts, past the first deadline.
+        second_deadline = _arm_clock(hold_dir, seconds_out=4)
+        assert second_deadline > first_deadline, "the re-arm must move the deadline"
         proc.communicate(timeout=30)
-        assert time.monotonic() - started >= 2.5, (
+        assert time.time() >= second_deadline - 0.2, (
             "the timer fired on its original deadline, ignoring the re-arm"
         )
     finally:

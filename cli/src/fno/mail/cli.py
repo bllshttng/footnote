@@ -3991,11 +3991,18 @@ def cmd_notify_self() -> None:
     # wiring is needed. A live timed hold renders nothing and pushes its own
     # deadline out. A lapsed one is tidied here rather than on the send path,
     # where the gate stays a pure read to avoid a re-entrant registry lock.
-    from fno.mail import hold as hold_mod
+    # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
+    # tidied must degrade to rendering the mail, never to swallowing this
+    # turn's delivery. Busy mode is a convenience layered over the bus, and it
+    # does not get to break the bus.
+    try:
+        from fno.mail import hold as hold_mod
 
-    if hold_mod.extend(handle) is not None:
-        return
-    hold_mod.tidy_lapsed(handle)
+        if hold_mod.extend(handle) is not None:
+            return
+        hold_mod.tidy_lapsed(handle)
+    except Exception:  # noqa: BLE001 - a hold failure never costs a delivery
+        pass
 
     lines: list[str] = []
 
