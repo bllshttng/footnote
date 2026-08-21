@@ -3528,15 +3528,18 @@ def cmd_hold(
     handle = _self_handle_or_exit()
 
     if status:
-        clock = hold_mod.read(handle)
-        if clock is None:
+        # Ask the delivery gate, not the clock. A flag stamped by
+        # `fno agents register --delivery-policy bus-only` has no clock, and
+        # reading the clock alone reported "mail delivers normally" for a
+        # session whose mail was in fact being held indefinitely.
+        from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
+
+        if _delivery_policy_refusal(handle) != BUS_ONLY_POLICY:
             print(f"{handle}: no hold - mail delivers normally")
             return
-        label = hold_mod.remaining_label(handle)
-        if clock.until is None:
-            print(f"{handle}: bus-only, no expiry (hand-stamped policy)")
-        elif label is None:
-            print(f"{handle}: hold lapsed - the next send delivers")
+        label = hold_mod.dnd_label(handle)
+        if label == "held":
+            print(f"{handle}: holding mail, no expiry (hand-stamped bus-only)")
         else:
             print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
         return

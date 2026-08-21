@@ -91,19 +91,25 @@ def row_address(
 
 
 def _dnd_label(entry: AgentEntry) -> Optional[str]:
-    """Remaining time on this row's do-not-disturb hold, or None (x-481e).
+    """This row's do-not-disturb state for the DND column, or None (x-481e).
 
     None whenever mail flows right now, so a row whose hold already lapsed
     reads the same as a row that never had one. Both are states in which a
     message lands, and the column exists to answer that question, not to
     report a flag nobody cleaned up.
+
+    A bus-only row with no clock reads ``held``, not blank. Mail to it really
+    is being held, indefinitely, and a blank cell there would be the column
+    lying about the one row it exists to describe. ``dnd_label`` derives that
+    from the same ``lapsed`` the delivery gate uses, so the two agree by
+    construction rather than by matching edits.
     """
     if getattr(entry, "delivery_policy", None) != "bus-only":
         return None
     try:
         from fno.mail import hold as _hold
 
-        return _hold.remaining_label(entry.name)
+        return _hold.dnd_label(entry.name)
     except Exception:  # noqa: BLE001 - a render helper never breaks the listing
         return None
 

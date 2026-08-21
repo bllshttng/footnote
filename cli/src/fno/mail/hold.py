@@ -12,15 +12,16 @@ nine construction sites, for one timestamp. So the clock is a sidecar and the
 flag stays the sole enforcement authority: a reader asking "is mail held"
 reads the flag, a reader asking "until when" reads the sidecar.
 
-Three sidecar states, and the third is the one that matters:
+Three sidecar states, and only one of them ever expires:
 
-- **absent** - no clock was ever written for a set flag. The self-heal LIFTS
-  the hold. See :func:`lapsed` for why the fail-open direction is the safe one.
-- **``until: null``** - a deliberate permanent policy, stamped by
-  ``fno agents register --delivery-policy bus-only``. Never lapses. This state
-  exists so the fail-open above cannot destroy a manual stamp that has no
-  clock by design.
-- **``until: <iso8601>``** - a timed busy-mode hold. Lapses at that instant.
+- **absent** - no clock was written for this flag, so it is not a busy-mode
+  hold at all. It is a policy stamped by ``fno agents register
+  --delivery-policy bus-only``, which has no clock by construction. Never
+  lapses. See :func:`lapsed` for why lifting it instead was tried and reversed.
+- **``until: null``** - the same permanent policy, recorded explicitly so the
+  DND column can say "held" rather than leaving the operator to guess.
+- **``until: <iso8601>``** - a timed busy-mode hold. Lapses at that instant,
+  and only this state lapses.
 """
 from __future__ import annotations
 
@@ -34,10 +35,6 @@ from pathlib import Path
 from typing import Optional
 
 from fno import paths
-
-#: Sidecar written for a policy that is deliberately permanent, so an absent
-#: sidecar can safely mean "no clock, lift it" without destroying a hand stamp.
-NO_EXPIRY = {"until": None, "window_s": None}
 
 DEFAULT_MINUTES = 5
 
@@ -141,7 +138,12 @@ def arm(handle: str, minutes: int = DEFAULT_MINUTES) -> Hold:
 
 
 def arm_permanent(handle: str) -> Hold:
-    """Record a policy that never expires (the hand-stamped ``bus-only``)."""
+    """Record a policy that never expires (the hand-stamped ``bus-only``).
+
+    Not needed for enforcement - an absent clock already never lapses. This is
+    for the RENDER: it lets the DND column distinguish a deliberate permanent
+    policy from a row nobody has looked at, on rows written from here on.
+    """
     return _write(Hold(handle=handle, until=None, window_s=None))
 
 
@@ -224,13 +226,31 @@ def tidy_lapsed(handle: str) -> bool:
     return True
 
 
-def remaining_label(handle: str) -> Optional[str]:
-    """A compact remaining-time string for the DND column, or None.
+def dnd_label(handle: str) -> Optional[str]:
+    """What the DND column shows for a row whose flag IS ``bus-only``.
 
-    None whenever nothing is being held right now, so the column renders the
-    same for "no hold" and "a hold that has already lapsed" - both are states
-    in which mail flows. A hold with no visible end is the thing the operator
-    asked to avoid, so a live hold always renders a duration, never a bare yes.
+    Defined in terms of :func:`lapsed`, so the column and the delivery gate can
+    never disagree about whether mail is moving. That matters more than the
+    string: a column that says one thing while the gate does another is worse
+    than no column, and this node exists because state was modelled and never
+    shown.
+
+    ``None`` when mail flows despite the flag, which is the lapsed-timed-hold
+    case and the one state where the flag is stale. ``"held"`` when the hold
+    has no end to show. A duration whenever there is one, because a hold with
+    no visible end is what the operator asked to avoid.
+    """
+    if lapsed(handle):
+        return None
+    return remaining_label(handle) or "held"
+
+
+def remaining_label(handle: str) -> Optional[str]:
+    """The compact remaining-time string alone, or None when there is no clock.
+
+    Callers rendering the operator-facing column want :func:`dnd_label`, which
+    answers the question the column asks. This one answers only "how long is
+    left", and returns None for a row that is held with no end recorded.
     """
     hold = read(handle)
     if hold is None:

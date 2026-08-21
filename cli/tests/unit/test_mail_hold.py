@@ -313,6 +313,36 @@ def test_a_row_with_no_hold_renders_a_null_dnd():
     assert row["dnd"] is None
 
 
+def test_a_bus_only_row_with_no_clock_reads_held_not_blank():
+    """The pre-busy-mode row: flag set by hand, no clock, mail genuinely held.
+
+    A blank cell here would be the column lying about the one row it exists to
+    describe, and every row stamped before this file existed is this shape.
+    """
+    row = fmt.serialize_entry(_full_entry(), live_status=None)
+
+    assert row["delivery_policy"] == "bus-only"
+    assert row["dnd"] == "held"
+
+
+def test_the_dnd_column_and_the_delivery_gate_never_disagree():
+    """Whatever the column says, the gate must agree mail is or is not moving."""
+    cases = [
+        ("no clock", lambda: None),
+        ("permanent", lambda: hold_mod.arm_permanent(HANDLE)),
+        ("live timed", lambda: hold_mod.arm(HANDLE, 5)),
+        ("lapsed timed", lambda: _expire(HANDLE)),
+    ]
+    for name, arrange in cases:
+        hold_mod.clear(HANDLE)
+        arrange()
+        held_per_column = fmt.serialize_entry(_full_entry(), live_status=None)["dnd"]
+        held_per_gate = (
+            dispatch._delivery_policy_refusal(_entry()) == dispatch.BUS_ONLY_POLICY
+        )
+        assert (held_per_column is not None) is held_per_gate, name
+
+
 def test_a_lapsed_hold_renders_no_dnd_because_mail_flows_again():
     hold_mod._write(
         hold_mod.Hold(
