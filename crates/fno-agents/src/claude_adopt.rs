@@ -62,7 +62,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         origin: Some("adopted".into()),
         short_id: short,
         legacy_provider: String::new(),
-        provider: None,
+        provider: Some("anthropic".into()),
         model: None,
         effort: None,
         harness: Some("claude".into()),
@@ -248,6 +248,7 @@ mod tests {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.harness_name(), "claude");
+        assert_eq!(e.provider.as_deref(), Some("anthropic"));
         assert_eq!(e.host_mode.as_deref(), Some("attached"));
         // Addressing identity is the full uuid; since v9 the wire short lives in
         // the unified short_id field (was claude_short_id).

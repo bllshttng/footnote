@@ -2417,10 +2417,7 @@ use crate::agent_lock::{holder_note, AgentLock};
 
 /// Stable fno-side log path for `fno agents logs <name>` (`_derive_log_path`).
 fn derive_log_path(home: &AgentsHome, name: &str) -> PathBuf {
-    home.root()
-        .join("agents")
-        .join("logs")
-        .join(format!("{}.log", name))
+    home.root().join("logs").join(format!("{}.log", name))
 }
 
 /// Orchestrate one claude `ask`: validate, lock, decide create-vs-followup,
@@ -3263,7 +3260,7 @@ fn create(
         // follow-up/logs read it via `transport_short()`.
         short_id: short_id.clone(),
         legacy_provider: String::new(),
-        provider: None,
+        provider: Some("anthropic".to_string()),
         model: None,
         effort: None,
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
