@@ -32,14 +32,6 @@ Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. I
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
 
-### A guard placed on one of N reachable paths is decorative
-
-Before trusting a guard, enumerate every path a caller can reach: in-process test, exec'd binary, skill layer, direct CLI, spawned worker. A guard on only one reads as protection and ships green while the rest stay broken. The inversion is as fatal: a PRODUCER on one of N paths (review_coverage only under run_done, `crates/fno-agents/src/loopcheck.rs`) makes the gate unsatisfiable, not bypassable, for every shape that cannot run that path. Skill-prose-only behavior is the same defect: a direct CLI call or a non-Claude worker skips that layer. So is a test asserting two paths emit one enum variant, pinning the tag, not the destination.
-
-- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid a path only the exec'd binary took), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity pinned the tag, not the target).
-- graduates-to: a path-uniqueness lint treating N reachable implementations of one operation as a CI failure, not a review catch; plus one failing an equivalence assertion that ignores the payload.
-- added: 2026-07-23
-
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
 Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. `fno do target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno agents claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).

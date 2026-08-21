@@ -236,6 +236,14 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-review-invocation-single-source.sh
 
+      # From the AGENTS.md reachable-paths pitfall graduation (x-5ff6).
+      - name: Reachable-paths lint + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash scripts/ci/check-reachable-paths.sh --self-test
+          bash scripts/ci/check-reachable-paths.sh
+
       # From skill-local-evals.yml.
       - name: No skills/<name>/evals/ dead convention
         if: ${{ !cancelled() }}
