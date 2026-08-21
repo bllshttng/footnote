@@ -22,9 +22,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 
-pytestmark = pytest.mark.skipif(
-    not INIT_SCRIPT.exists(), reason="init-target-state.sh not present"
-)
+# NO module-level skipif here, and the omission is load-bearing. It used to read
+# `skipif(not INIT_SCRIPT.exists())`, so deleting the very script this file
+# exists to test made the ENTIRE file pass silently. A missing script under test
+# is a failure, not a reason to abstain, and it fails at the first subprocess
+# call with the path in the message.
 
 NODE_ID = "ab-deadbeef"  # matches ^ab-[0-9a-f]{8}$
 
@@ -215,109 +217,9 @@ def test_non_contention_error_does_not_block(tmp_path):
     assert f'target_claim_key: "node:{NODE_ID}"' not in state
 
 
-SET_GATE = REPO_ROOT / "scripts" / "lib" / "set-gate.sh"
-
-
-@pytest.mark.skipif(not SET_GATE.exists(), reason="set-gate.sh not present")
-def test_set_gate_refresh_uses_ttl_and_global_root(tmp_path):
-    """set-gate.sh refreshes the node claim with --ttl + the global root so a
-    long phase cannot let a TTL claim shrink to MIN_TTL_MS and free the node."""
-    home = tmp_path / "home"
-    (home / ".fno").mkdir(parents=True)
-    # set-gate.sh validates the gate name against ./docs/architecture/
-    # events-schema.yaml (relative to cwd) and refuses the flip if it's
-    # missing - which would exit before the refresh hook. Stage a copy so the
-    # flip succeeds and the refresh path actually runs.
-    schema_src = REPO_ROOT / "docs" / "architecture" / "events-schema.yaml"
-    if not schema_src.exists():
-        pytest.skip("events-schema.yaml not present in this checkout")
-    schema_dst = tmp_path / "docs" / "architecture" / "events-schema.yaml"
-    schema_dst.parent.mkdir(parents=True)
-    schema_dst.write_text(schema_src.read_text())
-    state = tmp_path / "target-state.md"
-    state.write_text(
-        "---\n"
-        "status: IN_PROGRESS\n"
-        "session_id: test-sid\n"
-        "provenance_nonce: deadbeef\n"
-        'target_claim_key: "node:ab-deadbeef"\n'
-        'target_claim_holder: "target-session:test-sid"\n'
-        'target_claim_ttl: "2h"\n'
-        "ledger_updated: false\n"
-        "---\n"
-    )
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    mock = bindir / "fno"
-    mock.write_text(MOCK_ABI)
-    mock.chmod(0o755)
-    log = tmp_path / "fno.log"
-
-    env = os.environ.copy()
-    env.update({
-        "HOME": str(home),
-        "PATH": f"{bindir}:{env['PATH']}",
-        "MOCK_ABI_LOG": str(log),
-    })
-    subprocess.run(
-        ["bash", str(SET_GATE), str(state), "ledger_updated", "true", "register"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=20,
-    )
-    log_text = log.read_text() if log.exists() else ""
-    refresh_lines = [ln for ln in log_text.splitlines() if "claim refresh" in ln]
-    assert refresh_lines, f"refresh hook never invoked fno: {log_text!r}"
-    line = refresh_lines[0]
-    assert "--ttl 2h" in line, line
-    assert f"ROOT:{home}" in line, "refresh must set FNO_CLAIMS_ROOT=$HOME: " + line
-
-
-CLAIM_RELEASE = REPO_ROOT / "scripts" / "lib" / "claim-release.sh"
-
-
-@pytest.mark.skipif(not CLAIM_RELEASE.exists(), reason="claim-release.sh not present")
-def test_release_runs_when_graph_node_id_null(tmp_path):
-    """release_graph_claim must release the fno node:<id> claim even when
-    graph_node_id is null. The fno claim is acquired whenever target_claim_key
-    is written (bare node-id idea node, or legacy-claim-refused), independent
-    of graph_node_id; gating release on graph_node_id leaks the global lock for
-    the full TTL and hides the node from selection (ab-fcf9cec5 regression)."""
-    home = tmp_path / "home"
-    (home / ".fno").mkdir(parents=True)
-    state = tmp_path / "target-state.md"
-    state.write_text(
-        "---\n"
-        "status: IN_PROGRESS\n"
-        "session_id: test-sid\n"
-        "graph_node_id: null\n"
-        'target_claim_key: "node:ab-deadbeef"\n'
-        'target_claim_holder: "target-session:test-sid"\n'
-        "---\n"
-    )
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    mock = bindir / "fno"
-    mock.write_text(MOCK_ABI)
-    mock.chmod(0o755)
-    log = tmp_path / "fno.log"
-
-    driver = (
-        f'log() {{ :; }}; SCRIPT_DIR="{REPO_ROOT}"; '
-        f'source "{CLAIM_RELEASE}"; release_graph_claim "{state}"'
-    )
-    env = os.environ.copy()
-    env.update({
-        "HOME": str(home),
-        "PATH": f"{bindir}:{env['PATH']}",
-        "MOCK_ABI_LOG": str(log),
-    })
-    subprocess.run(["bash", "-c", driver], env=env,
-                   capture_output=True, text=True, timeout=20)
-    log_text = log.read_text() if log.exists() else ""
-    release_lines = [ln for ln in log_text.splitlines() if "claim release" in ln]
-    assert release_lines, (
-        "fno claim release must run even when graph_node_id is null; got: "
-        + repr(log_text)
-    )
-    line = release_lines[0]
-    assert "node:ab-deadbeef" in line, line
-    assert f"ROOT:{home}" in line, "release must set FNO_CLAIMS_ROOT=$HOME: " + line
+# set-gate.sh and claim-release.sh were REMOVED from the product (the stop hook
+# became a read-only shim). Their tests were `skipif(not <script>.exists())`, so
+# each one could not fail on the deletion of the very script it existed to test,
+# and both have been skipping silently ever since. A test for functionality that
+# no longer ships is dead code, so it is deleted here rather than converted to a
+# hard failure that would keep CI permanently red for a deliberate removal.

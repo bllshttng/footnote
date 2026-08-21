@@ -104,6 +104,78 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"live-claim","holder"
 ok  'foreign holder + --self -> still already-running' "$(field "$out")" 'already-running'
 no  'foreign holder did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
+# --- unproven-claim -> already-running, and the receipt says what it MEASURED -
+# x-2fe6 AC8-HP. A held claim proves a holder, never a worker. The old receipt
+# asserted "live worker holds node" for a launch window that may never boot and
+# for an external `backlog next --claim`, which is a claim with nobody behind it.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"unproven-claim","holder":"spawn-handover:t-x-7777","init_reached":false}' \
+  run --name w2u --provider claude --message '/target x' --node "$NODE")"
+ok  'unproven-claim -> already-running' "$(field "$out")" 'already-running'
+has 'unproven-claim names the untested condition' "$out" 'no worker has reached target init'
+has 'unproven-claim names the holder' "$out" 'spawn-handover:t-x-7777'
+no  'unproven-claim does NOT assert a live worker' "$out" 'live worker holds node'
+no  'unproven-claim did NOT spawn' "$(calllog)" 'agents spawn --harness'
+
+# --- an unproven claim that is the CALLER's own still routes to handoff -------
+# The self-handoff receipt must stay reachable: reading unproven-claim into the
+# fail-closed arm would lose it for a caller holding its own unbooted claim.
+out="$(STUB_VERDICT='{"verdict":"already-running","reason":"unproven-claim","holder":"target-session:owner","init_reached":false}' \
+  run --name w2uh --provider claude --message '/target x' --node "$NODE" --self 'target-session:owner')"
+ok  'unproven + --self -> self-handoff receipt' "$(field "$out")" 'self-handoff'
+no  'unproven self-handoff did NOT spawn' "$(calllog)" 'agents spawn --harness'
+
+# --- unproven-claim on the POST-SPAWN refusal, the path a real dispatch takes -
+# The probe above runs before the spawn. This block fires when the claim is
+# taken in the window between them. An arm on only one of the two reads as
+# protection and ships green while the live path stays broken: without it the
+# reason falls past the esac and a benign skip becomes result=failed, exit 1.
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=unproven-claim \
+  run --name w2p --provider claude --message '/target x' --node "$NODE")"; rc=$?
+ok  'post-spawn unproven-claim -> already-running' "$(field "$out")" 'already-running'
+ok  'post-spawn unproven-claim exits 0' "$rc" '0'
+has 'post-spawn unproven-claim names the untested condition' "$out" 'no worker has reached target init'
+no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worker holds node'
+
+# --- every guard reason has an arm in BOTH consumers -------------------------
+# One Python producer, two shell consumers, and neither case statement carries a
+# default: an unhandled reason falls through to a failure handler and turns a
+# benign skip into a hard failure. That is how unproven-claim shipped covering
+# only the probe path.
+#
+# Each consumer is checked on BOTH of its paths, because they are separate code
+# and a reason can reach one and not the other. The post-spawn refusal is a
+# `case` arm; the probe verdict is an if/elif chain. Matching only the `case`
+# passed a reason that was missing from the probe chain, which is the same
+# half-coverage this check exists to catch.
+#
+# CEILING, stated rather than implied. The list is written here, not derived
+# from the producer, because the reasons are built in a ternary that no grep
+# reads reliably. So it catches a reason DROPPED from Python, and a reason
+# mentioned in neither path of a consumer. It does NOT catch a brand-new reason
+# nobody adds to this list, and it does not prove the arm it found does the
+# right thing - the behavioral tests above do that for `unproven-claim`.
+_GUARD_REASONS='live-claim unproven-claim suspect-claim reservation-held duplicate-claim auto-deferred defer-failed'
+_SPAWN_SH_LOCAL="$(dirname "${BASH_SOURCE[0]}")/../scripts/spawn.sh"
+_CLI_PY="$(dirname "${BASH_SOURCE[0]}")/../../../cli/src/fno/agents/cli.py"
+_DISPATCH_SH="$(dirname "${BASH_SOURCE[0]}")/../../target/scripts/dispatch-node.sh"
+for reason in $_GUARD_REASONS; do
+  if grep -qF "\"$reason\"" "$_CLI_PY"; then
+    ok "producer still emits: $reason" "present" "present"
+  else
+    ok "producer still emits: $reason" "GONE from cli.py (stale list)" "present"
+  fi
+  for consumer in "$_SPAWN_SH_LOCAL" "$_DISPATCH_SH"; do
+    label="$(basename "$consumer")"
+    # A `case` arm (post-spawn refusal) OR an explicit comparison (probe chain).
+    if grep -qE "^[[:space:]]*[a-z|-]*${reason}[a-z|-]*\)" "$consumer" \
+       || grep -qF "== \"${reason}\"" "$consumer"; then
+      ok "$label handles reason: $reason" "handled" "handled"
+    else
+      ok "$label handles reason: $reason" "UNHANDLED (falls to the failure handler)" "handled"
+    fi
+  done
+done
+
 # --- reservation acquired by a peer between probe and launch -> NO worker ----
 out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=reservation-held \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"

@@ -197,6 +197,62 @@ def _reclaim_if_provably_dead(key: str, *, probe=None) -> tuple[str | None, str]
         release_dir_mutex(lock, token)
 
 
+def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
+    """True when a `fno target init` PROVABLY took this node claim.
+
+    A live `node:<id>` claim proves a HOLDER exists. It does not prove a WORKER
+    exists: a `spawn-handover:` claim covers a launch window whose worker can
+    die before it boots, and a hand `fno claim acquire` from a live process
+    takes the key with nothing launched at all. Reporting either as a live
+    worker tells a king the opposite of the truth at the moment the king
+    decides whether to staff the node.
+
+    Two markers, both POSITIVE. This never reads an absence as a yes:
+
+    1. The holder shape. Init acquires under `target-session:<id>`
+       (``hooks/helpers/init-target-state.sh``). This is a CONVENTION, not
+       proof: `fno claim acquire --holder target-session:anything` writes the
+       same prefix, and a hand acquire is one of the cases this function exists
+       to exclude. It is kept because it is the only marker that reaches a
+       worker running in its own worktree, whose manifest this process cannot
+       see. Marker 2 is the non-forgeable one.
+    2. A manifest under CWD binding `target_claim_key: node:<id>` AND naming
+       the OBSERVED holder in `target_claim_holder`. The stronger fact, and
+       never the only one: a worktree worker's manifest lives under its own
+       root, not the dispatcher's, so requiring it alone reports every real
+       worktree worker as unproven.
+
+    The holder match on marker 2 is what makes it a measurement rather than a
+    snapshot. Manifest claim fields are written once at init and are never
+    ownership truth, and a dispatcher is handed the NODE's project root as
+    `--cwd`, which is exactly where a finished session leaves its manifest. A
+    key-only test therefore reads a dead session's file and calls an unrelated
+    holder a live worker, which is the lie this function exists to delete.
+
+    Any read fault answers False. An unreadable manifest must never manufacture
+    a worker.
+    """
+    from fno.agents.truth_status import _HOLDER_PREFIX
+
+    holder = str(holder or "")
+    if holder.startswith(_HOLDER_PREFIX):
+        return True
+    if not cwd or not holder:
+        return False
+    try:
+        from pathlib import Path
+
+        from fno.target.manifest import read_target_manifest
+
+        raw = read_target_manifest(Path(cwd)) or {}
+        return (
+            str(raw.get("target_claim_key") or "") == f"node:{node_id}"
+            and str(raw.get("target_claim_holder") or "") == holder
+        )
+    except Exception:  # noqa: BLE001 - an unreadable manifest proves nothing
+        return False
+
+
 def _spawn_guard_decision(
     node_id: str,
     holder: str,
@@ -205,7 +261,7 @@ def _spawn_guard_decision(
     no_reserve: bool = False,
     cwd: str | None = None,
     handover_holder: str | None = None,
-) -> tuple[dict[str, str], int]:
+) -> tuple[dict[str, object], int]:
     """Return the shared family-2 pre-birth verdict without rendering it.
 
     ``handover_holder``, when given, also takes the ``node:<id>`` claim under
@@ -257,6 +313,11 @@ def _spawn_guard_decision(
     common = {
         "holder": observation.holder,
         "truth_status": observation.truth_status,
+        # Whether a `fno target init` provably took this claim. It travels in
+        # `common` so every consumer branch can tell a worker that is starting
+        # from one that never started, instead of every holder reading as a
+        # live worker.
+        "init_reached": _init_reached(node_id, observation.holder, cwd),
     }
     if observation.action in ("auto-deferred", "defer-failed"):
         return {
@@ -305,6 +366,9 @@ def _spawn_guard_decision(
                 common = {
                     "holder": observation.holder,
                     "truth_status": observation.truth_status,
+                    "init_reached": _init_reached(
+                        node_id, observation.holder, cwd
+                    ),
                 }
                 # The cleared claim makes this the first reading with the node
                 # free, so the failure-limit arm can fire here for the first
@@ -344,9 +408,21 @@ def _spawn_guard_decision(
                 current = state
             wedged = current == "suspect" and not in_launch_window
             recovery = "not-attempted" if wedged and no_reserve else None
+            # THREE reasons, not two. `live-claim` now asserts only what was
+            # measured: a holder AND a target init behind it. A held claim
+            # nobody has booted a worker for reads `unproven-claim`, so a
+            # reader can tell a worker that is starting from one that never
+            # started. `live-claim` and `suspect-claim` stay byte-identical
+            # wherever init was reached, so no existing consumer branch moves.
             return {
                 "verdict": "already-running",
-                "reason": "suspect-claim" if wedged else "live-claim",
+                "reason": (
+                    "suspect-claim"
+                    if wedged
+                    else "live-claim"
+                    if common["init_reached"]
+                    else "unproven-claim"
+                ),
                 **({"recovery": recovery} if recovery else {}),
                 **({"remedy": _remedy_for(node_key)}
                    if wedged and not no_reserve else {}),
@@ -448,7 +524,7 @@ def _spawn_guard_decision(
             "reason": "duplicate-claim",
             "holder": post.get("holder") or "unknown",
         }, 0
-    out = {
+    out: dict[str, object] = {
         "verdict": "dispatchable",
         "reservation_key": res_key,
         "reservation_holder": holder,
@@ -490,10 +566,20 @@ def _spawn_guard_decision(
             # inside its TTL. Leaving it blocked every dispatcher for 3m over a
             # node somebody else legitimately holds.
             _release_dispatch_claims((res_key, holder))
+            # Same split as the verdict above, for the same reason. A guard
+            # placed on one of two paths producing one lie is decorative: this
+            # arm fires when the read said free and the acquire lost the race,
+            # and the winner is no more proven to be a worker than any other
+            # holder.
+            race_holder = getattr(exc, "holder", "") or "unknown"
             return {
                 "verdict": "already-running",
-                "reason": "live-claim",
-                "holder": getattr(exc, "holder", "") or "unknown",
+                "reason": (
+                    "live-claim"
+                    if _init_reached(node_id, race_holder, cwd)
+                    else "unproven-claim"
+                ),
+                "holder": race_holder,
                 "detail": f"node:{node_id} is held ({exc}); no worker launched",
             }, 0
         except Exception as exc:  # noqa: BLE001 - visibility is best-effort here
@@ -539,6 +625,13 @@ def _release_dispatch_claims(*claims) -> None:
     One helper for both failure paths. They used to release only the
     reservation, in two copies, and adding the node claim to one of them is how
     a guard ends up on one of N paths.
+
+    A failed release is SWALLOWED but never SILENT. Swallowing is right: this
+    runs on the way out of a failure, and raising here would mask the error
+    being handled. Saying nothing is not. A release that quietly no-ops leaves
+    the key held for its whole TTL under a holder that is gone, which is the
+    exact wedge this file exists to delete - so the no-op path names the key it
+    failed to free instead of reporting the same nothing as success.
     """
     from fno.claims.core import release_claim
     from fno.claims.io import claims_root_for
@@ -549,8 +642,13 @@ def _release_dispatch_claims(*claims) -> None:
         key, holder = pair
         try:
             release_claim(key, holder, root=claims_root_for(key))
-        except Exception:  # noqa: BLE001 - a stuck release must not mask the real error
-            pass
+        except Exception as exc:  # noqa: BLE001 - must not mask the real error
+            print(
+                f"WARNING: could not release {key} held by {holder} ({exc}); "
+                f"it stays held until its TTL expires. Free it with: "
+                f"fno claim release {key} --holder {holder}",
+                file=sys.stderr,
+            )
 
 
 def _emit_reaped_abandoned(node_id: str, prior_holder: str, truth_status: str) -> None:
@@ -1705,72 +1803,6 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
-    node_reservation: tuple[str, str] | None = None
-    node_claim: tuple[str, str] | None = None
-    if node is not None:
-        guarded_node = prov_env.get("FNO_NODE")
-        if not guarded_node:
-            print(
-                f"refusing unresolved --node {node!r}: cannot run the shared "
-                "family-2 dispatch guard; no worker launched",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        guard_holder = f"spawn-cli:{os.getpid()}"
-        from fno.claims.cli import HANDOVER_HOLDER_PREFIX
-
-        # The worker's name is the whole proof. A bare `spawn-handover:` is a
-        # string anyone can type, and naming it back is exactly what
-        # `compare_and_rebind` accepts as evidence of successorship - so an
-        # empty name would hand the takeover to any process that guessed the
-        # prefix. Fall back to this dispatch's own pid, which is at least not
-        # guessable, and which the launch-window exemptions still recognize.
-        handover_holder = f"{HANDOVER_HOLDER_PREFIX}{name or f'pid-{os.getpid()}'}"
-        guard, guard_exit = _spawn_guard_decision(
-            guarded_node,
-            guard_holder,
-            cwd=str(workdir),
-            handover_holder=handover_holder,
-        )
-        if guard.get("verdict") != "dispatchable":
-            guard_reason = (
-                guard.get("detail") or guard.get("reason") or guard.get("verdict") or "unknown"
-            )
-            prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
-            print(
-                f"node dispatch refused: node={guarded_node} "
-                f"verdict={guard.get('verdict')} reason={guard_reason}{prior}; "
-                "no worker launched",
-                file=sys.stderr,
-            )
-            # This is the launch path, so a remedy here HAS earned itself:
-            # recovery ran and could not prove the holder dead. Printing it is
-            # what makes the way out reach an operator; the shell callers read
-            # this stream and pass it through.
-            if guard.get("remedy"):
-                print(guard["remedy"], file=sys.stderr)
-            raise typer.Exit(code=guard_exit or 2)
-        node_reservation = (
-            guard["reservation_key"],
-            guard["reservation_holder"],
-        )
-        if guard.get("node_claim_key"):
-            # Released on the SAME two failure paths as the reservation. A
-            # launch that dies after the claim must not strand the node for the
-            # whole handover window; that is the wedge this PR exists to delete,
-            # reintroduced by its own fix.
-            node_claim = (guard["node_claim_key"], guard["node_claim_holder"])
-            # The worker proves it is the intended successor by naming this
-            # holder back. It travels in the environment, never on the command
-            # line, so it reaches exactly the process spawned for this node.
-            prov_env["FNO_NODE_CLAIM_HOLDER"] = guard["node_claim_holder"]
-        elif guard.get("node_claim_error"):
-            print(
-                f"note: node:{guarded_node} claim not taken at dispatch "
-                f"({guard['node_claim_error']}); the worker claims it at init",
-                file=sys.stderr,
-            )
-
     # A resume may restore a recorded route inside dispatch_spawn. Resolve its
     # separately stored provider axis before admission so the gate judges the
     # destination the revived worker will actually use.
@@ -1815,6 +1847,98 @@ def cmd_spawn(
                 )
                 raise typer.Exit(code=2)
             route_provider = recorded_provider
+
+    # The node guard sits BELOW the resume-provider resolution on purpose.
+    # It acquires `dispatch:<id>` (and the handover `node:<id>`), and every
+    # exit above it is an exit that would strand those keys for their whole
+    # TTL with nothing launched. Taking the reservation after the launch is
+    # proven is one placement; a release bolted onto each exit is a guard on
+    # one of N paths, and the next exit added to that stretch leaks again.
+    # Below this point the next exit is `run_gate`, whose `except BaseException`
+    # releases both keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear
+    # block sits between a successful `run_gate` and the `try` whose `finally`
+    # releases, so an exception there still leaks both. Narrow, and named rather
+    # than papered over.
+    node_reservation: tuple[str, str] | None = None
+    node_claim: tuple[str, str] | None = None
+    if node is not None:
+        guarded_node = prov_env.get("FNO_NODE")
+        if not guarded_node:
+            print(
+                f"refusing unresolved --node {node!r}: cannot run the shared "
+                "family-2 dispatch guard; no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        guard_holder = f"spawn-cli:{os.getpid()}"
+        from fno.claims.cli import HANDOVER_HOLDER_PREFIX
+
+        # The worker's name is the whole proof. A bare `spawn-handover:` is a
+        # string anyone can type, and naming it back is exactly what
+        # `compare_and_rebind` accepts as evidence of successorship - so an
+        # empty name would hand the takeover to any process that guessed the
+        # prefix. Fall back to this dispatch's own pid, which is at least not
+        # guessable, and which the launch-window exemptions still recognize.
+        handover_holder = f"{HANDOVER_HOLDER_PREFIX}{name or f'pid-{os.getpid()}'}"
+        guard, guard_exit = _spawn_guard_decision(
+            guarded_node,
+            guard_holder,
+            cwd=str(workdir),
+            handover_holder=handover_holder,
+        )
+        if guard.get("verdict") != "dispatchable":
+            # `reason` FIRST, and detail as its own field. Both shell consumers
+            # read this line with `sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q'`,
+            # so whatever lands in `reason=` is the machine token they switch
+            # on. `detail` is a prose sentence, and the acquire-race return sets
+            # BOTH - so leading with detail put `node:<id>` in the slot, matched
+            # no case arm in either consumer, and dropped a benign refusal into
+            # the generic failure handler. Detail is still printed, just not in
+            # the slot something parses.
+            guard_reason = (
+                guard.get("reason") or guard.get("verdict") or "unknown"
+            )
+            prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
+            detail = f" detail={guard['detail']!r}" if guard.get("detail") else ""
+            print(
+                f"node dispatch refused: node={guarded_node} "
+                f"verdict={guard.get('verdict')} reason={guard_reason}{prior}; "
+                f"no worker launched{detail}",
+                file=sys.stderr,
+            )
+            # This is the launch path, so a remedy here HAS earned itself:
+            # recovery ran and could not prove the holder dead. Printing it is
+            # what makes the way out reach an operator; the shell callers read
+            # this stream and pass it through.
+            if guard.get("remedy"):
+                print(guard["remedy"], file=sys.stderr)
+            raise typer.Exit(code=guard_exit or 2)
+        # str() at the boundary: the verdict dict carries a bool
+        # (`init_reached`) beside its strings, so these keys are typed `object`
+        # coming out and the claim keys are strings going in.
+        node_reservation = (
+            str(guard["reservation_key"]),
+            str(guard["reservation_holder"]),
+        )
+        if guard.get("node_claim_key"):
+            # Released on the SAME two failure paths as the reservation. A
+            # launch that dies after the claim must not strand the node for the
+            # whole handover window; that is the wedge this PR exists to delete,
+            # reintroduced by its own fix.
+            node_claim = (
+                str(guard["node_claim_key"]),
+                str(guard["node_claim_holder"]),
+            )
+            # The worker proves it is the intended successor by naming this
+            # holder back. It travels in the environment, never on the command
+            # line, so it reaches exactly the process spawned for this node.
+            prov_env["FNO_NODE_CLAIM_HOLDER"] = str(guard["node_claim_holder"])
+        elif guard.get("node_claim_error"):
+            print(
+                f"note: node:{guarded_node} claim not taken at dispatch "
+                f"({guard['node_claim_error']}); the worker claims it at init",
+                file=sys.stderr,
+            )
 
     # Spawn gate (x-c5cc): cap + RAM floor at the top of the primitive, before
     # the substrate fan-out. This Python gate is the SOLE gate on every path
@@ -2069,7 +2193,17 @@ def cmd_spawn(
         # Release the gate's claims once the dispatch result exists (or the
         # spawn failed): registry/roster rows carry the count from here.
         gate.release()
-        if not spawn_succeeded:
+        # A one-shot's worker has already exited by the time `dispatch_spawn`
+        # returns, so there is nobody left to inherit the reservation and
+        # holding it to TTL wedges the node under a holder that is gone.
+        # `spawn_succeeded` is the wrong discriminator here: it is only
+        # evaluated after the worker exits on exactly these two substrates, so
+        # a twenty-second `--once` run kept `dispatch:<id>` for the rest of its
+        # TTL. `pane` and `bg` return while the worker lives on, so their
+        # reservation is inherited and must stay. `--once` is the pre-substrate
+        # spelling of headless, so both spellings answer the same.
+        one_shot = once or substrate == "headless"
+        if one_shot or not spawn_succeeded:
             _release_dispatch_claims(node_reservation, node_claim)
         for _k, _v in prov_prev.items():
             if _v is None:
@@ -2244,7 +2378,11 @@ def cmd_spawn_guard(
                       now held by ``--holder`` (the line carries reservation_key +
                       reservation_holder); under ``--no-reserve`` no reservation is
                       taken.
-    - already-running a live ``node:<id>`` claim (reason=live-claim, holder=<owner>),
+    - already-running a live ``node:<id>`` claim with a target init behind it
+                      (reason=live-claim, holder=<owner>), a held claim with NO
+                      target init behind it (reason=unproven-claim: a launch
+                      window, or a hand ``claim acquire`` - a holder exists and
+                      a worker is unproven),
                       a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
                       a respawned worker - the caller maps this to skipped-contested,
                       x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
@@ -2274,7 +2412,16 @@ def cmd_spawn_guard(
         for key, value in obj.items():
             if key == "verdict":
                 continue
-            parts.append(f'{key}="{value}"' if key == "detail" else f"{key}={value}")
+            # Booleans render lowercase, matching the --json lane. Python's
+            # str(True) is "True", and this text line is parsed with sed by
+            # shell callers, so a capitalised token would be a second spelling
+            # of the same fact for anything that learns to read it.
+            if key == "detail":
+                parts.append(f'{key}="{value}"')
+            elif isinstance(value, bool):
+                parts.append(f"{key}={'true' if value else 'false'}")
+            else:
+                parts.append(f"{key}={value}")
         line = " ".join(parts)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()

@@ -22,15 +22,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INIT_SCRIPT = REPO_ROOT / "hooks" / "helpers" / "init-target-state.sh"
 STOP_HOOK = REPO_ROOT / "hooks" / "target-stop-hook.sh"
-# Phase 1 of stop-hook refactor: release_graph_claim lives in
-# scripts/lib/claim-release.sh; the hook sources it.
-CLAIM_LIB = REPO_ROOT / "scripts" / "lib" / "claim-release.sh"
 
-
-pytestmark = pytest.mark.skipif(
-    not (INIT_SCRIPT.exists() and STOP_HOOK.exists()),
-    reason="target integration scripts not present in this checkout",
-)
+# NO module-level skipif, and the omission is load-bearing. It used to read
+# `skipif(not (INIT_SCRIPT.exists() and STOP_HOOK.exists()))`, which made the
+# whole file abstain on the deletion of the very scripts it tests. It also made
+# the per-test fix below decorative: a guard on one of two paths reads as
+# protection while the other path still ships green. Both scripts are part of
+# the product, so their absence is a failure and it surfaces at the first
+# subprocess call with the path in the message.
 
 
 # ---------------------------------------------------------------------------
@@ -38,13 +37,19 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 
-def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
-    """init-target-state.sh writes target_claim_key + target_claim_holder when a
-    graph node id is resolvable and fno is on PATH.
+def test_init_target_state_writes_a_state_file_for_a_node_input(tmp_path):
+    """init-target-state.sh runs end to end for a node input and writes a state
+    file, with no `fno` on PATH.
 
-    Strategy: build a minimal graph.json with one entry, point the script at
-    it via env vars, run, and assert the state file references both fields
-    and the .fno/claims/*.lock file exists.
+    Deliberately NOT the claim-acquisition test, though it used to claim to be.
+    Its claim assertions sat behind `if "target_claim_key:" in text:` and that
+    field is never written here, because nothing puts a resolvable `fno` on
+    PATH. The body never executed, so the test proved nothing about acquiring a
+    claim while its name said otherwise. The dead branch is gone and the name
+    now matches what runs.
+
+    Acquisition IS covered, properly, in test_target_node_claim.py: it installs
+    a mock `fno` on PATH and asserts the key, the holder, and the TTL by value.
     """
     # Minimal fno-resolvable graph
     fno_home = tmp_path / ".fno-home"
@@ -60,8 +65,11 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
     (repo / "plans").mkdir(parents=True)
     (repo / "plans" / "test.md").write_text("# Test plan\n")
     (repo / ".fno").mkdir()
-    (repo / ".git").mkdir()
-    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    # A REAL git repo on a feature branch. A hand-built `.git` holding only a
+    # HEAD file makes `git rev-parse` fail, and the script's location gate then
+    # refuses with rc=1 before it ever reaches the claim wiring this test is
+    # about. That refusal was invisible while the assertion below was a skip.
+    subprocess.run(["git", "init", "-q", "-b", "feature/sandbox"], cwd=repo, check=True)
 
     env = os.environ.copy()
     env.update({
@@ -84,29 +92,27 @@ def test_init_target_state_acquires_claim_when_node_id_present(tmp_path):
         timeout=60,
     )
 
-    # The script may legitimately fail to find the graph in this sandbox
-    # (it walks parent dirs looking for graph.json). We only assert the
-    # PR1 invariant when the state file actually got written.
+    # A missing state file is a FAILURE of the thing under test, never a reason
+    # to abstain. This used to call pytest.skip with the script's own return
+    # code embedded in the message: the code under test had failed and the
+    # instrument reported green. An instrument that can no-op must not report
+    # success on its no-op path.
     state = repo / ".fno" / "target-state.md"
     if not state.exists():
-        pytest.skip(
-            f"init-target-state.sh did not write state in sandbox: "
-            f"rc={result.returncode}, stderr={result.stderr[:500]!r}"
+        pytest.fail(
+            f"init-target-state.sh wrote no state file. That is the invariant "
+            f"under test. rc={result.returncode}, "
+            f"stderr={result.stderr[:500]!r}, stdout={result.stdout[:300]!r}"
         )
 
     text = state.read_text()
-    # The PR1 fields only appear if fno was actually on PATH and the claim
-    # acquire succeeded. We do not hard-fail the test if not - we want this
-    # to be a smoke test that the wiring runs at all without erroring out.
-    if "target_claim_key:" in text:
-        # If the field is written, the claim file must also exist
-        assert "target_claim_holder:" in text
-        # The lock file landed under the repo's .fno/claims/
-        claims_dir = repo / ".fno" / "claims"
-        if claims_dir.exists():
-            locks = list(claims_dir.glob("*.lock"))
-            # At least one lock present means the acquire returned success.
-            assert len(locks) >= 1
+    # Assert what this sandbox actually produces, unconditionally. A `fno`-less
+    # run still has to write a well-formed manifest naming its input.
+    assert "fno_id:" in text, text
+    assert 'input: "ab-testit"' in text, text
+    assert result.returncode == 0, (
+        f"rc={result.returncode}, stderr={result.stderr[:500]!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

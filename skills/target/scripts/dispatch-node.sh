@@ -598,6 +598,14 @@ for id in "${NODES[@]}"; do
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
         echo "already-running $id reason=\"live target worker holds node:$id ($holder)\""
         n_already=$((n_already + 1))
+      elif [[ "$reason" == "unproven-claim" ]]; then
+        # The claim is held, and that is ALL that was measured. Saying "live
+        # target worker" here asserted a worker nothing had tested, at the exact
+        # moment a reader decides whether to staff the node. Same skip, honest
+        # sentence.
+        holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null)"
+        echo "already-running $id reason=\"node:$id is held by $holder but no target init took that claim; no worker has reached target init\""
+        n_already=$((n_already + 1))
       elif [[ "$reason" == "suspect-claim" ]]; then
         # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
         # liveness degrades to SKIP, never steal and never park the lane -
@@ -907,6 +915,15 @@ for id in "${NODES[@]}"; do
       case "$guard_reason" in
         live-claim)
           echo "already-running $id reason=\"$guard_reason by shared family-2 guard; no worker launched\""
+          n_already=$((n_already + 1))
+          continue ;;
+        unproven-claim)
+          # This arm carries the ordinary dispatch. The probe above runs only
+          # under --dry-run or for a `claimed` node, so a ready node reaches
+          # the guard verdict HERE and nowhere else. Without this arm the
+          # reason falls past the esac to the generic failure handler, turning
+          # a benign skip into `failed` and a non-zero exit for the batch.
+          echo "already-running $id reason=\"node:$id is held but no target init took that claim; no worker has reached target init\""
           n_already=$((n_already + 1))
           continue ;;
         reservation-held|duplicate-claim)

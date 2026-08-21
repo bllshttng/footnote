@@ -278,3 +278,125 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     # No claim pointer in the sidecar.
     sc = json.loads((Path(str(claims_root)).parent / "sidecars" / "EXT-hi.json").read_text())
     assert "locked_by" not in sc
+
+
+# --- x-2fe6 AC10-EDGE: the external node claim must land in the GLOBAL root ---
+
+
+def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatch):
+    """A `node:` claim written to the cwd-default tree is a lock nobody honors.
+
+    Every reader of a `node:` key resolves the global root through
+    `claims_root_for` (`_read_node_claim` documents the trap in as many words:
+    a bare `claim_status(key)` reads the wrong tree as free). The external arm
+    of `backlog next --claim` was the one `node:` site that passed no `root=`,
+    so its lock landed under the cwd-default root and the node still read
+    `free` to the dispatch guard.
+
+    The two roots are pinned APART here on purpose. Every other test in this
+    file sets `FNO_CLAIMS_ROOT`, which `claims_dir()` and `global_claims_root()`
+    both honor, so they collapse to one directory and the bug is invisible.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_dir, claims_root_for, global_claims_root
+
+    rows = _rows_basic()
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+        "EXT-lo": {"plan_path": "/plans/lo.md"},
+    })
+    # Split the roots: global from $HOME, cwd-default from the canonical repo.
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir(exist_ok=True)
+    repo.mkdir(exist_ok=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("fno.paths.resolve_canonical_repo_root", lambda: repo)
+    assert global_claims_root() != claims_dir().parent, "roots must differ"
+
+    r = runner.invoke(
+        app, ["backlog", "next", "--claim", "sess-ext-root"],
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
+
+    key = "node:EXT-hi"
+    # The positive marker: the reader that every dispatch surface uses finds
+    # the claim, and names the same holder the acquire was given.
+    info = claim_status(key, root=claims_root_for(key))
+    assert info["holder"] == "sess-ext-root"
+    # A TTL, and this is the half that makes the lock HONORED rather than merely
+    # visible. Selection runs in a process that exits as soon as it prints the
+    # node. Under CliRunner that process is pytest, which stays alive, so a
+    # pid-liveness claim reads `live` here and `stale` in production - the test
+    # would certify the instrument while the target stayed broken. The TTL is
+    # what survives the selector's exit, so assert the TTL, not the state.
+    assert info["expires_at"], info
+    # And it is the same lockfile the acquire wrote, not a second one.
+    globals_ = list(claims_dir(global_claims_root()).rglob("*EXT-hi*"))
+    assert globals_, f"no lock under the global root {global_claims_root()}"
+    assert not list(claims_dir().rglob("*EXT-hi*")), (
+        "the claim landed in the cwd-default tree, where no node reader looks"
+    )
+
+
+def test_the_external_claim_still_blocks_after_its_selector_exits(
+    tmp_path, monkeypatch
+):
+    """The property that matters, and the one an in-process test cannot see.
+
+    Selection runs in a process that exits as soon as it prints the node. A
+    pid-liveness claim is therefore dead on arrival in production: it reads
+    `stale`, `stale` does not block dispatch, and a worker launches onto the
+    node this selector just handed out. Routing the root alone made the lock
+    visible and left it unhonored.
+
+    Under CliRunner the acquiring process is pytest, which stays alive, so the
+    claim reads `live` and the bug is invisible. This test forces the recorded
+    pid to a dead one, which is what the real selector's exit produces, and then
+    asks the guard the question a dispatcher asks.
+    """
+    import json
+    import re
+
+    from fno.claims.core import claim_path, claim_status
+    from fno.claims.io import claims_root_for
+
+    rows = _rows_basic()
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+        "EXT-lo": {"plan_path": "/plans/lo.md"},
+    })
+    r = runner.invoke(
+        app, ["backlog", "next", "--claim", "sess-ext-gone"], catch_exceptions=False
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
+
+    key = "node:EXT-hi"
+    root = claims_root_for(key)
+    path = claim_path(key, root=root)
+
+    dead = 999_999
+    import psutil
+
+    while psutil.pid_exists(dead):
+        dead += 1
+    text = path.read_text()
+    patched, n = re.subn(r"(?m)^pid:.*$", f"pid: {dead}", text)
+    assert n == 1, f"expected exactly one pid line in the claim: {text!r}"
+    path.write_text(patched)
+
+    # Dead pid INSIDE the TTL is `suspect`, and suspect blocks. Without the TTL
+    # the same reading is `stale`, which does not.
+    assert claim_status(key, root=root)["state"] == "suspect"
+
+    from fno.agents.cli import _spawn_guard_decision
+
+    verdict, _code = _spawn_guard_decision(
+        "EXT-hi", "spawn-cli:probe", no_reserve=True
+    )
+    assert verdict["verdict"] == "already-running", verdict
+    assert verdict["holder"] == "sess-ext-gone"

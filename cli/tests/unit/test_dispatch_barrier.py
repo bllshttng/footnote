@@ -317,7 +317,11 @@ def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_pa
     """The spawn-side claim carries the pid of `fno agents spawn`, which exits
     the moment it has forked the worker. So it reads SUSPECT for its whole TTL
     by construction, and a second dispatcher used to call a healthy in-flight
-    launch a wedge and hand back force-release advice for it."""
+    launch a wedge and hand back force-release advice for it.
+
+    x-2fe6: the reason is now `unproven-claim`, which is what a launch window
+    actually is - a worker that may still never boot. It is still NOT a wedge
+    and still earns no remedy, which is what this test pins."""
     _route_to(monkeypatch, tmp_path)
     from fno.claims.cli import HANDOVER_HOLDER_PREFIX
     from fno.claims.core import acquire_claim, claim_status
@@ -330,7 +334,8 @@ def test_a_launch_window_holder_is_never_reported_as_a_wedge(monkeypatch, tmp_pa
     _fake_roster(monkeypatch, rows=[], warnings=["claude not on PATH"])
 
     verdict, exit_code = _spawn_guard_decision("N", "spawn-cli:me", ttl="3m")
-    assert verdict["reason"] == "live-claim"
+    assert verdict["reason"] == "unproven-claim"
+    assert verdict["init_reached"] is False
     assert "remedy" not in verdict
     assert exit_code == 0
 
@@ -640,3 +645,256 @@ def test_a_held_node_refuses_and_hands_back_its_own_reservation(monkeypatch, tmp
         claim_status("node:N", root=tmp_path)["holder"] == "target-session:someone-else"
     )
     assert claim_status("dispatch:N", root=tmp_path)["state"] == "free"
+
+
+# --- x-2fe6: the reservation is taken after the launch is proven, and released
+# --- on an observation every substrate reaches ----------------------------
+
+
+def _spawn_env(monkeypatch, tmp_path, *, node="x-abcd"):
+    """Route claims to TMP_PATH and stub everything cmd_spawn touches downstream."""
+    _route_to(monkeypatch, tmp_path)
+    from fno.agents import mux_spawn, spawn_gate
+
+    monkeypatch.setattr(
+        mux_spawn, "resolve_provenance", lambda n, s, p: {"FNO_NODE": node} if n else {}
+    )
+
+    class FakeGuard:
+        def release(self):
+            pass
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda name, substrate, **kw: FakeGuard())
+    return FakeGuard
+
+
+def _spy_guard(monkeypatch):
+    """Replace the node guard with a spy that records every call and takes nothing."""
+    from fno.agents import cli as agents_cli
+
+    calls: list[tuple] = []
+
+    def spy(*a, **k):
+        calls.append((a, k))
+        return {
+            "verdict": "dispatchable",
+            "reservation_key": "dispatch:x-abcd",
+            "reservation_holder": "spawn-cli:spy",
+        }, 0
+
+    monkeypatch.setattr(agents_cli, "_spawn_guard_decision", spy)
+    return calls
+
+
+def test_a_resume_registry_failure_never_took_the_reservation(monkeypatch, tmp_path):
+    """AC1-HP: the resume-provider exit runs BEFORE the node guard.
+
+    The registry read raising used to exit 2 with `dispatch:<id>` already held
+    by a pid that was gone, stranding the node for the whole TTL with nothing
+    launched. The spy is the positive marker: a free claim alone cannot tell
+    "released" from "never taken".
+    """
+    _spawn_env(monkeypatch, tmp_path)
+    from fno.claims.core import claim_status
+
+    guard_calls = _spy_guard(monkeypatch)
+
+    def boom():
+        raise RuntimeError("registry unreadable")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", boom)
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi",
+            "--harness", "claude", "--substrate", "bg",
+            "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert guard_calls == []
+    assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "free"
+    assert claim_status("node:x-abcd", root=tmp_path)["state"] == "free"
+
+
+def test_a_resume_route_without_a_provider_never_took_the_reservation(
+    monkeypatch, tmp_path
+):
+    """AC2-HP: the second resume-provider exit is above the guard too."""
+    _spawn_env(monkeypatch, tmp_path)
+    from fno.claims.core import claim_status
+
+    guard_calls = _spy_guard(monkeypatch)
+    row = SimpleNamespace(
+        name="w1",
+        provider=None,
+        route_settings_path="/tmp/route.json",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi",
+            "--harness", "claude", "--substrate", "bg",
+            "--node", "x-abcd", "--resume", "11111111-2222-3333-4444-555555555555",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert guard_calls == []
+    assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "free"
+
+
+#: The `provider` field on both spawn results carries the HARNESS axis, not a
+#: model provider: `cmd_spawn` renders it as the receipt's "harness" key. Bind
+#: the value to a harness-named constant so these fixtures name the axis the
+#: value belongs to rather than restating the field's misnomer.
+_FIXTURE_HARNESS = "claude"
+
+
+def _stub_headless_dispatch(monkeypatch, kind="created"):
+    from fno.agents import dispatch as dispatch_mod
+
+    class R:
+        pass
+
+    R.kind = kind
+    R.name = "w1"
+    R.short_id = "abcd1234"
+    R.provider = _FIXTURE_HARNESS
+    R.reply = "done" if kind == "reply" else None
+    monkeypatch.setattr(dispatch_mod, "dispatch_spawn", lambda **kw: R())
+
+
+def test_a_one_shot_releases_the_reservation_in_seconds_not_at_ttl(
+    monkeypatch, tmp_path
+):
+    """AC3-HP: `--once` releases both keys as soon as cmd_spawn returns.
+
+    The worker has already exited when `dispatch_spawn` returns, so nobody is
+    left to inherit the reservation. `spawn_succeeded` cannot express that: it
+    is only evaluated after the worker exits on this substrate.
+    """
+    import time
+
+    _spawn_env(monkeypatch, tmp_path)
+    _stub_headless_dispatch(monkeypatch, kind="reply")
+    from fno.claims.core import claim_status
+
+    started = time.monotonic()
+    result = runner.invoke(
+        agents_app,
+        # codex, NOT claude. Real `dispatch_spawn` refuses claude + --once
+        # without --substrate headless (`provider == "claude" and once and not
+        # headless` -> exit 2), so a claude spawn here would take the
+        # pre-existing `not spawn_succeeded` arm and prove nothing about the
+        # one-shot split. The stub hid that. codex + --once is a path a caller
+        # can actually reach.
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--once",
+         "--node", "x-abcd"],
+    )
+    elapsed = time.monotonic() - started
+    assert result.exit_code == 0, result.output
+    assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "free"
+    assert claim_status("node:x-abcd", root=tmp_path)["state"] == "free"
+    # Free because it was RELEASED, not because it expired. The reservation
+    # carries a 3m TTL and the handover claim 15m, so a run this short cannot
+    # have reached either. The bound only has to sit under the SHORTER TTL to
+    # rule expiry out, and it is generous because CLI startup dominates it.
+    assert elapsed < 60, "ran long enough that expiry is no longer excluded"
+
+
+def test_a_headless_substrate_releases_the_reservation(monkeypatch, tmp_path):
+    """AC4-HP: `--substrate headless` answers the same as `--once`."""
+    _spawn_env(monkeypatch, tmp_path)
+    _stub_headless_dispatch(monkeypatch, kind="created")
+    from fno.claims.core import claim_status
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude",
+         "--substrate", "headless", "--node", "x-abcd"],
+    )
+    assert result.exit_code == 0, result.output
+    assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "free"
+
+
+def test_a_pane_spawn_still_holds_the_reservation_for_its_worker(
+    monkeypatch, tmp_path
+):
+    """AC5-HP: the fix is a SPLIT, not a blanket release.
+
+    A pane worker outlives this process, so its reservation must stay held or
+    the next dispatcher launches a second worker onto the same node.
+    """
+    _spawn_env(monkeypatch, tmp_path)
+    from fno.agents import mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+    from fno.claims.core import claim_status
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kw: MuxSpawnResult(
+            name="w1",
+            provider=_FIXTURE_HARNESS,
+            session="s0",
+            pane_id=1,
+            child_pid=None,
+            session_uuid="11111111-2222-3333-4444-555555555555",
+            short_id="abcd1234",
+            bound=True,
+        ),
+    )
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude",
+         "--substrate", "pane", "--node", "x-abcd"],
+    )
+    assert result.exit_code == 0, result.output
+    assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "live"
+
+
+def test_a_failed_release_names_the_key_it_could_not_free(monkeypatch, capsys):
+    """A release that no-ops must not report the same nothing as one that worked.
+
+    Swallowing the exception is correct: this runs on the way out of a failure
+    and raising would mask the error being handled. Saying nothing is not. A
+    silently-failed release leaves the key held for its whole TTL under a holder
+    that is gone, which is the same wedge the rest of this file deletes.
+    """
+    from fno.agents import cli as agents_cli
+
+    def boom(key, holder, **kw):
+        raise OSError("claims dir is read-only")
+
+    monkeypatch.setattr("fno.claims.core.release_claim", boom)
+    agents_cli._release_dispatch_claims(
+        ("dispatch:x-abcd", "spawn-cli:1"), ("node:x-abcd", "spawn-handover:w1")
+    )
+    err = capsys.readouterr().err
+    # Both keys named, and the way out named with them.
+    assert "dispatch:x-abcd" in err
+    assert "node:x-abcd" in err
+    assert "stays held until its TTL expires" in err
+    assert "fno claim release" in err
+
+
+def test_a_successful_release_stays_quiet(monkeypatch, capsys):
+    """The other direction, so the warning is proven to discriminate.
+
+    Without this, a warning printed unconditionally would pass the test above
+    while telling an operator that every clean release had failed.
+    """
+    from fno.agents import cli as agents_cli
+
+    released = []
+    monkeypatch.setattr(
+        "fno.claims.core.release_claim",
+        lambda key, holder, **kw: released.append(key),
+    )
+    agents_cli._release_dispatch_claims(("dispatch:x-abcd", "spawn-cli:1"))
+    assert released == ["dispatch:x-abcd"]
+    assert capsys.readouterr().err == ""

@@ -3978,6 +3978,17 @@ def _joined_open_candidates() -> list[dict]:
     return joined
 
 
+#: How long an external selector's `node:<id>` claim protects the node it just
+#: handed out. It is a SELECTION window, not a work lease: the winner is handed
+#: to a caller that has yet to launch anything, and the worker replaces this
+#: hold with its own the moment `fno target init` runs. Sized to match the spawn
+#: handover window for the same reason - both cover launch-to-init, and the
+#: selector's caller has strictly less to do before init than a spawn does. Short
+#: on purpose: a selector that never dispatches must not wedge the node, and an
+#: expired claim is provably dead so the node self-heals.
+EXTERNAL_SELECTION_TTL = "15m"
+
+
 @cli.command("next")
 def cmd_next(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id"),
@@ -4181,12 +4192,36 @@ def cmd_next(
             # (the live holder lives in the claims dir). Contention falls
             # through to the next ranked candidate rather than failing the
             # whole selection.
+            from fno.claims.cli import _parse_ttl
             from fno.claims.core import ClaimHeldByOther, acquire_claim
+            from fno.claims.io import claims_root_for
 
             candidates = _pick_ready(pre_entries)
             for winner in candidates:
+                key = f"node:{winner['id']}"
+                # TWO things have to be true for this lock to protect anything,
+                # and routing alone gave only the first.
+                #
+                # ROUTE the root, or the lock lands in the cwd-default tree
+                # while every reader of a `node:` key resolves the global root
+                # through `claims_root_for`, so the node still reads `free`.
+                # `_read_node_claim` names the same trap from the other side.
+                #
+                # TTL, or the lock is visible and still not honored. Selection
+                # runs in a process that exits as soon as it prints the node,
+                # so a pid-liveness claim is dead on arrival: it reads `stale`,
+                # which does not block dispatch, and a worker launches onto the
+                # node this selector just handed out. The TTL makes the dead pid
+                # read `suspect` instead, which does block, and it bounds the
+                # hold so an external selector that never dispatches cannot wedge
+                # the node past the window.
                 try:
-                    acquire_claim(f"node:{winner['id']}", claim)
+                    acquire_claim(
+                        key,
+                        claim,
+                        ttl_ms=_parse_ttl(EXTERNAL_SELECTION_TTL),
+                        root=claims_root_for(key),
+                    )
                 except ClaimHeldByOther:
                     continue
                 result[0] = _node_summary(winner)
