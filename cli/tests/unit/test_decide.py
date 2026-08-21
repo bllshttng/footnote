@@ -1214,8 +1214,6 @@ def test_no_identity_at_a_terminal_names_the_operator_but_claims_no_authority(
     at one the law lane is never DEFAULTED, because a tty is obtainable
     (`script -q /dev/null`) and law must never be inherited by silence."""
     from fno import decide as decide_mod
-    from fno import harness_identity
-
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
@@ -1243,8 +1241,6 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     --authority operator` resolved no identity, took the attended branch, and
     landed a row in the law lane. Absence is not attendance."""
     from fno import decide as decide_mod
-    from fno import harness_identity
-
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
@@ -1435,8 +1431,6 @@ def test_no_identity_explicit_operator_authority_records(
     """Kept, with the terminal now pinned. The operator lane stays open to a
     person who states their authority; only the silent inheritance closed."""
     from fno import decide as decide_mod
-    from fno import harness_identity
-
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
@@ -1917,8 +1911,6 @@ def test_only_an_attended_caller_writes_attested_by(
 ):
     """The field that makes a genuine ruling checkable on the row itself."""
     from fno import decide as decide_mod
-    from fno import harness_identity
-
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),

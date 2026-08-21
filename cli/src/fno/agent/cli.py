@@ -24,6 +24,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 from dataclasses import asdict, is_dataclass, replace
 from datetime import date, datetime
 from pathlib import Path

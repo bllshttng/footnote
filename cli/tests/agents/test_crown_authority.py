@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from fno.agents.crown import (
     AGENT_UNREGISTERED,
     REGISTRY_UNREADABLE,
