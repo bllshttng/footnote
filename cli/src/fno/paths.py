@@ -1361,10 +1361,10 @@ def resolve_plugin_script(relpath: str) -> Path:
     project), e.g. ``hooks/helpers/init-target-state.sh`` or
     ``scripts/setup/setup-worktree.sh``.
 
-    Order: env hint (CLAUDE_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
+    Order: env hint (CLAUDE_PLUGIN_ROOT / CODEX_PLUGIN_ROOT / FNO_REPO_ROOT, authoritative) ->
     package-relative -> persisted ~/.fno/plugin-root pointer -> repo.
     Self-heals the pointer on any env/pkg resolve (manifest-gated)."""
-    for env_name in ("CLAUDE_PLUGIN_ROOT", "FNO_REPO_ROOT"):
+    for env_name in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"):
         root = os.environ.get(env_name)
         if root:
             base = Path(root).expanduser()

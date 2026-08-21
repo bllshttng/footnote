@@ -37,6 +37,7 @@ def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "fno-home"
     monkeypatch.setenv("FNO_HOME", str(home))
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
     monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
     monkeypatch.delenv("CONDUCTOR_ROOT_PATH", raising=False)
     return home
@@ -67,6 +68,14 @@ def test_env_hint_resolves_and_self_heals_pointer(tmp_path, monkeypatch, isolate
     got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
     assert got == plugin / "scripts" / "lib" / "set-gate.sh"
     # env resolve primed the pointer for later env-less runs
+    assert (isolated_home / "plugin-root").read_text().strip() == str(plugin)
+
+
+def test_codex_env_hint_resolves_and_self_heals_pointer(tmp_path, monkeypatch, isolated_home):
+    plugin = _make_plugin(tmp_path / "plugin")
+    monkeypatch.setenv("CODEX_PLUGIN_ROOT", str(plugin))
+    got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
+    assert got == plugin / "scripts" / "lib" / "set-gate.sh"
     assert (isolated_home / "plugin-root").read_text().strip() == str(plugin)
 
 
