@@ -136,31 +136,58 @@ TOOL_NAME=""
 TOOL_COMMAND=""
 if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
   TOOL_NAME="$(printf '%s' "$STDIN" | jq -r '.tool_name // empty' 2>/dev/null)"
-  TOOL_COMMAND="$(printf '%s' "$STDIN" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+  TOOL_COMMAND="$(printf '%s' "$STDIN" \
+    | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)"
 fi
 if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ ]] \
-    && [[ "$TOOL_COMMAND" =~ (^|[\;\&\|][[:space:]]*)gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$) ]] \
-    && command -v fno >/dev/null 2>&1; then
-  _CREATED_PR_FAILED="$(printf '%s' "$STDIN" | jq -r '
-    if (.tool_response | type) == "object" and (
-      ((.tool_response.is_error // .tool_response.isError // false) == true) or
-      (((.tool_response.exit_code // .tool_response.exitCode // 0) | tonumber? // 0) != 0)
-    ) then 1 else 0 end' 2>/dev/null)"
-  _CREATED_PR_URLS="$(printf '%s' "$STDIN" | jq -r '
-    [.tool_response | .. | strings
-      | scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")]
-    | unique | .[]' 2>/dev/null)"
-  _CREATED_PR_URL_COUNT="$(printf '%s\n' "$_CREATED_PR_URLS" | awk 'NF { n++ } END { print n+0 }')"
-  if [[ "$_CREATED_PR_FAILED" == 0 && "$_CREATED_PR_URL_COUNT" -eq 1 ]]; then
-    _BIND_OWNER="$CUR_CLAUDE_SID"
-    [[ "$IS_CODEX_HOOK" -eq 1 ]] && _BIND_OWNER="$CUR_CODEX_THREAD_ID"
-    if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
-      _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
+    && [[ "$TOOL_COMMAND" =~ (^|[[:space:]\;\&\|])gh[[:space:]]+pr[[:space:]]+create([[:space:]]|$) ]]; then
+  _BARE_GH_CREATE=0
+  if [[ "$TOOL_COMMAND" =~ ^[[:space:]]*gh[[:space:]]+pr[[:space:]]+create([[:space:]][^\;\&\|]*)?[[:space:]]*$ \
+        && "$TOOL_COMMAND" != *$'\n'* ]]; then
+    _BARE_GH_CREATE=1
+  fi
+  if [[ "$_BARE_GH_CREATE" -ne 1 ]]; then
+    echo "claim-heartbeat: gh pr create not attributable (compound command); binding skipped" >&2
+  elif ! command -v fno >/dev/null 2>&1; then
+    echo "claim-heartbeat: gh pr create observed but fno is unavailable; binding skipped" >&2
+  else
+    _CREATED_PR_FAILED="$(printf '%s' "$STDIN" | jq -r '
+      if (.tool_response | type) == "object" and (
+        ((.tool_response.is_error // .tool_response.isError // false) == true) or
+        (((.tool_response.exit_code // .tool_response.exitCode // 0) | tonumber? // 0) != 0)
+      ) then 1 else 0 end' 2>/dev/null)"
+    _CREATED_PR_URLS="$(printf '%s' "$STDIN" | jq -r '
+      [.tool_response | .. | strings
+        | scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")]
+      | unique | .[]' 2>/dev/null)"
+    _CREATED_PR_URL_COUNT="$(printf '%s\n' "$_CREATED_PR_URLS" | awk 'NF { n++ } END { print n+0 }')"
+    if [[ "$_CREATED_PR_FAILED" != 0 ]]; then
+      echo "claim-heartbeat: gh pr create failed; binding skipped" >&2
+    elif [[ "$_CREATED_PR_URL_COUNT" -eq 0 ]]; then
+      echo "claim-heartbeat: gh pr create returned no PR URL; binding skipped" >&2
+    elif [[ "$_CREATED_PR_URL_COUNT" -ne 1 ]]; then
+      echo "claim-heartbeat: gh pr create returned ambiguous PR URLs; binding skipped" >&2
+    else
+      _BIND_OWNER="$CUR_CLAUDE_SID"
+      [[ "$IS_CODEX_HOOK" -eq 1 ]] && _BIND_OWNER="$CUR_CODEX_THREAD_ID"
+      if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
+        _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
+      fi
+      _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
+      [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
+      _BIND_OUTPUT="$(with_timeout "${FNO_PR_BIND_CREATED_TIMEOUT:-5}" \
+        fno "${_bind_args[@]}" 2>&1)"
+      _BIND_RC=$?
+      if [[ "$_BIND_RC" -eq 124 ]]; then
+        echo "claim-heartbeat: PR binding timed out; will retry on later activity" >&2
+      elif [[ "$_BIND_RC" -ne 0 ]]; then
+        _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" \
+          | jq -r '.refusal // .error // empty' 2>/dev/null)"
+        [[ -n "$_BIND_REASON" ]] || _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" | head -1)"
+        [[ -n "$_BIND_REASON" ]] || _BIND_REASON="binder exited $_BIND_RC"
+        echo "claim-heartbeat: PR binding skipped: $_BIND_REASON" >&2
+      fi
     fi
-    _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
-    [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
-    with_timeout "${FNO_PR_BIND_CREATED_TIMEOUT:-5}" fno "${_bind_args[@]}" \
-      >/dev/null 2>&1 || true
   fi
 fi
 
@@ -188,14 +215,32 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     [[ -n "$_HANDOVER_STATUS" ]] || _HANDOVER_STATUS="$(with_timeout \
       "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
       fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+    _HANDOVER_STATUS_VALID="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
+      if (type == "object") and
+         (.state == "free" or .state == "live" or .state == "suspect" or
+          .state == "stale" or .state == "corrupted") and
+         ((.holder == null) or (.holder | type) == "string")
+      then 1 else 0 end' 2>/dev/null)"
+    _RECORDED_HANDOVER_STATE="$(printf '%s' "$_HANDOVER_STATUS" \
+      | jq -r '.state // empty' 2>/dev/null)"
     _RECORDED_HANDOVER_HOLDER="$(printf '%s' "$_HANDOVER_STATUS" \
       | jq -r '.holder // empty' 2>/dev/null)"
-    if [[ "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
-      with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
+    if [[ "$_HANDOVER_STATUS_VALID" != 1 ]]; then
+      echo "claim-heartbeat: handover claim status unreadable for node:$_HANDOVER_NODE; refresh remains due" >&2
+    elif [[ "$_RECORDED_HANDOVER_STATE" == live \
+            && "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
+      if with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
         fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
-        --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1 || true
+        --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
+        touch "$_HANDOVER_STAMP" 2>/dev/null || true
+      else
+        echo "claim-heartbeat: handover refresh failed for node:$_HANDOVER_NODE; refresh remains due" >&2
+      fi
+    else
+      # A complete status answer positively proves there is nothing this holder
+      # may refresh. Throttle that safe no-op; only an instrument failure stays due.
+      touch "$_HANDOVER_STAMP" 2>/dev/null || true
     fi
-    touch "$_HANDOVER_STAMP" 2>/dev/null || true
   fi
 fi
 
