@@ -2091,7 +2091,7 @@ def cmd_spawn(
             }
             if pane_result.seed_source is not None:
                 receipt_obj["seed_source"] = pane_result.seed_source
-            if pane_result.claim_store_writable is False:
+            if getattr(pane_result, "claim_store_writable", None) is False:
                 from fno.claims.io import claims_dir, global_claims_root
 
                 receipt_obj["claim_store_writable"] = False
