@@ -126,6 +126,44 @@ def calling_agent_row():
     return row
 
 
+def crown_reading(row) -> Optional[dict[str, Any]]:
+    """The one rendering of a crown, or ``None`` when ``row`` holds none.
+
+    Reads ``row.crown_label`` (``registry.AgentEntry.crown_label``) rather than
+    re-deriving the "L{level} {scope}" string, so ``fno whoami``, ``fno agents
+    whoami`` and ``fno agents top`` cannot drift into three different renderings
+    of the same fact. Safe on the :func:`calling_agent_row` sentinels and on
+    ``None``: neither carries ``crown_label``, so ``getattr`` answers ``None``
+    rather than raising.
+    """
+    label = getattr(row, "crown_label", None)
+    if label is None:
+        return None
+    grantor = getattr(row, "crown_grantor", None) or "human"
+    level = getattr(row, "crown_level", None)
+    scope = getattr(row, "crown_scope", None)
+    return {
+        "level": level,
+        "scope": scope,
+        "grantor": grantor,
+        "label": label,
+        "text": f"{label} (by {grantor})",
+    }
+
+
+def current_crown() -> Optional[dict[str, Any]]:
+    """This session's crown reading, or ``None`` - never raises.
+
+    ``fno whoami`` must render byte-for-byte unchanged for an attended human
+    shell (AC8-EDGE), so any failure resolving the caller's identity or
+    registry row degrades to "no crown" rather than surfacing.
+    """
+    try:
+        return crown_reading(calling_agent_row())
+    except Exception:
+        return None
+
+
 def canonical_scope(scopes: list[str]) -> str:
     """The stored form: one name, or sorted unique members joined.
 
@@ -137,8 +175,14 @@ def canonical_scope(scopes: list[str]) -> str:
 
 
 def split_scope(scope: Optional[str]) -> list[str]:
-    """The members of a stored scope; a single-name scope yields one element."""
-    if not scope:
+    """The members of a stored scope; a single-name scope yields one element.
+
+    Guards on type, not just truthiness: a corrupted registry row can carry a
+    non-string ``crown_scope`` (e.g. a stray int from a hand-edit), and
+    ``5.split(...)`` would raise past every caller here, including
+    ``fno agents court``, which promises to exit 0 on a read.
+    """
+    if not scope or not isinstance(scope, str):
         return []
     return [s for s in (part.strip() for part in scope.split(SCOPE_SEPARATOR)) if s]
 
@@ -235,7 +279,8 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
         raise CrownScopeError(
             f"{raw!r} is a {entry.get('type') or 'node'}, not an epic. "
             "Implementers get no crowns - a single node is work, not a territory. "
-            "Crown the epic above it, or its project."
+            f"If {raw} IS meant to be an epic: fno backlog update {raw} --type epic. "
+            "Otherwise crown the epic above it, or its project."
         )
     return 2, raw
 
@@ -384,29 +429,56 @@ class CrownPromotionError(RuntimeError):
 
 
 def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
-    """Grant a crown to one existing row from an attended human shell.
+    """Grant a crown to one existing row from an attended human shell, or from
+    an agent whose own crown strictly contains the requested scope.
 
-    This is deliberately not a general crown writer. Agent-to-agent grants and
-    same-scope succession stay on ``spawn --crown``; this function only closes
-    the human workflow where the useful target session already exists.
+    Same-scope succession stays on ``spawn --crown``; this function closes the
+    human workflow and the in-place re-scope of a live subordinate, where the
+    useful target session already exists.
 
     A row that already holds a crown is re-scoped, not refused: the new
     territory replaces the old in the one write below, and the receipt reports
     what was vacated. The live-holder check is the guard that matters here - it
     is what keeps two rows from ruling the same territory.
     """
-    caller = calling_agent_row()
-    if caller is not None:
-        raise CrownPromotionError(
-            "in-place coronation must run from an attended shell with no ambient "
-            "agent identity. Run `fno agents register` in the target session, "
-            "then run this crown command from another terminal."
-        )
-
     try:
         level, scope = resolve_crown(scopes)
     except CrownScopeError as exc:
         raise CrownPromotionError(str(exc)) from exc
+
+    # Resolved before update_registry, never inside _stamp: this reads the
+    # registry itself, and the closure runs under its lock.
+    caller = calling_agent_row()
+    denial = grant_error(scope, caller)
+    if denial is not None:
+        raise CrownPromotionError(denial)
+    grantor = "human" if caller is None else caller.name
+    # `grant_error` blesses an equal scope because SPAWN succession is legal
+    # there: that path vacates the caller and stamps the heir in one write.
+    # This path only stamps the target, so letting it through would leave two
+    # live crowns over one scope - which the holder scan below then refuses,
+    # naming the caller's OWN row as the blocker and offering three remedies
+    # that all contradict the refusal (re-scope yourself, reconcile yourself,
+    # stop yourself). Refuse here instead, where the remedy is reachable.
+    if caller is not None and _same_territory(
+        getattr(caller, "crown_scope", None), scope
+    ):
+        raise CrownPromotionError(
+            f"refusing to crown {handle!r}: {scope!r} is your OWN scope, and "
+            "this verb only stamps the target, so it cannot hand a crown over. "
+            "Succession runs through `fno agents spawn --crown` instead, which "
+            "vacates you and stamps the heir in a single registry write, so the "
+            "scope is never doubly ruled and never briefly unruled."
+        )
+    # The authority check above ran OUTSIDE the lock, so the grantor's own
+    # crown can move between it and the stamp - a window that did not exist
+    # while every agent caller was refused outright. Re-running grant_error
+    # under the lock is not the fix: it calls scope_contains, which reads the
+    # GRAPH, and this file keeps graph I/O off the lock on purpose. So carry
+    # the scope authority was granted on and re-assert it under the lock as a
+    # plain attribute compare. Fails closed: an agent grantor whose crown moved
+    # mid-call is refused rather than allowed to bestow what it no longer holds.
+    granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
     from fno.agents.registry import (
         AgentResolutionError,
@@ -422,9 +494,36 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             f"{exc}. `fno agents list` shows every handle you can crown."
         ) from exc
 
+    # A crown is stamped BY a grantor, never self-declared. That held for free
+    # while every agent caller was refused outright; once a king may grant, the
+    # invariant needs its own check, because the grantor recorded on the row
+    # would otherwise be the row itself. The succession refusal above does not
+    # cover this: it fires only on an EQUAL scope, so a king narrowing its own
+    # crown to a strict SUBSET sails past it and re-stamps itself, vacating the
+    # wider scope on the way. Identity, not territory, is the thing to test.
+    if caller is not None and target_name == grantor:
+        raise CrownPromotionError(
+            f"refusing to crown {target_name!r}: that is this session, and a "
+            "crown is stamped by a grantor, never self-declared. The row would "
+            "record itself as its own grantor, which is exactly the claim an "
+            "external reader cannot verify. Ask a king whose scope contains "
+            f"{scope!r}, or crown a different row."
+        )
+
     receipt: dict[str, Any] = {}
 
     def _stamp(rows: list) -> list:
+        if caller is not None:
+            live_caller = next((row for row in rows if row.name == grantor), None)
+            live_scope = None if live_caller is None else live_caller.crown_scope
+            if not _same_territory(live_scope, granting_scope):
+                raise CrownPromotionError(
+                    f"refusing to crown {target_name!r}: this session's own crown "
+                    f"moved from {granting_scope!r} to {live_scope!r} while the "
+                    "grant was in flight, so the authority it was checked against "
+                    "no longer holds. Re-read your crown with `fno agents court`, "
+                    "then retry if it still contains the scope."
+                )
         target = next((row for row in rows if row.name == target_name), None)
         if target is None:
             raise CrownPromotionError(
@@ -432,10 +531,24 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 "grant committed. `fno agents list` shows the handles you can crown."
             )
         if target.status in TERMINAL_STATUSES:
+            # Name the field, not just the value, and name a remedy that cannot
+            # contradict the refusal. This test reads the STORED status; `fno
+            # agents list` renders that column beside a freshly-computed
+            # `live_status`, and the two disagree exactly when a live row was
+            # stamped terminal by an earlier sweep. Pointing a caller at that
+            # reader (as this refusal used to) sends it to a column saying the
+            # row is live, with no way forward from there.
             raise CrownPromotionError(
-                f"refusing to crown {target.name!r}: target status {target.status!r} "
-                "is terminal. `fno agents list` shows which rows are live; crown "
-                "one of those instead."
+                f"refusing to crown {target.name!r}: its STORED status is "
+                f"{target.status!r}, which is terminal. That is a recorded "
+                "snapshot, not a live probe, so it can be stale for a session "
+                "that is still running. Two ways out:\n"
+                "  target is alive    run `fno agents register` IN the target "
+                "session (it restamps the row idle in place), then retry\n"
+                "  target really died `fno agents reconcile`, then crown a live "
+                "row instead; `fno agents list` shows stored status beside the "
+                "computed live_status, and a disagreement means the stored one "
+                "is stale"
             )
 
         # A row that already holds a crown is re-scoped, not refused: the
@@ -486,14 +599,14 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                     row,
                     crown_level=level,
                     crown_scope=scope,
-                    crown_grantor="human",
+                    crown_grantor=grantor,
                 )
                 break
         receipt.update(
             crowned=target.name,
             level=level,
             scope=scope,
-            grantor="human",
+            grantor=grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
         )

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Optional
 
@@ -42,6 +42,15 @@ def test_split_is_the_inverse_of_canonical() -> None:
     assert split_scope(canonical_scope(["web", "etl"])) == ["etl", "web"]
     assert split_scope("epic-x") == ["epic-x"]
     assert split_scope(None) == []
+
+
+def test_split_scope_degrades_on_a_non_string_rather_than_raising() -> None:
+    """A corrupted registry row can carry a non-string crown_scope (a stray
+    int from a hand-edit). Every caller here, including `fno agents court`
+    (which promises to exit 0 on a read), must not crash on it."""
+    from fno.agents.crown import split_scope
+
+    assert split_scope(5) == []  # type: ignore[arg-type]
 
 
 def test_scope_contains_canonicalizes_an_alias_project(monkeypatch, tmp_path) -> None:
@@ -317,6 +326,30 @@ def test_top_rows_join_the_crown_by_name() -> None:
     assert _rows([worker("king-epic")], {})[0]["crown"] is None
 
 
+def test_top_rows_join_the_crown_through_session_id_when_names_differ(monkeypatch) -> None:
+    """AC3-HP: a foreign claude row is labelled by the FIRST 8 hex of its
+    session uuid, while the registry crown map is keyed by the handle the
+    registry itself uses (the LAST 8) - the exact mismatch that read as
+    `None` for a crowned session before the join went through session_id."""
+    from fno.agents import top
+    from fno.agents.spawn_gate import LiveWorker
+
+    monkeypatch.setattr(
+        top, "_registry_handles", lambda: {"full-session-uuid": "last8reg"}
+    )
+    w = LiveWorker(
+        source="claude",
+        name="first8row",
+        harness="claude",
+        substrate="pane",
+        pid=1,
+        status="live",
+        session_id="full-session-uuid",
+    )
+    rows = top._rows([w], {"last8reg": "L2 epic-x"})
+    assert rows[0]["crown"] == "L2 epic-x"
+
+
 # --- attended in-place crown promotion --------------------------------------
 
 
@@ -415,13 +448,16 @@ def test_in_place_crown_preserves_every_non_crown_field(tmp_path: Path, monkeypa
     assert after == before
 
 
-def test_agent_originated_in_place_crown_is_refused_without_mutation(
+def test_uncrowned_agent_caller_is_refused_without_mutation(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """An agent caller holding no crown has nothing to hand down - grant_error's
+    uncrowned branch, reached now that identity alone no longer refuses first."""
     from fno.agents.registry import load_registry
 
     caller = _entry(
         "caller",
+        harness="codex",
         harness_session_id="caller-session",
         status="idle",
     )
@@ -437,7 +473,76 @@ def test_agent_originated_in_place_crown_is_refused_without_mutation(
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 2
-    assert "attended shell" in result.output.lower()
+    assert "holds none" in result.output.lower()
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_agent_caller_whose_crown_strictly_contains_scope_is_accepted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: an L1-equivalent caller crowned over a portfolio may re-scope a
+    live subordinate into a project it strictly contains, and the registry
+    records the CALLER as grantor rather than the literal 'human'."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["grantor"] == "caller"
+    row = next(r for r in load_registry() if r.name == "worker")
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        1,
+        "alpha",
+        "caller",
+    )
+
+
+def test_agent_caller_whose_crown_does_not_contain_scope_is_refused_without_mutation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-EDGE: a crown that neither contains nor equals the request is
+    refused, and the registry is not mutated."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=1,
+        crown_scope="beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "neither contains nor equals" in result.output.lower()
     assert [asdict(row) for row in load_registry()] == before
 
 
@@ -458,6 +563,92 @@ def test_in_place_crown_refuses_a_terminal_target_without_mutation(
 
     assert result.exit_code == 2
     assert status in result.output
+    # AC2-shaped: the refusal names the way out, and never points at a reader
+    # that contradicts it. The old text sent the caller to `fno agents list`,
+    # whose computed live_status says "live" for exactly the stale-stored row
+    # this branch refuses - measured against a real session on 2026-08-20.
+    assert "STORED status" in result.output
+    assert "fno agents register" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_grantor_whose_own_crown_moved_mid_grant_is_refused_under_the_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The authority check runs outside the registry lock, so a grantor's crown
+    can move between the check and the stamp. Re-asserted under the lock as a
+    plain attribute compare, and it must fail CLOSED: the caller passed
+    grant_error holding 'alpha,beta', then lost 'alpha' before the write."""
+    from fno.agents import crown as crown_mod
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry("worker", harness_session_id="worker-session", status="idle")
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    # Authority is read here; the demotion lands after, before the stamp.
+    real_calling_agent_row = crown_mod.calling_agent_row
+
+    def _demote_after_reading(*args, **kwargs):
+        row = real_calling_agent_row(*args, **kwargs)
+        rows = load_registry()
+        from fno.agents.registry import write_registry
+
+        write_registry(
+            [
+                replace(r, crown_level=1, crown_scope="beta")
+                if r.name == "caller"
+                else r
+                for r in rows
+            ]
+        )
+        return row
+
+    monkeypatch.setattr(crown_mod, "calling_agent_row", _demote_after_reading)
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "moved from" in result.output
+    # The target was never crowned: authority that evaporated grants nothing.
+    # (The caller's own row DID change - this test demotes it on purpose - so a
+    # whole-registry equality check would be asserting the fixture, not the fix.)
+    after = {r.name: r for r in load_registry()}
+    assert after["worker"].crown_scope is None
+    assert after["worker"].crown_level is None
+
+
+def test_terminal_target_refusal_names_the_stale_snapshot_not_a_live_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live session whose row an earlier sweep stamped `orphaned` is the case
+    that stalled a real coronation: the refusal read the stored field and then
+    named `fno agents list`, whose freshly-computed live_status disagreed. The
+    refusal must say the value is a snapshot and name what restamps it."""
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness_session_id="worker-session", status="orphaned")],
+    )
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "snapshot, not a live probe" in result.output
+    assert "fno agents register" in result.output
+    assert "fno agents reconcile" in result.output
     assert [asdict(row) for row in load_registry()] == before
 
 
@@ -918,6 +1109,126 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_a_king_cannot_crown_itself_even_to_a_strict_subset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """"The crown is stamped by a grantor, never self-declared" held for free
+    while every agent caller was refused. Once a king may grant, self-crowning
+    needs its own check: the row would record ITSELF as its own grantor, the
+    one claim an external reader cannot verify.
+
+    A strict SUBSET is the case the succession refusal misses, since that one
+    fires only on an equal scope. Here a portfolio king over alpha,beta narrows
+    itself to alpha, which passes containment AND passes succession, and used
+    to land - vacating the wider scope on the way."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("caller", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "never self-declared" in result.output
+    # The mutation this refusal exists to prevent: no self-grantor, and the
+    # wider scope is not vacated on the way out.
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: grant_error's succession branch accepts an equal scope because
+    SPAWN succession is legal there. This verb only stamps the target, so it
+    must refuse - and the refusal has to name a remedy the caller can act on.
+    Falling through to the live-holder scan named the caller's OWN row as the
+    blocker and offered three remedies that all contradict the refusal: re-scope
+    yourself, reconcile yourself, or stop yourself."""
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    out = result.output.lower()
+    assert "your own scope" in out
+    assert "fno agents spawn --crown" in out
+    # The remedies that contradict the refusal must not appear: every one of
+    # them tells the caller to act on its own live row.
+    assert "already held" not in out
+    assert "fno agents stop caller" not in out
+    assert "fno agents reconcile" not in out
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_agent_caller_with_a_wrongly_typed_scope_sees_the_type_refusal_not_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-HP ordering: resolve_crown runs BEFORE the authority check, so an
+    agent caller naming a feature-typed node hits the type refusal - not an
+    identity/containment refusal. This fails on the pre-reorder code for the
+    ordering reason alone, which is the proof the reorder landed."""
+    from fno import paths
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness="codex",
+        harness_session_id="caller-session",
+        status="idle",
+        crown_level=0,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    target = _entry(
+        "worker",
+        harness_session_id="worker-session",
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller, target])
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps({"entries": [{"id": "n-1", "type": "feature", "project": "alpha"}]}),
+        encoding="utf-8",
+    )
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
+
+    result = _invoke_crown("worker", "--scope", "n-1")
+
+    assert result.exit_code == 2
+    assert "fno backlog update n-1 --type epic" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_in_place_crown_canonicalizes_a_portfolio_and_derives_its_level(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -948,7 +1259,7 @@ def test_in_place_crown_help_teaches_the_attended_workflow() -> None:
     assert result.exit_code == 0, result.output
     assert "attended shell" in result.output.lower()
     assert "fno agents register" in result.output
-    assert "another terminal" in result.output.lower()
+    assert "strictly contains" in result.output.lower()
     assert "re-scope" in result.output.lower()
     assert "--level" not in result.output
     assert "--succeed" not in result.output

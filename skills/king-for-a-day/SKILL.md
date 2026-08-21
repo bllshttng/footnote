@@ -47,12 +47,14 @@ State your level, altitude, and scope in your own opening line, so the transcrip
 **The crown is stamped by a grantor, never self-declared.**
 Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio.
 
-When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. This path grants authority only from a human. It refuses agent-originated calls. It preserves the target's transcript and placement and never performs succession.
+When a human promotes an already-running session, the target first runs `fno agents register`. The human then runs `fno agents crown <printed-handle> --scope <scope>` from another attended terminal. When its own crown strictly contains the scope, a live king can run this path too, to re-scope a subordinate. The registry records the actual grantor, either the attended `human` or the granting king. It preserves the target's transcript and placement and never performs succession.
 You never pass a level.
 Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
 The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
 That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
-So a crown is externally verifiable, not a claim a session makes about itself: `fno agents list`/`top` mark crowned rows (a minion resolves who to escalate to, and a second live crown over one scope is detectable), and `fno whoami` prints your own crown line so you recover your authority after a compaction.
+
+A crown is externally verifiable, not a claim a session makes about itself. `fno agents list`/`top` mark crowned rows, so a minion resolves who to escalate to. `fno agents court` names every live crown, whether the registry and the graph agree, and any scope two live rows hold at once. When the session holds a crown, `fno whoami` prints it as a `crown:` line, so you recover your own authority after a compaction.
+
 Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
 
 **Abdicate.**
@@ -89,7 +91,7 @@ A wrapped prompt ("run $fno:target ... and here is why") does not reliably load 
 
 The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fno:target`. When the harness cannot expand an invocation, the prompt names the skill path to Read. A hand-rolled prose prompt for a crown is the defect this rule exists to prevent.
 
-**In-place coronation is human-attended.** `fno agents crown <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run the command from a normal terminal with no ambient agent identity. A session cannot use the verb to crown itself or another session. When creating a king, placing a court, or granting to a subordinate, use spawn-time `--crown`.
+**In-place coronation keeps the session where it is.** `fno agents crown <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live king whose own crown strictly contains the scope. A session cannot crown itself, and same-scope succession is refused here. When creating a king, placing a court, or handing your own scope to an heir, use spawn-time `--crown`.
 
 **Succession happens at spawn too.** An abdicating king that spawns a successor over its OWN scope hands the crown over instead of being refused. The vacate and the stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. It has to happen while you still reign - a session that has already exited spawns nothing. An attended shell can also move a crown between two LIVE sessions without spawning anyone. Re-scope the incumbent first with `fno agents crown <incumbent> --scope <other territory>`, which frees the old scope in the same write. Then crown the newcomer over it. The order is the non-obvious half. Crowning the newcomer first is refused with the incumbent named and the same three remedies spelled out.
 
@@ -201,7 +203,8 @@ This is the difference between a track that walks and one that silently wedges, 
 Prefer `peek` first: attaching is a drive action, and a king that starts driving has stopped ruling.
 
 **Orient yourself after a compaction.**
-`fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail).
+
+`fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail). `fno agents court` answers whether the coronations worked - every live crown, and whether the registry and the graph agree.
 Run these instead of grepping state files.
 `fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your crown, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
 Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the king Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.

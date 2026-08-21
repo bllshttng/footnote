@@ -895,14 +895,15 @@ def cmd_crown(
         ),
     ),
 ) -> None:
-    """Crown an existing session from an attended shell.
+    """Crown an existing session from an attended shell, or from an agent whose
+    own crown strictly contains the requested scope.
 
     Run `fno agents register` inside the target session, then run this command
-    with its printed handle from another terminal. Agent-originated calls are
-    refused; subordinate grants and succession stay on `spawn --crown`. A row
-    already holding a crown is re-scoped rather than refused: the new territory
-    replaces the old in one atomic write, the level is derived from the new
-    scope, and the receipt reports what was vacated.
+    with its printed handle. Same-scope succession stays on `spawn --crown`. A
+    row already holding a crown is re-scoped rather than refused: the new
+    territory replaces the old in one atomic write, the level is derived from
+    the new scope, the registry records the actual grantor, and the receipt
+    reports what was vacated.
     """
     from fno.agents import events
     from fno.agents.crown import CrownPromotionError, promote_existing_session
@@ -926,6 +927,30 @@ def cmd_crown(
     print(json.dumps(receipt))
 
 
+@agents_app.command("court", hidden=True)
+def cmd_court(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit JSON instead of the table."
+    ),
+) -> None:
+    """The whole court: every live crown, its scope, its holder, its grantor,
+    and whether the registry and the graph agree - the read that answers "did
+    the coronations work" without trusting the absence of a disagreement.
+
+    Exit 0 always: this is a read, and a caller gates on the JSON keys
+    (``agree``, ``summary.disagreements``, ``summary.unknowns``, and
+    ``conflicts``), not the process status.
+
+    ``conflicts`` belongs in that list and is not derivable from the counts.
+    Two live rows holding one territory are each individually corroborated by
+    the graph, so both report ``agree: true`` and the summary reads zero
+    disagreements while the fleet has two kings over one scope. A caller that
+    gates on the counts alone reads that as a healthy court, which is the
+    precise failure this command exists to end.
+    """
+    from fno.agents.court import render_court
+
+    print(render_court(json_output))
 
 
 @agents_app.command("spawn")
