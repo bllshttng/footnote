@@ -7122,6 +7122,63 @@ exit 1
     )
 }
 
+fn fallback_gh(
+    dir: &Path,
+    record: &Path,
+    reviewed: bool,
+    label_mode: &str,
+    status_description: &str,
+) -> PathBuf {
+    let reviews = if reviewed {
+        format!(
+            r#"{{"reviews":[{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-08-14T01:00:00Z","commit":{{"oid":"{PUB_HEAD}"}}}}],"comments":[]}}"#
+        )
+    } else {
+        r#"{"reviews":[],"comments":[]}"#.to_string()
+    };
+    let record_s = record.display().to_string();
+    let attempts = dir.join("label-attempts");
+    make_script(
+        dir,
+        "gh-fallback",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"{PUB_HEAD}","mergeable":"MERGEABLE","baseRefName":"main"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then echo '[]'; exit 0; fi
+if echo "$*" | grep -q "reviews"; then echo '{reviews}'; exit 0; fi
+if echo "$*" | grep -q -- "--json labels"; then
+  n=0
+  if [ -f "{attempts}" ]; then n=$(cat "{attempts}"); fi
+  n=$((n + 1))
+  echo "$n" > "{attempts}"
+  echo "label-read-$n" >> "{record_s}"
+  if [ "{label_mode}" = "second-true" ] && [ "$n" -ge 2 ]; then
+    echo true
+    exit 0
+  fi
+  exit 1
+fi
+if echo "$*" | grep -q "/commits/.*/status"; then
+  echo "status-description-read" >> "{record_s}"
+  echo '{status_description}'
+  exit 0
+fi
+if echo "$*" | grep -q "^api"; then echo "$*" >> "{record_s}"; echo '{{}}'; exit 0; fi
+exit 1
+"#,
+            attempts = attempts.display(),
+        ),
+    )
+}
+
 fn pub_git(dir: &Path) -> PathBuf {
     make_script(
         dir,
@@ -7284,6 +7341,108 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
         "a bot review must not satisfy the local code-review lane: {}",
         posts[0]
     );
+}
+
+#[test]
+fn coverage_status_protects_an_override_after_three_refused_label_reads() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = fallback_gh(
+        bins.path(),
+        &record,
+        false,
+        "always-fail",
+        "coverage-override label applied by jane",
+    );
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+
+    assert_eq!(code, 0, "{json}");
+    let recorded = fs::read_to_string(&record).unwrap();
+    assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
+    assert_eq!(recorded.matches("status-description-read").count(), 1);
+    assert!(status_posts(&record).is_empty(), "{recorded}");
+}
+
+#[test]
+fn coverage_status_posts_covered_after_refused_label_reads_find_no_override() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = fallback_gh(
+        bins.path(),
+        &record,
+        true,
+        "always-fail",
+        "no covered review at deadbeef",
+    );
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+
+    assert_eq!(code, 0, "{json}");
+    let recorded = fs::read_to_string(&record).unwrap();
+    assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 1, "{recorded}");
+    assert!(posts[0].contains("state=success"), "{}", posts[0]);
+    assert!(posts[0].contains("covered: 1 reviewed at"), "{}", posts[0]);
+}
+
+#[test]
+fn coverage_status_posts_failure_after_refused_label_reads_find_no_status() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = fallback_gh(bins.path(), &record, false, "always-fail", "");
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+
+    assert_eq!(code, 0, "{json}");
+    let recorded = fs::read_to_string(&record).unwrap();
+    assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 1, "{recorded}");
+    assert!(posts[0].contains("state=failure"), "{}", posts[0]);
+}
+
+#[test]
+fn coverage_status_retries_a_label_read_then_honors_the_override() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("proj");
+    pub_fixture(&cwd, BOT_LANE);
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let record = tmp.path().join("gh-api-record");
+    let bins = TempDir::new().unwrap();
+    let gh = fallback_gh(bins.path(), &record, false, "second-true", "unused");
+    let git = pub_git(bins.path());
+
+    let (code, json) = fire_verb(&cwd, &gh, &git, &project, &global);
+
+    assert_eq!(code, 0, "{json}");
+    let recorded = fs::read_to_string(&record).unwrap();
+    assert_eq!(recorded.matches("label-read-").count(), 2, "{recorded}");
+    assert!(!recorded.contains("status-description-read"), "{recorded}");
+    let posts = status_posts(&record);
+    assert_eq!(posts.len(), 1, "{recorded}");
+    assert!(posts[0].contains("state=success"), "{}", posts[0]);
+    assert!(posts[0].contains("coverage-override"), "{}", posts[0]);
 }
 
 // ── the king driver arm ───────────────────────────────────────────────────────

@@ -644,6 +644,145 @@ def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
     assert "review_coverage_uncovered" in out["ready_blockers"]
 
 
+def _coverage_status_projection_fetch(monkeypatch, posted_state="SUCCESS", *, state="OPEN"):
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": state,
+                "headRefOid": "1" * 40,
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    {
+                        "context": _reviews.COVERAGE_STATUS_CONTEXT,
+                        "state": posted_state,
+                    },
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: False,
+    )
+
+
+def test_status_reposts_a_stale_green_when_computed_coverage_is_uncovered(
+    monkeypatch, capsys
+):
+    _coverage_status_projection_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    calls = []
+    monkeypatch.setattr(
+        _reviews,
+        "publish_coverage_status",
+        lambda pr, **kw: (calls.append((pr, kw)) is None, ""),
+    )
+
+    code = _status.run_status("42")
+    out = _json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert calls == [(42, {"head": "1" * 40, "cwd": None})]
+    assert out["coverage_status_repost"] == "reposted"
+    assert out["ready"] is False
+    assert "review_coverage_uncovered" in out["ready_blockers"]
+
+
+@pytest.mark.parametrize(
+    "posted_state, coverage",
+    [
+        ("SUCCESS", {"coverage": "covered", "reviewed_count": 1, "head_sha": "1" * 40}),
+        ("FAILURE", {"coverage": "uncovered", "reviewed_count": 0}),
+    ],
+)
+def test_status_does_not_repost_when_the_posted_state_agrees(
+    monkeypatch, capsys, posted_state, coverage
+):
+    _coverage_status_projection_fetch(monkeypatch, posted_state)
+    monkeypatch.setattr(_status, "read_review_coverage", lambda pr, cwd, **kw: coverage)
+    monkeypatch.setattr(
+        _reviews,
+        "publish_coverage_status",
+        lambda *_a, **_kw: pytest.fail("an agreeing status was reposted"),
+    )
+
+    _status.run_status("42")
+    out = _json.loads(capsys.readouterr().out)
+
+    assert "coverage_status_repost" not in out
+
+
+def test_status_does_not_become_the_first_coverage_status_writer(monkeypatch, capsys):
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "publish_coverage_status",
+        lambda *_a, **_kw: pytest.fail("an absent context triggered a first post"),
+    )
+
+    _status.run_status("42")
+    out = _json.loads(capsys.readouterr().out)
+
+    assert "coverage_status_repost" not in out
+
+
+def test_status_reports_a_failed_repost_without_changing_its_verdict(
+    monkeypatch, capsys
+):
+    _coverage_status_projection_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "publish_coverage_status",
+        lambda *_a, **_kw: (False, "gh exited 1"),
+    )
+
+    code = _status.run_status("42")
+    out = _json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert out["verdict"] == "green"
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["review_coverage_uncovered"]
+    assert out["coverage_status_repost"] == "repost failed: gh exited 1"
+
+
+def test_status_never_reposts_coverage_for_a_terminal_pr(monkeypatch, capsys):
+    _coverage_status_projection_fetch(monkeypatch, state="MERGED")
+    monkeypatch.setattr(
+        _reviews,
+        "publish_coverage_status",
+        lambda *_a, **_kw: pytest.fail("a terminal PR triggered a coverage post"),
+    )
+
+    _status.run_status("42")
+    out = _json.loads(capsys.readouterr().out)
+
+    assert "coverage_status_repost" not in out
+
+
 def test_ready_is_false_when_coverage_is_unknown(monkeypatch, capsys):
     """AC3-EDGE: an unknown coverage read blocks and is named as its own
     blocker. WHY the read degraded is x-b56a's question; this only reports

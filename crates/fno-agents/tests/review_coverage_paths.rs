@@ -75,6 +75,55 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
     ]
 }
 
+fn writer_return_table() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("invalid status target", "not posting for invalid target"),
+        ("no configured review lane", "no review lane configured"),
+        ("coverage row describes a different head", "event describes"),
+        (
+            "live override label posts its own verdict",
+            "coverage-override label applied on the PR",
+        ),
+        (
+            "unreadable label protects an existing override status",
+            "protected existing coverage-override marker",
+        ),
+        (
+            "covered predicate has no counted coverage variant",
+            "covered predicate had no Covered count",
+        ),
+    ]
+}
+
+#[test]
+fn every_coverage_status_return_has_a_positive_marker() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(manifest_dir.join("src/loopcheck.rs")).unwrap();
+    let start = source.find("fn publish_coverage_status(").unwrap();
+    let end = source[start..]
+        .find("/// The give-up line")
+        .map(|offset| start + offset)
+        .unwrap();
+    let publisher = &source[start..end];
+    let table = writer_return_table();
+
+    assert_eq!(
+        publisher.matches("return;").count(),
+        table.len(),
+        "a publisher return was added or removed without updating the writer-path table"
+    );
+    for (path, marker) in table {
+        assert!(
+            !marker.is_empty(),
+            "writer path '{path}' has no positive marker"
+        );
+        assert!(
+            publisher.contains(marker),
+            "writer path '{path}' does not emit or post its marker '{marker}'"
+        );
+    }
+}
+
 fn coverage_exists(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|t| {

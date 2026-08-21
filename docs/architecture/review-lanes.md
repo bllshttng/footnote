@@ -498,6 +498,10 @@ That pre-empts the aggregate-that-overstates-its-inputs shape at the field that 
 
 A bare `gh pr merge` from an agent tool call is a fourth reader of the same predicate. The merge hook in `hooks/git-protection.py` shells the hidden `fno pr coverage-check` verb. That verb evaluates the guard's coverage check in `cli/src/fno/pr/_coverage_gate.py` without the recompute. A PreToolUse hook has a 60s harness budget and the Rust producer is budgeted in minutes. The invariant between the two surfaces is one-directional by design. The hook never allows what the guard refuses. When the row is missing or stale the hook denies where `fno pr merge` can still allow after recomputing. Absence denies. A named instrument failure (exit 4) fails open. Both surfaces refuse with one sentence, pinned character for character in `cli/tests/unit/test_pr_coverage_check.py`.
 
+### The GitHub status is a projection, not a latch
+
+The local `review_coverage` event is the computed verdict. The `fno/review-coverage` commit status is its GitHub projection. When an existing status disagrees with the verdict, `fno pr status` republishes it. Polling is silent after one correction. An absent context remains pending, so the status reader never becomes the first writer. Both stale directions are defects. PR 966 stayed green after its computed count became zero. PR 1003 stayed red after fresh covered evidence existed. The Rust publisher retries unreadable override-label queries. It protects an existing `coverage-override` description and otherwise posts the computed verdict instead of preserving stale state.
+
 ### Zero rows vs a frozen streak: the discriminator
 
 Two symptoms read alike and are different defects. Count `loop_check` rows in the worktree's own `.fno/events.jsonl`. Zero rows means the producer never ran there. A manual `fno-agents review-coverage --cwd <worktree>` settles it. Rows present with `consecutive_unchanged` frozen below `MUTE_PROBE_N` is the streak-gated shape the merge recompute makes moot.

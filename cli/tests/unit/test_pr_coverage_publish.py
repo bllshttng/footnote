@@ -162,6 +162,26 @@ def test_an_unanswered_probe_posts_the_note_as_failure(hermetic):
     assert fields["description"] == "pr head fetch failed"
 
 
+def test_an_uncovered_verdict_overwrites_a_contradicting_green(hermetic):
+    runner, verdict_box = hermetic
+    verdict_box["return"] = (
+        _coverage_gate.REFUSED,
+        f"no covered review at {HEAD[:8]}; run the review verb at HEAD",
+        HEAD,
+        "",
+    )
+
+    posted, note = _reviews.publish_coverage_status(42, head=HEAD)
+
+    assert (posted, note) == (True, "")
+    posts = _posts(runner)
+    assert len(posts) == 1
+    fields = _fields(posts[0])
+    assert fields["state"] == "failure"
+    assert fields["context"] == _reviews.COVERAGE_STATUS_CONTEXT
+    assert fields["description"].startswith("no covered review at")
+
+
 def test_the_override_arrives_through_the_verdict_not_a_second_label_read(
     hermetic, monkeypatch
 ):

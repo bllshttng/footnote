@@ -513,46 +513,70 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     )
     if hold_reason:
         blockers.append("dispatch_hold")
-    sys.stdout.write(
-        json.dumps(
-            {
-                "pr": pr,
-                # The commit this verdict describes, so a caller can pin the
-                # answer to a head instead of trusting it across a push.
-                "head": pr_json.get("headRefOid"),
-                "verdict": verdict,
-                # total > 0 is load bearing: an empty rollup and an all-green
-                # one both have zero unsettled entries, and only one of them
-                # is decided. Existence must be stated, not inherited.
-                # verdict != unknown too (x-4271): a zero-real-check-run
-                # rollup can have zero unsettled entries (every StatusContext
-                # already settled) while still being an undecided read.
-                "settled": verdict != "unknown" and counts["total"] > 0
-                and counts["unsettled"] == 0,
-                "green": green,
-                "pr_state": pr_json.get("state"),
-                "mergeable": pr_json.get("mergeable"),
-                "checks": counts,
-                "optional_reviews": reviews.get("optional_reviews", "unknown"),
-                "optional_reviews_unresolved": unresolved,
-                "review_coverage": coverage,
-                "dispatch_hold": hold_reason,
-                # The obvious "read this, not green": ready iff CI is green AND
-                # no optional finding is unresolved AND review coverage is a
-                # counted pass. Coverage joined the conjunction because `fno
-                # pr merge` already read it (x-e601): with it absent here, the
-                # two verbs answered opposite ways from one payload and every
-                # ready: true PR refused at the merge gate. The blockers list
-                # names WHICH conjunct failed - a bare false has one
-                # explanation per conjunct and a reader would have to guess.
-                # `covered and reviewed_count > 0` rather than the word alone:
-                # historical events serialize a real zero as `covered`, and
-                # every existing consumer tests both.
-                "ready": not blockers,
-                "ready_blockers": blockers,
-            }
+    coverage_status_repost = None
+    if not is_terminal and review_lane:
+        from fno.pr import _reviews
+
+        posted_state = next(
+            (
+                check.get("state")
+                for check in _latest_per_name(rollup)
+                if check.get("context") == _reviews.COVERAGE_STATUS_CONTEXT
+            ),
+            None,
         )
-        + "\n"
+        wanted_state = (
+            "FAILURE"
+            if any(blocker.startswith("review_coverage_") for blocker in blockers)
+            else "SUCCESS"
+        )
+        if posted_state is not None and str(posted_state).upper() != wanted_state:
+            posted, note = _reviews.publish_coverage_status(
+                int(pr), head=pr_json.get("headRefOid"), cwd=cwd
+            )
+            coverage_status_repost = (
+                "reposted" if posted else f"repost failed: {note}"
+            )
+    payload = {
+        "pr": pr,
+        # The commit this verdict describes, so a caller can pin the
+        # answer to a head instead of trusting it across a push.
+        "head": pr_json.get("headRefOid"),
+        "verdict": verdict,
+        # total > 0 is load bearing: an empty rollup and an all-green
+        # one both have zero unsettled entries, and only one of them
+        # is decided. Existence must be stated, not inherited.
+        # verdict != unknown too (x-4271): a zero-real-check-run
+        # rollup can have zero unsettled entries (every StatusContext
+        # already settled) while still being an undecided read.
+        "settled": verdict != "unknown" and counts["total"] > 0
+        and counts["unsettled"] == 0,
+        "green": green,
+        "pr_state": pr_json.get("state"),
+        "mergeable": pr_json.get("mergeable"),
+        "checks": counts,
+        "optional_reviews": reviews.get("optional_reviews", "unknown"),
+        "optional_reviews_unresolved": unresolved,
+        "review_coverage": coverage,
+        "dispatch_hold": hold_reason,
+        # The obvious "read this, not green": ready iff CI is green AND
+        # no optional finding is unresolved AND review coverage is a
+        # counted pass. Coverage joined the conjunction because `fno
+        # pr merge` already read it (x-e601): with it absent here, the
+        # two verbs answered opposite ways from one payload and every
+        # ready: true PR refused at the merge gate. The blockers list
+        # names WHICH conjunct failed - a bare false has one
+        # explanation per conjunct and a reader would have to guess.
+        # `covered and reviewed_count > 0` rather than the word alone:
+        # historical events serialize a real zero as `covered`, and
+        # every existing consumer tests both.
+        "ready": not blockers,
+        "ready_blockers": blockers,
+    }
+    if coverage_status_repost is not None:
+        payload["coverage_status_repost"] = coverage_status_repost
+    sys.stdout.write(
+        json.dumps(payload) + "\n"
     )
     # Same discipline as the unresolved-findings note below: a number a human
     # would misread gets its instruction beside it, on stderr. An unsettled

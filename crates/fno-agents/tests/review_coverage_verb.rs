@@ -17,10 +17,11 @@ use common::make_script;
 use fno_agents::loopcheck::{run_loop_check_capture, run_review_coverage_capture};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
-const HEAD: &str = "deadbeefdeadbeefdeadbeef00000001";
-const LOCAL_HEAD: &str = "localheadlocalheadlocalhead00000001";
+const HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000001";
+const LOCAL_HEAD: &str = "cafebabecafebabecafebabecafebabe00000001";
 
 /// gh: OPEN PR #1 at HEAD, green CI, one COMMENTED review by the configured
 /// bot at HEAD (counts as reviewed), no inline comments. git: HEAD echo, with
@@ -120,6 +121,50 @@ fn last_coverage(path: &Path) -> Option<serde_json::Value> {
         }
     }
     last
+}
+
+#[test]
+fn explicit_head_rejects_an_abbreviated_sha_without_writing_an_event() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("short-head");
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let project = cwd.join(".fno/events.jsonl");
+    let global = tmp.path().join("global.jsonl");
+    let short = "7e7dc390";
+    let args = vec![
+        "review-coverage".to_string(),
+        format!("--cwd={}", cwd.display()),
+        "--pr=42".to_string(),
+        format!("--head={short}"),
+        format!("--events={}", project.display()),
+        format!("--global-events={}", global.display()),
+    ];
+
+    let (code, json) = run_review_coverage_capture(&args);
+
+    assert_ne!(code, 0, "an abbreviated head was accepted: {json}");
+    assert!(
+        json.contains(short),
+        "the refusal omitted the value: {json}"
+    );
+    assert!(
+        json.contains("40-hex"),
+        "the refusal omitted the requirement: {json}"
+    );
+    assert!(!project.exists(), "the refused head wrote a project event");
+    assert!(!global.exists(), "the refused head wrote a global event");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(short), "stderr omitted the value: {stderr}");
+    assert!(
+        stderr.contains("40-hex"),
+        "stderr omitted the requirement: {stderr}"
+    );
 }
 
 /// cwd with `.fno/config.toml` naming the bot (so the login gate reads), a
