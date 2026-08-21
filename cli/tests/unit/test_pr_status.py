@@ -1208,7 +1208,7 @@ def test_read_review_coverage_from_events(tmp_path):
     assert read_review_coverage(7, cwd=str(tmp_path)) == {
         "coverage": "uncovered",
         "reviewed_count": 0,
-        "self_attested_count": 0,
+        "self_attested_count": None,
         "head_sha": "a",
         "stale_verdicts": [],
         "verdicts": [],
@@ -1270,6 +1270,7 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
         encoding="utf-8",
     )
     got = read_review_coverage(826, cwd=str(tmp_path))
+    assert got["coverage"] == "uncovered"
     assert got["head_sha"] == "89bc0b91"
     assert got["self_attested_count"] == 1
     assert got["stale_verdicts"] == [
@@ -1280,6 +1281,84 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
             "freshness": "stale",
         }
     ]
+
+
+def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": 1006,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "reviewed",
+                            "reviewed_sha": head,
+                            "freshness": "fresh",
+                        },
+                        {
+                            "producer": "github_app",
+                            "name": "optional-reviewer",
+                            "verdict": "refused",
+                        },
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    got = read_review_coverage(1006, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "covered"
+    assert got["stale_verdicts"] == []
+    assert "freshness" not in got["verdicts"][1]
+
+
+def test_malformed_verdict_cannot_hide_beside_fresh_review(tmp_path):
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": 1007,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "reviewed",
+                            "reviewed_sha": head,
+                            "freshness": "fresh",
+                        },
+                        "malformed",
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    got = read_review_coverage(1007, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "uncovered"
 
 
 def _git(tmp_path, *args: str) -> str:
@@ -1324,7 +1403,9 @@ def _commit_reviewed_history(tmp_path) -> str:
     return _git(tmp_path, "rev-parse", "HEAD")
 
 
-def test_read_review_coverage_rejects_rebased_out_review(tmp_path):
+def test_read_review_coverage_rejects_rebased_out_review(
+    tmp_path, monkeypatch, capsys
+):
     """A stored fresh stamp cannot survive when its commit leaves HEAD history."""
     from fno.pr._reviews import read_review_coverage
 
@@ -1358,6 +1439,13 @@ def test_read_review_coverage_rejects_rebased_out_review(tmp_path):
             "freshness": "stale",
         }
     ]
+
+    _lane_fetch(monkeypatch, head=head)
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    _status.run_status("1003", cwd=str(tmp_path))
+    status = _json.loads(capsys.readouterr().out)
+    assert status["ready"] is False
+    assert "review_coverage_uncovered" in status["ready_blockers"]
 
 
 def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):

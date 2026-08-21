@@ -16,7 +16,18 @@ from fno.pr._proc import Result
 from .test_pr_merge import FakeRun, _last_json, enabled  # noqa: F401
 
 
-def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=""):
+def _stub_recompute(
+    monkeypatch,
+    tmp_path,
+    *,
+    coverage,
+    count,
+    head,
+    calls,
+    why="",
+    reviewed_sha=None,
+    ancestor=True,
+):
     """Replace the verb seam with one that appends a coverage event to the
     project log - the observable effect of the real binary's append. ``why``
     models the verb's exit-4 degraded-run reason (x-b56a)."""
@@ -33,7 +44,7 @@ def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=
                 "name": "code-review",
                 "producer": "local_attestation",
                 "verdict": "reviewed",
-                "reviewed_sha": head,
+                "reviewed_sha": reviewed_sha or head,
                 "freshness": "fresh",
             }]
         with open(events, "a", encoding="utf-8") as fh:
@@ -46,7 +57,9 @@ def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=
         return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
-    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_is_ancestor", lambda *args: ancestor
+    )
     # Route the gate through the REAL read (the `enabled` fixture's covered
     # stub would bypass the recompute entirely): the only seam is the verb.
     monkeypatch.setattr(
@@ -103,6 +116,28 @@ def test_recompute_reviewed_pr_passes_after_exactly_one(enabled, monkeypatch, ca
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
     assert len(calls) == 1, f"the recompute must fire exactly once, fired {len(calls)}"
+
+
+def test_recompute_current_head_with_rewritten_review_refuses(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    calls: list = []
+    _stub_recompute(
+        monkeypatch,
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head="currenthead",
+        calls=calls,
+        reviewed_sha="rewrittenout",
+        ancestor=False,
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "currenthead")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    reason = _last_json(capsys, stream="err")["reason"]
+    assert "uncovered" in reason
+    assert "recomputed" in reason
+    assert len(calls) == 1
 
 
 def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_path):  # noqa: F811

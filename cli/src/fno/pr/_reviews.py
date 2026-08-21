@@ -30,6 +30,7 @@ _COUNTED_FRESHNESS = {
     "carried_docs_only",
     "carried_subset",
 }
+_KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
 
 # The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
 # (resolved below) extends this; config.review.required_bots is the separate GATE
@@ -478,9 +479,12 @@ def _verdicts_with_current_freshness(
         if not isinstance(verdict, dict):
             continue
         current = dict(verdict)
-        stale = verdict.get("freshness") not in _COUNTED_FRESHNESS
+        verdict_kind = verdict.get("verdict")
+        stale = verdict_kind == "stale"
         reviewed_sha = verdict.get("reviewed_sha")
-        if head:
+        if verdict_kind == "reviewed":
+            stale = verdict.get("freshness") not in _COUNTED_FRESHNESS
+        if verdict_kind == "reviewed" and head:
             if not isinstance(reviewed_sha, str) or not reviewed_sha:
                 stale = True
             elif reviewed_sha not in ancestry:
@@ -523,14 +527,21 @@ def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) 
     if data.get("coverage") != "covered":
         return shaped
 
+    raw_verdicts = data.get("verdicts")
+    malformed = (
+        not isinstance(raw_verdicts, list)
+        or not raw_verdicts
+        or any(
+            not isinstance(v, dict) or v.get("verdict") not in _KNOWN_REVIEW_VERDICTS
+            for v in raw_verdicts
+        )
+    )
     reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
     valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
-    if not reviewed or len(valid) != len(reviewed):
+    explicit_stale = any(v.get("verdict") == "stale" for v in verdicts)
+    if malformed or explicit_stale or not reviewed or len(valid) != len(reviewed):
         shaped["coverage"] = "uncovered"
         shaped["reviewed_count"] = len(valid)
-        shaped["self_attested_count"] = sum(
-            v.get("attestation_origin") == "self_attested" for v in valid
-        )
     return shaped
 
 
