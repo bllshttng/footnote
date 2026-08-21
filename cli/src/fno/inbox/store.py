@@ -1028,14 +1028,14 @@ def rebuild_render(recipient: str) -> int:
     render shows every message as unread in the markdown view. The canonical
     consume position is the per-recipient bus cursor, which this never touches.
     """
-    from fno.bus.log import Envelope, iter_messages
+    from fno.bus.log import Envelope, is_deliverable, iter_messages
 
     # Collect this recipient's envelopes, grouped by thread, preserving log
     # (oldest-first) order within each thread.
     threads: dict[str, list[Envelope]] = {}
     order: list[str] = []
     for env in iter_messages():
-        if env.to != recipient:
+        if env.to != recipient or not is_deliverable(env):
             continue
         tid = env.thread or env.id
         if tid not in threads:

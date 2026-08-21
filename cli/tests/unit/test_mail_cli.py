@@ -85,6 +85,36 @@ def test_send_then_unread_then_ack(runner, mailbox):
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
+def test_ack_refuses_hosted_audit_without_skipping_durable_mail(runner, mailbox):
+    from fno.bus.cursor import read_cursor, scan_unread
+    from fno.bus.log import Envelope, append
+    from fno.inbox.store import write_new_thread
+
+    durable = write_new_thread(
+        recipient="web", sender="etl", kind="send", body="still pending"
+    )
+    append(
+        Envelope.new(
+            id="msg-hosted2",
+            from_="etl",
+            to="web",
+            kind="send",
+            body="already delivered",
+            delivery="hosted",
+            to_kind="session",
+        )
+    )
+
+    result = runner.invoke(
+        app, ["mail", "ack", "msg-hosted2", "--name", "web"]
+    )
+
+    assert result.exit_code == 2
+    assert "already delivered (hosted)" in (result.stderr or "")
+    assert read_cursor("web") is None
+    assert [m.id for m in scan_unread("web")] == [durable.thread_id]
+
+
 def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
     runner, mailbox, monkeypatch
 ):
@@ -273,6 +303,29 @@ def test_rebuild_render_regenerates_from_log(runner, mailbox):
     assert list(inbox.glob("*.md"))  # render regenerated from the canonical log
 
 
+def test_rebuild_render_skips_hosted_audit_rows(runner, mailbox):
+    from fno.bus.log import Envelope, append
+    from fno.inbox.store import inbox_dir_for
+
+    append(
+        Envelope.new(
+            id="msg-hosted1",
+            from_="etl",
+            to="web",
+            kind="send",
+            body="already delivered live",
+            delivery="hosted",
+            to_kind="session",
+        )
+    )
+
+    res = runner.invoke(app, ["mail", "rebuild-render", "web", "--json"])
+
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.stdout.strip().splitlines()[-1])["threads"] == 0
+    assert list(inbox_dir_for("web").glob("*.md")) == []
+
+
 # ---------------------------------------------------------------------------
 # US5 / AC2-HP: a session drains its OWN cross-harness inbox and acks it
 # ---------------------------------------------------------------------------
@@ -450,7 +503,8 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     runner, mailbox, monkeypatch, tmp_path
 ):
     # US8 (node x-d899): a running codex daemon takes the turn LIVE, so the send
-    # reports "delivered (hosted)" and writes NO durable thread.
+    # reports "delivered (hosted)" and writes only an audit bus row, never a
+    # durable thread.
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     _isolate_codex_discovery(monkeypatch, tmp_path, session_id=sid)
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: True)
@@ -462,7 +516,7 @@ def test_us8_codex_live_inject_hosted_short_circuits_durable(
     assert "delivered (hosted)" in sent.output
     assert "queued (durable)" not in sent.output
 
-    # No durable thread was written: drain-self sees nothing for the handle.
+    # The audit row is non-deliverable: drain-self sees nothing for the handle.
     monkeypatch.setenv("CODEX_THREAD_ID", sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output

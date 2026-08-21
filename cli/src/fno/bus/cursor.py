@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fno.bus.log import Envelope, iter_messages
+from fno.bus.log import Envelope, is_deliverable, iter_messages
 
 
 def _cursors_dir() -> Path:
@@ -167,6 +167,8 @@ def scan_unread(
 
     def _mine(m: Envelope) -> bool:
         if m.to != name:
+            return False
+        if not is_deliverable(m):
             return False
         if m.id in retracted:
             return False

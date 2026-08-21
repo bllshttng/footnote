@@ -29,6 +29,7 @@ from fno.time_budget import validate_timeout_budget
 
 
 ENVELOPE_VERSION = 1
+HOSTED_DELIVERY = "hosted"
 
 # Size-triggered rotation. A segment is rolled once it reaches this many bytes
 # (checked before each append, under the lock). Env overrides exist for tests
@@ -409,6 +410,51 @@ def append(env: Envelope) -> None:
                 written += n
         finally:
             os.close(fd)
+
+
+def is_deliverable(env: Envelope) -> bool:
+    """Whether a bus envelope is pending recipient delivery.
+
+    Missing delivery metadata is the legacy durable shape. A hosted row records
+    a delivery that already succeeded and exists only for sender/operator audit.
+    """
+    return env.delivery != HOSTED_DELIVERY
+
+
+def record_hosted_delivery(
+    *,
+    msg_id: str,
+    sender: str,
+    recipient: str,
+    body: str,
+    thread: Optional[str] = None,
+    provider_from: Optional[str] = None,
+    provider_to: Optional[str] = None,
+    request_id: Optional[str] = None,
+    in_reply_to: Optional[str] = None,
+    from_session: Optional[str] = None,
+    from_model: Optional[str] = None,
+    to_kind: Optional[str] = None,
+) -> Envelope:
+    """Append one audit-only record after confirmed hosted delivery."""
+    env = Envelope.new(
+        id=msg_id,
+        thread=thread or msg_id,
+        from_=sender,
+        to=recipient,
+        kind="send",
+        body=body,
+        provider_from=provider_from,
+        provider_to=provider_to,
+        request_id=request_id,
+        in_reply_to=in_reply_to,
+        delivery=HOSTED_DELIVERY,
+        from_session=from_session,
+        from_model=from_model,
+        to_kind=to_kind,
+    )
+    append(env)
+    return env
 
 
 # ---------------------------------------------------------------------------

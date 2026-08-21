@@ -248,11 +248,12 @@ def test_writeahead_writes_durable_for_asleep_recipient(runner, tmp_path, monkey
     assert all(m.kind != "withdraw" for m in unread)
 
 
-def test_live_recipient_hosted_writes_no_durable(runner, tmp_path, monkeypatch):
-    """A recipient we will attempt live does NOT write-ahead: it can drain during
-    the live window, and a placeholder there would race the live inject. A hosted
-    send to it leaves the bus empty."""
+def test_live_recipient_hosted_writes_audit_only_outbox_row(
+    runner, tmp_path, monkeypatch
+):
+    """A confirmed live send is auditable without becoming deliverable again."""
     from fno.bus.cursor import scan_unread
+    from fno.bus.log import iter_messages
     from fno.cli import app
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -260,15 +261,78 @@ def test_live_recipient_hosted_writes_no_durable(runner, tmp_path, monkeypatch):
     monkeypatch.setattr(
         "fno.agents.dispatch._registered_family1_state", lambda _e: "working"
     )
-    monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: True)
+    injected: list[str] = []
+
+    def _deliver(_entry, body, _from_name, mail, **_kwargs):
+        from fno.mail.envelope import wrap_fno_mail
+
+        injected.append(
+            wrap_fno_mail(
+                body,
+                from_=mail.from_,
+                harness=mail.harness,
+                model=mail.model,
+                node=mail.node,
+                to=mail.to,
+                id=mail.id,
+            )
+        )
+        return True
+
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", _deliver)
 
     res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
 
-    assert scan_unread(recipient) == [], (
-        "a hosted live send wrote a durable copy (write-ahead must not fire for a "
-        "recipient that can drain during the live window)"
+    rows = list(iter_messages())
+    assert len(rows) == 1
+    audit = rows[0]
+    assert audit.id in res.output
+    assert (audit.from_, audit.to, audit.kind, audit.delivery) == (
+        "web", recipient, "send", "hosted"
     )
+    assert audit.body == injected[0]
+    assert scan_unread(recipient) == []
+
+    sent = runner.invoke(app, ["mail", "sent", "--from-name", "web", "--json"])
+    assert sent.exit_code == 0, sent.output
+    assert json.loads(sent.stdout) == [
+        {
+            "id": audit.id,
+            "to": recipient,
+            "to_kind": "session",
+            "kind": "send",
+            "ts": audit.ts,
+            "delivery": "hosted",
+            "claimed": True,
+        }
+    ]
+
+
+def test_live_recipient_audit_failure_does_not_queue_retry(
+    runner, tmp_path, monkeypatch
+):
+    from fno.bus.log import iter_messages
+    from fno.cli import app
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer("red")
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state", lambda _e: "working"
+    )
+    monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "fno.bus.log.record_hosted_delivery",
+        lambda **_k: (_ for _ in ()).throw(OSError("audit disk full")),
+    )
+
+    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+
+    assert res.exit_code == 0, res.output
+    assert "delivered (hosted)" in res.stdout
+    assert "outbox record failed" in (res.stderr or "")
+    assert "do not retry" in (res.stderr or "")
+    assert list(iter_messages()) == []
 
 
 def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
@@ -290,4 +354,3 @@ def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
     unread = scan_unread(recipient)
     assert unread, "the live-first durable fallback did not write"
     assert all(m.kind != "withdraw" for m in unread)
-

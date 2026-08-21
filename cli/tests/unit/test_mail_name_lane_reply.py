@@ -486,7 +486,11 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     # The inject succeeds -> hosted delivery, no deferral warning on stderr.
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
+    injected: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda _sid, body, **_k: (injected.append(body), True)[1],
+    )
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
 
     msg = _seed_name_lane_inbound(
@@ -496,6 +500,44 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
     assert r.exit_code == 0, r.output
     assert "delivered (hosted)" in r.stdout
     assert "no live pane" not in (r.stderr or "")
+
+    hosted = [m for m in _bus_msgs() if m.delivery == "hosted"]
+    assert len(hosted) == 1
+    audit = hosted[0]
+    assert audit.id in r.stdout
+    assert audit.in_reply_to == msg
+    assert (audit.from_, audit.to, audit.kind) == (
+        "11111111", "9a063cd3", "send"
+    )
+    assert audit.body == injected[0]
+
+    from fno.bus.cursor import scan_unread
+
+    assert scan_unread("9a063cd3") == []
+
+
+def test_name_lane_audit_failure_keeps_hosted_receipt(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "fno.bus.log.record_hosted_delivery",
+        lambda **_k: (_ for _ in ()).throw(OSError("audit disk full")),
+    )
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_="9a063cd3", body="ping"
+    )
+
+    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert result.exit_code == 0, result.output
+    assert "delivered (hosted)" in result.stdout
+    assert "outbox record failed" in (result.stderr or "")
+    assert "do not retry" in (result.stderr or "")
+    assert all(m.delivery != "hosted" for m in _bus_msgs())
 
 
 # --- the body may be positional, exactly as it is on `send` --------------------
@@ -510,9 +552,8 @@ def test_no_deferred_warning_on_inject_hit(runner, mailbox, monkeypatch, tmp_pat
 def _seeded_reply(runner, monkeypatch, tmp_path, argv_tail):
     sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
     _isolate_claude_roster(monkeypatch, tmp_path, session_id=sid)
-    # Force the DURABLE path. A hosted delivery deliberately writes no bus
-    # record, so asserting the body on the bus after a successful inject reads
-    # as "nothing was sent" when in fact everything worked.
+    # Force the DURABLE path so this test asserts the pending queue record rather
+    # than the audit-only row a hosted delivery now writes.
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "11111111-2222-3333-4444-555566667777")
     msg = _seed_name_lane_inbound(to="claude-meeeeeee", from_="9a063cd3", body="ping")

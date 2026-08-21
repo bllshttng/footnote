@@ -13,9 +13,6 @@ drain picks it up. These tests pin the two load-bearing guarantees:
 """
 from __future__ import annotations
 
-import json
-import os
-
 import pytest
 from typer.testing import CliRunner
 
@@ -148,18 +145,22 @@ def test_send_refuses_when_claim_stale(runner, isolated, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Send: live holder -> delivered (hosted), no durable copy
+# Send: live holder -> delivered (hosted), audit-only bus copy
 # ---------------------------------------------------------------------------
 
 
-def test_send_live_holder_delivers_no_durable(runner, isolated, monkeypatch):
+def test_send_live_holder_records_audit_without_redelivery(
+    runner, isolated, monkeypatch
+):
     _acquire_node("live-abcd", "11111111-1111-1111-1111-111111111111")
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
     inject_calls: list[str] = []
+    injected_bodies: list[str] = []
 
     def _fake_inject(session_id, wrapped, **_k):
         inject_calls.append(session_id)
+        injected_bodies.append(wrapped)
         return True  # confirmed delivery
 
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _fake_inject)
@@ -172,7 +173,42 @@ def test_send_live_holder_delivers_no_durable(runner, isolated, monkeypatch):
     assert "delivered (hosted)" in res.stdout
     # Inject targeted the holder's session, not a handle.
     assert inject_calls == ["11111111-1111-1111-1111-111111111111"]
-    # A hosted send writes NO durable thread (live delivery is its own record).
+    rows = _bus_to("node:live-abcd")
+    assert len(rows) == 1
+    audit = rows[0]
+    assert audit.id in res.stdout
+    assert (audit.from_, audit.kind, audit.delivery, audit.to_kind) == (
+        "king", "send", "hosted", "node"
+    )
+    assert audit.body == injected_bodies[0]
+
+    from fno.bus.cursor import scan_unread
+
+    assert scan_unread("node:live-abcd") == []
+
+
+def test_send_live_holder_audit_failure_keeps_hosted_receipt(
+    runner, isolated, monkeypatch
+):
+    _acquire_node("live-abcd", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        "fno.bus.log.record_hosted_delivery",
+        lambda **_k: (_ for _ in ()).throw(OSError("audit disk full")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["mail", "send", "node:live-abcd", "ship it", "--from-name", "king"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "delivered (hosted)" in result.stdout
+    assert "outbox record failed" in (result.stderr or "")
+    assert "do not retry" in (result.stderr or "")
     assert _bus_to("node:live-abcd") == []
 
 

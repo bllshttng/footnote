@@ -50,11 +50,14 @@ def env(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _send(from_, to, body, *, ts=None, to_kind="session") -> str:
+def _send(
+    from_, to, body, *, ts=None, to_kind="session", delivery=None
+) -> str:
     from fno.bus.log import Envelope, append
 
     env_ = Envelope.new(
-        from_=from_, to=to, kind="send", body=body, ts=ts, to_kind=to_kind
+        from_=from_, to=to, kind="send", body=body, ts=ts,
+        to_kind=to_kind, delivery=delivery,
     )
     append(env_)
     return env_.id
@@ -106,6 +109,28 @@ def test_sent_without_filter_marks_claimed_mail(env):
     by_id = {r["id"]: r for r in rows}
     assert by_id[claimed]["claimed"] is True
     assert by_id[stranded]["claimed"] is False
+
+
+def test_sent_separates_hosted_audit_from_durable_unclaimed(env):
+    hosted = _send(
+        MY_HANDLE, PEER, "already delivered", ts=_ts_ago(3600),
+        delivery="hosted",
+    )
+    durable = _send(MY_HANDLE, PEER, "still pending", ts=_ts_ago(3600))
+
+    rows = json.loads(_run("mail", "sent", "--json").stdout)
+    assert {
+        row["id"]: (row["delivery"], row["claimed"])
+        for row in rows
+    } == {
+        hosted: ("hosted", True),
+        durable: ("durable", False),
+    }
+
+    unclaimed = json.loads(
+        _run("mail", "sent", "--unclaimed", "--json").stdout
+    )
+    assert [row["id"] for row in unclaimed] == [durable]
 
 
 def test_sent_does_not_call_a_just_sent_message_claimed(env):
@@ -178,6 +203,21 @@ def test_withdraw_refuses_an_already_claimed_message(env):
 
     assert res.exit_code == 1
     assert "already claimed" in res.stderr
+
+
+def test_withdraw_refuses_hosted_audit_without_tombstone(env):
+    from fno.bus.log import WITHDRAW_KIND, iter_messages
+
+    mid = _send(
+        MY_HANDLE, PEER, "already delivered", ts=_ts_ago(3600),
+        delivery="hosted",
+    )
+
+    res = _run("mail", "withdraw", mid)
+
+    assert res.exit_code == 1
+    assert "already delivered (hosted)" in res.stderr
+    assert all(m.kind != WITHDRAW_KIND for m in iter_messages())
 
 
 def test_withdraw_refuses_an_unknown_id(env):

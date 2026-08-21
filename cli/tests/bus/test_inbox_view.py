@@ -36,7 +36,7 @@ def test_view_json_all_renders_enriched_fields(env, runner):
     from fno.mail.cli import mail_app
 
     _bus("worker-b", "hi b", from_="alice", to_kind="name",
-         provider_from="claude", from_model="opus-4-8")
+         provider_from="claude", from_model="opus-4-8", delivery="hosted")
 
     res = runner.invoke(mail_app, ["view", "--json", "--all"])
     assert res.exit_code == 0, res.output
@@ -48,6 +48,7 @@ def test_view_json_all_renders_enriched_fields(env, runner):
     assert m["from_model"] == "opus-4-8"
     assert m["from"] == "alice"
     assert m["body"] == "hi b"
+    assert m["delivery"] == "hosted"
 
 
 def test_view_default_scopes_to_project(env, runner):
@@ -100,8 +101,12 @@ def test_view_additive_ignores_unknown_fields(env, runner):
 def test_view_text_output_is_human_readable(env, runner):
     from fno.mail.cli import mail_app
 
-    _bus("projA", "the body text", from_="alice", to_kind="project")
+    _bus(
+        "projA", "the body text", from_="alice", to_kind="project",
+        delivery="hosted",
+    )
     res = runner.invoke(mail_app, ["view", "--from", "projA"])
     assert res.exit_code == 0, res.output
     assert "alice" in res.stdout
     assert "the body text" in res.stdout
+    assert "hosted" in res.stdout
