@@ -10,6 +10,14 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 **Worktree-first default:** whenever possible, enter a dedicated feature worktree before editing, generating, or committing; keep the canonical checkout unclogged; prune after the PR lands. Exception: a project whose resolved `worktree.policy` is `never` works in place on the canonical checkout by design.
 
+## Relay compression contract
+
+Agent-authored `fno mail send`, `fno mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer.
+
+Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, pleasantries, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
+
+Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
+
 ## 1. Slash-command workflows (orchestration, reasoning-required)
 
 Invoke via `/fno:<verb>`. Front door:
@@ -55,12 +63,9 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as panes you can watch, drive, or message.
 
-**Citizens vs limbs.** `fno agents spawn` makes a *citizen* (registry row, mail handle, survives its spawner); your harness's native subagent makes a *limb* (nested, no handle, no life of its own).
-Spawn for citizens, harness subagent for limbs - the limb for one-shot work you consume next turn; spawn when it must outlive its spawner, be driven by a third party, or hold a claim.
-Neither is always correct; a limb is observable only (`fno agents top --subagents`), not addressable.
-Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
+**Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** `fno mail send` injects as user-shaped text, so it is the fallback when a worker's Skill-tool self-invocation is refused: `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A probe over mail tests only the user-triggered path, never autonomous action.
+**Mail is user-shaped.** It is the fallback after a worker's own invocation is refused: `fno mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
 
 **Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 

@@ -1,4 +1,4 @@
-"""Tests for the six-rule style checker (``cli/src/fno/style.py``).
+"""Tests for the seven-rule style checker (``cli/src/fno/style.py``).
 
 Each rule is covered positive and negative, plus the two deliberate sharp
 edges: rule 4 must not flag the possessive "agent's", and rule 5 must skip the
@@ -11,6 +11,9 @@ list marker, heading, table row, fence, frontmatter, thematic break) needs its
 own case. A false positive there refuses correct markdown.
 """
 from __future__ import annotations
+
+import pytest
+import typer
 
 from fno import style
 
@@ -34,6 +37,32 @@ def test_paragraph_over_25_words_fails():
 def test_paragraph_at_25_words_passes():
     words = " ".join("w" for _ in range(25))
     assert not rule_set(words + ".")
+
+
+# --- Rule 7: mail word cap ---------------------------------------------------
+
+def test_mail_body_over_80_masked_words_fails_with_both_counts():
+    body = " ".join("word" for _ in range(81)) + "."
+    violations = style.check(body, surface="mail")
+    wordcap = next(v for v in violations if v.rule == 7)
+    assert "81" in wordcap.detail
+    assert "80" in wordcap.detail
+
+
+def test_mail_body_at_80_masked_words_passes_word_cap():
+    body = " ".join("word" for _ in range(80)) + "."
+    assert 7 not in {v.rule for v in style.check(body, surface="mail")}
+
+
+def test_word_cap_is_not_used_on_other_surfaces_or_added_lines():
+    body = " ".join("word" for _ in range(81)) + "."
+    assert 7 not in {v.rule for v in style.check(body, surface="pr-body")}
+    assert 7 not in {v.rule for v in style.check_lines(body, {1})}
+
+
+def test_masked_log_does_not_count_against_mail_word_cap():
+    body = "under the cap.\n```\n" + "\n".join("word" for _ in range(200)) + "\n```"
+    assert 7 not in {v.rule for v in style.check(body, surface="mail")}
 
 
 def test_list_item_uses_the_20_cap():
@@ -480,12 +509,29 @@ def test_format_names_the_local_dry_run():
     assert "fno lint style --stdin" in msg
 
 
+def test_format_adds_word_cap_recipe_only_for_rule_7():
+    body = " ".join("word" for _ in range(81)) + "."
+    wordcap_msg = style.format_violations(style.check(body, surface="mail"))
+    assert "Cut articles, filler, pleasantries, hedges" in wordcap_msg
+    assert "Fragments work" in wordcap_msg
+    assert "Keep technical terms exact" in wordcap_msg
+    assert "Status:" in wordcap_msg
+    assert "Approval:" in wordcap_msg
+    assert "Put findings on the node" in wordcap_msg
+
+    other_msg = style.format_violations(style.check("you should run it."))
+    assert "Cut articles" not in other_msg
+    assert "Status:" not in other_msg
+    assert "Approval:" not in other_msg
+    assert "Put findings on the node" not in other_msg
+
+
 def test_format_excerpt_survives_an_inner_double_quote():
     # A sentence carrying a literal double quote must not close the wrapping
     # quote early and expose the rest of the excerpt to the word count.
     text = 'you should run "the check" now.'
     msg = style.format_violations(style.check(text))
-    assert style.check(msg) == [], msg
+    assert style.check(msg, surface="pr-body") == [], msg
 
 
 def test_format_detail_survives_an_unmatched_quote_on_a_later_hit():
@@ -494,7 +540,7 @@ def test_format_detail_survives_an_unmatched_quote_on_a_later_hit():
     # leave a real word unmasked, failing the refusal's own self-check.
     text = 'you should run and would" stop.'
     msg = style.format_violations(style.check(text))
-    assert style.check(msg) == [], msg
+    assert style.check(msg, surface="pr-body") == [], msg
 
 
 def test_the_refusal_message_passes_its_own_rules():
@@ -502,7 +548,8 @@ def test_the_refusal_message_passes_its_own_rules():
     # style-checked; every banned word it names is quoted, so masking exempts it.
     text = "you should don't; run if x."
     msg = style.format_violations(style.check(text))
-    assert style.check(msg) == [], msg
+    # The refusal goes to stderr, not a mail body, so it models rules 1 to 6.
+    assert style.check(msg, surface="pr-body") == [], msg
 
 
 def test_the_refusal_message_survives_a_rule_6_violation():
@@ -510,7 +557,46 @@ def test_the_refusal_message_survives_a_rule_6_violation():
     # one most able to break the self-consistency invariant above.
     msg = style.format_violations(style.check("a paragraph broken\nacross two lines."))
     assert "rule 6" in msg
-    assert style.check(msg) == [], msg
+    # The refusal goes to stderr, not a mail body, so it models rules 1 to 6.
+    assert style.check(msg, surface="pr-body") == [], msg
+
+
+def test_rule_7_refusal_with_recipe_passes_rules_1_to_6():
+    sentences = [
+        " ".join("word" for _ in range(count)) + "."
+        for count in (20, 20, 20, 21)
+    ]
+    body = " ".join(sentences)
+    msg = style.format_violations(style.check(body, surface="mail"))
+    assert style.check(msg, surface="pr-body") == [], msg
+    assert len(style._mask(msg).split()) <= style.MESSAGE_WORD_CAP
+
+
+def test_enforce_style_refuses_81_words_with_positive_marker(capsys, monkeypatch):
+    from fno.mail.cli import _enforce_style
+
+    monkeypatch.setenv("FNO_STYLE_ENFORCE", "1")
+    body = " ".join("word" for _ in range(81)) + "."
+    with pytest.raises(typer.Exit):
+        _enforce_style(body)
+    error = capsys.readouterr().err
+    assert "rule 7" in error
+    assert "81" in error and "80" in error
+
+
+def test_enforce_style_accepts_80_words(monkeypatch):
+    from fno.mail.cli import _enforce_style
+
+    monkeypatch.setenv("FNO_STYLE_ENFORCE", "1")
+    sentence = " ".join("word" for _ in range(20)) + "."
+    _enforce_style(" ".join(sentence for _ in range(4)))
+
+
+def test_enforce_style_accepts_style_exception(monkeypatch):
+    from fno.mail.cli import _enforce_style
+
+    monkeypatch.setenv("FNO_STYLE_ENFORCE", "1")
+    _enforce_style(" ".join("word" for _ in range(81)) + ".\nstyle-exception: log payload")
 
 
 # --- has_exception ------------------------------------------------------------
