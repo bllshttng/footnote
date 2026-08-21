@@ -139,7 +139,7 @@ fi
 # only while its own entry is present, so evicting or graduating an entry
 # releases its phrase instead of wedging this gate on prose the corpus is
 # supposed to have dropped.
-PINNED_PHRASES=$'liveness probes\tlive lockfile\ncapability probe\tmail probe'
+PINNED_PHRASES=$'capability probe\tmail probe'
 
 while IFS=$'\t' read -r entry_key phrase; do
   [[ -z "$entry_key" || -z "$phrase" ]] && continue
