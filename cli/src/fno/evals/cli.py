@@ -1,15 +1,15 @@
-"""fno evals subcommand - golden-task bank runner + research-brief grader.
+"""fno doctor evals subcommand - golden-task bank runner + research-brief grader.
 
-``fno evals run``
+``fno doctor evals run``
     Execute bank tasks (``evals/bank/*.yaml``) in disposable worktrees via the
     headless spawn substrate, grade mechanically, and append one history row
     per task-run. ``--repeat K`` scores pass^k reliability.
-``fno evals report``
+``fno doctor evals report``
     Fold the history: per-tier pass rates, per-task pass@1 / pass^k, flake list,
     and a regression alarm. ``--graduate`` lists saturated capability tasks.
-``fno evals graduate <id>``
+``fno doctor evals graduate <id>``
     Retag a capability task's YAML to regression (a reviewed edit).
-``fno evals grade``
+``fno doctor evals grade``
     Grade a research brief against a golden doc (three mechanical assertions).
     Backs the kept research surfaces (``/ship doc``, ``/review research``).
 """
@@ -47,7 +47,7 @@ def _evals_callback() -> None:
 
     A no-op group callback so Typer keeps ``evals`` as a command group with
     a single subcommand instead of collapsing ``grade`` into the top-level
-    callback (which would break ``fno evals grade`` routing).
+    callback (which would break ``fno doctor evals grade`` routing).
     """
 
 

@@ -142,7 +142,7 @@ pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
 
 /// Run a spawn closure, retrying briefly on ETXTBSY ("Text file busy", os error
 /// 26). The spawned file is the `fno` / `fno-agents` binary: a concurrent
-/// `fno update` relinks it in place, and under `cargo test` a sibling thread
+/// `fno doctor update` relinks it in place, and under `cargo test` a sibling thread
 /// that just wrote+exec'd a stub leaves a transient write-fd open in another
 /// thread's fork window; either way the kernel can refuse the exec with
 /// ETXTBSY. The condition clears within microseconds once the writing fd closes,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-no-skill-local-evals.sh - CI gate: skills/<name>/evals/ is a dead
 # convention. The sole home for an eval task is the repo-root bank
-# (evals/bank/*.yaml), graded by `fno evals`. A skills/<name>/evals/ directory
+# (evals/bank/*.yaml), graded by `fno doctor evals`. A skills/<name>/evals/ directory
 # has zero consumers - no runner reads it - so a file placed there looks
 # adopted but runs never, which is how this node once concluded the eval system
 # had "one user" when it had none. Deleting the last instance without a gate
@@ -40,7 +40,7 @@ fi
     echo
     printf '%s\n' "$offenders"
     echo
-    echo "Eval tasks live in evals/bank/*.yaml (graded by 'fno evals'). Move the"
+    echo "Eval tasks live in evals/bank/*.yaml (graded by 'fno doctor evals'). Move the"
     echo "task there - the bank accepts arbitrary grade commands, so a skill-local"
     echo "eval has nowhere to go that a bank task cannot - and delete the directory."
     echo "A skills/<name>/evals file that runs never is worse than absent: it reads"

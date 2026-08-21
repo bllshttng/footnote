@@ -1,4 +1,4 @@
-"""fno codemap - AST + PageRank codebase map.
+"""fno doctor codemap - AST + PageRank codebase map.
 
 Thin wrapper around ``repogram.py`` (the analysis engine) and ``db-schema.py``
 (optional DB-aware companion), both of which sit next to this module. The
@@ -7,7 +7,7 @@ wrapper preserves byte-equivalent output so callers that already rely on
 
 The engines live INSIDE the package, not under the repo's ``scripts/``, because
 they are fno's own analysis code and must be found wherever fno is installed.
-Resolving them from the analyzed repo made ``fno codemap`` work only when the
+Resolving them from the analyzed repo made ``fno doctor codemap`` work only when the
 analyzed repo happened to be the footnote checkout itself.
 """
 import os
@@ -159,9 +159,9 @@ def codemap(
         # at the target repo and sent readers hunting for a file that never
         # belonged there.
         typer.echo(
-            f"fno codemap: the repogram engine is missing from this fno "
+            f"fno doctor codemap: the repogram engine is missing from this fno "
             f"installation (looked for {script}). This is a broken/incomplete "
-            f"fno install, not a problem with {target_repo}. Try `fno update`.",
+            f"fno install, not a problem with {target_repo}. Try `fno doctor update`.",
             err=True,
         )
         raise typer.Exit(code=EXIT_NO_ENGINE)
@@ -170,7 +170,7 @@ def codemap(
     # rather than silently emitting invalid output (Codex review P2).
     if json_output and db_schema:
         typer.echo(
-            "fno codemap: --json and --db-schema are incompatible "
+            "fno doctor codemap: --json and --db-schema are incompatible "
             "(JSON output cannot accept the markdown db-schema appendix)",
             err=True,
         )
@@ -192,7 +192,7 @@ def codemap(
     interpreter, tried = _engine_python(env)
     if interpreter is None:
         typer.echo(
-            f"fno codemap: no interpreter on PATH can import the engine's "
+            f"fno doctor codemap: no interpreter on PATH can import the engine's "
             f"dependencies ({', '.join(ENGINE_DEPS)}). They are intentionally "
             f"not bundled in the fno wheel (heavy native deps). Install them "
             f"into any python3 on PATH, e.g. "
@@ -246,7 +246,7 @@ def codemap(
                 # the failure to stderr so the user can investigate.
                 if db_result.returncode != 0:
                     typer.echo(
-                        f"warning: fno codemap --db-schema companion exited "
+                        f"warning: fno doctor codemap --db-schema companion exited "
                         f"with code {db_result.returncode}; primary codemap is still valid.",
                         err=True,
                     )

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_hermetic_lanes.sh - the dirty lane must be able to go red.
 #
-# `fno test smoke --ambient dirty` claims that a green run means the ambient
+# `fno doctor test smoke --ambient dirty` claims that a green run means the ambient
 # surface is complete. That claim rests entirely on the lane being ABLE to
 # fail: a success condition built on an absence cannot distinguish "no leaks"
 # from "the instrument never ran".

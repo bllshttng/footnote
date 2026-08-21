@@ -24,7 +24,7 @@
 #                                    (default 0; set to non-zero to fail selectively)
 #   $SCENARIO_DIR/fno-claim-acquire-rc -> rc for claim acquire only
 #   $SCENARIO_DIR/fno-claim-release-rc -> rc for claim release only
-#   $SCENARIO_DIR/fno-event-emit-rc    -> rc for fno event emit
+#   $SCENARIO_DIR/fno-event-emit-rc    -> rc for fno doctor event emit
 
 set -uo pipefail
 
@@ -333,7 +333,7 @@ case "$subcmd1 $subcmd2" in
     esac
     exit 0
     ;;
-  "event emit")
+  "doctor event")
     rc_file="$SCENARIO_DIR/fno-event-emit-rc"
     [ -f "$rc_file" ] && rc=$(cat "$rc_file") || rc=0
     if [ "$rc" -eq 0 ]; then

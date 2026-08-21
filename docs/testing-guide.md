@@ -54,7 +54,7 @@ All test scripts follow the same convention:
 
 ### Smoke runner coverage (the two-test-trees trap)
 
-`fno test smoke` is the one-command gate, but it has two layers and a gap that a verb-surface change falls straight through.
+`fno doctor test smoke` is the one-command gate, but it has two layers and a gap that a verb-surface change falls straight through.
 
 - A pytest step (unit + integration under `cli/tests/`).
 - Auto-included shell steps from `_SMOKE_HARNESS_GLOBS` in `cli/src/fno/test_cmd.py`: root `tests/*.sh`, `tests/{hooks,lib,target,skills,events,lint}/*.sh`, `scripts/tests/*.sh`, and `skills/*/tests/*.sh`.
@@ -62,7 +62,7 @@ All test scripts follow the same convention:
 
 Two shell trees are NOT in the smoke globs and never run unless invoked directly: `cli/tests/smoke/*.sh` and `cli/tests/scenarios/*.sh`. These call verbs (`fno backlog new`, `fno mail send`, and friends) that the pytest suite does not exercise.
 
-When you kill, rename, or nest a CLI verb, run the shell layer explicitly: `bash cli/tests/smoke/*.sh`, `bash cli/tests/scenarios/*.sh`, and root `tests/*.sh`. A green `fno test smoke` after a verb-surface change is not proof the shell layer still resolves, especially if the pytest step was red and fail-fast stopped before the shell steps. This bit a kill-verbs PR that passed 12525 pytest cases while two shell tests still invoked the removed verbs.
+When you kill, rename, or nest a CLI verb, run the shell layer explicitly: `bash cli/tests/smoke/*.sh`, `bash cli/tests/scenarios/*.sh`, and root `tests/*.sh`. When a verb surface changes, a green `fno doctor test smoke` does not prove the shell layer still resolves. A red pytest step can stop fail-fast before shell steps. This happened on a PR that passed 12525 pytest cases while two shell tests still invoked removed verbs.
 
 ### Validation Scripts
 
@@ -169,15 +169,9 @@ The second waits for a string that only the real outcome produces, so a broken c
 Pin the pattern to the thing being measured, too.
 A monitor armed on `verdict=` fired on `PASS: verdict=canonical-protected` from an unrelated harness while its gate was at step 10 of 124.
 
-A fail-fast gate hides the same way, with no pipe and no pattern involved.
-Once one step is permanently red, every step behind it stops running, and a check that never ran reports exactly what a passing check reports, which is nothing.
-A local gate stopped at step 32 on a known baseline failure and never reached the verb-surface ratchet around step 40, so "the gate did not complain about the ratchet" only meant "the gate never looked at it", and CI caught it instead.
-Once a step is known red, run `fno test --keep-going` so the steps behind it still report (`--keep-going` belongs to `fno test`; `scripts/ci/preflight.sh` rejects it as an unknown arg and exits 2).
+A fail-fast gate hides the same way, with no pipe and no pattern involved. Once one step is permanently red, every later step stops running. A check that never ran reports the same nothing as a passing check. A local gate stopped at step 32 on a known baseline failure and never reached the verb-surface ratchet around step 40. Therefore, "the gate did not complain" meant "the gate never looked", and CI caught it. Once a step is known red, run `fno doctor test --keep-going` so later steps still report. `--keep-going` belongs to `fno doctor test`. `scripts/ci/preflight.sh` rejects it as an unknown argument and exits 2.
 
-Last, and it is the one a control does not save you from: believe the reading once you have it.
-A helper in this repo was fixed for a bug it really had, and the search proving nothing sources the file had already been run and its result written down, by two people, before either drew the conclusion that the fix therefore executed nowhere.
-Running the control is the cheap half.
-Acting on what it says is the half that gets skipped, because a truthful reading that contradicts the work you have already done is easier to note than to obey.
+Last, and it is the one a control does not save you from: believe the reading once you have it. A helper had a real bug and received a fix. Two people had already recorded a search proving no source called it. Neither concluded that the fix executed nowhere. Running the control is the cheap half. Acting on it gets skipped because contradictory evidence is easier to note than obey.
 
 ### Validation Scripts
 

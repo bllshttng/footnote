@@ -43,7 +43,7 @@ TOMBSTONES: dict[str, str] = {
         "delivery code; only the CLI surface was removed"
     ),
     "log": (
-        "`fno event emit` - the per-worktree progress log had no reader and no "
+        "`fno doctor event emit` - the per-worktree progress log had no reader and no "
         "caller outside its own test"
     ),
     "reality-check": (
@@ -200,8 +200,8 @@ TOMBSTONES: dict[str, str] = {
         "cost/usage already cover the token-burn diagnosis"
     ),
     "upgrade": (
-        "`fno update` - the identical command `upgrade` duplicated; every "
-        "`fno upgrade` call was a spelling of `fno update`"
+        "`fno doctor update` - the identical command `upgrade` duplicated; every "
+        "`fno upgrade` call was a spelling of `fno doctor update`"
     ),
 }
 

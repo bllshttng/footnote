@@ -46,15 +46,9 @@ The runtime capability table (`fno.agents.harness_map`) asserts its keys stay in
 None of the moves left a re-export shim at the old path.
 A shim would keep the upward import spelling available and hide the move from the next reader.
 
-The two survivors are one finding: the `fno event emit` envelope builder stamps the sending session's identity (`fno.agents.self_stamp`) and resolves its spawn lineage from the agents registry (`fno.agents.registry`).
-That is platform-layer code reading agent-runtime state, and it is a genuine architectural finding rather than a misplaced file.
-Neither callee can follow the others down: `self_stamp` imports `fno.claims.session_pid` at L1 core, so moving it to L0 would trade one upward edge for another, and `agents.registry` is the agents registry.
-The remaining options are larger than a burndown: invert the stamp behind a registered hook, which silently stops stamping in any process that never imports `fno.agents`, or move envelope construction into the runtime layer and leave `fno event emit` a thin caller.
+The two survivors form one finding. The `fno doctor event emit` builder stamps the sending session identity through `fno.agents.self_stamp`. It resolves spawn lineage through `fno.agents.registry`. That is platform-layer code reading agent-runtime state, and it is a genuine architectural finding rather than a misplaced file. Neither callee can move down. `self_stamp` imports `fno.claims.session_pid` at L1 core. Moving it to L0 trades one upward edge for another. `agents.registry` is the agents registry. The remaining options are larger than a burndown. One option puts the stamp behind a registered hook, which leaves processes without `fno.agents` unstamped. Another moves envelope construction into the runtime layer and leaves `fno doctor event emit` as a thin caller.
 
-Two shortcuts were considered and rejected on measurement rather than taste.
-Hoisting `fno.graph.cli` and `fno.events.cli` to a higher layer, on the precedent that this map already places `fno.company.cli` at composition, clears nothing: at L3 those modules still import L5 `fno.agents`.
-It only bites if the CLI modules are declared L5, and `graph/cli.py` is roughly 10k lines of logic rather than a composition root, so declaring it unconstrained would empty the check.
-Reclassifying `fno.events` itself from platform to runtime fails a harder test: `fno.config`, `fno.claims`, `fno.graph` and `fno.approvals` all import it, so the move would manufacture nine new upward violations while erasing three.
+Two shortcuts were considered and rejected on measurement rather than taste. Hoisting `fno.graph.cli` and `fno.events.cli` to a higher layer clears nothing. Those modules still import L5 `fno.agents`. If CLI modules are declared L5, the check bites. `graph/cli.py` has roughly 10k lines of logic, not a composition root. Declaring it unconstrained empties the check. Reclassifying `fno.events` from platform to runtime fails a harder test. `fno.config`, `fno.claims`, `fno.graph`, and `fno.approvals` all import it. The move creates nine upward violations while erasing three.
 
 ## Audit and CI modes
 
@@ -65,11 +59,7 @@ The cycle line reports the first cycle the detector finds, not every cycle prese
 Retiring the config-to-graph import did not clear "the" cycle; it revealed the next one, which the two surviving events-CLI imports keep alive.
 Expect a burndown to re-root the reported cycle rather than remove it, until the last upward edge out of a layer is gone.
 
-`bash scripts/ci/check-company-boundaries.sh --baseline` is the gate registered in `fno test`.
-Its checked-in source of truth is `scripts/ci/company-boundary-baseline.txt`, which records each known finding as an importing file and line, layer pair, and import statement, plus the cycle.
-The baseline gate passes only when the exact finding set is unchanged.
-A new or changed finding fails, and a removed finding also fails until its human-readable baseline entry is removed in the same pull request.
-Therefore a green baseline verdict means the known debt did not grow; it does not mean the architecture is clean or supersede the red strict audit.
+`bash scripts/ci/check-company-boundaries.sh --baseline` is the gate registered in `fno doctor test`. Its checked-in source of truth is `scripts/ci/company-boundary-baseline.txt`. The file records each finding's import site, layer pair, import statement, and cycle. When the exact finding set is unchanged, the baseline gate passes. New or changed findings fail. Removed findings also fail until their readable baseline entries leave in the same pull request. Therefore, green means known debt did not grow. It does not mean the architecture is clean or supersede the red strict audit.
 
 The check enforces no edges for `fno-skills`, which is Markdown and shell content, or for `fno-mux`, which is Rust in `crates/fno/src/mux_cli.rs`.
 They remain named as uncovered seams instead of being counted as clean Python boundaries.

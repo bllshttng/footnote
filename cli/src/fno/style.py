@@ -2,7 +2,7 @@
 
 Seven rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
-state, no network. ``fno mail send`` and the hand-run ``fno lint style``
+state, no network. ``fno mail send`` and the hand-run ``fno doctor lint style``
 surfaces route through :func:`check`.
 
 Code does not count against a sentence. A masking pass runs before any rule
@@ -322,7 +322,7 @@ def format_violations(violations: list[Violation]) -> str:
             ]
         )
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
-    lines.append('run "fno lint style --stdin" to check a rewrite before you send it.')
+    lines.append('run "fno doctor lint style --stdin" to check a rewrite before you send it.')
     return "\n\n".join(lines)
 
 

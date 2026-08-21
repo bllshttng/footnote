@@ -268,11 +268,11 @@ def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
             project_root, lambda: _settings_for(project_root).evals.enabled
         )
         return SpawnerStatus(
-            "evals runner", "fno evals run", "config.evals.enabled", armed, rank,
+            "evals runner", "fno doctor evals run", "config.evals.enabled", armed, rank,
         )
     except Exception:  # noqa: BLE001
         return SpawnerStatus(
-            "evals runner", "fno evals run", "config.evals.enabled", False, "default",
+            "evals runner", "fno doctor evals run", "config.evals.enabled", False, "default",
         )
 
 

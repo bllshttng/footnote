@@ -177,10 +177,10 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). `-p` is reachable only via explicit `headless`; never default to it.
 - **`fno agents watchdog`** - fleet sweep from transcript truth: wake / reroute / reap. Dry run by default; `--apply` (wake), `--apply-all` (reroute; reap needs `config.recovery.watchdog_reap`, it deletes worktrees). Cadence behind `config.recovery.watchdog`. [fleet-watchdog](docs/architecture/fleet-watchdog.md)
-- **`fno doctor`** - detects stale deployed `fno` vs merged source only; `--fix` delegates to `fno update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
+- **`fno doctor`** - detects stale deployed `fno` vs merged source only. `--fix` delegates to `fno doctor update`. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider. Never infer the axis from a value. Definitions live in [axis-vocabulary](docs/architecture/axis-vocabulary.md).
 - **Stage table (per-stage axis)** - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch; `route`=vendor/model (`--route`, fail-closed) beside `provider`=harness. [stage table](docs/architecture/role-based-model-routing.md).
-- **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` lists everything (`help <group> --all` per group). New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
+- **Curated CLI menu** - `fno --help` shows ~9 verbs. Most commands are hidden but invocable. `fno help --all` lists everything (`help <group> --all` per group). New verbs default hidden. `fno doctor lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
 - **Target self-handoff** - `/target` can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review); two memory-pass checkpoints; stuck terminals write postmortems. [memory-system](docs/architecture/memory-system.md).
@@ -188,7 +188,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## Skill / agent development
 
 - **Skill:** `skills/<name>/SKILL.md` (+ optional `references/`, `scripts/`). **Agent:** `agents/<name>.md` with frontmatter.
-- **Self-containment (CI-enforced):** driver skills (`/target`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse is build-time via `skill-bundles.yaml` + `fno bundle` (`bundle check` gates freshness).
+- **Self-containment (CI-enforced):** driver skills (`/target`) must be portable. They allow no `${REPO_ROOT}/scripts/` refs, path escapes, or runtime `Skill()` calls between drivers. Build-time reuse uses `skill-bundles.yaml` and `fno doctor bundle`. The `bundle check` action gates freshness.
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/execute/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 

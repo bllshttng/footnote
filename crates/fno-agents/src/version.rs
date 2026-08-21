@@ -2,12 +2,12 @@
 //!
 //! All three bins bake in the same crate-wide build.rs env vars
 //! (`FNO_AGENTS_GIT_REV` / `FNO_AGENTS_CRATES_REV` / `FNO_AGENTS_GIT_DIRTY`) via
-//! `env!`, so one reporter lets `fno update` interrogate each bin's `crates_rev`
+//! `env!`, so one reporter lets `fno doctor update` interrogate each bin's `crates_rev`
 //! and verify the whole triad is the SAME build, not merely present.
 
 use serde_json::json;
 
-/// The machine-readable version payload `fno doctor` / `fno update` read off a
+/// The machine-readable version payload `fno doctor` / `fno doctor update` read off a
 /// resolved binary (`<bin> version --json`). `crates_rev` is the crates/ subtree
 /// rev the rust-staleness verdict keys on (ab-716cd330) -- the same quantity
 /// Python's `update._rust_subtree_rev` computes, so the comparison is
@@ -30,7 +30,7 @@ pub fn version_json() -> serde_json::Value {
 /// Print the binary's embedded version. `--json` emits [`version_json`]; the
 /// human form is a one-liner. Side-effect-free: never starts the daemon. The
 /// human string is crate-generic ("fno-agents") since the lib cannot see
-/// `CARGO_BIN_NAME`; `fno update` reads only the name-agnostic `--json` form.
+/// `CARGO_BIN_NAME`; `fno doctor update` reads only the name-agnostic `--json` form.
 pub fn print_version(json_out: bool) {
     let pkg = env!("CARGO_PKG_VERSION");
     let rev = env!("FNO_AGENTS_GIT_REV"); // full sha, or the literal "unknown"

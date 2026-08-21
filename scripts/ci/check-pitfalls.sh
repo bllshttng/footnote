@@ -91,7 +91,7 @@ fi
 
 # Graduated-verb check: a title naming a shipped `fno` verb as the trap is by
 # definition un-graduated, because the verb IS the carrier its `graduates-to:`
-# is waiting for. This is the loop that produced the "`fno test` can report a
+# is waiting for. This is the loop that produced the "`fno doctor test` can report a
 # false green" entry - written the day after the verb that fixed it, then read
 # at every SessionStart as a reason to distrust it. Titles only: a body may
 # cite a verb as a specimen without claiming it is the trap.

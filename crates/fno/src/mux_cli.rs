@@ -929,7 +929,7 @@ fn refusal(context: &str, reason: &str, sock: &Path) -> KillOutcome {
         path: KillPath::Unrecoverable,
         note: format!(
             "fno: {context}\nfno: {reason}\n     next: kill -9 $(lsof -t -U {}) 2>/dev/null; \
-             rm -f {rm}\n     then: fno update && fno restart && fno",
+             rm -f {rm}\n     then: fno doctor update && fno restart && fno",
             shell_quote(sock),
         ),
     }

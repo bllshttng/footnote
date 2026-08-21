@@ -945,7 +945,7 @@ def emit_status_event(
     outcome: str = "",
     data: Optional[Dict] = None,
 ) -> bool:
-    """Emit an x-dbaf status-breakpoint event by shelling ``fno event emit``.
+    """Emit an x-dbaf status-breakpoint event by shelling ``fno doctor event emit``.
 
     Non-fatal by contract: any failure logs one stderr note and returns False;
     it never raises, so a boundary emit can never fail the task or the run.
@@ -953,7 +953,16 @@ def emit_status_event(
     resolve-executor.sh. Work coordinates fall back to the manifest inside the
     emit CLI when the flags are empty.
     """
-    argv = ["fno", "event", "emit", "-t", event_type, "-d", json.dumps(data or {})]
+    argv = [
+        "fno",
+        "doctor",
+        "event",
+        "emit",
+        "-t",
+        event_type,
+        "-d",
+        json.dumps(data or {}),
+    ]
     for flag, val in (("--run", run), ("--node", node), ("--task", task), ("--outcome", outcome)):
         if val:
             argv += [flag, val]

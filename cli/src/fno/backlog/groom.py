@@ -546,7 +546,7 @@ def install_groom_agent(
     # Captured at install time: the scheduled run has no cwd of its own, and
     # maintain's validity sweep needs a real repo to read source evidence from.
     # A refresh passes the installed value so it is not re-resolved against
-    # whatever directory `fno update` happened to run from.
+    # whatever directory `fno doctor update` happened to run from.
     if workdir is None:
         try:
             from fno.paths import resolve_repo_root
@@ -604,7 +604,7 @@ def _installed_agent_settings(plist_path: Path) -> tuple[Optional[int], Optional
 def refresh_groom_agent(*, launch_agents_dir: Optional[Path] = None) -> dict[str, Any]:
     """Re-render the installed plist onto the current binary and re-bootstrap it.
 
-    The tail of ``fno update``: an update replaces the binary but never re-renders
+    The tail of ``fno doctor update``: an update replaces the binary but never re-renders
     the plist, so a migration that breaks the old entry point leaves the agent
     pointing at it with no self-heal. A no-op when no groom agent is installed,
     so an operator who never ran ``--install-agent`` gets nothing. Never raises:

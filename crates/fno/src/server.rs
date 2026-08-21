@@ -6772,7 +6772,7 @@ impl Core {
     /// Emit `human_touch` for one steering action on `pane` (W4 touch
     /// telemetry). `coalesced` applies the per-pane window (inject bursts);
     /// answer submits are one emit per action. The write rides the Python
-    /// `type` envelope via a fire-and-forget `fno event emit` shell-out (the
+    /// `type` envelope via a fire-and-forget `fno doctor event emit` shell-out (the
     /// x-4e2d digest idiom) - no Rust-side `kind`, so the three-places rule
     /// never applies. The shell-out runs in the squad's cwd so the event
     /// lands in that project's events.jsonl. A failure bumps
@@ -6800,6 +6800,7 @@ impl Core {
             const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
             let mut cmd = tokio::process::Command::new(fno_bin());
             cmd.args([
+                "doctor",
                 "event",
                 "emit",
                 "--type",

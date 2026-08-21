@@ -1,6 +1,6 @@
 """US4 CI drift guard - no repo-root shell-out without a degrade path.
 
-`fno lint shellout-drift` is the regression backstop for the packaging epic
+`fno doctor lint shellout-drift` is the regression backstop for the packaging epic
 (ab-8bdb4642 / ab-acbde274). Once the shell-outs were eliminated (Group 1:
 folded into Rust or internalized into Python), the remaining risk is that a
 future `fno` verb shells out to a NEW repo-root script and silently reintroduces
@@ -30,7 +30,7 @@ Scope boundaries (deliberate, documented so they are not silent gaps):
   the shared resolver is invisible to this guard (the ``(b)`` SIGNAL above fails).
   That is a hiding place, not a sanctioned exemption: the fix is to re-root the
   verb on the shared resolver and add a degrade branch + an allowlist entry, which
-  is what ``fno lint flock-pattern`` (-> ``scripts/lint-flock-pattern.sh``) now does
+  is what ``fno doctor lint flock-pattern`` (-> ``scripts/lint-flock-pattern.sh``) now does
   (ab-fd017698) - so it is in scope, listed, and degrade-proven.
 * SCAN_EXCLUDE: ``evals/runner.py`` is the in-repo-only efficacy-eval harness; it
   shells out to ``run-target-loop.sh`` + fixture asserts that exist only inside a

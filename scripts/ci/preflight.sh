@@ -11,7 +11,7 @@
 # stale-base invoking tree -> lock -> reset the worktree to the invoking HEAD
 # (caches preserved) ->
 # build a hermetic env -> changed packet (CHANGED SUBSET, fail-fast, partial) ->
-# fno-py test smoke --keep-going -> rust-ci legs (pinned fmt, cargo test,
+# fno-py doctor test smoke --keep-going -> rust-ci legs (pinned fmt, cargo test,
 # advisory audit) -> one summary + exit.
 #
 # The changed packet is early feedback only: its failure stops the run at the
@@ -1084,7 +1084,7 @@ if [[ -n "$CHANGED_BASE" ]]; then
     echo ""
     echo "preflight: === changed packet (CHANGED SUBSET - partial, never the gate) ==="
     c0="$SECONDS"
-    run_hermetic uv run --project cli fno-py test smoke --changed \
+    run_hermetic uv run --project cli fno-py doctor test smoke --changed \
         --base "$CHANGED_BASE" --head "$CANDIDATE_SHA"
     creq=$?
     case $creq in
@@ -1127,11 +1127,11 @@ if retry_run_leg smoke; then
     SMOKE_ARGS=(--keep-going); [[ $RETRY_FAILED -eq 1 ]] && SMOKE_ARGS=(--retry-failed --keep-going)
     s0="$SECONDS"
     # Bootstrap via `uv run --project cli`: there is no repo-root pyproject and
-    # no global fno-py in a hermetic env, so a bare `fno test smoke` is not on
+    # no global fno-py in a hermetic env, so a bare `fno doctor test smoke` is not on
     # PATH until uv syncs the cli project (uv auto-syncs). The attestation
     # logic below is unchanged: a FULL GREEN records, a RED deletes, a subset
     # mints nothing.
-    run_hermetic uv run --project cli fno-py test smoke "${SMOKE_ARGS[@]}"
+    run_hermetic uv run --project cli fno-py doctor test smoke "${SMOKE_ARGS[@]}"
     sreq=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     [[ $sreq -eq 0 ]] && record_leg smoke "smoke suite" pass $(( SECONDS - s0 )) || { record_leg smoke "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
@@ -1268,7 +1268,7 @@ if [[ $RUN_FNO_CARGO -eq 1 ]]; then
         echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
              "(mtime $_squads_before -> $_squads_after)" >&2
         echo "  if a real mux session is running concurrently it is a valid writer;" >&2
-        echo "  otherwise a crates/fno test bypassed the HOME redirect and leaked." >&2
+        echo "  otherwise a crates/fno doctor test bypassed the HOME redirect and leaked." >&2
         FAIL=1
         record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
     else

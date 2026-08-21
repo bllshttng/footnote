@@ -193,7 +193,7 @@ def test_a_commit_gets_a_synthetic_identity_not_the_developers(tmp_path):
     assert git("commit", "-q", "-m", "probe").returncode == 0
 
     author = git("log", "-1", "--format=%an <%ae>").stdout.strip()
-    assert author == "fno test <fno-test@localhost>"
+    assert author == "fno doctor test <fno-test@localhost>"
     # init.defaultBranch is ambient too: a developer who sets it renames the
     # branch a test just created.
     assert git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"

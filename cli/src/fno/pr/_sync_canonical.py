@@ -3,7 +3,7 @@
 Pure-mechanical, fail-open. After a PR merges, bring the CANONICAL checkout and
 its installed tooling up to the merged HEAD by running the project's configured
 ``config.post_merge.sync_command`` (footnote example:
-``git checkout main && git pull origin main && fno update && fno restart``).
+``git checkout main && git pull origin main && fno doctor update && fno restart``).
 
 Load-bearing constraints, each with its own guard below:
 
@@ -461,7 +461,7 @@ def run_sync_catchup(
     up, because a single pull brings HEAD current for all of them. The older
     swept SHAs are marker-stamped afterwards so they stop reading as stale - but
     ONLY once the newest SHA's marker proves the sync actually landed, so a
-    claim-held skip or a failed ``fno update`` can never backdate a lie.
+    claim-held skip or a failed ``fno doctor update`` can never backdate a lie.
     """
     from fno.config import load_settings
 

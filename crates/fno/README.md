@@ -26,14 +26,7 @@ refuses version-skewed clients with both versions named.
 
 ## The CLI (bootstrapper)
 
-Any `fno <subcommand>` invocation forwards to the Python CLI, which the wheel
-ships as the **`fno-py`** console script (not `fno` - this binary owns `fno`, so
-the two never fight for the name on PATH). The wheel also bundles the
-`fno-agents*` binaries. On first run the shim provisions the wheel via
-[uv](https://docs.astral.sh/uv/), verifies the package is this project's, and
-then `exec`s `<uv tool dir>/fno/bin/fno-py` by absolute path; later runs forward
-instantly. `fno update` refreshes this binary (`crates/fno`) alongside the
-fno-agents bins, so a normal reboot keeps the front door current.
+Any `fno <subcommand>` invocation forwards to the Python CLI. The wheel ships that CLI as the **`fno-py`** console script. The Rust binary owns `fno`, so the two never fight for the PATH name. The wheel also bundles the `fno-agents*` binaries. On first run, the shim provisions the wheel through [uv](https://docs.astral.sh/uv/) and verifies this project owns the package. It then `exec`s `<uv tool dir>/fno/bin/fno-py` by absolute path. Later runs forward instantly. `fno doctor update` refreshes this binary (`crates/fno`) alongside the fno-agents bins, so a normal reboot keeps the front door current.
 
 ```sh
 cargo install fno

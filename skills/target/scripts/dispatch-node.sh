@@ -222,7 +222,7 @@ fi
 #   - resolve fails      : an unknown/misconfigured harness has NO autonomous
 #     substrate -> hard fail naming config.dispatch.harness; every node stays
 #     ready, nothing launches, a failure event is recorded (epic AC2-ERR).
-# `fno dispatch resolve` / `fno event emit` are top-level Python verbs (not in the
+# `fno dispatch resolve` / `fno doctor event emit` are top-level Python verbs (not in the
 # `agents` group), so they are immune to FNO_AGENTS_RUNTIME=rust - no pin needed.
 resolve_json="$(fno dispatch resolve --json 2>/dev/null)"; resolve_rc=$?
 # jq `//` treats "" as truthy, so filter empties with select() before the
@@ -237,7 +237,7 @@ DISPATCH_SUBSTRATE="$(printf '%s' "$resolve_json" | jq -r '.substrate | select(.
 DISPATCH_COMMAND="$(printf '%s' "$resolve_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
 if [[ "$resolve_rc" -ne 0 || -z "$DISPATCH_PROVIDER" || -z "$DISPATCH_SUBSTRATE" ]]; then
   reason="no autonomous substrate resolved (rc=$resolve_rc); set config.dispatch.harness to a harness with one (claude=bg, codex/gemini/agy/opencode=headless)"
-  fno event emit -t dispatch_no_autonomous_substrate -s backlog \
+  fno doctor event emit -t dispatch_no_autonomous_substrate -s backlog \
     -d "{\"reason\":\"dispatch resolve rc=$resolve_rc\",\"config_key\":\"config.dispatch.harness\"}" >/dev/null 2>&1 || true
   for id in "${NODES[@]}"; do echo "failed $id reason=\"$reason\""; done
   echo "summary: launched=0 parked=0 already=0 skipped=0 done=0 failed=${#NODES[@]} capped=0"
@@ -246,7 +246,7 @@ fi
 # Loud, once: a non-bg harness dispatches via headless (a one-shot, not detached).
 if [[ "$DISPATCH_SUBSTRATE" != "bg" ]]; then
   echo "note: harness '$DISPATCH_PROVIDER' has no bg substrate; dispatching via headless (one-shot runs to completion, not a detached thread)" >&2
-  fno event emit -t dispatch_substrate_fallback -s backlog \
+  fno doctor event emit -t dispatch_substrate_fallback -s backlog \
     -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"bg\",\"to\":\"$DISPATCH_SUBSTRATE\"}" >/dev/null 2>&1 || true
 fi
 
@@ -999,10 +999,10 @@ for id in "${NODES[@]}"; do
   echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\" route=${route_val}"
   # The cutover receipt, on the same contract the Python launchers honour:
   # AFTER launch proof, never on the decision alone. Without it a shell cutover
-  # is invisible to `fno event` and an operator cannot see that quota moved the
+  # is invisible to `fno doctor event` and an operator cannot see that quota moved the
   # work to another harness. Best-effort: telemetry never fails a dispatch.
   if [[ -n "$route_account" ]]; then
-    fno event emit -t dispatch_failover -s backlog -d "$(jq -nc \
+    fno doctor event emit -t dispatch_failover -s backlog -d "$(jq -nc \
       --arg node_id "$id" \
       --arg from "$(printf '%s' "$route_json" | jq -r '.route_source // ""')" \
       --arg to "$route_account" \

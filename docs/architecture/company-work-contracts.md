@@ -64,7 +64,7 @@ Unknown graph fields continue to survive canonicalization, and the new validatio
 Run the contract and persistence tests through the repository wrapper:
 
 ```bash
-fno test cli/tests/unit/company/test_contracts.py cli/tests/unit/test_plan_company_contract.py cli/tests/unit/test_graph_store.py -q
+fno doctor test cli/tests/unit/company/test_contracts.py cli/tests/unit/test_plan_company_contract.py cli/tests/unit/test_graph_store.py -q
 ```
 
 The store-level cases are the counterfactual guard: malformed company-work data must raise before the locked writer changes the graph file.

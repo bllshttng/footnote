@@ -57,7 +57,7 @@ class _Shell:
 
 
 def _run(canonical, **kw):
-    kw.setdefault("settings", _settings("git pull && fno update"))
+    kw.setdefault("settings", _settings("git pull && fno doctor update"))
     kw.setdefault("canonical_root", canonical)
     kw.setdefault("runner", _git_origin())
     kw.setdefault("gh_json", _gh_row())
@@ -124,14 +124,14 @@ def test_path_gate_match_runs(tmp_path, capsys):
     shell = _Shell(rc=0)
     rc = _run(
         tmp_path,
-        settings=_settings("git pull && fno update", paths=["cli/**"]),
+        settings=_settings("git pull && fno doctor update", paths=["cli/**"]),
         gh_json=_gh_row(files=[{"path": "cli/src/fno/z.py"}]),
         shell_runner=shell,
     )
     assert rc == 0
     assert "synced" in capsys.readouterr().out
     assert len(shell.calls) == 1
-    assert shell.calls[0][0] == "git pull && fno update"
+    assert shell.calls[0][0] == "git pull && fno doctor update"
     assert (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
 
 
@@ -160,7 +160,7 @@ def test_failure_surfaces_command_and_captured_stderr(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "exit 1" in err
-    assert "git pull && fno update" in err  # the command that ran
+    assert "git pull && fno doctor update" in err  # the command that ran
     assert "checkpout" in err               # the captured stderr
     assert not (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
 

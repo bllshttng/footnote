@@ -48,5 +48,4 @@ The receipt reports source status, not a conclusion.
 An unavailable GitHub search is not “no matching PR,” missing or stale schema evidence is not “no database change,” and a graph read failure is not “no duplicate.”
 The model decides relevance only after inspecting the cited evidence.
 
-The receipt is derived and read-only.
-Backlog changes still go through `fno backlog`, target manifest first-fill still goes through `fno do state set`, and schema refresh still goes through the established `fno codemap --db-schema` artifact path.
+The receipt is derived and read-only. Backlog changes still go through `fno backlog`, target manifest first-fill still goes through `fno do state set`, and schema refresh still goes through the established `fno doctor codemap --db-schema` artifact path.

@@ -30,7 +30,7 @@ pub enum ClientError {
     DaemonExitedEarly(std::process::ExitStatus),
     #[error(
         "daemon binary not found: {0} - the fno-agents triad (client/daemon/worker) \
-         is split here. Run `fno update` to redeploy the pair, or set \
+         is split here. Run `fno doctor update` to redeploy the pair, or set \
          FNO_AGENTS_DAEMON_BIN to a coherent same-build daemon."
     )]
     DaemonBinMissing(PathBuf),

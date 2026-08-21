@@ -50,7 +50,7 @@ tasks:
   - id: \"1.1\"
     title: Build the validator
     surface: [cli/src/fno/plan/cli.py]
-    verify: fno test cli/tests/unit/test_plan_execution_validation.py
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
     acceptance: [AC1-HP]
 """
 
@@ -84,7 +84,7 @@ Do the work.
 
 ## Verification
 
-1. `fno test cli/tests/unit/test_a.py`
+1. `fno doctor test cli/tests/unit/test_a.py`
 """,
     )
 
@@ -130,7 +130,7 @@ Why this is needed.
 
 
 _QUICK_FILES = "| File | Action |\n|---|---|\n| `cli/src/fno/plan/execution_validation.py` | modify |"
-_QUICK_VERIFY = "1. `fno test cli/tests/unit/test_plan_execution_validation.py`"
+_QUICK_VERIFY = "1. `fno doctor test cli/tests/unit/test_plan_execution_validation.py`"
 
 
 def _quick_plan(*, files: str = _QUICK_FILES, verification: str = _QUICK_VERIFY) -> str:
@@ -178,12 +178,12 @@ def test_quick_plan_arbitrary_surface_word_is_not_a_file(tmp_path: Path) -> None
 
 def test_quick_plan_verification_stays_representation_tolerant(tmp_path: Path) -> None:
     for verification in (
-        "1. `fno test cli/tests/unit/test_a.py`",
-        "- fno test cli/tests/unit/test_a.py",
-        "Run the check first.\n\n1. env FNO_DEBUG=1 fno test cli/tests/unit/test_a.py",
+        "1. `fno doctor test cli/tests/unit/test_a.py`",
+        "- fno doctor test cli/tests/unit/test_a.py",
+        "Run the check first.\n\n1. env FNO_DEBUG=1 fno doctor test cli/tests/unit/test_a.py",
         "1. `./scripts/ci/preflight.sh`",
         "1. `timeout 30 pytest cli/tests/unit/test_a.py`",
-        "1. `timeout -k 5 1m fno test cli/tests/unit/test_a.py`",
+        "1. `timeout -k 5 1m fno doctor test cli/tests/unit/test_a.py`",
         "1. `gtimeout 30 pytest cli/tests/unit/test_a.py`",
         "1. `poetry run pytest -q`",
         "1. `tsc --noEmit`",
@@ -247,7 +247,7 @@ def test_quick_plan_rejects_non_path_tokens(tmp_path: Path) -> None:
 
 def test_quick_plan_malformed_shell_verification_fails_closed(tmp_path: Path) -> None:
     for verification in (
-        '1. fno test "unclosed',
+        '1. fno doctor test "unclosed',
         # A parseable segment must not rescue a value bash itself would reject.
         '1. pytest cli/tests/ && echo "done',
     ):
@@ -278,8 +278,8 @@ def test_prose_that_opens_with_a_command_word_is_not_runnable(tmp_path: Path) ->
 
 def test_full_plan_task_verify_accepts_a_timeout_wrapper(tmp_path: Path) -> None:
     strategy = VALID_STRATEGY.replace(
-        "verify: fno test cli/tests/unit/test_plan_execution_validation.py",
-        "verify: timeout 300 fno test cli/tests/unit/test_plan_execution_validation.py",
+        "verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py",
+        "verify: timeout 300 fno doctor test cli/tests/unit/test_plan_execution_validation.py",
     )
     plan = _write_plan(tmp_path, _full_plan(strategy))
 
@@ -316,7 +316,7 @@ tasks:
 
 def test_prose_task_verification_is_not_runnable(tmp_path: Path) -> None:
     strategy = VALID_STRATEGY.replace(
-        "verify: fno test cli/tests/unit/test_plan_execution_validation.py",
+        "verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py",
         "verify: manually inspect the result",
     )
     plan = _write_plan(tmp_path, _full_plan(strategy))
@@ -362,12 +362,12 @@ tasks:
   - id: \"1.1\"
     title: First
     surface: [src/a.py]
-    verify: fno test tests/test_a.py
+    verify: fno doctor test tests/test_a.py
     acceptance: [AC1]
   - id: \"1.1\"
     title: Duplicate
     surface: [src/b.py]
-    verify: fno test tests/test_b.py
+    verify: fno doctor test tests/test_b.py
     acceptance: [AC2]
 """
     plan = _write_plan(tmp_path, _full_plan(strategy))
@@ -400,12 +400,12 @@ tasks:
   - id: \"1.1\"
     title: First
     surface: [src/shared.py]
-    verify: fno test tests/test_a.py
+    verify: fno doctor test tests/test_a.py
     acceptance: [AC1]
   - id: \"1.2\"
     title: Second
     surface: [src/shared.py]
-    verify: fno test tests/test_b.py
+    verify: fno doctor test tests/test_b.py
     acceptance: [AC2]
 """
     plan = _write_plan(tmp_path, _full_plan(strategy))
@@ -430,12 +430,12 @@ tasks:
   - id: \"1.1\"
     title: First
     surface: [src/a.py]
-    verify: fno test tests/test_a.py
+    verify: fno doctor test tests/test_a.py
     acceptance: [AC1]
   - id: \"2.1\"
     title: Second
     surface: [src/b.py]
-    verify: fno test tests/test_b.py
+    verify: fno doctor test tests/test_b.py
     acceptance: [AC2]
 """
     plan = _write_plan(tmp_path, _full_plan(strategy))
@@ -472,12 +472,12 @@ tasks:
   - id: "1.1"
     title: First
     surface: [src/a.py]
-    verify: fno test tests/test_a.py
+    verify: fno doctor test tests/test_a.py
     acceptance: [AC1]
   - id: "2.1"
     title: Second
     surface: [src/b.py]
-    verify: fno test tests/test_b.py
+    verify: fno doctor test tests/test_b.py
     acceptance: [AC2]
 """
     plan = _write_plan(tmp_path, _full_plan(strategy))
@@ -520,12 +520,12 @@ tasks:
   - id: "1.1"
     title: First
     surface: [src/shared.py]
-    verify: fno test tests/test_a.py
+    verify: fno doctor test tests/test_a.py
     acceptance: [AC1]
   - id: "1.2"
     title: Second
     surface: [./src/shared.py]
-    verify: fno test tests/test_b.py
+    verify: fno doctor test tests/test_b.py
     acceptance: [AC2]
 """
     alias_plan = _write_plan(tmp_path, _full_plan(alias_strategy))
@@ -627,7 +627,7 @@ tasks:
   - id: "1.1"
     title: Build the validator
     surface: [cli/src/fno/plan/cli.py]
-    verify: fno test cli/tests/unit/test_plan_execution_validation.py
+    verify: fno doctor test cli/tests/unit/test_plan_execution_validation.py
     acceptance: [AC9]
 """
 

@@ -25,7 +25,7 @@ TMP="$(mktemp -d -t emit-attestation-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 # Stub the event sink and CAPTURE ITS ARGV: the assertion must read what was
-# actually handed to `event emit`, not what the receipt claims (same rule as
+# actually handed to `doctor event emit`, not what the receipt claims (same rule as
 # tests/hooks/test_attest_model.sh).
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/last-emit.txt"\nexit 0\n' \
   "$TMP" > "$TMP/fno-stub"
@@ -44,7 +44,7 @@ emit() { # runs the emitter inside the scratch repo; prints nothing
 
 stored() { # echoes one field of the last emitted payload: stored <jq-path>
   [[ -f "$TMP/last-emit.txt" ]] || { echo "<no-emit>"; return; }
-  # argv is: event emit -t <kind> -s <source> -d <json>; the payload is -d's value.
+  # argv is: doctor event emit -t <kind> -s <source> -d <json>; the payload is -d's value.
   tail -1 "$TMP/last-emit.txt" | jq -r "$1 // \"<missing>\""
 }
 

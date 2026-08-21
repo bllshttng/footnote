@@ -2,7 +2,7 @@
 
 One emit path for the autonomy-debt counter: reconcile's auto ``dead-bot``
 emit, the ``spawn-cap`` auto emit from both spawn gates, and the manual
-``fno event gate-escape <reason>`` verb all land here. Fails OPEN (an emit
+``fno doctor event gate-escape <reason>`` verb all land here. Fails OPEN (an emit
 never aborts the host op), dedups on ``(dedup_key, reason)``, and writes to the
 CANONICAL events log so a closed node's telemetry outlives its worktree and
 retro aggregates one coherent log.

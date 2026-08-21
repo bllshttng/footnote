@@ -165,7 +165,7 @@ pub enum MissionDispatch {
 /// state, recoverable via `fno backlog undefer`. Node ids are global, so the
 /// epic's cwd is a valid working dir for the child-node defer.
 /// `retry_etxtbsy` like every other shellout here - this was the one that
-/// skipped it. A transient busy binary (a concurrent `fno update`, or under
+/// skipped it. A transient busy binary (a concurrent `fno doctor update`, or under
 /// `cargo test` a sibling thread's freshly-written stub) makes the spawn fail,
 /// and `let _ =` swallows it, so a tripped breaker silently never defers its
 /// node and re-dispatches it into the same crash loop.
@@ -204,7 +204,7 @@ fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) -> bool {
 /// healthy node.
 fn node_has_pr_ref(cfg: &DrainConfig, node_id: &str) -> bool {
     // retry_etxtbsy like every other shellout here: a transient busy binary
-    // (a concurrent `fno update`) must not read as "healthy, has PR" and quietly
+    // (a concurrent `fno doctor update`) must not read as "healthy, has PR" and quietly
     // disable the guard.
     let Ok(out) = retry_etxtbsy(|| {
         fno_cmd(&cfg.fno_bin)
@@ -753,13 +753,13 @@ fn resolve_fanout_targets(fno_bin: &str) -> Vec<FanoutTarget> {
     }
 }
 
-/// One project's status-fanout loop: shell `fno status-fanout tick` in the
+/// One project's status-fanout loop: shell `fno doctor event fanout tick` in the
 /// project cwd on the configured cadence, best-effort. Independent of the drain
 /// loops; a tick failure is swallowed and the next tick retries. Between ticks it
 /// re-resolves its own enablement (codex P2): a new `interval_secs` is picked up,
 /// and removing the project's sinks EXITS the loop (so `retain(!is_finished)`
 /// reaps it) rather than ticking forever. Exits on shutdown.
-/// Cap on a single `fno status-fanout tick` child. A legitimately slow tick
+/// Cap on a single `fno doctor event fanout tick` child. A legitimately slow tick
 /// (several stalled sinks x (retries+1) x http_timeout + backoff) can reach
 /// minutes; 300s bounds the pathological hang, not normal work.
 const TICK_CHILD_CAP: Duration = Duration::from_secs(300);
@@ -799,7 +799,8 @@ async fn per_project_fanout_loop(target: FanoutTarget, fno_bin: String, shutdown
             None => break, // sinks removed for this project -> stop ticking.
         };
         let mut cmd = tokio::process::Command::new(&fno_bin);
-        cmd.args(["status-fanout", "tick"]).current_dir(&target.cwd);
+        cmd.args(["doctor", "event", "fanout", "tick"])
+            .current_dir(&target.cwd);
         // Failure otherwise swallowed (next tick retries; at-least-once cursor
         // semantics). The kill must NOT be silent - the one line below is required.
         if output_with_cap(cmd, TICK_CHILD_CAP).await {

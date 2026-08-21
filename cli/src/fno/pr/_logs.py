@@ -6,7 +6,7 @@ agent reached past footnote to `gh run view --log`, which downloads a zip of
 EVERY job in the run and pastes the whole thing into a transcript that then
 re-reads it on every later request.
 
-The output contract is `fno test`'s, so there is one convention rather than
+The output contract is `fno doctor test`'s, so there is one convention rather than
 two: spool everything to a log file, print a bounded tail plus the path, and
 give a human one escape flag (`--full`).
 

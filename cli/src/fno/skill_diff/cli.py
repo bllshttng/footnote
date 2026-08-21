@@ -1,4 +1,4 @@
-"""``fno skill-diff`` - the skill-diff proposer loop.
+"""``fno doctor skill-diff`` - the skill-diff proposer loop.
 
 `tick`      one loop iteration: scan observer events -> propose a cited diff PR,
             file a no-diff-helps node, or close a run as a no-op. Level-gated
@@ -588,7 +588,7 @@ def _run_replay(corpus_item: str, skill_ref: str, run_id_after: str) -> int:
     the subprocess rc (non-zero == that item did not score)."""
     try:
         p = subprocess.run(
-            ["fno", "observer", "replay", "--skill", "blueprint",
+            ["fno", "doctor", "observer", "replay", "--skill", "blueprint",
              "--corpus-item", corpus_item, "--skill-ref", skill_ref, "--run-id", run_id_after],
             cwd=paths.resolve_repo_root(), capture_output=True, text=True, timeout=900,
         )

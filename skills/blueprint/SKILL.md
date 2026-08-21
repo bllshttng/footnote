@@ -110,7 +110,7 @@ fi
 2. **Structural context** — Generate a fresh codemap:
    ```bash
    REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-   # `fno codemap` writes to .fno/codemap.md by default and
+   # `fno doctor codemap` writes to .fno/codemap.md by default and
    # auto-appends the DB-schema companion when --db-schema is set.
    # The `.env` clause widens detection to repos whose connection lives only
    # in a dev .env file (the case `db-schema.py` now discovers).
@@ -130,9 +130,9 @@ fi
      schema_reused=1
    fi
    if [ -z "$schema_reused" ] && { [ -d "$REPO_ROOT/supabase" ] || [ -f "$REPO_ROOT/prisma/schema.prisma" ] || [ -f "$REPO_ROOT/drizzle/schema.ts" ] || [ -n "$DATABASE_URL" ] || [ -n "$db_env_found" ]; }; then
-     fno codemap --tokens 2048 --db-schema 2>/dev/null || true
+     fno doctor codemap --tokens 2048 --db-schema 2>/dev/null || true
    elif [ -z "$schema_reused" ]; then
-     fno codemap --tokens 2048 2>/dev/null || true
+     fno doctor codemap --tokens 2048 2>/dev/null || true
    fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.

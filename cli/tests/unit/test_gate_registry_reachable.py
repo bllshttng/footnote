@@ -1,4 +1,4 @@
-"""The company boundary gates must be reachable from ``fno test smoke``."""
+"""The company boundary gates must be reachable from ``fno doctor test smoke``."""
 
 from fno.test_cmd import _STRUCTURAL_STEPS
 

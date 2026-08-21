@@ -1,6 +1,6 @@
 """fno restart - restart running fno processes onto freshly-installed binaries (x-69b3).
 
-`fno update && fno restart` is the reboot loop: `update` installs new binaries,
+`fno doctor update && fno restart` is the reboot loop: `update` installs new binaries,
 `restart` swaps the RUNNING processes onto them.
 
 - Agents daemon: ALWAYS restarted - SIGTERM the stale daemon and lazy-start a
@@ -229,7 +229,7 @@ def restart_command(
             typer.echo(msg)
 
     # 1. Agents daemon (safe: PTY workers survive). The primary action - an actual
-    # restart FAILURE fails the command so a chained `fno update && fno restart`
+    # restart FAILURE fails the command so a chained `fno doctor update && fno restart`
     # surfaces it. An absent binary is "nothing to restart", not a failure.
     from fno import rust_binary
 

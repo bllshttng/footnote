@@ -94,7 +94,7 @@ enum Role {
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
     /// `version [--json]`: report the mux binary's own baked-in build rev so
-    /// `fno update` can detect a present-but-stale front door. The bool is
+    /// `fno doctor update` can detect a present-but-stale front door. The bool is
     /// `--json`. Additive: `fno version` had no Python command (it errored), so
     /// intercepting it here breaks nothing; `fno --version` still forwards.
     MuxVersion(bool),

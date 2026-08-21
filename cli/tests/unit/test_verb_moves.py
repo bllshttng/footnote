@@ -323,6 +323,22 @@ def test_do_fold_move_table_matches_the_approved_work_order():
     assert {name: VERB_MOVES[name].to for name in expected} == expected
 
 
+def test_doctor_fold_move_table_matches_the_approved_work_order():
+    expected = {
+        "bundle": "doctor bundle",
+        "codemap": "doctor codemap",
+        "evals": "doctor evals",
+        "event": "doctor event",
+        "lint": "doctor lint",
+        "observer": "doctor observer",
+        "skill-diff": "doctor skill-diff",
+        "status-fanout": "doctor event fanout",
+        "test": "doctor test",
+        "update": "doctor update",
+    }
+    assert {name: VERB_MOVES[name].to for name in expected} == expected
+
+
 def test_help_all_lists_moved_spellings_under_their_own_heading():
     from fno.cli import app
 
@@ -369,7 +385,7 @@ def test_help_all_classifies_a_moved_eager_command_too(monkeypatch):
         ("executor", "skills/execute/scripts/resolve-executor.sh"),
         ("posture", "`fno config set`"),
         ("tokens", "`fno whoami context`"),
-        ("upgrade", "`fno update`"),
+        ("upgrade", "`fno doctor update`"),
     ],
 )
 def test_deleted_verb_refuses_naming_its_replacement(verb: str, needle: str):

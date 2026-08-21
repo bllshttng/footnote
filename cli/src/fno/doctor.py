@@ -8,7 +8,7 @@ command makes that skew detectable and self-explaining, **network-free**.
 Python-side signals, each degrading to ``unknown`` rather than crying wolf:
 
 1. **Revision compare** (when a source checkout is resolvable): compare
-   ``~/.fno/installed-rev`` (written by ``fno update``) against ``git rev-parse
+   ``~/.fno/installed-rev`` (written by ``fno doctor update``) against ``git rev-parse
    HEAD`` of the resolved source.
 2. **Capability probe** (always-available fallback): run ``fno backlog capture
    --help`` against the *installed* CLI; a "No such command" failure proves a
@@ -16,7 +16,7 @@ Python-side signals, each degrading to ``unknown`` rather than crying wolf:
 3. **Content compare** (ground truth, cannot be fooled by a lying marker):
    fingerprint the *installed* ``fno`` package's ``.py`` bytes against the
    source working tree ``uv tool install`` would ship. Signal 1 trusts a marker
-   ``fno update`` writes on any zero install exit -- but ``uv`` can exit 0 while
+   ``fno doctor update`` writes on any zero install exit -- but ``uv`` can exit 0 while
    serving a stale *cached* wheel (a no-op reinstall), leaving month-old bytes on
    disk under a marker that reads HEAD. That false 'fresh' went unnoticed until a
    content compare grounded the verdict on the actual installed bytes.
@@ -92,7 +92,7 @@ def _read_marker() -> Optional[str]:
 
 
 def _resolve_source(source: Optional[Path]) -> Optional[Path]:
-    """Resolve a source checkout via the same precedence as ``fno update``.
+    """Resolve a source checkout via the same precedence as ``fno doctor update``.
 
     Returns None when no source is resolvable (PyPI install, repo absent), so
     the verdict degrades to ``unknown`` rather than hard-failing.
@@ -234,7 +234,7 @@ def _python_content_drift(source: Optional[Path]) -> Optional[int]:
     """Count of ``.py`` files where the INSTALLED package differs from SOURCE.
 
     Ground-truths freshness on actual bytes instead of the ``installed-rev``
-    marker, which ``fno update`` writes on any zero install exit even when ``uv``
+    marker, which ``fno doctor update`` writes on any zero install exit even when ``uv``
     served a stale cached wheel - the exact way a month-old install hid behind a
     HEAD marker. Compares against the source WORKING TREE (not committed HEAD)
     because ``uv tool install <path>`` ships the working tree: an
@@ -402,7 +402,7 @@ def _rust_report() -> dict[str, Optional[str]]:
     gate (``_cargo_bin_present``) and ``--fix`` both target the cargo binary;
     reading the rev from a bundled sibling would misjudge or misrepair (codex
     PR #491). It replaces the old ``installed-rust-rev`` marker, which only
-    tracked ``fno update`` cargo installs and missed a bare ``cargo install``.
+    tracked ``fno doctor update`` cargo installs and missed a bare ``cargo install``.
     ``binary``/``binary_rev`` describe the binary ``auto`` actually runs (display
     + HEAD identity, ab-24a59d50). A probe error degrades to None rather than
     aborting the verdict.
@@ -680,7 +680,7 @@ def _cargo_installed_mux() -> Optional[Path]:
     """Path to the cargo-installed mux front-door binary (`fno`), or None.
 
     Thin wrapper around ``update._cargo_installed_mux`` (single source of truth,
-    shared with `fno update`'s install path) so this collector stays patchable.
+    shared with `fno doctor update`'s install path) so this collector stays patchable.
     Probes the default ``$CARGO_HOME/bin``; a custom-``--root`` install is caught
     instead by the ``which("fno")`` + mux-verb probe in ``_mux_front_door_report``.
     """
@@ -1179,7 +1179,7 @@ def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict
         }
         # An ``unknown`` count is answerable, not fated (x-4be1): a proven-stale
         # deployed plugin cache is a LIKELY cause (a cache pinned before the
-        # provenance writer cannot stamp manifests), and ``fno update`` is the
+        # provenance writer cannot stamp manifests), and ``fno doctor update`` is the
         # fix for that cause. Only speak when the plugin-cache signal PROVES
         # stale, and say "likely" - ancestor-ness alone does not prove the
         # pinned sha predates the writer, and a pre-provenance manifest with a
@@ -1191,7 +1191,7 @@ def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
                     f"deployed plugin cache is stale ({sha}, {when}); likely "
-                    "predates the auto_merge_source writer. Fix: fno update"
+                    "predates the auto_merge_source writer. Fix: fno doctor update"
                 )
         findings.append(finding)
     return {"findings": findings, "posture": _read_posture_stamp()}
@@ -1488,7 +1488,7 @@ def _emit_human(
             out(
                 f"fno doctor: installed fno is behind {src_label} "
                 f"(missing: {', '.join(result['missing_verbs'])}). "
-                "Run `fno update` (or `fno doctor --fix`)."
+                "Run `fno doctor update` (or `fno doctor --fix`)."
             )
         elif result.get("content_stale"):
             # Authoritative signal: installed bytes differ from source. Named
@@ -1498,7 +1498,7 @@ def _emit_human(
             out(
                 f"fno doctor: installed fno is STALE - {n} .py file(s) on disk differ "
                 f"from {src_label} (a cache-hit reinstall can leave old bytes while the "
-                "installed-rev marker still reads HEAD). Run `fno update` (or `fno doctor --fix`)."
+                "installed-rev marker still reads HEAD). Run `fno doctor update` (or `fno doctor --fix`)."
             )
         elif result.get("missing_config_keys"):
             # Config-schema drift is the more actionable signal (it names a
@@ -1513,12 +1513,12 @@ def _emit_human(
             inst, srcrev = result["installed_rev"], result["source_rev"]
             if inst is not None and srcrev is not None and inst != srcrev:
                 msg += f" Installed rev {inst} != source {srcrev}."
-            out(msg + " Run `fno update` (or `fno doctor --fix`).")
+            out(msg + " Run `fno doctor update` (or `fno doctor --fix`).")
         elif result["python_stale"]:
             out(
                 f"fno doctor: installed fno is behind {src_label} "
                 f"(installed rev {result['installed_rev']} != source {result['source_rev']}). "
-                "Run `fno update` (or `fno doctor --fix`)."
+                "Run `fno doctor update` (or `fno doctor --fix`)."
             )
         else:
             # Rust-only stale. Branch structurally guarantees non-None (rust_stale
@@ -1528,7 +1528,7 @@ def _emit_human(
             out(
                 f"fno doctor: rust bins STALE "
                 f"(installed {ri[:12]} != source {rs[:12]}). "
-                "Run fno update (or fno doctor --fix)."
+                "Run fno doctor update (or fno doctor --fix)."
             )
     elif (
         result.get("content_indeterminate")
@@ -1539,7 +1539,7 @@ def _emit_human(
             "fno doctor: status unknown - the installed-rev marker matches HEAD, but the "
             "content check could not read the installed/source .py bytes to confirm it (the "
             "marker alone can lie about a cache-hit reinstall). Check file permissions, or "
-            "run `fno update` to be safe."
+            "run `fno doctor update` to be safe."
         )
     elif src is None:
         out("fno doctor: status unknown (no source checkout to compare against).")
@@ -1564,7 +1564,7 @@ def _emit_human(
         out(
             f"fno doctor: rust fno-agents binary: {bin_label} "
             f"rust bins STALE (installed {(ri or '')[:12]} != source {(rs or '')[:12]}). "
-            "Run fno update (or fno doctor --fix)."
+            "Run fno doctor update (or fno doctor --fix)."
         )
     elif not cargo_present:
         # Binary resolved but not cargo-installed: the verdict still gates on a
@@ -1585,7 +1585,7 @@ def _emit_human(
             out(
                 f"fno doctor: rust fno-agents binary: {bin_label} "
                 "rust revision unknown (binary does not self-report a crates/ rev; "
-                "rebuild via fno update)."
+                "rebuild via fno doctor update)."
             )
         else:
             out(f"fno doctor: rust fno-agents binary: {bin_label} rust revision unknown.")
@@ -1611,7 +1611,7 @@ def _emit_human(
     elif fd_state == "not-installed":
         out(
             "fno doctor: mux front door: crates/fno not cargo-installed; bare `fno` will "
-            "not launch the mux. Run `fno update` (or cargo install --path crates/fno)."
+            "not launch the mux. Run `fno doctor update` (or cargo install --path crates/fno)."
         )
     elif fd_state == "shadowed":
         where = result.get("path_fno") or "nothing on PATH"
@@ -1819,7 +1819,7 @@ def _emit_human(
         out(
             f"fno doctor: LaunchAgent {entry['label']} last exited {entry['exit']} "
             "(it is installed but failing); check its log under ~/.fno/ and re-run "
-            "`fno update` if the entry point moved."
+            "`fno doctor update` if the entry point moved."
         )
 
     # Silent-switch legibility (x-8cd5 Wave 6): the applied posture, then both
@@ -1859,7 +1859,7 @@ def _emit_human(
         when = str(pc.get("installed_at") or "")[:10] or "?"
         out(
             f"fno doctor: deployed claude plugin cache STALE (pinned {sha}, "
-            f"{when}; hooks run pre-HEAD bytes). Run `fno update`."
+            f"{when}; hooks run pre-HEAD bytes). Run `fno doctor update`."
         )
     elif pc.get("status") == "fresh":
         out("fno doctor: deployed claude plugin cache: fresh (pinned at source HEAD).")
@@ -2688,7 +2688,7 @@ def _managed_block_report() -> dict:
 
 
 # --------------------------------------------------------------------------
-# Per-harness surface freshness (x-3248 Change 5): `fno update` refreshes only
+# Per-harness surface freshness (x-3248 Change 5): `fno doctor update` refreshes only
 # the shared CLI/wheel; the codex marketplace plugin and the opencode local
 # plugin are separate surfaces with their own refresh verbs. Report-and-point
 # only (no auto-fix): the refresh action differs per harness and stays manual.
@@ -3250,7 +3250,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["managed_block"] = _managed_block_report()
 
     # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
-    # surfaces `fno update` does not cover. Never changes status/exit.
+    # surfaces `fno doctor update` does not cover. Never changes status/exit.
     result["harness_surface"] = _harness_surface_report()
 
     # Advisory plugin hook launch probe (x-d991): a hook command that cannot
@@ -3304,10 +3304,11 @@ def _emit_blockers(
 
 
 def doctor_command(
+    ctx: typer.Context,
     fix: bool = typer.Option(
         False,
         "--fix",
-        help="If stale, run `fno update` for Python staleness (honors the IN_PROGRESS guard). "
+        help="If stale, run `fno doctor update` for Python staleness (honors the IN_PROGRESS guard). "
         "For rust-only staleness, calls the rust refresh helper directly (no full Python reinstall).",
     ),
     blockers_only: bool = typer.Option(
@@ -3377,6 +3378,9 @@ def doctor_command(
     ),
 ) -> None:
     """Report skew between the installed fno and its source checkout."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     if context_audit:
         if fix or cost_check or codex_hooks or codex_bind:
             raise typer.BadParameter(
@@ -3495,10 +3499,10 @@ def doctor_command(
             if preamble_line is not None:
                 typer.echo(preamble_line)
 
-    # Report BEFORE delegating: `fno update` execs/replaces this process.
+    # Report BEFORE delegating: `fno doctor update` execs/replaces this process.
     if fix:
         # Heal a dead pr-watch first: the verdict's own fix is the bounce, and a
-        # python_stale --fix execs `fno update` below and never returns, so act
+        # python_stale --fix execs `fno doctor update` below and never returns, so act
         # on it here. Advisory - never changes doctor's exit code (a dead
         # watcher and a stale binary are distinct concerns).
         pw = result.get("pr_watch") or {}
@@ -3540,7 +3544,7 @@ def doctor_command(
                 err=True,
             )
         elif result["python_stale"]:
-            typer.echo("fno doctor: --fix running `fno update`...", err=True)
+            typer.echo("fno doctor: --fix running `fno doctor update`...", err=True)
             # Delegate to update (its own IN_PROGRESS guard applies). Its new
             # rust leg refreshes both Python and Rust. On Unix this execs and
             # never returns; the post-update marker then matches HEAD.
@@ -3554,7 +3558,7 @@ def doctor_command(
                 typer.echo(
                     "fno doctor: --fix refused: target-state.md shows status: IN_PROGRESS. "
                     "Refreshing rust bins mid-loop risks binary skew; "
-                    "run `fno update --force` after the loop, or to override now.",
+                    "run `fno doctor update --force` after the loop, or to override now.",
                     err=True,
                 )
                 raise typer.Exit(1)

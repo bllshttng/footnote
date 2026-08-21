@@ -108,11 +108,7 @@ Re-bench guidance: run `rm -rf cli/.venv && uv sync` first to avoid
 
 ## The reinstall-window hazard
 
-Deferring an import is deferring a **disk read**. A running `fno` process holds a
-partially-imported package and reaches back into `site-packages` at an arbitrary
-later moment, so `uv tool install --reinstall` (what `fno update` runs) deletes
-and rewrites the very tree that process is executing from. For the length of the
-install, every subcommand the process has not yet imported fails.
+Deferring an import is deferring a **disk read**. A running `fno` process holds a partially imported package. It reaches back into `site-packages` later. `uv tool install --reinstall` (what `fno doctor update` runs) deletes and rewrites the process's executing tree. During installation, every subcommand not yet imported fails.
 
 This is a real, reproduced operator failure, not a theoretical one, and it took
 three sessions to identify because it presents as three unrelated symptoms that
@@ -154,19 +150,9 @@ than it costs, so the recipe lives here for hand-running instead.
 
 Fixed, in four layers.
 
-**Legibility.** The error path performs no first-time import, and a missing
-module under the `fno` package says so and names both candidate causes (a
-reinstall in flight, retry; a stale install, `fno update` then `fno doctor`).
+**Legibility.** The error path performs no first-time import. A missing module under the `fno` package names both candidate causes: retry during a reinstall, or run `fno doctor update` then `fno doctor` for a stale install.
 
-**Verify-then-retry.** On an `ImportError` for a module under the `fno` package,
-`_load_real` re-checks whether that module is on disk *now* and, if it is,
-retries the import exactly once. The disk re-check is what separates this from a
-hopeful sleep-retry: a genuinely stale or broken install answers "absent", is not
-retried, and fails with the same message as before, so nothing is masked. This
-matters because the window is not rare on a real machine. A box running several
-launchd agents plus live sessions nearly always has an `fno` process mid-flight
-during the few seconds `uv tool install --reinstall` takes, so every `fno update`
-was hitting it.
+**Verify-then-retry.** On an `fno` package import failure, `_load_real` checks current disk presence. A module present now gets exactly one retry. The disk check separates this from a hopeful sleep. A stale or broken install answers "absent", receives no retry, and keeps the original message. Nothing is masked. This window is common on real machines. Several launchd agents plus live sessions usually leave an `fno` process running during `uv tool install --reinstall`. Therefore, every `fno doctor update` reached the window.
 
 **The same retry, on the other import path.** `_load_real` guards the lazy command-group import. That is one path of two. The other one carries far more traffic. It is a deferred `from fno. ...` written inside a command body, and there are about 2000 of those. `fno agents truth` reaches `fno.agents.session_truth` that way. The fno-agents daemon runs that verb as a continuous per-session liveness probe, so it is the highest-frequency reader of the window. Those sites used to fail with a bare `ModuleNotFoundError`, no retry and no dual-cause message. A guard on one of two reachable paths is decorative, so the guard moved to the one site both paths cross.
 
@@ -178,17 +164,7 @@ The re-check itself is not free, and the number is worth stating. `importlib.inv
 
 **One transient failure tolerated at the daemon probe.** The truth probe is the loudest victim of the window. `family1_truth_probe` in `crates/fno-agents/src/claude_ask.rs` now retries once before it warns. The discriminator is narrow on purpose. It fires on a non-zero exit with NO parseable body on stdout, and on a failure to spawn at all. Both shapes mean the process never reached the code that writes a verdict. The reinstall replaces the `fno` console script as well as the tree behind it. So ENOENT on spawn is as much a face of the window as an import crash. Guarding only the crash reaches one shape of two. A refusal always carries its `{state, reason}` body. So the volume case, `not-found`, still answers on the first attempt. No dead registry row pays for a second process. A probe that crashes twice keeps its WARN. This tolerates a transient failure. It does not hide a persistent one.
 
-**The exposure gap (symptom 3).** `/bin/sh: .../fno-py: No such file or directory`
-fails in the shell before any interpreter starts, so no import-level retry can
-reach it. Measured by sampling every 5ms across a reinstall: the venv's `python3`
-is present in every sample, so the shebang interpreter is never the cause; what
-vanishes is the console script `<tools>/fno/bin/fno-py`, for ~490ms, taking the
-`~/.local/bin` exposure symlink with it. That gap closed only ~40ms before uv
-exited on an idle machine, so `fno update`'s `&&`-gated post-install chain is
-correct in principle and much too tight in practice. `update.py` now waits up to
-3s for the console script before running the refresh, and if it never returns,
-skips loudly with the manual commands rather than leaving a launchd agent pinned
-to the old binary.
+**The exposure gap (symptom 3).** `/bin/sh: .../fno-py: No such file or directory` fails before any interpreter starts. No import-level retry can reach it. Sampling every 5ms showed the venv's `python3` in every sample. The shebang interpreter was not the cause. The `<tools>/fno/bin/fno-py` console script and `~/.local/bin` exposure symlink vanished for about 490ms. The gap closed about 40ms before uv exited on an idle machine. Therefore, the `&&`-gated chain was correct but too tight. `update.py` now waits up to 3s for the console script. If it never returns, update skips loudly and prints manual commands. It does not leave a launchd agent pinned to the old binary.
 
 **The same wait, on all four verify sites.** Naming `update.py` alone was itself a one-of-N gap, and it cost a second bug. FOUR places install the tool and then verify it, and every one of them verified single-shot, the instant uv returned. Each therefore raced the install it was verifying. The symptom on a real box: `fno` refused every verb, reran a full 19-package install each time, and reported "the install does not verify: no console script". The sites are `install_verified` in `crates/fno/src/bootstrap.rs`, `uv_install_verifies` in `.claude-plugin/postinstall.sh` and again in `scripts/install/fno.sh`, and the verify inside `_uv_retry_sh` in `cli/src/fno/update.py`. That last one is the sharpest lesson. `update.py` was believed fixed because `_await_binary` waits. That wait runs AFTER the verify, and the verify's `exit 1` short-circuits the chain, so `_await_binary` was never reached.
 

@@ -2,7 +2,7 @@
 # Each entry is exact: importing file and line, layer pair, and import statement.
 # Remove an entry only in the same PR that removes the corresponding dependency.
 #
-# Both survivors are the same finding: the `fno event emit` envelope builder
+# Both survivors are the same finding: the `fno doctor event emit` envelope builder
 # resolves the sending session's identity and its spawn lineage out of the
 # agents runtime. Unlike the entries retired alongside them, neither callee can
 # move down -- self_stamp imports fno.claims.session_pid (L1 core), and

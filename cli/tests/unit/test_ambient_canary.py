@@ -37,5 +37,5 @@ def test_no_ambient_state_reaches_this_process():
         "In the dirty lane this is the EXPECTED failure: it proves the lane can "
         "detect a channel the ambient surface does not cover.\n"
         "In the clean lane it means something is poisoning the environment "
-        "outside `fno test smoke --ambient dirty`."
+        "outside `fno doctor test smoke --ambient dirty`."
     )

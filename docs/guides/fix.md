@@ -16,7 +16,7 @@ The default runs one fix per iteration and reverts on regression.
 Give it a failing guard:
 
 ```
-/fno:fix --guard "fno test tests/test_auth.py" --category test
+/fno:fix --guard "fno doctor test tests/test_auth.py" --category test
 ```
 
 Each iteration changes code and runs the guard.
@@ -48,13 +48,11 @@ A `fix` that loops without converging is the signal to switch to `investigate`.
 
 ## Test first, always
 
-Both modes lean on `fno test`, not bare `pytest`.
-`fno test` pins the worktree PYTHONPATH, bypasses the wrapper tee, and returns the real exit code.
-A bare `pytest` in a worktree can import the wrong package and report a false green.
+Both modes lean on `fno doctor test`, not bare `pytest`. `fno doctor test` pins the worktree PYTHONPATH, bypasses the wrapper tee, and returns the real exit code. A bare `pytest` in a worktree can import the wrong package and report a false green.
 
 ```bash
-fno test tests/                    # run a path
-fno test tests/test_auth.py        # run one file
+fno doctor test tests/                    # run a path
+fno doctor test tests/test_auth.py        # run one file
 ```
 
 ## Config problems, not code bugs

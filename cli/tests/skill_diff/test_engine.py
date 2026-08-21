@@ -41,7 +41,7 @@ def test_unprocessed_and_idempotency():  # AC8-FR
 
 def test_unprocessed_excludes_skill_ref_runs():  # AC6-EDGE (x-ed13 Locked Decision 5)
     # A skill_ref-tagged run_complete is a replay/candidate eval (an
-    # eval-after-merge after-run, or a manual `fno observer replay`), never a
+    # eval-after-merge after-run, or a manual `fno doctor observer replay`), never a
     # bare sweep - it must NOT be a proposer trigger, else the loop re-opens.
     evs = [
         _rc("sweep1"),

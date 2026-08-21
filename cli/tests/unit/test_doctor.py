@@ -1,7 +1,7 @@
 """Unit tests for `fno doctor` (ab-5a1fc285 + ab-a78c9731).
 
 Covers US1 (detection: fresh / stale / unknown / json / no-source / probe-error),
-US3-adjacent --fix behavior (delegates to `fno update`, honors the IN_PROGRESS
+US3-adjacent --fix behavior (delegates to `fno doctor update`, honors the IN_PROGRESS
 guard), and US2 (rust staleness fold-in: full evidence mismatch -> stale,
 partial evidence -> not stale, --fix rust-only leg runs the refresh helper,
 never shells out to cargo directly).
@@ -117,7 +117,7 @@ def test_ac1_err_missing_verb_reports_skew_and_exits_nonzero(
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code != 0
     assert "missing: backlog capture" in result.stdout
-    assert "fno update" in result.stdout
+    assert "fno doctor update" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +414,7 @@ def test_config_schema_drift_reports_stale(monkeypatch: pytest.MonkeyPatch) -> N
     assert result.exit_code != 0
     assert "config schema is STALE" in result.stdout
     assert "backlog.id_prefix" in result.stdout
-    assert "fno update" in result.stdout
+    assert "fno doctor update" in result.stdout
 
 
 def test_config_schema_drift_shows_rev_delta_when_also_rev_behind(
@@ -718,7 +718,7 @@ def test_ac2_err_binary_present_marker_absent_explains(monkeypatch: pytest.Monke
     )
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-    # Should mention revision unknown / no marker / seed it via fno update.
+    # Should mention revision unknown / no marker / seed it via fno doctor update.
     combined = result.stdout + result.stderr
     assert "revision unknown" in combined or "no installed-rust-rev marker" in combined
 
@@ -1067,7 +1067,7 @@ def test_no_fix_never_heals(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_ac3_hp_fix_delegates_to_update(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC3-HP: --fix on a stale Python install delegates to `fno update`."""
+    """AC3-HP: --fix on a stale Python install delegates to `fno doctor update`."""
     _stub_signals(
         monkeypatch,
         src=Path("/src"),
@@ -1156,7 +1156,7 @@ def test_json_fix_does_not_pollute_stdout_or_delegate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Codex review: `--json --fix` on a stale install keeps stdout a single JSON
-    object and does NOT delegate to `fno update` (which prints to stdout)."""
+    object and does NOT delegate to `fno doctor update` (which prints to stdout)."""
     _stub_signals(
         monkeypatch,
         src=Path("/src"),

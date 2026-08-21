@@ -13,7 +13,7 @@
 #   3. Placement flags never appear on a bg/headless example - the CLI
 #      rejects them there, so such an example is a command that cannot run.
 #
-# Auto-discovered by `fno test smoke` via the tests/skills/*.sh glob.
+# Auto-discovered by `fno doctor test smoke` via the tests/skills/*.sh glob.
 
 set -uo pipefail
 

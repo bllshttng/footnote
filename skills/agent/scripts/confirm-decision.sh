@@ -106,7 +106,7 @@ case "$raw" in
 esac
 
 WARN=""
-[[ "$DEGRADED" -eq 1 ]] && WARN="config.agents.confirm unreadable or invalid (stale fno? run 'fno update'); the free lane does not confirm regardless"
+[[ "$DEGRADED" -eq 1 ]] && WARN="config.agents.confirm unreadable or invalid (stale fno? run 'fno doctor update'); the free lane does not confirm regardless"
 
 # ---- compute caveat (exec-stall / yolo / merge grant) ------------------------
 # Exec-stall: a codex/gemini exec build has nobody to answer a clarifying

@@ -1,6 +1,6 @@
 """orchestrator.emit_status_event - the do-phase task_done/blocked boundary emit.
 
-The orchestrator shells `fno event emit` (skills stay self-contained, never
+The orchestrator shells `fno doctor event emit` (skills stay self-contained, never
 import repo code). These tests cover the argv it builds and the non-fatal
 contract: an emit failure logs and returns False, never raising.
 """
@@ -42,7 +42,7 @@ def test_emit_status_event_builds_argv(monkeypatch) -> None:
     )
     assert ok is True
     argv = captured["argv"]
-    assert argv[:5] == ["fno", "event", "emit", "-t", "task_done"]
+    assert argv[:6] == ["fno", "doctor", "event", "emit", "-t", "task_done"]
     for flag, val in (("--run", "R1"), ("--node", "prj-0001"), ("--task", "2.1"), ("--outcome", "SUCCESS")):
         assert flag in argv and val in argv
 

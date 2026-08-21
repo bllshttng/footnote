@@ -117,7 +117,7 @@ backfill). The hand-off is a top-level `## Schema Reconciliation` section,
 grepped exactly like the `## Discovery` skip above so the later phase reuses it
 instead of regenerating.
 
-1. **Generate the schema-aware codemap.** `fno codemap --db-schema` appends a
+1. **Generate the schema-aware codemap.** `fno doctor codemap --db-schema` appends a
    `## Database Schema` section. The connection is discovered from the shell
    `DATABASE_URL` or a dev `.env` file (`.env.production` / `.env.staging` are
    never auto-connected); with no reachable DB it parses migration files for

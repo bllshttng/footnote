@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import typer
 import typer.main
-# click's runner, not typer's: the live `fno lint` resolves to a bare
+# click's runner, not typer's: the live `fno doctor lint` resolves to a bare
 # TyperCommand (see _live_lint_command), and typer.testing.CliRunner only
 # accepts a Typer app.
 from click.testing import CliRunner
@@ -16,7 +16,7 @@ from fno.lint_cli import lint
 
 
 def _live_lint_command():
-    """The `fno lint` command in the exact shape the live CLI resolves.
+    """The `fno doctor lint` command in the exact shape the live CLI resolves.
 
     `lint` is a plain-function registry entry, so `_lazy_group` wraps it in a
     one-command Typer and takes `typer.main.get_command`, which collapses to a
@@ -126,7 +126,7 @@ def test_lint_cli_help_lists_promoted_flock_pattern() -> None:
 def test_registry_lint_reports_all_three_buckets_and_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`fno lint registry` (x-7bcd) end-to-end: only registry.py's own
+    """`fno doctor lint registry` (x-7bcd) end-to-end: only registry.py's own
     write-time validation had test coverage before this. Nothing exercised
     the CLI wrapper itself (the CHECKS entry, the --json flag, the three
     output buckets), so a break here would have gone unnoticed."""
@@ -150,7 +150,7 @@ def test_registry_lint_reports_all_three_buckets_and_exits_nonzero(
     assert "recorded but unresolvable: stale (recorded: log_path)" in result.stdout
     assert "live" not in result.stdout
     assert (
-        "fno lint registry: 1 no handle recorded, 1 recorded but unresolvable, 1 ok, 3 total"
+        "fno doctor lint registry: 1 no handle recorded, 1 recorded but unresolvable, 1 ok, 3 total"
         in result.stdout
     )
 
@@ -893,7 +893,7 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
 
 
 def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
-    """Every option a check accepts must exist on `fno lint`.
+    """Every option a check accepts must exist on `fno doctor lint`.
 
     The eight subcommands each carried their own options; the collapse turned
     those into options on one verb, dispatched by signature. A check parameter
@@ -901,7 +901,7 @@ def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
     rejected as unknown before any check runs.
 
     That is exactly what shipped: `style` declares `--surface/--stdin/--files/
-    --diff-base` and the first pass wired none of them, so `fno lint style
+    --diff-base` and the first pass wired none of them, so `fno doctor lint style
     --surface markdown` died with "No such option" in a CI job four steps
     removed from the change. This compares the two sets directly, so the next
     check with a new option fails here instead.
@@ -915,7 +915,7 @@ def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
         accepted = set(inspect.signature(getattr(L, fn_name)).parameters)
         missing = accepted - declared
         assert not missing, (
-            f"`fno lint {name}` accepts {sorted(missing)}, which `fno lint` does "
+            f"`fno doctor lint {name}` accepts {sorted(missing)}, which `fno doctor lint` does "
             f"not declare, so those flags are unreachable. Add them to lint()."
         )
 
@@ -1080,7 +1080,7 @@ def test_the_skip_receipt_fires_on_the_files_branch_too(tmp_path: Path) -> None:
 
 
 def test_the_skip_receipt_fires_on_the_stdin_branch_too(tmp_path: Path) -> None:
-    """Same guarantee on the hand-run ``fno lint style --stdin`` path.
+    """Same guarantee on the hand-run ``fno doctor lint style --stdin`` path.
 
     A body carrying the marker used to pass with an empty log.
     """

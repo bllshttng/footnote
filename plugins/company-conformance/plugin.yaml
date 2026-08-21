@@ -64,11 +64,11 @@ permissions:
 # The journey test named by each runnable command carries the evidence.
 scenarios:
   - id: support-response
-    command: uv run --project cli fno-py test cli/tests/journeys/test_company_function_conformance.py -k support_response
+    command: uv run --project cli fno-py doctor test cli/tests/journeys/test_company_function_conformance.py -k support_response
     recorded_result: passed
   - id: sales-outreach
-    command: uv run --project cli fno-py test cli/tests/journeys/test_company_function_conformance.py -k sales_outreach
+    command: uv run --project cli fno-py doctor test cli/tests/journeys/test_company_function_conformance.py -k sales_outreach
     recorded_result: passed
   - id: operations-recurring
-    command: uv run --project cli fno-py test cli/tests/journeys/test_company_function_conformance.py -k cadence
+    command: uv run --project cli fno-py doctor test cli/tests/journeys/test_company_function_conformance.py -k cadence
     recorded_result: passed

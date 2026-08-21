@@ -11,7 +11,7 @@
 #   AC1-FR   - a dispatch that fails leaves nothing claiming success
 #
 # A FAKE `fno` on PATH means no real grooming pass, claim, or graph write ever
-# happens. NOTE: this repo has two test trees - a green `fno test cli/tests` is
+# happens. NOTE: this repo has two test trees - a green `fno doctor test cli/tests` is
 # NOT evidence for this file. Run it directly.
 #
 # Run: bash tests/hooks/test_groom_self_heal.sh

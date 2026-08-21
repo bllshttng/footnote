@@ -303,6 +303,6 @@ def run_rebase(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         # chooses to record.
         sys.stderr.write(
             "note: if this rebase resolved a stale base the loop should have "
-            'caught, tag it: fno event gate-escape stale-base --detail "hand-rebase"\n'
+            'caught, tag it: fno doctor event gate-escape stale-base --detail "hand-rebase"\n'
         )
     return rc

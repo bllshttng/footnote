@@ -1,4 +1,4 @@
-"""`fno evals run` CLI exit-code contract (no spawn / no worktree needed)."""
+"""`fno doctor evals run` CLI exit-code contract (no spawn / no worktree needed)."""
 from __future__ import annotations
 
 from pathlib import Path

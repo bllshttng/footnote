@@ -154,7 +154,7 @@ presence is build time (skills and agents are copied into `skills/` and `agents/
 and read at session start, unconditionally), and permission is runtime (a
 packaged role is projected into the plugin layer only on activation, and
 `/fno:growth-launch` refuses at step one when the pack is not active). Three
-lifetimes: build time bundles, activation permits, run time scopes. `fno bundle
+lifetimes: build time bundles, activation permits, run time scopes. `fno doctor bundle
 check` reports the bundles fresh with no drift.
 
 The company-conformance pack adds internal support, sales, and recurring-operations scenarios, not products or independent consumers; full function packs remain out of scope here.

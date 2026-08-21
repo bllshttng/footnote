@@ -83,7 +83,7 @@ ok 'never skips' "$(field "$out" confirm_required)" '0'
 out="$(run "$R_FAIL" --node ab-deadbeef --provider claude --payload-mode build --mode exec)"
 ok 'degraded read -> no confirm (free lane, not "always")' "$(field "$out" confirm_required)" '0'
 ok 'degraded posture is auto, not always' "$(field "$out" posture)" 'auto'
-if printf '%s' "$out" | grep -qi "fno update"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: degraded missing staleness hint: $out"; fi
+if printf '%s' "$out" | grep -qi "fno doctor update"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: degraded missing staleness hint: $out"; fi
 out="$(run "$R_TYPO" --node ab-deadbeef --provider claude --payload-mode build --mode exec)"
 ok 'invalid enum (typo) -> no confirm (auto), never silently confirms' "$(field "$out" confirm_required)" '0'
 

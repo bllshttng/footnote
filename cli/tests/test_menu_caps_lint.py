@@ -1,4 +1,4 @@
-"""AC5-FR: the In-N-Out menu-cap ratchet (`fno lint menu-caps`, x-71b6).
+"""AC5-FR: the In-N-Out menu-cap ratchet (`fno doctor lint menu-caps`, x-71b6).
 
 The ratchet keeps the advertised command surface small: promoting a verb past
 the cap fails lint with a message that names the offender and both remedies,
@@ -9,7 +9,7 @@ from __future__ import annotations
 import click
 import typer
 import typer.main
-# click's runner: `fno lint` is a plain-function registry entry that the live
+# click's runner: `fno doctor lint` is a plain-function registry entry that the live
 # CLI resolves to a bare TyperCommand, which typer.testing.CliRunner rejects.
 from click.testing import CliRunner
 
@@ -17,7 +17,7 @@ import fno.lint_cli as L
 
 
 def _lint_command():
-    """`fno lint` in the shape the live CLI resolves it to (see _lazy_group)."""
+    """`fno doctor lint` in the shape the live CLI resolves it to (see _lazy_group)."""
     sub = typer.Typer(add_completion=False)
     sub.command(name="lint")(L.lint)
     return typer.main.get_command(sub)

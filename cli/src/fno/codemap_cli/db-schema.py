@@ -9,7 +9,7 @@ Usage:
 
 The optional positional argument is interpreted by shape: a string that names
 an existing directory is treated as the project root to search (this is how
-`fno codemap --db-schema` calls it, passing the analyzed repo); anything else
+`fno doctor codemap --db-schema` calls it, passing the analyzed repo); anything else
 is treated as a PostgreSQL connection string.
 
 Auto-detects a database connection when none is given, in this precedence:
@@ -708,7 +708,7 @@ def main():
     args = parser.parse_args()
 
     # Discriminate the positional by shape: an existing directory is the
-    # project root to search (how `fno codemap --db-schema` invokes us);
+    # project root to search (how `fno doctor codemap --db-schema` invokes us);
     # anything else is an explicit connection string.
     project_root = "."
     explicit_conn = None

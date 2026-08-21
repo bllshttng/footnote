@@ -1,4 +1,4 @@
-"""Tests for `fno event emit` CLI - canonical envelope path.
+"""Tests for `fno doctor event emit` CLI - canonical envelope path.
 
 Covers AC1-HP, AC1-ERR, AC1-UI, AC1-EDGE, AC1-FR from the
 events + test hygiene cleanup spec (ab-a1118224).
@@ -289,7 +289,7 @@ def test_ac1_edge_child_promise_minimum_data(runner: CliRunner, tmp_path: Path) 
 def test_pr270_codex_non_json_success_prints_nonce_when_present(
     runner: CliRunner, tmp_path: Path
 ) -> None:
-    """Codex P2 (PR #270): shell callers using `$(fno event emit ...)` must not
+    """Codex P2 (PR #270): shell callers using `$(fno doctor event emit ...)` must not
     receive an empty string on success. When the event type carries a nonce
     (phase_transition, child_promise), the nonce is the token (matches the
     legacy ``emit_event`` contract that shell scripts may depend on)."""
@@ -317,7 +317,7 @@ def test_pr270_gemini_default_paths_anchor_to_repo_root(
 ) -> None:
     """Gemini MEDIUM (PR #270): when --events / --state are not passed, the
     defaults must anchor to the repo root, not to the current working
-    directory. Otherwise running `fno event emit` from a subdirectory writes
+    directory. Otherwise running `fno doctor event emit` from a subdirectory writes
     events to a per-subdir ``.fno/events.jsonl`` instead of the
     repository's central log."""
     # Stage a fake repo root with a state file at <root>/.fno/.

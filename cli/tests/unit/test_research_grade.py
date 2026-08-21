@@ -183,7 +183,7 @@ def test_empty_golden_checklist_errors(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# `fno evals grade` CLI exit codes
+# `fno doctor evals grade` CLI exit codes
 # --------------------------------------------------------------------------- #
 
 

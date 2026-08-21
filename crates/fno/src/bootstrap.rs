@@ -549,7 +549,7 @@ const INSTALL_ATTEMPTS: u32 = 3;
 
 /// What a capped ENOTEMPTY race means and what to do about it. Word-for-word
 /// the message `scripts/install/fno.sh`, the plugin postinstall, and the
-/// `fno update` shell wrapper print, so the remedy does not depend on which
+/// `fno doctor update` shell wrapper print, so the remedy does not depend on which
 /// provisioning path the user happened to hit.
 const RACE_CAP_MSG: &str = "uv tool install hit the directory race (os error 66) three times. \
      A concurrent fno process is rewriting bytecode into the venv mid-removal. \
@@ -894,7 +894,7 @@ fn install_source(override_val: Option<&str>, pin: Option<&str>) -> BootResult<S
 }
 
 /// Validate a pinned checkout and return its `uv tool install` source
-/// (`<checkout>/cli`, the same wheel-build path `fno update` uses, so the venv
+/// (`<checkout>/cli`, the same wheel-build path `fno doctor update` uses, so the venv
 /// ships `fno-py`). Validity is the strict "`cli/pyproject.toml` present" check
 /// so a pin at the repo root (missing the `cli/` subdir) fails rather than
 /// silently building nothing. A bad pin errors naming `config.dev.source` and

@@ -156,13 +156,12 @@ def test_parking_lot_path_joins_canonical_and_rejects_escape(tmp_path):
 # --- x-c4ff: legs call the real verbs (no dangling references) -----------
 
 def test_leg_skill_diff_calls_real_verb(tmp_path, capsys):
-    # x-c4ff: the skill-diff leg calls the existing `skill-diff reconcile`,
-    # not a nonexistent `fno skill-diff`. Dangling reference = this fails.
+    # The skill-diff leg calls the canonical nested reconcile action.
     runner = FakeRunner()
     r = _bare(tmp_path, runner)
     r.leg_skill_diff()
-    sub = _argv_sub(runner.calls, "skill-diff")
-    assert sub is not None and "reconcile" in sub
+    sub = _argv_sub(runner.calls, "doctor")
+    assert sub is not None and sub[1:4] == ["doctor", "skill-diff", "reconcile"]
     rec = [line for line in capsys.readouterr().out.splitlines() if line.startswith("step=skill-diff")]
     assert rec and "status=ok" in rec[0]
 

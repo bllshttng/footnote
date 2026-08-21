@@ -264,7 +264,7 @@ def done_not_merged_report(entries: list[dict], *, window_days: int = DONE_NOT_M
 
 
 def _events_path() -> Path:
-    """Repo-root ``.fno/events.jsonl`` - the same file ``fno event emit`` writes
+    """Repo-root ``.fno/events.jsonl`` - the same file ``fno doctor event emit`` writes
     to (events/cli.py) and the routing/triage fold reads. Anchoring to the repo
     root (not cwd) keeps producer and consumer coincident regardless of which
     subdirectory a verb runs from."""

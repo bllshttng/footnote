@@ -506,7 +506,7 @@ def test_format_caps_the_excerpt_at_twelve_words():
 
 def test_format_names_the_local_dry_run():
     msg = style.format_violations(style.check("you should run it."))
-    assert "fno lint style --stdin" in msg
+    assert "fno doctor lint style --stdin" in msg
 
 
 def test_format_adds_word_cap_recipe_only_for_rule_7():

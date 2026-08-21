@@ -74,7 +74,7 @@ def kill_check(
         typer.echo(
             "fno do phase kill-check: the fno-agents binary was not found. It ships "
             "in the `pip install fno` wheel and with the plugin; reinstall fno or "
-            "run `fno update --rust`, or set FNO_AGENTS_BIN to its path.",
+            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
             err=True,
         )
         raise typer.Exit(code=2)

@@ -36,7 +36,7 @@ AUTO_ROUTE_FRONTEND="${AUTO_ROUTE_FRONTEND:-true}"
 TASK_ID="${TASK_ID:-}"
 PLAN_PATH="${PLAN_PATH:-}"
 # x-dbaf status-breakpoint coordinates for the task_started emit. All best-effort:
-# empty TARGET_RUN/NODE_ID fall back to the manifest inside `fno event emit`.
+# empty TARGET_RUN/NODE_ID fall back to the manifest inside `fno doctor event emit`.
 TARGET_RUN="${TARGET_RUN:-}"
 NODE_ID="${NODE_ID:-}"
 TASK_TITLE="${TASK_TITLE:-}"
@@ -86,7 +86,7 @@ emit_resolution() {
     local data
     data="$(printf '{"task":"%s","plan_path":"%s","resolved":"%s","tier":"%s","warn_fallback":%s}' \
         "$esc_task" "$esc_plan" "$esc_val" "$tier" "$warn_bool")"
-    if ! fno event emit -t executor_resolved -d "$data" >/dev/null 2>&1; then
+    if ! fno doctor event emit -t executor_resolved -d "$data" >/dev/null 2>&1; then
         echo "resolve-executor: note: executor_resolved emit failed (non-fatal)" >&2
     fi
 }
@@ -108,7 +108,7 @@ emit_task_started() {
     local data
     data="$(printf '{"title":"%s","executor":"%s"}' \
         "$(json_escape "$TASK_TITLE")" "$(json_escape "$resolved")")"
-    if ! fno event emit -t task_started -d "$data" \
+    if ! fno doctor event emit -t task_started -d "$data" \
         --run "$TARGET_RUN" --node "$NODE_ID" --task "$TASK_ID" >/dev/null 2>&1; then
         echo "resolve-executor: note: task_started emit failed (non-fatal)" >&2
     fi

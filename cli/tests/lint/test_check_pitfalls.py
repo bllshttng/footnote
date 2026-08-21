@@ -107,10 +107,10 @@ def _one_entry(tmp_path: Path, title: str, body: str = "trap.") -> Path:
 def test_title_naming_shipped_verb_fails(tmp_path: Path) -> None:
     # The exact entry this check exists to prevent re-acquiring: a trap titled
     # for the verb that already fixes it, so the verb IS the graduating carrier.
-    path = _one_entry(tmp_path, "`fno test` can report a false green")
+    path = _one_entry(tmp_path, "`fno doctor test` can report a false green")
     r = _run(path)
     assert r.returncode == 1
-    assert "fno test" in r.stderr
+    assert "fno doctor test" in r.stderr
     assert "carrier" in r.stderr
 
 

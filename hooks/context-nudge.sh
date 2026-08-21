@@ -27,7 +27,7 @@
 # Both BLOCK (the only Stop output documented to reach the model on Claude and
 # Codex; an allow's systemMessage is informational-only / lost on Codex) and
 # emit an event (session_context_nudge / king_context_nudge / king_orphan_block)
-# so `fno event audit` can prove the hook actually fired in a real session. That
+# so `fno doctor event audit` can prove the hook actually fired in a real session. That
 # arming proof is the one question its predecessor (arm-handoff-precompact.sh,
 # gated on a pid dead ~1s after init) could never answer.
 #

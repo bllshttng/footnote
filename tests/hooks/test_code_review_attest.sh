@@ -65,8 +65,8 @@ mkdir -p "$BIN"
 EMITTED="$TMP/emitted.jsonl"
 cat > "$BIN/fno-stub" <<STUB
 #!/usr/bin/env bash
-# records only \`event emit\` calls; anything else is a silent no-op
-if [[ "\${1:-}" == "event" && "\${2:-}" == "emit" ]]; then
+# records only \`doctor event emit\` calls; anything else is a silent no-op
+if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
   printf '%s\n' "\$*" >> "$EMITTED"
 fi
 exit 0

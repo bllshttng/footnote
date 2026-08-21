@@ -272,7 +272,7 @@ def sweep(repo: Path) -> list[Row]:
     ``scripts/``-relative path in this file (the ``_unpushed_batch`` /
     ``_worktrees`` script lookups, deliberately package-relative via
     ``Path(__file__)`` rather than that same resolver - see their
-    docstrings) into `fno lint shellout-drift`'s scan scope for no reason;
+    docstrings) into `fno doctor lint shellout-drift`'s scan scope for no reason;
     that guard flags a module on the mere co-occurrence of a bash-exec and
     a resolver call, not on which one actually roots the script path.
     """
@@ -386,7 +386,7 @@ def record_unknown(row: Row) -> dict:
 def _emit_sweep_event(
     row: Row, *, node: Optional[str], branch: Optional[str], sha: Optional[str], acts: list[str]
 ) -> bool:
-    """In-process, not a shell to `fno event emit`: the same pattern
+    """In-process, not a shell to `fno doctor event emit`: the same pattern
     fno.agents.watchdog.emit_event already uses for this daemon's sibling
     fleet-watchdog leg. A miss is swallowed loudly (a log warning, not
     silence) so a whole lane of telemetry going missing is never mistaken

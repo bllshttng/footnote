@@ -1,4 +1,4 @@
-"""``fno observer`` - skill eval over a recorded corpus (x-57a5).
+"""``fno doctor observer`` - skill eval over a recorded corpus (x-57a5).
 
 Two verbs over the pure fold in :mod:`fno.observer.fold`:
 

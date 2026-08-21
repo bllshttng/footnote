@@ -1,6 +1,6 @@
 # tests/
 
-Shell harnesses. `fno test smoke` runs every one of them; the globs in `cli/src/fno/test_cmd.py` discover new files with no registry edit.
+Shell harnesses. `fno doctor test smoke` runs every one of them. The globs in `cli/src/fno/test_cmd.py` discover new files with no registry edit.
 
 ## Running one directly is not hermetic
 
@@ -13,9 +13,9 @@ That asymmetry is exactly what produced three separate specimens on 2026-08-11, 
 Run the same step hermetically instead:
 
 ```bash
-fno test smoke --only 'backlog aliases'    # the step, isolated
-fno test smoke                             # everything
-fno test smoke --ambient both              # clean and dirty lanes, to catch a leak
+fno doctor test smoke --only 'backlog aliases'    # the step, isolated
+fno doctor test smoke                             # everything
+fno doctor test smoke --ambient both              # clean and dirty lanes, to catch a leak
 ```
 
 Full mechanism: [docs/architecture/test-hermeticity.md](../docs/architecture/test-hermeticity.md).

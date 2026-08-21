@@ -172,7 +172,7 @@ def resolve_fanout_targets() -> list["FanoutTarget"]:
     """Projects with at least one enabled status sink, each carrying its own
     ``status_fanout.interval_secs``. Reuses the same workspace project->path map
     as the drain resolver; a project without a workspace path is skipped (no cwd
-    to tick from - the standalone/cron ``fno status-fanout tick`` covers a
+    to tick from - the standalone/cron ``fno doctor event fanout tick`` covers a
     runner-less setup)."""
     from pathlib import Path as _P
 

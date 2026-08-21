@@ -80,7 +80,7 @@
    "kind": "user_text"
   },
   {
-   "text": "**This is a wiring gap, not a law, so do not build around it.** The durable push leg for `blocked` already exists on the event bus: `fno event emit -t blocked` auto-pushes a notice to the parent handle, and `fno event push-parent --type blocked` is the manual verb. What is missing is an emitter - no",
+   "text": "**This is a wiring gap, not a law, so do not build around it.** The durable push leg for `blocked` already exists on the event bus: `fno doctor event emit -t blocked` auto-pushes a notice to the parent handle, and `fno doctor event push-parent --type blocked` is the manual verb. What is missing is an emitter - no",
    "index": 14,
    "kind": "user_text"
   },
@@ -250,13 +250,13 @@
   },
   {
    "tool": "Bash",
-   "target": "fno mail send <handle> \"RULING - authorization granted. From the Director crown over epic x-d7e4 (level 0, grantor: human operator, this session). This is the epic-scoped acceptance-contract call you asked for; it is mine to make and I am making it. Merge approval is NOT mine and remains the human's.\n\nAUTHORIZED: x-2388's delivery contract uses two modes.\n1. Strict audit - remains RED on all 9 existing violations plus the L0->L1->L0 cycle. Reachable by an explicit flag, and named in --help text so it is discoverable without reading the script.\n2. Baseline CI gate - the mode registered in 'fno test'. Passes only when the violation set is unchanged or reduced; fails on any NEW or CHANGED violation. Reducing the set requires updating the baseline in the same PR, so it ratchets down and cannot",
+   "target": "fno mail send <handle> \"RULING - authorization granted. From the Director crown over epic x-d7e4 (level 0, grantor: human operator, this session). This is the epic-scoped acceptance-contract call you asked for; it is mine to make and I am making it. Merge approval is NOT mine and remains the human's.\n\nAUTHORIZED: x-2388's delivery contract uses two modes.\n1. Strict audit - remains RED on all 9 existing violations plus the L0->L1->L0 cycle. Reachable by an explicit flag, and named in --help text so it is discoverable without reading the script.\n2. Baseline CI gate - the mode registered in 'fno doctor test'. Passes only when the violation set is unchanged or reduced; fails on any NEW or CHANGED violation. Reducing the set requires updating the baseline in the same PR, so it ratchets down and cannot",
    "index": 43,
    "kind": "tool_use"
   },
   {
    "tool": "Bash",
-   "target": "fno backlog update x-2388 --dispatch-brief \"AUTHORIZED 2026-08-05 by Director crown over x-d7e4 (level 0, grantor: human operator): boundary check ships in two modes. (1) Strict audit stays RED on all 9 violations + the L0->L1->L0 cycle, behind an explicit flag named in --help. (2) Baseline gate is what 'fno test' registers; passes only when the violation set is unchanged or reduced, fails on any NEW or CHANGED violation, and a reduction must update the baseline in the same PR. Baseline must be a checked-in human-readable file naming each violation (file:line, layer pair, import statement) plus the cycle - an opaque hash or count does not satisfy this. Do NOT modify prohibited core files. Auto-merge stays OFF; merge approval is the human's (x-0eaf, the review-gate defect, is still open and",
+   "target": "fno backlog update x-2388 --dispatch-brief \"AUTHORIZED 2026-08-05 by Director crown over x-d7e4 (level 0, grantor: human operator): boundary check ships in two modes. (1) Strict audit stays RED on all 9 violations + the L0->L1->L0 cycle, behind an explicit flag named in --help. (2) Baseline gate is what 'fno doctor test' registers; passes only when the violation set is unchanged or reduced, fails on any NEW or CHANGED violation, and a reduction must update the baseline in the same PR. Baseline must be a checked-in human-readable file naming each violation (file:line, layer pair, import statement) plus the cycle - an opaque hash or count does not satisfy this. Do NOT modify prohibited core files. Auto-merge stays OFF; merge approval is the human's (x-0eaf, the review-gate defect, is still open and",
    "index": 44,
    "kind": "tool_use"
   },
@@ -1630,7 +1630,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno evals' (golden-task bank: run/report/graduate/grade), 'fno observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno do delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
+   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno doctor evals' (golden-task bank: run/report/graduate/grade), 'fno doctor observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno do delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
    "index": 287,
    "kind": "tool_use"
   },

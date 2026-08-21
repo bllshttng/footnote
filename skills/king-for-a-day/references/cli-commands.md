@@ -128,7 +128,7 @@ It blocks modals (`should` `would` `might` `could` lowercase `may`), contraction
 
 It blocks a sentence over 25 words (20 in a list item), a paragraph split across lines, and a condition placed after its command.
 
-Draft to a file and run `fno lint style --stdin < file` before sending. The normative statement is `docs/style-rules.md`.
+Draft to a file and run `fno doctor lint style --stdin < file` before sending. The normative statement is `docs/style-rules.md`.
 
 ## Merge and CI reads
 

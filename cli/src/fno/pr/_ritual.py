@@ -501,7 +501,10 @@ class Ritual:
 
     def leg_skill_diff(self) -> None:
         """Step 3c: close the skill-diff loop. x-c4ff: the real verb exists."""
-        self._leg("skill-diff", ["skill-diff", "reconcile", "--pr-number", str(self.ctx.pr)])
+        self._leg(
+            "skill-diff",
+            ["doctor", "skill-diff", "reconcile", "--pr-number", str(self.ctx.pr)],
+        )
 
     def leg_sync_canonical(self) -> None:
         """Step 3d: x-adf9 fix lives in _sync_canonical._default_shell_runner."""

@@ -1,4 +1,4 @@
-"""fno event subcommands - emit and audit."""
+"""fno doctor event subcommands - emit and audit."""
 
 from __future__ import annotations
 
@@ -361,7 +361,7 @@ def emit(
         typer.echo("error: --data must be a JSON object", err=True)
         raise typer.Exit(code=1)
 
-    # Anchor default state + events paths to the repo root so `fno event emit`
+    # Anchor default state + events paths to the repo root so `fno doctor event emit`
     # produces consistent results regardless of which subdirectory the user
     # invokes from. Gemini review on PR #270 caught the previous relative-path
     # default that silently routed events to a per-subdir .fno/ folder
@@ -484,7 +484,7 @@ def emit(
         typer.echo(json.dumps(event))
     else:
         # Non-JSON success output: print a stable success token so shell
-        # callers using ``$(fno event emit ...)`` or piped automation
+        # callers using ``$(fno doctor event emit ...)`` or piped automation
         # receive a non-empty value. Codex review on PR #270 caught the
         # previous silent-on-success path (legacy ``emit_event`` returned
         # a freshly-minted nonce on stdout). Prefer ``data.nonce`` when

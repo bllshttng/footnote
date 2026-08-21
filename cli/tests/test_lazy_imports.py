@@ -167,8 +167,6 @@ _ADVERTISED_SUBCOMMANDS = [
     "setup",
     "whoami",
     "doctor",
-    "test",
-    "update",
 ]
 
 # A sample of the hidden tier - present under `help --all`, absent from `--help`.
@@ -754,8 +752,8 @@ def test_plain_import_error_is_never_retried(monkeypatch):
 def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch):
     """The retry gets further through the import tree, so it can surface a different
     and more truthful cause. Reporting the original would bury a real missing
-    dependency under an fno reinstall hint and send the operator to `fno update` for
-    something `fno update` cannot fix."""
+    dependency under an fno reinstall hint and send the operator to `fno doctor update` for
+    something `fno doctor update` cannot fix."""
     from fno import _lazy_group as lg
 
     monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
@@ -889,7 +887,7 @@ def test_absent_fno_submodule_names_both_causes_end_to_end():
     )
     assert proc.returncode == 0, proc.stderr
     assert "reinstalled underneath the running process" in proc.stdout, proc.stdout
-    assert "fno update" in proc.stdout
+    assert "fno doctor update" in proc.stdout
 
 
 def test_lazy_group_states_the_hint_once_not_twice():

@@ -66,7 +66,7 @@ Then open the Ubuntu shell and do everything from there: install `gh`, Python 3.
 fno --version          # prints a version
 ```
 
-If `fno` is "command not found", you have the Python CLI (`fno-py`) but not the Rust **`fno` front door** yet. `fno` (the mux + terminal front door) owns the `fno` command and bootstraps the Python CLI. Install it with `cargo install fno`, or from a clone `fno update --rust` - both build the Rust binary, so they need a **Rust toolchain** (`rustup`); a Python-only machine (installed via `uv`/`pip`) has to add Rust first. A Claude Code session also reminds you when the front door is missing. Until it's installed, reach the CLI directly as `fno-py`.
+If `fno` is "command not found", you have the Python CLI (`fno-py`) but not the Rust **`fno` front door**. `fno` owns the mux and terminal command and bootstraps the Python CLI. Install it with `cargo install fno` or, from a clone, `fno doctor update --rust`. Both commands build Rust, so they need a **Rust toolchain** (`rustup`). A Python-only machine installed through `uv` or `pip` must add Rust first. When the front door is missing, a Claude Code session also reminds you. Until it is installed, reach the CLI directly as `fno-py`.
 
 Inside Claude Code, type `/fno:` and you should see skill autocomplete (`target`, `think`, `blueprint`, ...).
 
@@ -194,11 +194,11 @@ Each agent runs its own loop; Claude, Codex, and Gemini, one project.
 
 ## Keeping fno up to date
 
-From a clone, the full refresh is three steps - `fno update` refreshes the binaries, but the long-running mux server and agents daemon keep the old code until restarted:
+From a clone, the full refresh has three steps. `fno doctor update` refreshes the binaries. The long-running mux server and agents daemon keep old code until restarted:
 
 ```bash
 git pull
-fno update          # reinstall the Python CLI + cargo binaries (fno mux + fno-agents) from source
+fno doctor update          # reinstall the Python CLI + cargo binaries (fno mux + fno-agents) from source
 fno restart --mux   # restart the daemon AND the mux server onto the fresh binaries
 ```
 

@@ -25,7 +25,7 @@ Output goes to `cli/benchmarks/fno_in_target_results.json`. The script also prin
 ### Requirements
 
 - The repo root must contain a populated `.fno/ledger.json` with at least three completed target sessions that have the `do` phase and duration > 3 minutes. Without this, the harness exits with a `<help reason="insufficient-sample-data">` marker.
-- The `fno` binary must be on `PATH`. If `fno --version` fails before running the harness, recover by running `uv tool upgrade footnote` or `fno update`.
+- The `fno` binary must be on `PATH`. If `fno --version` fails before running the harness, recover by running `uv tool upgrade footnote` or `fno doctor update`.
 
 ### What gets measured
 

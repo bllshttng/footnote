@@ -5,7 +5,7 @@
 - If not found, calls `gh pr create`.
 - Does NOT arm auto-merge: that moved to `fno-agents finalize` (x-1951).
 - Writes .fno/artifacts/ship-{session_id}.md.
-- Emits fno event emit --type pr_created/pr_exists.
+- Emits fno doctor event emit --type pr_created/pr_exists.
 - Sets state field artifact_shipped=true (via fno do state set).
 """
 from __future__ import annotations

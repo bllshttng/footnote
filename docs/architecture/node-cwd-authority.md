@@ -35,7 +35,7 @@ Underscore prefix = derived, matching `status`. Unlike `status` it is **never pe
 node_cwd="$(printf '%s' "$node_json" | jq -r '._resolved_cwd // .cwd // empty' 2>/dev/null)"
 ```
 
-The `// .cwd` fallback is a locked back-compat contract, not an implementation detail: an older *installed* fno (no `_resolved_cwd` in `get` output) degrades to the pre-fix behavior instead of breaking. The shell script upgrades with the repo checkout; `fno` upgrades on `fno update`; the fallback makes the two unsynchronized upgrade paths safe in either order. Both the `launched` and dry-run outcome lines carry `cwd=<path>` so a wrong-repo boot is visible at dispatch time.
+The `// .cwd` fallback is a locked back-compat contract. An older installed fno lacks `_resolved_cwd` and degrades to the pre-fix behavior instead of breaking. The shell script upgrades with the repo checkout. `fno` upgrades through `fno doctor update`. The fallback makes the unsynchronized paths safe in either order. Both outcome lines carry `cwd=<path>`, so a wrong-repo boot is visible at dispatch time.
 
 The `/agents` skill (spawn verb) passes the same `_resolved_cwd`-with-fallback to `spawn.sh --cwd`. `autolaunch-on-ready.sh` delegates to dispatch-node.sh and is fixed transitively. Megawalk is unaffected - the walker is project-scoped and never relocates via node.cwd.
 
@@ -70,4 +70,4 @@ Threshold lives under `config.health_monitor.thresholds.project_cwd_mismatch`, d
 
 ## Operational note
 
-After merging, run `fno update` - the Python-side behavior (derived field, filing derivation, health metric) is gated on the installed fno. Until then the jq fallback keeps dispatch on pre-fix behavior, which is safe.
+After merging, run `fno doctor update`. The installed fno gates the Python-side derived field, filing derivation, and health metric. Until then, the jq fallback keeps dispatch on safe pre-fix behavior.

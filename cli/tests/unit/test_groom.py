@@ -483,7 +483,7 @@ def test_install_on_non_macos_reports_the_cron_fallback(monkeypatch):
 
 
 def test_install_bounces_rather_than_loads(tmp_path, monkeypatch):
-    # `launchctl load` cannot cure the wedge class an `fno update` bounce leaves
+    # `launchctl load` cannot cure the wedge class an `fno doctor update` bounce leaves
     # behind; reusing pr_watch's bootout->bootstrap->kickstart is the point.
     import sys as _sys
 
@@ -666,7 +666,7 @@ def test_scheduled_run_works_from_a_repo_not_home(tmp_path, monkeypatch):
     assert "<key>WorkingDirectory</key>\n  <string>/repo/footnote</string>" in xml
 
 
-# ── refresh onto a new binary (fno update tail) ─────────────────────────────
+# ── refresh onto a new binary (fno doctor update tail) ─────────────────────────────
 
 
 def test_refresh_is_a_no_op_when_no_agent_is_installed(tmp_path):
@@ -679,7 +679,7 @@ def test_refresh_preserves_the_installed_hour_and_workdir(tmp_path, monkeypatch)
     """A refresh re-renders, so it must not reset the operator's schedule.
 
     Re-resolving would also point WorkingDirectory at whatever directory
-    `fno update` happened to run from.
+    `fno doctor update` happened to run from.
     """
     import sys as _sys
 

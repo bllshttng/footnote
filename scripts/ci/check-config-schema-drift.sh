@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ci/check-config-schema-drift.sh
 #
-# Config-schema anti-drift gate. Mirrors `fno bundle check`:
+# Config-schema anti-drift gate. Mirrors `fno doctor bundle check`:
 # the Pydantic SettingsModel is the single source of truth, and the generated
 # docs/configuration-guide.md MUST match the generator. This fails CI the
 # moment the committed reference drifts from the model + registry.

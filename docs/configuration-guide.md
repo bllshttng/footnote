@@ -48,7 +48,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `post_merge.maintainer_marker` | str (optional) | _(none)_ | advanced | Discriminator tag for maintainer-only post-merge items (e.g. '#maintainer'). Default empty: omit the tag entirely so a fresh install ships no one's initials. Honored by both the post-merge ritual and the capture parser; set per-repo only when the destination is a shared vault. |
 | `post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
-| `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off. |
+| `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno doctor update && fno restart`). Unset = off. |
 | `post_merge.sync_paths` | list[str] | `[]` | advanced | Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge). |
 | `post_merge.auto_run` | bool | `false` | advanced | Let the pr-watch daemon (the sole merge detector) run `fno do pr ritual <pr> --autonomous` for a newly-merged PR (opt-in; default off). Reconcile no longer dispatches a ritual. |
 | `post_merge.catchup_window_days` | int | `3` | advanced | How far back the canonical-sync catch-up sweep looks for merges with no sync marker (default 3 days). Bounds the sweep so a fresh clone never re-syncs all history. |

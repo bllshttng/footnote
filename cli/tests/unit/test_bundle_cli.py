@@ -1,4 +1,4 @@
-"""Unit tests for `fno bundle` thin wrappers.
+"""Unit tests for `fno doctor bundle` thin wrappers.
 
 Each subcommand is a forwarder. Tests verify:
 1. Help text renders (top-level + each subcommand).
@@ -25,9 +25,9 @@ runner = CliRunner()
 
 
 def test_bundle_help_renders():
-    """`fno bundle --help` lists check + lint subcommands and explains the
+    """`fno doctor bundle --help` lists check + lint subcommands and explains the
     no-subcommand default action."""
-    result = runner.invoke(app, ["bundle", "--help"])
+    result = runner.invoke(app, ["doctor", "bundle", "--help"])
     assert result.exit_code == 0
     assert "check" in result.stdout
     assert "lint" in result.stdout
@@ -35,13 +35,13 @@ def test_bundle_help_renders():
 
 
 def test_bundle_check_help_renders():
-    result = runner.invoke(app, ["bundle", "check", "--help"])
+    result = runner.invoke(app, ["doctor", "bundle", "check", "--help"])
     assert result.exit_code == 0
     assert "freshness" in result.stdout
 
 
 def test_bundle_lint_help_renders():
-    result = runner.invoke(app, ["bundle", "lint", "--help"])
+    result = runner.invoke(app, ["doctor", "bundle", "lint", "--help"])
     assert result.exit_code == 0
     assert "marketplace" in result.stdout.lower()
 
@@ -54,7 +54,7 @@ def test_bundle_no_subcommand_runs_bundler_without_mutating_committed_tree(tmp_p
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
     bundle_root = tmp_path / "bundle-root"
     env["REPO_ROOT"] = str(bundle_root)
-    # Use subprocess directly so we exercise the real `fno bundle` entry
+    # Use subprocess directly so we exercise the real `fno doctor bundle` entry
     # point (CliRunner doesn't enter the subprocess that the wrapper spawns).
     result = subprocess.run(
         ["uv", "run", "fno-py", "bundle"],
@@ -72,7 +72,7 @@ def test_bundle_no_subcommand_runs_bundler_without_mutating_committed_tree(tmp_p
 
 
 def test_bundle_check_passes_for_fresh_tree():
-    """`fno bundle check` exits 0 when the committed bundles match canonical."""
+    """`fno doctor bundle check` exits 0 when the committed bundles match canonical."""
     env = dict(os.environ)
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
     result = subprocess.run(
@@ -88,7 +88,7 @@ def test_bundle_check_passes_for_fresh_tree():
 
 
 def test_bundle_lint_passes_for_current_state():
-    """`fno bundle lint` exits 0 against the current driver-skill state."""
+    """`fno doctor bundle lint` exits 0 against the current driver-skill state."""
     env = dict(os.environ)
     env["FNO_REPO_ROOT"] = str(REPO_ROOT)
     result = subprocess.run(
@@ -104,24 +104,24 @@ def test_bundle_lint_passes_for_current_state():
 
 
 def test_bundle_check_emits_terminal_verdict_line(monkeypatch):
-    """x-6a8e: ``fno bundle check`` prints a terminal verdict line from the same
-    code path that sets the exit code, so ``fno bundle check | tail`` cannot mask
+    """x-6a8e: ``fno doctor bundle check`` prints a terminal verdict line from the same
+    code path that sets the exit code, so ``fno doctor bundle check | tail`` cannot mask
     a drift failure behind the pipe's exit. The verdict is the LAST line and
     greppable; the exit code is preserved and is no longer the only signal."""
     import fno.bundle.cli as bc
 
     # FAIL path: underlying freshness script reports drift (rc=1).
     monkeypatch.setattr(bc, "_forward", lambda verb, args: 1)
-    result = runner.invoke(app, ["bundle", "check"])
+    result = runner.invoke(app, ["doctor", "bundle", "check"])
     assert result.exit_code == 1
     lines = result.stdout.strip().splitlines()
-    assert lines[-1] == "fno bundle check: FAIL (rc=1)", result.stdout
+    assert lines[-1] == "fno doctor bundle check: FAIL (rc=1)", result.stdout
 
     # PASS path: rc=0.
     monkeypatch.setattr(bc, "_forward", lambda verb, args: 0)
-    result = runner.invoke(app, ["bundle", "check"])
+    result = runner.invoke(app, ["doctor", "bundle", "check"])
     assert result.exit_code == 0
-    assert result.stdout.strip().splitlines()[-1] == "fno bundle check: PASS"
+    assert result.stdout.strip().splitlines()[-1] == "fno doctor bundle check: PASS"
 
 
 def test_bundle_missing_canonical_script_reports_diagnostic(tmp_path, monkeypatch):
@@ -132,7 +132,7 @@ def test_bundle_missing_canonical_script_reports_diagnostic(tmp_path, monkeypatc
     fake_root.mkdir()
     monkeypatch.setenv("FNO_REPO_ROOT", str(fake_root))
 
-    result = runner.invoke(app, ["bundle", "check"])
+    result = runner.invoke(app, ["doctor", "bundle", "check"])
     assert result.exit_code == 2
     # AC3-ERR: capability-accurate degrade names the footnote plugin and the
     # bare-install gap + an install path, not "is the plugin installed correctly?".

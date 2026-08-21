@@ -50,12 +50,4 @@ design, not a porting gap.
 
 ## Drift guard
 
-The four `scripts/lib/pr-*.sh` are deleted and their
-`scripts/lint/.clone-only-scripts.txt` entries removed, so `fno lint
-shellout-drift` passes without flagging the pr paths. `_merge.py`'s best-effort
-per-PR artifact consolidation still shells to the canonical
-`scripts/lib/consolidate-artifacts.sh`, but resolves its path from the plugin
-root via a direct environment read (`CLAUDE_PLUGIN_ROOT` / `FNO_REPO_ROOT`),
-not the shared `resolve_repo_root` resolver. That keeps it an in-repo-only
-maintainer side-effect that is out of scope for the drift guard, and it
-degrades to a silent no-op on a bare install where the script is absent.
+The four `scripts/lib/pr-*.sh` files and their clone-only entries are deleted. Therefore, `fno doctor lint shellout-drift` passes without flagging PR paths. `_merge.py` still shells to the canonical `scripts/lib/consolidate-artifacts.sh` for best-effort per-PR consolidation. It resolves that script from `CLAUDE_PLUGIN_ROOT` or `FNO_REPO_ROOT`, not shared `resolve_repo_root`. This keeps the maintainer side effect in-repo and outside the drift guard. On bare installs without the script, it becomes a silent no-op.

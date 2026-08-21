@@ -1,4 +1,4 @@
-"""US4 CI drift guard tests (ab-acbde274) - `fno lint shellout-drift`.
+"""US4 CI drift guard tests (ab-acbde274) - `fno doctor lint shellout-drift`.
 
 Covers the five BDD acceptance criteria plus the precision regressions that
 keep the scope decisions honest (cost/paths_cli/worktree exclusions).
@@ -362,7 +362,7 @@ def go():
 
 
 def test_allowlist_lists_flock_pattern_and_drops_exception_caveat():
-    """AC2-UI/AC2-HP (ab-fd017698): once `fno lint flock-pattern` conforms to the
+    """AC2-UI/AC2-HP (ab-fd017698): once `fno doctor lint flock-pattern` conforms to the
     shared resolve_repo_root(), it is LISTED on the allowlist and the scope note
     no longer documents it as the private-rooted exception (the cv-ca99e324
     caveat is removed), so the allowlist does not lie."""

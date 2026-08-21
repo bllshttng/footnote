@@ -172,7 +172,7 @@ reconcile-throttle.sh
 
 # Shared daily-throttled eval-loop ignition helper (x-42f6). Sourced by
 # hooks/eval-sweep-session-start.sh to fire a backgrounded, throttled
-# `fno observer sweep` + `fno skill-diff tick` (which ARE the wrapped entry
+# `fno doctor observer sweep` + `fno doctor skill-diff tick` (which ARE the wrapped entry
 # points); itself sources reconcile-throttle.sh for helper reuse. Pure sourcing
 # library: exposes eval_sweep_maybe_fire; no standalone CLI.
 eval-sweep-throttle.sh

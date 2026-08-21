@@ -186,7 +186,7 @@ def test_parsed_source_note(tmp_path):
 
 def test_autodetect_migrations_under_project_root(tmp_path):
     """The directory-positional path resolves supabase/migrations under the
-    given root, not the process CWD (how `fno codemap --db-schema` invokes it)."""
+    given root, not the process CWD (how `fno doctor codemap --db-schema` invokes it)."""
     mig = tmp_path / "supabase" / "migrations"
     mig.mkdir(parents=True)
     (mig / "001_init.sql").write_text("CREATE TABLE gadgets (id uuid PRIMARY KEY, label text);\n")

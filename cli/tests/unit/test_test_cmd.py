@@ -77,7 +77,7 @@ def test_discovers_new_harness_and_excludes_non_harnesses(tmp_path: Path) -> Non
     assert "tests/hooks/not_shell.sh" not in found        # non-shell shebang excluded
 
 
-# --- changed-surface selection (fno test smoke --changed) -------------------
+# --- changed-surface selection (fno doctor test smoke --changed) -------------------
 
 
 def _repo(root: Path) -> None:

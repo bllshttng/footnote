@@ -67,7 +67,7 @@ Project/cwd is demoted from address to resolver. `fno agents send --to-project X
 
 `fno agents send` (with `fno agents send --to-project <project>` for project-destination anycast) routes through `write_new_thread`, which mirrors a canonical envelope into the bus on every write: one log line per send, the md render and the envelope agree (no md-store divergence), and the existing triage drain finds it. The mirror is best-effort (the md render is the durable copy); a mirror failure warns loudly on stderr because a bus reader would otherwise diverge from the md drain until backfill.
 
-**Rollout / stale install:** during the Group 4 rollout a stale installed `fno` may still expose the removed `fno inbox send` verb, while a fresh install removes it and errors with a pointer to `fno agents send`. `fno doctor` is the staleness-detection surface (it probes for verb skew between the installed snapshot and the source), so if `fno doctor` reports stale, run `fno update` to pick up the `fno agents send` cutover.
+**Rollout / stale install:** A stale installed `fno` can still expose the removed `fno inbox send` verb during Group 4. A fresh install removes it and points to `fno agents send`. `fno doctor` detects verb skew between the installed snapshot and source. If it reports stale, run `fno doctor update` to pick up the cutover.
 
 `fno inbox migrate-bus` (and `migrate_md_threads_to_bus`) backfills markdown threads written before the bus existed (or by a stale pre-G3 `fno`) into the canonical log, so a cursor scan never strands unread legacy mail. It is idempotent (dedup by message-id), resilient (one unappendable message is counted in `MigrationResult.failed` and skipped, not aborting the batch), and never re-migrates threads already on the bus.
 

@@ -13,7 +13,7 @@
 # is why it is written here rather than learned twice.
 #
 # To regenerate after an intentional change:
-#   uv run --project cli fno-py lint verb-ratchet --update
+#   uv run --project cli fno-py doctor lint verb-ratchet --update
 # then commit this file in that PR. Run it that way, not as a bare `fno`: a bare
 # `fno` enumerates the INSTALLED package while writing this checkout's file, and
 # a verb that exists only in source is missed. The lint refuses that combination

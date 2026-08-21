@@ -55,10 +55,10 @@ Load [plan-validation.md](plan-validation.md) for the full protocol.
 Generate fresh codemap for structural awareness:
 
 ```bash
-fno codemap --tokens 2048 2>/dev/null || true
+fno doctor codemap --tokens 2048 2>/dev/null || true
 ```
 
-If `fno` is unavailable or `fno codemap`'s deps are missing, skip silently. Read `.fno/codemap.md` if it exists. Use it to identify god nodes (high-PageRank files) that need careful handling during wave execution, and to understand module dependency flow for wave ordering.
+If `fno` is unavailable or `fno doctor codemap`'s deps are missing, skip silently. Read `.fno/codemap.md` if it exists. Use it to identify god nodes (high-PageRank files) that need careful handling during wave execution, and to understand module dependency flow for wave ordering.
 
 ### 1. Load Execution Strategy
 

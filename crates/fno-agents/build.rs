@@ -3,7 +3,7 @@
 //!
 //! Rust-side `fno doctor` staleness now keys on a rev baked INTO the binary
 //! instead of the external `~/.fno/installed-rust-rev` marker (which was
-//! written only by `fno update`, so a bare `cargo install` or dirty dev build
+//! written only by `fno doctor update`, so a bare `cargo install` or dirty dev build
 //! was misjudged). `FNO_AGENTS_CRATES_REV` is the crates/ subtree rev the
 //! verdict compares against the source's crates/ subtree rev (ab-716cd330);
 //! `FNO_AGENTS_GIT_REV` is the full HEAD identity (ab-24a59d50). Both surface

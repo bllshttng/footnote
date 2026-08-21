@@ -11,7 +11,7 @@
 #      probe must exit 0 (proves the in-package module shipped + imports); a
 #      real run (notify) may fail on its own merits but never via a missing
 #      shell-out script.
-#   3. clone-only verbs degrade (US3): `fno do target init` / `fno bundle` exit
+#   3. clone-only verbs degrade (US3): `fno do target init` / `fno doctor bundle` exit
 #      non-zero with the install-the-plugin message, never a 127 or a traceback.
 #
 # Prints pass/fail per check and exits non-zero on any miss. Runs on the

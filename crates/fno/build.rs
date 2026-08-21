@@ -2,9 +2,9 @@
 //! built front door can self-report which commit it came from, the same way
 //! crates/fno-agents does for the triad.
 //!
-//! `FNO_MUX_CRATES_REV` is the crates/ subtree rev `fno update` compares against
+//! `FNO_MUX_CRATES_REV` is the crates/ subtree rev `fno doctor update` compares against
 //! the source's crates/ subtree rev; it surfaces via `fno version --json`, so
-//! `fno update` can detect a present-but-STALE front door (the mux install is
+//! `fno doctor update` can detect a present-but-STALE front door (the mux install is
 //! best-effort, so a prior failed build can leave an old `fno` beside a fresh
 //! triad) and reinstall it, not just heal an absent one.
 //!

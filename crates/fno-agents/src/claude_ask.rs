@@ -147,7 +147,7 @@ fn family1_truth_command(handle: &str) -> std::process::Command {
 pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // This probe runs once per tracked session, continuously, which makes it
     // the highest-frequency reader of the tree `uv tool install --reinstall`
-    // (what `fno update` runs) rewrites in place. A probe landing in that
+    // (what `fno doctor update` runs) rewrites in place. A probe landing in that
     // window dies before `cmd_truth` can write anything, and spent a WARN line
     // on a failure that is over by the next sweep.
     //

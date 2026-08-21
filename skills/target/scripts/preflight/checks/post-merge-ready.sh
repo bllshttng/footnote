@@ -19,7 +19,7 @@ NAME="post-merge-ready"
 FNO="${FNO_BIN:-fno}"
 
 if ! command -v "$FNO" >/dev/null 2>&1; then
-    echo "$NAME unknown $FNO not found on PATH (run: fno update)"
+    echo "$NAME unknown $FNO not found on PATH (run: fno doctor update)"
     exit 0
 fi
 
@@ -27,7 +27,7 @@ OUT="$("$FNO" config doctor --post-merge --json 2>/dev/null)"
 RC=$?
 if [[ $RC -ne 0 || -z "$OUT" ]]; then
     # AC1-FR: an installed fno too old to expose --post-merge degrades here.
-    echo "$NAME unknown post-merge oracle unavailable - installed fno too old? (run: fno update)"
+    echo "$NAME unknown post-merge oracle unavailable - installed fno too old? (run: fno doctor update)"
     exit 0
 fi
 

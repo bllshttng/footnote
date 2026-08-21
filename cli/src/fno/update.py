@@ -1,4 +1,4 @@
-"""fno update: reinstall the fno CLI from its source path.
+"""fno doctor update: reinstall the fno CLI from its source path.
 
 Discovers the source via (in priority order):
 
@@ -67,7 +67,7 @@ RefreshOutcome = Literal[
 ]
 
 _GUARD_MSG = (
-    "[fno update] refused: target-state.md shows status: IN_PROGRESS. "
+    "[fno doctor update] refused: target-state.md shows status: IN_PROGRESS. "
     "Updating mid-loop risks binary skew across subprocesses. "
     "Pass --force to override."
 )
@@ -468,7 +468,7 @@ def stale_mux_servers(
     ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
     any reinstall (a wire-agnostic false alarm). Best-effort and advisory: any
     missing binary / non-zero exit / unparseable JSON yields ``[]``. `fno doctor`
-    renders this; `fno update` nudges on it; `fno restart` auto-restarts it."""
+    renders this; `fno doctor update` nudges on it; `fno restart` auto-restarts it."""
     fno = _cargo_installed_mux() or shutil.which("fno")
     if not fno:
         return []
@@ -653,13 +653,13 @@ def _build_update_guidance(
     if wire_bump:
         return (
             f"update ready {rev_label} - WIRE BUMP {_wire_label(running_wires)} -> "
-            f"{source_label} - `fno update && fno restart --mux` ends {shells_ended} "
+            f"{source_label} - `fno doctor update && fno restart --mux` ends {shells_ended} "
             f"shell(s); --revive respawns {revivable} worker(s)"
         )
 
     return (
         f"update ready {rev_label} - wire unchanged ({source_label}) - "
-        f"detach, `fno update`, reattach; {shells} shell(s) survive"
+        f"detach, `fno doctor update`, reattach; {shells} shell(s) survive"
     )
 
 
@@ -670,7 +670,7 @@ def update_readiness(
     """Compute update readiness: whether an install is waiting, whether it would
     break the wire, and the one guidance line an operator sees. The single
     resolver (Locked Decision 1) - the TUI (``crates/fno/src/client.rs``)
-    renders this payload and computes nothing itself; ``fno update --check
+    renders this payload and computes nothing itself; ``fno doctor update --check
     --json`` exposes it directly. Every input degrades independently rather
     than raising, so a broken environment still gets a non-empty, honest
     guidance line (AC4-EDGE)."""
@@ -790,24 +790,24 @@ def _install_mux_front_door(source: Path, install_root: Path, *, dry_run: bool) 
     if dry_run:
         typer.echo(f"Would run: {shlex.join(cmd)}")
         return
-    typer.echo(f"fno update: refreshing mux front door: {shlex.join(cmd)}")
+    typer.echo(f"fno doctor update: refreshing mux front door: {shlex.join(cmd)}")
     try:
         result = subprocess.run(cmd, check=False)
     except OSError as exc:
         typer.echo(
-            f"fno update: WARNING: mux front door install failed to execute ({exc});"
+            f"fno doctor update: WARNING: mux front door install failed to execute ({exc});"
             " `fno` may be absent/stale; continuing",
             err=True,
         )
         return
     if result.returncode != 0:
         typer.echo(
-            f"fno update: WARNING: mux front door install failed (exit {result.returncode});"
+            f"fno doctor update: WARNING: mux front door install failed (exit {result.returncode});"
             " `fno` may be absent/stale; continuing",
             err=True,
         )
         return
-    typer.echo("fno update: mux front door refreshed (crates/fno -> `fno`)")
+    typer.echo("fno doctor update: mux front door refreshed (crates/fno -> `fno`)")
 
 
 def _triad_install_dirs() -> list[Path]:
@@ -906,14 +906,14 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
                 except OSError:
                     pass
             typer.echo(
-                f"fno update: ERROR: triad sync FAILED at {dest} ({exc}). "
+                f"fno doctor update: ERROR: triad sync FAILED at {dest} ({exc}). "
                 f"Copied {copied or 'none'} before the failure; this location may now "
                 "hold a MIXED-VERSION fno-agents triad. Fix the location and re-run "
-                "`fno update` (or set FNO_AGENTS_DAEMON_BIN to a coherent triad dir).",
+                "`fno doctor update` (or set FNO_AGENTS_DAEMON_BIN to a coherent triad dir).",
                 err=True,
             )
             raise typer.Exit(1)
-        typer.echo(f"fno update: synced fno-agents triad -> {dest}")
+        typer.echo(f"fno doctor update: synced fno-agents triad -> {dest}")
 
 
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
@@ -935,13 +935,13 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     """
     crate_dir = source.parent / "crates" / "fno-agents"
     if not crate_dir.is_dir():
-        typer.echo("fno update: no crates/fno-agents directory found; skipping rust leg")
+        typer.echo("fno doctor update: no crates/fno-agents directory found; skipping rust leg")
         return "skipped-no-crate"
 
     installed_bin = _cargo_installed_bin()
     if installed_bin is None and not force:
         typer.echo(
-            "fno update: no cargo-installed fno-agents binary; skipping rust leg"
+            "fno doctor update: no cargo-installed fno-agents binary; skipping rust leg"
             " (pass --rust to install)"
         )
         return "skipped-no-binary"
@@ -949,7 +949,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     subtree = _rust_subtree_rev(source)
     if subtree is None and not force:
         typer.echo(
-            "fno update: could not determine crates/ subtree rev; skipping rust leg"
+            "fno doctor update: could not determine crates/ subtree rev; skipping rust leg"
         )
         return "skipped-no-rev"
     # When force=True but subtree is None, we continue but remember we cannot write a marker.
@@ -975,12 +975,12 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         and _triad_same_build(installed_bin.parent, subtree)
     ):
         typer.echo(
-            f"fno update: rust bins fresh (rev {installed_rev[:12]} from binary);"
+            f"fno doctor update: rust bins fresh (rev {installed_rev[:12]} from binary);"
             " skipping cargo install"
         )
         # The agents bins are current, but the mux front door (crates/fno ->
         # `fno`) can still be ABSENT or STALE at a fresh triad. Absent: the
-        # fno->fno-py rename lands fno-py while a fresh-binary `fno update` never
+        # fno->fno-py rename lands fno-py while a fresh-binary `fno doctor update` never
         # installed the mux. Stale: the mux install is best-effort (a failed
         # build warns and continues), so a prior failure can leave an OLD `fno`
         # beside a fresh triad. Now that crates/fno bakes its own crates_rev,
@@ -999,7 +999,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
 
     if shutil.which("cargo") is None:
         typer.echo(
-            "fno update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
+            "fno doctor update: WARNING: rust bins need refresh but cargo is not on PATH; skipping",
             err=True,
         )
         return "skipped-no-cargo"
@@ -1021,21 +1021,21 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         _install_mux_front_door(source, install_root, dry_run=True)
         return "dry-run"
 
-    typer.echo(f"fno update: refreshing rust bins: {shlex.join(cmd)}")
+    typer.echo(f"fno doctor update: refreshing rust bins: {shlex.join(cmd)}")
     try:
         result = subprocess.run(cmd, check=False)
     except OSError as exc:
         # TOCTOU after the which() check, permission error, exec format
         # error: fail the leg loudly but never crash the Python update.
         typer.echo(
-            f"fno update: WARNING: cargo install failed to execute ({exc});"
+            f"fno doctor update: WARNING: cargo install failed to execute ({exc});"
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
         return "failed"
     if result.returncode != 0:
         typer.echo(
-            f"fno update: WARNING: cargo install failed (exit {result.returncode});"
+            f"fno doctor update: WARNING: cargo install failed (exit {result.returncode});"
             " rust bins NOT refreshed; continuing with Python update",
             err=True,
         )
@@ -1061,7 +1061,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
                     f" resolves it (install root {install_root})"
                 )
             typer.echo(
-                f"fno update: ERROR: post-deploy verify FAILED - the deployed fno-agents {detail}."
+                f"fno doctor update: ERROR: post-deploy verify FAILED - the deployed fno-agents {detail}."
                 " NOT continuing.",
                 err=True,
             )
@@ -1069,7 +1069,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
 
     # The mux front door (crates/fno -> `fno` on PATH) rides the SAME crates/
     # subtree staleness gate as the agents bins, so refresh it here too. Without
-    # this the front door is an orphan: `fno update` rebuilds fno-agents but the
+    # this the front door is an orphan: `fno doctor update` rebuilds fno-agents but the
     # `fno` binary this whole channel is about is never installed or refreshed.
     _install_mux_front_door(source, install_root, dry_run=False)
 
@@ -1082,10 +1082,10 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     if subtree is None:
         # force=True with an undeterminable rev: bins rebuilt but no marker
         # breadcrumb written (no verdict reads it, so this is cosmetic).
-        typer.echo("fno update: rust bins refreshed (marker not written: rev undeterminable)")
+        typer.echo("fno doctor update: rust bins refreshed (marker not written: rev undeterminable)")
         outcome = "refreshed-no-marker"
     elif _write_rust_marker(subtree):
-        typer.echo(f"fno update: rust bins refreshed (rev {subtree[:12]})")
+        typer.echo(f"fno doctor update: rust bins refreshed (rev {subtree[:12]})")
         outcome = "refreshed"
     else:
         # Marker write failed, but the deploy already passed post-deploy verify
@@ -1094,7 +1094,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         # `fno doctor --fix` treats as a failed repair and exits 1). Warn about the
         # cosmetic breadcrumb, return success.
         typer.echo(
-            "fno update: note: rust bins refreshed; the legacy marker write failed"
+            "fno doctor update: note: rust bins refreshed; the legacy marker write failed"
             f" (harmless, no verdict reads it; check {_RUST_MARKER_FILE.parent} permissions)",
             err=True,
         )
@@ -1109,7 +1109,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         )
         if pgrep_result.returncode == 0:
             typer.echo(
-                "fno update: note: fno-agents-daemon is running the OLD binary;"
+                "fno doctor update: note: fno-agents-daemon is running the OLD binary;"
                 " restart it to pick up the refresh",
                 err=True,
             )
@@ -1121,7 +1121,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # silently blocks agent dispatch until restarted. Nothing else nudges for it.
     for sess in stale_mux_servers():
         typer.echo(
-            f"fno update: note: mux server '{sess}' speaks an OLD wire version"
+            f"fno doctor update: note: mux server '{sess}' speaks an OLD wire version"
             " (a new client can't attach it); run 'fno restart' to auto-cut it"
             " over (ends that session's panes)",
             err=True,
@@ -1290,7 +1290,7 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
         f"do _fno_n=$((_fno_n+1)); sleep 0.2; done;"
     )
     warn = q(
-        "fno update: fno-py never reappeared after the install, so the launchd "
+        "fno doctor update: fno-py never reappeared after the install, so the launchd "
         "agents were NOT refreshed onto the new binary. Run by hand: "
         "fno do pr watch refresh; fno backlog groom --refresh-agent"
     )
@@ -1354,7 +1354,7 @@ def update_command(
         return
 
     if rust and no_rust:
-        typer.echo("fno update: --rust and --no-rust are mutually exclusive", err=True)
+        typer.echo("fno doctor update: --rust and --no-rust are mutually exclusive", err=True)
         raise typer.Exit(2)
 
     if _target_in_progress() and not force:
@@ -1381,7 +1381,7 @@ def update_command(
         # --refresh busts uv's build cache. Without it, a path source at an
         # unchanged version (fno stays 0.2.1 across rebuilds) can reinstall a
         # stale cached wheel that predates newly-added modules, so `fno restart`
-        # etc. crash with ModuleNotFoundError even after `fno update`.
+        # etc. crash with ModuleNotFoundError even after `fno doctor update`.
         # --compile-bytecode: ship the venv's own .pyc so no later process
         # writes into a tree a reinstall may be deleting
         # (docs/architecture/cli-lazy-imports.md).
@@ -1426,7 +1426,7 @@ def update_command(
     # checkout; the marker is written ONLY on a successful install.
     rev = _source_rev(resolved)
 
-    # Refresh the pr-watch daemon onto the freshly-installed binary. `fno update`
+    # Refresh the pr-watch daemon onto the freshly-installed binary. `fno doctor update`
     # only replaces the binary; it never re-renders/reloads the launchd plist, so
     # a migration-update that makes the next tick error wedges the daemon with no
     # self-heal (observed with the config-flatten). Chained AFTER the install so
