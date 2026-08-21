@@ -196,9 +196,11 @@ def serialize_entry(
         # showed. `delivery_policy` (registry.py, schema v14) decides whether
         # mail to this row may ever paste into its prompt line - readable by
         # twelve call sites and invisible to the human deciding.
-        # `dnd` is the derived half: the remaining time on a busy-mode hold, so
-        # a do-not-disturb row shows when it ends rather than a bare yes. The
-        # clock is read only for a row that actually carries the flag, so the
+        # `dnd` is the derived half, so a do-not-disturb row shows when it ends
+        # rather than a bare yes. Four values, all of which a consumer must
+        # handle: a duration, `held` for no recorded expiry, `?` for a clock
+        # that could not be read, and null when mail is flowing despite the
+        # flag. The clock is read only for a row carrying the flag, so the
         # common case pays no file read at all.
         "delivery_policy": entry.delivery_policy,
         "dnd": _dnd_label(entry),
