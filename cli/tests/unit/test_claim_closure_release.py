@@ -270,8 +270,12 @@ class TestNodeSettlement:
         # Graph unreadable -> None; the different-node arm still answers.
         assert settlement(_expired_live_claim(), now=now_ms()) is True
 
-    def test_settlement_true_reaps_through_the_sweep(self, tmp_path):
+    def test_settlement_true_reaps_through_the_sweep(self, tmp_path, monkeypatch):
         """The settlement reaches reap_dead_claims, not just the predicate."""
+        # Pin the settlement's graph read away from the operator's real graph.
+        monkeypatch.setattr(
+            "fno.paths.graph_json", lambda: tmp_path / "not-a-graph.json"
+        )
         _write_claim(
             "node:x-gone",
             holder=HOLDER,

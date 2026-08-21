@@ -1669,23 +1669,47 @@ def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
     sweep - the claim file is already gone, which is the load-bearing half.
     Unconditional across done nodes too: a node closed before the closure
     hook shipped keeps a mirror nothing else ever clears (statuses.py only
-    clears stale locks on non-terminal rungs). Returns how many entries were
-    touched.
+    clears stale locks on non-terminal rungs). A node whose claim file is
+    BACK is skipped: a dispatcher can re-acquire in the window between this
+    sweep's archive and the clear, and wiping that fresh lock is the
+    second-worker disaster the whole reap doctrine exists to prevent.
+    Returns how many entries were touched.
     """
     import sys
 
-    from fno.graph.store import locked_mutate_graph
+    from fno.claims.io import claims_root_for
+    from fno.graph.store import locked_mutate_graph, read_graph
     from fno.paths import graph_json
 
     wanted = set(node_ids)
     cleared: list[str] = []
 
+    # Read first, mutate only if a reaped node is actually in the graph: a
+    # sweep whose reaped ids match no graph row (tests, foreign repos) must
+    # not take the graph lock and rewrite a file it has no change for.
+    try:
+        present = {
+            e.get("id")
+            for e in read_graph(graph_json())
+            if isinstance(e, dict) and e.get("id") in wanted
+        }
+    except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
+        print(f"claim reap: lock-mirror read failed: {exc}", file=sys.stderr)
+        return 0
+    if not present:
+        return 0
+
     def _clear(entries: list[dict]) -> list[dict]:
+        from fno.claims.core import claim_path
+
         for e in entries:
-            if isinstance(e, dict) and e.get("id") in wanted:
-                e["locked_by"] = None
-                e["claimed_at"] = None
-                cleared.append(str(e.get("id")))
+            if not (isinstance(e, dict) and e.get("id") in wanted):
+                continue
+            if claim_path(f"node:{e['id']}", root=claims_root_for(f"node:{e['id']}")).exists():
+                continue  # re-acquired between archive and this clear
+            e["locked_by"] = None
+            e["claimed_at"] = None
+            cleared.append(str(e.get("id")))
         return entries
 
     try:
