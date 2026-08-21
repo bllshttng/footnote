@@ -2,8 +2,8 @@
 
 Six rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
-state, no network. Every caller (``fno mail send``, the PR-body CI gate, the
-changed-markdown CI gate) routes through :func:`check`.
+state, no network. ``fno mail send`` and the hand-run ``fno lint style``
+surfaces route through :func:`check`.
 
 Code does not count against a sentence. A masking pass runs before any rule
 and replaces each code construct with one placeholder token, so a 60-character
