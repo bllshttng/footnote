@@ -22,9 +22,9 @@ from fno.agents.self_stamp import (
     _EXPANDED_TAIL_BYTES,
     _TAIL_BYTES,
     _complete_lines,
-    _owned_ident,
     resolve_own_transcript,
 )
+from fno.claims.self_identity import resolve_self_identity
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,7 @@ def probe_context(transcript_path: Optional[Path] = None) -> Optional[ContextRea
     derived, never stored: the transcript is the only source.
     """
     if transcript_path is None:
-        ident = _owned_ident()
+        ident = resolve_self_identity()
         if not ident.session_id or not ident.harness:
             return None
         transcript_path = resolve_own_transcript(ident.session_id, ident.harness)
