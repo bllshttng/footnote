@@ -259,6 +259,12 @@ echo "fno $*" >> "$CALL_LOG"
 subcmd1="${1:-}"
 subcmd2="${2:-}"
 
+if [ "$subcmd1 $subcmd2" = "agents claim" ]; then
+  shift
+  subcmd1="${1:-}"
+  subcmd2="${2:-}"
+fi
+
 if [ "$subcmd1 $subcmd2 ${3:-}" = "do plan rung" ]; then
   # Delegate to the REAL implementation instead of stubbing a verdict. This
   # gate's entire contract IS the rung vocabulary, so a stub that re-derived

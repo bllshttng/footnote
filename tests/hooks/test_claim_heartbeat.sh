@@ -58,6 +58,9 @@ EOF
   cat > "${bindir}/fno" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "${CALLLOG}"
+if [[ "\${1:-} \${2:-}" == "agents claim" ]]; then
+  shift
+fi
 case "\$1 \$2" in
   "claim status")
     if [[ -n "\${STUB_STATUS_JSON+x}" ]]; then

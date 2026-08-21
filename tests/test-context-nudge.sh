@@ -86,10 +86,13 @@ export FNO_REPO_ROOT="$SBX"
 # `fno agents mail send --to-self`, which derives its recipient from these markers, so a
 # developer machine leaked the REAL session id in and CI (which has none) took a
 # different branch than the local run: the local pass was environment-dependent.
-# Pin it to the fixture session and scrub every other family, since --to-self
-# refuses when two harness families are present.
+# Pin the primary hook identity to the fixture Claude session. Record the real
+# parent harness for the compact probe below, where --to-self refuses a
+# contradicted marker as inherited identity.
+_SESSION_HARNESS="$(PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -c \
+  'from fno.claims.session_pid import resolve_session_harness; print(resolve_session_harness() or "")')"
+unset CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
 export CLAUDE_CODE_SESSION_ID="$KING_SID"
-unset CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
 cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events all land under $SBX
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
@@ -384,6 +387,13 @@ assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
 # "busy with my turn", and stopped trying to compact. So the sentence is chosen by
 # asking the one resolver, and BOTH answers are pinned here: a gate tested on one
 # side only is the shape that shipped the bug.
+# The compact probe uses owned ambient identity. Switch only this part of the
+# harness to the actual parent harness so a Codex-run test does not present a
+# contradicted Claude marker to `--to-self`.
+if [ "$_SESSION_HARNESS" = "codex" ]; then
+  unset CLAUDE_CODE_SESSION_ID
+  export CODEX_THREAD_ID="$KING_SID"
+fi
 #
 # not-injectable: a session with NO registry row of its own, which is the
 # hand-started REPL that hit this bug. `--check` refuses at resolve_agent, before
@@ -414,7 +424,7 @@ rm -f "$LATCHES"/.context-nudge-* 2>/dev/null
 check_shim() {  # check_shim <line-to-print> <exit-code>
   SHIMDIR="$(mktemp -d)"
   { printf '#!/usr/bin/env bash\n'
-    printf 'if [ "$1" = "mail" ] && [ "$2" = "send" ]; then\n'
+    printf 'if [ "$1" = "agents" ] && [ "$2" = "mail" ] && [ "$3" = "send" ]; then\n'
     printf '  for a in "$@"; do [ "$a" = "--check" ] && { printf "%%s\\n" %q; exit %s; }; done\n' "$1" "$2"
     printf 'fi\n'
     printf 'exec %q "$@"\n' "$BINDIR/fno"
