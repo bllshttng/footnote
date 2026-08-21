@@ -279,8 +279,8 @@ def clear(
             # now, so the answer is already findable and a retry would record
             # it twice.
             # Routed through record_decision so the decision gets both halves
-            # a `fno decide` record has: the event AND the graph projection
-            # onto the subject node, which is what `fno decide list` reads.
+            # a `fno backlog decide` record has: the event AND the graph projection
+            # onto the subject node, which is what `fno backlog decisions` reads.
             # decided_by is left unset on purpose, so record_decision stamps
             # whoever actually ran the verb. Naming the operator here would
             # assert it, and an agent clearing a question on their behalf would
@@ -349,7 +349,7 @@ def clear(
             typer.echo(
                 f"outstanding: recorded the answer to {qid} as {exc.decision_id}, "
                 f"but the recall index write failed: {exc}. The question stays "
-                f"open. Run `fno decide reindex` to recover the answer, then "
+                f"open. Run `fno backlog decide-reindex` to recover the answer, then "
                 f"close it with no --answer; clearing with --answer again "
                 f"records the same ruling a second time.",
                 err=True,

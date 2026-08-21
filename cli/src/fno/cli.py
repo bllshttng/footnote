@@ -124,8 +124,8 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "lint": ("fno.lint_cli:lint", "Repository lint checks", {"hidden": True}),
     "claim": ("fno.claims.cli:cli", "Work-claim coordination primitive", {"hidden": True}),
     "decide": (
-        "fno.decide.cli:decide_app",
-        "Record and recover durable operator decisions.",
+        "fno.decide.cli:shim_app",
+        "Deprecated decision shim; use fno backlog decide/decisions.",
         {"hidden": True},
     ),
     "resume": (

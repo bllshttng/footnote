@@ -65,6 +65,18 @@ from fno.backlog.batch import cli as _batch_cli  # noqa: E402
 
 cli.add_typer(_batch_cli, name="batch", hidden=True)
 
+# Decision records are node/PR metadata, so their three leaves live directly
+# under backlog. The old top-level spelling remains a lazy shim.
+from fno.decide.cli import (  # noqa: E402
+    backlog_decide,
+    backlog_decide_reindex,
+    backlog_decisions,
+)
+
+cli.command("decide", hidden=True)(backlog_decide)
+cli.command("decisions", hidden=True)(backlog_decisions)
+cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
+
 
 # Selection-time enforcement (ab-fcf9cec5): a node another session is actively
 # driving holds a live ``node:<id>`` claim and must be skipped so two sessions
@@ -12255,7 +12267,7 @@ _TRACKER_OWNED_VERBS = frozenset({
     "dispatch-lanes",
     # footnote-owned DATA with a graph-resident write path (refused until the
     # write moves to the sidecar seam)
-    "cost", "session add",
+    "cost", "session add", "decide", "decisions", "decide-reindex",
     # sub-app mutations
     "triage apply", "capture promote",
     "batch join", "batch prepare", "batch ship", "batch ship-closeable",

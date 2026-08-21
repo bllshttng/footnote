@@ -42,7 +42,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno mail send\|reply\|unread\|ack` | Cross-project messaging over the jsonl bus; live-inject-first, durable fallback. |
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
 | `fno carveout add` | Last resort: work too big for this PR. Else fix it here. |
-| `fno inbox outstanding` / `fno decide` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `decide` records a ruling; `decide list` recovers it (no subject = recent). |
+| `fno outstanding` / `fno backlog` | Awaiting a human: carve-outs + questions; `ask`/`clear`. `backlog decide` records a ruling; `backlog decisions` recovers it (no subject = recent). |
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 

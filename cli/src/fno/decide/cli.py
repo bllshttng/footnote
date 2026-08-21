@@ -1,4 +1,4 @@
-"""`fno decide` - record a decision with no question on file, and recover one.
+"""Decision commands for ``fno backlog`` and the one-release old-spelling shim.
 
 That is the case that loses today: the operator states a ruling in chat, it
 touches no file, emits no event, and dies with the context. This verb is the
@@ -15,22 +15,23 @@ from typing import List, Optional
 
 import typer
 
-decide_app = typer.Typer(
+shim_app = typer.Typer(
     help=(
-        "Record an operator decision so it survives the session, and recover "
-        "the decision history for a subject. `fno decide --subject <subject> "
-        "--decision \"...\"` records; `fno decide list --subject <subject>` "
-        "recovers, newest first, including superseded ones (marked, not "
-        "hidden). The subject is any string - a node id/slug, a PR (`pr-923`), "
-        "a file, an area - and the reader takes every one the writer takes. "
-        "`fno decide list` with no subject shows the recent ones; "
-        "`fno decide reindex` backfills decisions recorded before the index."
+        "Deprecated compatibility shim for the decision commands now under "
+        "fno backlog."
     ),
+)
+decide_app = shim_app
+
+_DEPRECATION_NOTICE = (
+    "fno decide is now `fno backlog decide` (`fno decide list` -> "
+    "`fno backlog decisions`, `fno decide reindex` -> `fno backlog "
+    "decide-reindex`). This spelling is removed next release."
 )
 
 
-@decide_app.callback(invoke_without_command=True)
-def record(
+@shim_app.callback(invoke_without_command=True)
+def legacy_record(
     ctx: typer.Context,
     subject: Optional[str] = typer.Option(
         None, "--subject", help="What the decision governs: a node id/slug, file, or area."
@@ -69,12 +70,37 @@ def record(
         "'agent', or 'beastmode'. Omit to resolve it from the current session.",
     ),
 ) -> None:
-    """Record a decision as a durable event plus a graph projection."""
+    """Warn once, then delegate the old spelling to the backlog leaf."""
+    typer.echo(_DEPRECATION_NOTICE, err=True)
     if ctx.invoked_subcommand is not None:
         return
+    _record(
+        subject=subject,
+        decision=decision,
+        question_id=question_id,
+        rationale=rationale,
+        option=option,
+        supersedes=supersedes,
+        decided_by=decided_by,
+        authority=authority,
+    )
+
+
+def _record(
+    *,
+    subject: Optional[str],
+    decision: Optional[str],
+    question_id: Optional[str],
+    rationale: Optional[str],
+    option: List[str],
+    supersedes: Optional[str],
+    decided_by: Optional[str],
+    authority: Optional[str],
+) -> None:
+    """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
         typer.echo(
-            "decide: --subject and --decision are required to record", err=True
+            "backlog decide: subject and decision are required to record", err=True
         )
         raise typer.Exit(1)
 
@@ -88,11 +114,11 @@ def record(
 
     # Validated here, on the write path, and deliberately NOT in schema.yaml:
     # rows already on disk carry invented `crown-l2-<node>` spellings, and a
-    # schema enum would make `fno decide reindex` reject them and drop recall
+    # schema enum would make `fno backlog decide-reindex` reject them and drop recall
     # for real rulings.
     if authority is not None and authority not in AUTHORITY_SOURCES:
         typer.echo(
-            f"decide: --authority '{authority}' is not one of "
+            f"backlog decide: --authority '{authority}' is not one of "
             f"{', '.join(AUTHORITY_SOURCES)}. Nothing was recorded. Use 'crown' "
             "for a king ruling inside its own scope; omit the flag to resolve it "
             "from this session.",
@@ -117,7 +143,7 @@ def record(
         )
     except RefusedAuthorityError as exc:
         typer.echo(
-            f"decide: refused. This session is agent {exc.agent_handle}, so it "
+            f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
             "cannot record under operator authority. If only the operator can "
             "settle this, use `fno inbox outstanding ask`. If ruling as an agent, "
             "drop --authority operator; it records agent coordination.",
@@ -126,7 +152,7 @@ def record(
         raise typer.Exit(3)
     except UnattributedAuthorityError:
         typer.echo(
-            "decide: refused. This process has no session identity and no "
+            "backlog decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run it from a terminal, "
             "join the session so a handle can be stamped, or drop --authority "
@@ -139,14 +165,14 @@ def record(
         # remedy: the durable event HAS landed, so re-running this command
         # mints a second id for one ruling.
         typer.echo(
-            f"decide: recorded {exc.decision_id} to the project journal, but the "
-            f"recall index write failed: {exc}. Run `fno decide reindex` to "
+            f"backlog decide: recorded {exc.decision_id} to the project journal, but the "
+            f"recall index write failed: {exc}. Run `fno backlog decide-reindex` to "
             f"recover it. Do NOT re-run decide; that records it twice.",
             err=True,
         )
         raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
-        typer.echo(f"decide: failed to record: {exc}", err=True)
+        typer.echo(f"backlog decide: failed to record: {exc}", err=True)
         raise typer.Exit(1)
 
     did = result["decision_id"]
@@ -159,9 +185,9 @@ def record(
         _, everything, _ = list_decisions()
         if supersedes not in {d.get("decision_id") for d in everything}:
             typer.echo(
-                f"decide: warning - no decision {supersedes} is on record, so "
+                f"backlog decide: warning - no decision {supersedes} is on record, so "
                 f"nothing was marked superseded. Check the id with "
-                f"`fno decide list --subject {subject}`.",
+                f"`fno backlog decisions {subject}`.",
                 err=True,
             )
     # The receipt names the recall command in BOTH branches. A subject that
@@ -169,28 +195,92 @@ def record(
     # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
-            f"decide: recorded {did}; subject names no graph node, so no "
+            f"backlog decide: recorded {did}; subject names no graph node, so no "
             f"projection was written (the event and the index are the record). "
-            f"Recover with: fno decide list --subject {subject}",
+            f"Recover with: fno backlog decisions {subject}",
             err=True,
         )
     else:
         typer.echo(
-            f"decide: recorded {did} on {result['node_id']}. "
-            f"Recover with: fno decide list --subject {result['node_id']}",
+            f"backlog decide: recorded {did} on {result['node_id']}. "
+            f"Recover with: fno backlog decisions {result['node_id']}",
             err=True,
         )
     # stdout carries the value: the new decision id.
     typer.echo(did)
 
 
-@decide_app.command("list")
+def backlog_decide(
+    subject: Optional[str] = typer.Argument(
+        None, help="Node or subject governed by the decision."
+    ),
+    decision: Optional[str] = typer.Argument(
+        None, help="What was chosen."
+    ),
+    question_id: Optional[str] = typer.Option(
+        None,
+        "--question-id",
+        help="The operator_question this decision answers.",
+    ),
+    rationale: Optional[str] = typer.Option(
+        None, "--rationale", help="One line: the reason, not a restatement."
+    ),
+    option: List[str] = typer.Option(
+        [], "--option", help="What was on the table; repeatable."
+    ),
+    supersedes: Optional[str] = typer.Option(
+        None, "--supersedes", help="Decision id this one overturns."
+    ),
+    decided_by: Optional[str] = typer.Option(
+        None, "--decided-by", help="A name to relay for someone else."
+    ),
+    authority: Optional[str] = typer.Option(
+        None,
+        "--authority",
+        help="How the decider was entitled to decide.",
+    ),
+    subject_legacy: Optional[str] = typer.Option(
+        None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
+    ),
+    decision_legacy: Optional[str] = typer.Option(
+        None,
+        "--decision",
+        hidden=True,
+        help="Deprecated alias for the decision argument.",
+    ),
+) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
+
+    subject = merge_deprecated_alias(
+        subject,
+        subject_legacy,
+        canonical_flag="<subject>",
+        legacy_flag="--subject",
+    )
+    decision = merge_deprecated_alias(
+        decision,
+        decision_legacy,
+        canonical_flag="<decision>",
+        legacy_flag="--decision",
+    )
+    _record(
+        subject=subject,
+        decision=decision,
+        question_id=question_id,
+        rationale=rationale,
+        option=option,
+        supersedes=supersedes,
+        decided_by=decided_by,
+        authority=authority,
+    )
+
+
+@shim_app.command("list")
 def list_cmd(
     subject: Optional[str] = typer.Option(
         None,
         "--subject",
-        help="What the decision governs: a node id/slug, a PR, a file, an area. "
-        "Omit it to see the recent decisions across every subject.",
+        help="What the decision governs. Omit it for recent decisions.",
     ),
     limit: int = typer.Option(
         20, "--limit", help="Most recent N. 0 or less means no cap."
@@ -205,6 +295,47 @@ def list_cmd(
         False, "--json", "-J", help="Emit one JSON object instead of the human block."
     ),
 ) -> None:
+    _list_decisions(subject, limit, lane, as_json)
+
+
+def backlog_decisions(
+    subject: Optional[str] = typer.Argument(
+        None,
+        help="Node or subject whose decisions to recover. Omit for recent decisions.",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", help="Most recent N. 0 or less means no cap."
+    ),
+    lane: Optional[str] = typer.Option(
+        None,
+        "--lane",
+        metavar="law|coord|grant|unattributed",
+        help="Show only one authority lane.",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", "-J", help="Emit one JSON object instead of the human block."
+    ),
+    subject_legacy: Optional[str] = typer.Option(
+        None, "--subject", hidden=True, help="Deprecated alias for the subject argument."
+    ),
+) -> None:
+    from fno._flag_aliases import merge_deprecated_alias
+
+    subject = merge_deprecated_alias(
+        subject,
+        subject_legacy,
+        canonical_flag="<subject>",
+        legacy_flag="--subject",
+    )
+    _list_decisions(subject, limit, lane, as_json)
+
+
+def _list_decisions(
+    subject: Optional[str],
+    limit: int,
+    lane: Optional[str],
+    as_json: bool,
+) -> None:
     """Recover the decision history for a subject, newest first."""
     from fno.decide import (
         list_decisions,
@@ -215,7 +346,7 @@ def list_cmd(
 
     if lane not in {None, "law", "coord", "grant", "unattributed"}:
         typer.echo(
-            "decide list: --lane must be law, coord, grant, or unattributed",
+            "backlog decisions: --lane must be law, coord, grant, or unattributed",
             err=True,
         )
         raise typer.Exit(2)
@@ -228,10 +359,10 @@ def list_cmd(
     except (OSError, ValueError) as exc:
         # ValueError covers UnicodeDecodeError, which a torn multi-byte append
         # raises and which is NOT an OSError.
-        typer.echo(f"decide list: cannot read the decision index: {exc}", err=True)
+        typer.echo(f"backlog decisions: cannot read the decision index: {exc}", err=True)
         raise typer.Exit(1)
     except ExternalMetadataUnavailable as exc:
-        typer.echo(f"decide list: {exc}", err=True)
+        typer.echo(f"backlog decisions: {exc}", err=True)
         raise typer.Exit(1)
 
     decisions = found[:limit] if limit > 0 else found
@@ -312,7 +443,7 @@ def list_cmd(
                         "before authority was an earned value."
                     )
                 typer.echo(
-                    f"decide list: 0 {lane} decisions for '{label}', but "
+                    f"backlog decisions: 0 {lane} decisions for '{label}', but "
                     f"{len(unfiltered)} {noun} sit under it: {lanes}."
                     f"{hint} Drop --lane to read them.",
                     err=True,
@@ -321,7 +452,7 @@ def list_cmd(
 
         hint = (
             "" if _index_path().exists()
-            else " (no index yet on this machine - run `fno decide reindex` to "
+            else " (no index yet on this machine - run `fno backlog decide-reindex` to "
             "backfill what is already on disk)"
         )
         # NEVER "no decisions recorded". That is a claim about the world, and
@@ -330,23 +461,23 @@ def list_cmd(
         if near:
             listed = "; ".join(f"'{s}' ({n})" for s, n in near)
             typer.echo(
-                f"decide list: nothing is indexed under the exact subject "
+                f"backlog decisions: nothing is indexed under the exact subject "
                 f"'{label}'{hint}. Nearly matching subjects: {listed}. Read one "
-                f"with: fno decide list --subject '{near[0][0]}'",
+                f"with: fno backlog decisions '{near[0][0]}'",
                 err=True,
             )
         elif subject and looks_like_decision_id(subject):
             typer.echo(
-                f"decide list: '{label}' is shaped like a decision id, and no "
+                f"backlog decisions: '{label}' is shaped like a decision id, and no "
                 f"decision on this machine carries it{hint}. It is not indexed "
-                "as a subject either. Browse the store with: fno decide list",
+                "as a subject either. Browse the store with: fno backlog decisions",
                 err=True,
             )
         else:
             typer.echo(
-                f"decide list: no decision is indexed under the subject "
+                f"backlog decisions: no decision is indexed under the subject "
                 f"'{label}'{hint}. Rulings on other subjects are unaffected; "
-                "browse them with: fno decide list",
+                "browse them with: fno backlog decisions",
                 err=True,
             )
         return
@@ -389,7 +520,7 @@ def list_cmd(
 
     if truncated:
         typer.echo(
-            f"decide list: showing {len(decisions)} of {len(found)}; "
+            f"backlog decisions: showing {len(decisions)} of {len(found)}; "
             f"--limit 0 for all.",
             err=True,
         )
@@ -405,14 +536,13 @@ def list_cmd(
         # reader trusting a short answer.
         listed = "; ".join(f"'{s}' ({n})" for s, n in near)
         typer.echo(
-            f"decide list: decisions also sit under subjects that nearly match "
+            f"backlog decisions: decisions also sit under subjects that nearly match "
             f"'{label}': {listed}",
             err=True,
         )
 
 
-@decide_app.command("reindex")
-def reindex_cmd() -> None:
+def _reindex() -> None:
     """Backfill the recall index from the graph projections and the journals.
 
     A decision recorded before the index existed is durable but unreadable
@@ -426,7 +556,7 @@ def reindex_cmd() -> None:
         counts = reindex()
     except Exception as exc:  # noqa: BLE001 - a partial backfill must not read as done
         typer.echo(
-            f"decide reindex: failed on the index at {_index_path()}: {exc}", err=True
+            f"backlog decide-reindex: failed on the index at {_index_path()}: {exc}", err=True
         )
         raise typer.Exit(1)
 
@@ -443,14 +573,23 @@ def reindex_cmd() -> None:
 
     # Exit 1 on ANY write failure, not only on a total one. The counter cannot
     # tell an unusable legacy row from a store that went unwritable partway
-    # through, and a caller gating on the exit code (`fno decide reindex && ...`,
+    # through, and a caller gating on the exit code (`fno backlog decide-reindex && ...`,
     # or an agent following the recovery an IndexWriteError named) must not read
     # success while decisions stay unrecoverable. Fail safe on the ambiguity.
     if counts.get("invalid"):
         typer.echo(
-            f"decide reindex: {counts['invalid']} row(s) could not be written, "
+            f"backlog decide-reindex: {counts['invalid']} row(s) could not be written, "
             f"so the backfill is incomplete. Check that {_index_path()} is "
             f"writable, then run it again.",
             err=True,
         )
         raise typer.Exit(1)
+
+
+@shim_app.command("reindex")
+def reindex_cmd() -> None:
+    _reindex()
+
+
+def backlog_decide_reindex() -> None:
+    _reindex()

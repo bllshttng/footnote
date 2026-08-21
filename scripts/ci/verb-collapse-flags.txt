@@ -14,6 +14,9 @@ approvals show !--db
 backlog add !--tag
 backlog advance !--continuation
 backlog cost !--session
+backlog decide !--decision
+backlog decide !--subject
+backlog decisions !--subject
 backlog idea !--tag
 backlog intake !--batch
 backlog update !--tag

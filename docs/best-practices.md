@@ -55,9 +55,9 @@ The retro-triage harvest at merge turns surviving items into backlog nodes. That
 A decision stated in chat dies with the context. Weeks later the operator asks what happened with the thing you discussed, and the only answer is a transcript export. So record it while it is still in front of you.
 
 ```bash
-fno decide --subject <node|pr-N|area> --decision "<what was chosen>" --rationale "<why>"
-fno decide list --subject <same>        # newest first, superseded rows marked
-fno decide list                         # the recent decisions across every subject
+fno backlog decide <node|pr-N|area> "<what was chosen>" --rationale "<why>"
+fno backlog decisions <same>        # newest first, superseded rows marked
+fno backlog decisions                         # the recent decisions across every subject
 ```
 
 When a node exists, its id is the subject. Otherwise use `pr-<n>`, or the area. When a ruling changes what a worker does next, record it. An answered question is already recorded for you, because `fno inbox outstanding clear --answer` writes the decision on the same call.

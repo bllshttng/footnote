@@ -31,7 +31,7 @@ AUTHORITY_LANE_CUTOVER = "2026-08-21T00:00:00Z"
 # Enforced on the WRITE path only, never in schema.yaml. The index on disk
 # already holds `crown-l1`, `crown-l2-x-f3d0` and `crown-l2-x-b79f` in this
 # field, invented by kings who had no correct value to pass. A JSON-Schema enum
-# would make `fno decide reindex` reject those rows as unusable and silently
+# would make `fno backlog decide-reindex` reject those rows as unusable and silently
 # drop recall for real rulings, so the closed set binds where the value is
 # authored and the reader stays permissive.
 AUTHORITY_SOURCES: tuple[str, ...] = (
@@ -64,8 +64,8 @@ class IndexWriteError(RuntimeError):
 
     Separate from a plain failure because the remedy is the opposite one: the
     project journal already holds the event, so the operator must NOT re-run
-    `fno decide` (that mints a second id for one ruling) and must run
-    `fno decide reindex` instead.
+    `fno backlog decide` (that mints a second id for one ruling) and must run
+    `fno backlog decide-reindex` instead.
     """
 
     def __init__(self, decision_id: str, cause: BaseException) -> None:
@@ -237,7 +237,7 @@ def record_decision(
     An index write that fails is not a success, so it raises
     :class:`IndexWriteError`. That error carries the decision_id, because by
     then the durable event HAS landed: re-running the command would mint a
-    second id for one ruling, and `fno decide reindex` is the recovery.
+    second id for one ruling, and `fno backlog decide-reindex` is the recovery.
     """
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
@@ -284,7 +284,7 @@ def record_decision(
         print(
             f"decide: recorded {decision_id}, but the graph projection failed: "
             f"{exc}. The decision is durable and recoverable with "
-            f"`fno decide list`; the subject node just does not show it.",
+            f"`fno backlog decisions`; the subject node just does not show it.",
             file=sys.stderr,
         )
         node_id = None
@@ -434,7 +434,7 @@ def _read_index(path: Path, *, warn: bool = True) -> "tuple[list[dict], int]":
         # where a human can still read it.
         print(
             f"decide: {damaged} damaged row(s) in {path} were skipped. "
-            f"`fno decide reindex` re-folds the journals and moves the rest to "
+            f"`fno backlog decide-reindex` re-folds the journals and moves the rest to "
             f"{path.name}.corrupt.",
             file=sys.stderr,
         )
@@ -690,7 +690,7 @@ def list_decisions(
         if not keep(row):
             continue
         # One id, one row. reindex is read-then-write with no lock across the
-        # fold, so a `fno decide` landing mid-backfill can be appended twice;
+        # fold, so a `fno backlog decide` landing mid-backfill can be appended twice;
         # the index is append-only, so the reader is where that stops being
         # visible as two rulings.
         did = str(row.get("decision_id") or "")

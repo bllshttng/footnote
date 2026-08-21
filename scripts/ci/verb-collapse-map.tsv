@@ -75,6 +75,9 @@ backlog capture scan	T1	backlog capture scan	1
 backlog capture tidy	T1	backlog capture tidy	3
 backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
+backlog decide	T1	backlog decide	13
+backlog decide-reindex	T1	backlog decide-reindex	5
+backlog decisions	T1	backlog decisions	16
 backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
 backlog dispatch-lanes	T1	backlog dispatch-lanes	1
