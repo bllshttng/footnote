@@ -2,7 +2,7 @@
 
 Covers `fno.plan._project.project_graph_nodes`: walk a set of node ids, resolve
 each node's linked plan, inject the parent slug, and project the mirror fields.
-This is the shared primitive both the instrumented verbs and `fno plan sync`
+This is the shared primitive both the instrumented verbs and `fno do plan sync`
 call. Best-effort per node; returns a count of docs rewritten.
 """
 from __future__ import annotations

@@ -214,9 +214,9 @@ else:
       if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
         _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
       fi
-      _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
+      _bind_args=(do pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
       [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
-      _BIND_MANUAL="fno pr bind-created --url $_CREATED_PR_URLS --repo $CWD"
+      _BIND_MANUAL="fno do pr bind-created --url $_CREATED_PR_URLS --repo $CWD"
       [[ -n "$_BIND_OWNER" ]] && _BIND_MANUAL="$_BIND_MANUAL --owner $_BIND_OWNER"
       _BIND_ATTEMPT=0
       _BIND_RC=1

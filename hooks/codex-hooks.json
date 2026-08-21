@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "bash ${PLUGIN_ROOT}/hooks/graph-write-protect.sh",
-            "statusMessage": "checking fno state surfaces"
+            "statusMessage": "checking fno do state surfaces"
           }
         ]
       },

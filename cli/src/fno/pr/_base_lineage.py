@@ -35,9 +35,9 @@ guard that refuses it would be switched off within the week.
 One predicate, four call sites, because a guard on one of N reachable merge
 paths is decorative. The reachable paths in this repo:
 
-  - ``_merge.py``   ``fno pr merge`` (and its API fallback)        -> checked
+  - ``_merge.py``   ``fno do pr merge`` (and its API fallback)        -> checked
   - ``_verify.py``  the bounded ``gh pr merge --auto`` remediation -> checked
-  - ``finalize.rs`` the autonomous arm, via ``fno pr base-lineage-check`` -> checked
+  - ``finalize.rs`` the autonomous arm, via ``fno do pr base-lineage-check`` -> checked
   - ``.github/workflows/stacked-base-guard.yml``, same verb        -> checked
   - ``hooks/git-protection.py`` for an agent-run bare ``gh pr merge`` -> checked
   - the GitHub web/mobile merge button                             -> NOT reachable
@@ -98,7 +98,7 @@ def _probe(args: list, cwd: str):
     ``ToolMissing`` is caught here rather than at each call site: the in-process
     callers (``_merge.py``, ``_verify.py``) promise that an unevaluated probe
     degrades to a breadcrumb, and an uncaught ``ToolMissing`` from a box with no
-    ``git`` on PATH would instead surface as a traceback out of ``fno pr
+    ``git`` on PATH would instead surface as a traceback out of ``fno do pr
     verify`` - the opposite of the stated contract.
     """
     try:
@@ -275,7 +275,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     """``(verdict, reason)`` for merging PR ``pr_number`` into its declared base.
 
     ``pr_number`` is whatever identifier ``gh pr view`` accepts - a number, a
-    URL, a branch name - and is never parsed here. ``fno pr verify`` takes its
+    URL, a branch name - and is never parsed here. ``fno do pr verify`` takes its
     ``--pr-number`` as a free-form string for exactly that reason, so an
     ``int()`` at the call site would turn a URL into a ValueError traceback out
     of the remediation arm, after every precondition had already passed.
@@ -385,7 +385,7 @@ def emit_bypass_escape(pr_number, cwd: str, reason: str) -> None:
 
     ``pr`` is an int downstream (``emit_gate_escape`` does ``pr <= 0`` and
     dedups on ``(reason, pr)``), while this module's identifier is free-form -
-    ``fno pr verify`` carries its PR as a str. Passing the str through raised
+    ``fno do pr verify`` carries its PR as a str. Passing the str through raised
     TypeError straight into the swallow below, so the bypass on that path
     recorded NO escape at all: a fail-open telemetry path that reported an
     unbypassed run. The identifier is kept in ``detail`` for the URL/branch

@@ -1,4 +1,4 @@
-"""Tests for fno plan migrate-keys (x-f34f US7).
+"""Tests for fno do plan migrate-keys (x-f34f US7).
 
 Byte-preserving synonym-key collapse: graph_node_id->node, created_at->created,
 depends_on->blocked_by, kind->type, and drop claims where it equals node.

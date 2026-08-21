@@ -408,7 +408,7 @@ def clean_lock_dir(tmp_path: Path) -> Path:
 def _no_review_coverage_recompute(monkeypatch):
     """Hermetic default for the coverage recompute (x-3a3f).
 
-    `fno pr merge`/`status` recompute a missing coverage row by shelling out to
+    `fno do pr merge`/`status` recompute a missing coverage row by shelling out to
     the `fno-agents review-coverage` verb. In the test environment that
     resolver can find a real installed binary (PATH or the cargo dev target),
     so an unstubbbed no-event path would spawn it against real gh. This stub

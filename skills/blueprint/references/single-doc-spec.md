@@ -123,6 +123,6 @@ Example composing multiple modifiers:
 
 Blueprint takes any input and produces the plan.
 A feature description, a node id, or a cited-findings doc all work.
-The skill resolves a save path via `fno plan path`, seeds the body, and mutates.
+The skill resolves a save path via `fno do plan path`, seeds the body, and mutates.
 A prior `/think` run is optional research, never a prerequisite.
 `/target` chains blueprint into do and ship whether or not think ran.

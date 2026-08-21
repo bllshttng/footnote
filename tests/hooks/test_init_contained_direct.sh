@@ -9,7 +9,7 @@
 # There are TWO gates and they fail differently, which is the whole reason this
 # file exists:
 #
-#   pre-claim   `fno target check-contained` beside the review gate. Refuses
+#   pre-claim   `fno do target check-contained` beside the review gate. Refuses
 #               before anything is claimed or written.
 #   post-claim  the acquire-then-validate re-check, taken WHILE HOLDING the
 #               claim. Adoption can commit between the pre-claim gate and the
@@ -78,7 +78,7 @@ make_repo() {
 
   cat > "${_dir}/bin/fno" << STUB
 #!/usr/bin/env bash
-if [[ "\$1" == "target" && "\$2" == "check-contained" ]]; then
+if [[ "\$1" == "do" && "\$2" == "target" && "\$3" == "check-contained" ]]; then
   echo "call" >> "${_dir}/contained-calls.log"
   _n=\$(wc -l < "${_dir}/contained-calls.log" | tr -d ' ')
   if [[ "\$_n" == "1" ]]; then
@@ -90,6 +90,10 @@ if [[ "\$1" == "target" && "\$2" == "check-contained" ]]; then
     echo "stub: x-261c ships inside x-6320's PR; run \\\`/fno:target x-6320\\\`." >&2
   fi
   exit \$_rc
+fi
+if [[ "\$1" == "target" ]]; then
+  echo "deprecated target root reached" >&2
+  exit 2
 fi
 if [[ "\$1" == "claim" && "\$2" == "release" ]]; then
   # Record the full argv so a scenario can assert the KEY and HOLDER, not just

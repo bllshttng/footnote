@@ -116,7 +116,7 @@ RUST_CLIENT_VERBS = frozenset(
         # Eliminate-don't-vendor folds (packaging EPIC ab-8bdb4642, US1
         # ab-58645f63): Rust ports of the deleted scripts/lib/kill-criteria.sh
         # and scripts/lib/verify-event-evidence.sh. Both dispatch DIRECTLY in
-        # client.rs before build_request (no daemon RPC). The Python `fno phase
+        # client.rs before build_request (no daemon RPC). The Python `fno do phase
         # kill-check` wrapper resolves the binary and invokes its verb
         # explicitly (not via `fno agents` routing); these entries exist so
         # the client.rs<->router parity test stays in sync.
@@ -154,7 +154,7 @@ RUST_CLIENT_VERBS = frozenset(
         "needs",
         # Standalone review_coverage producer (x-3a3f): the same resolver +
         # emitter the stop hook uses, so any path that can reach the merge gate
-        # (``fno pr merge``/``status`` recompute, a manifest-less session) can
+        # (``fno do pr merge``/``status`` recompute, a manifest-less session) can
         # also satisfy it. Dispatched directly in client.rs before
         # build_request (no daemon RPC, no Python impl).
         "review-coverage",
@@ -303,7 +303,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "loop-check": "Stop-hook decision: external-truth done()/backstop check (read-only).",
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
-    "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
+    "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno do phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 when all pass. Shelled by the close verbs for close_probes.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",

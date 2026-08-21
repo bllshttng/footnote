@@ -48,7 +48,7 @@ def test_stamp_written_fields_are_modeled() -> None:
     """Every frontmatter key ``_stamp.py`` writes has a PlanFrontmatter field.
 
     Catches the drift class where the ship-time writer starts emitting a key
-    the schema doesn't know about, so ``fno plan validate`` would silently pass
+    the schema doesn't know about, so ``fno do plan validate`` would silently pass
     a plan carrying an unmodeled ship field.
     """
     src = Path(_stamp_mod.__file__).read_text(encoding="utf-8")
@@ -110,7 +110,7 @@ def test_design_template_carries_every_required_plan_field() -> None:
 
     Fails the build the moment PlanFrontmatter gains a required field the
     template does not show - the drift that made every authored design report
-    `Field required` from `fno plan validate`.
+    `Field required` from `fno do plan validate`.
     """
     frontmatter = _design_template().split("---")[1]
     shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))

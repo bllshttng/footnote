@@ -1,4 +1,4 @@
-"""Tests for the `fno pr status` coalescing cache.
+"""Tests for the `fno do pr status` coalescing cache.
 
 The load-bearing claim: N sessions polling one PR issue ONE network read per
 TTL (a secondary limit counts request rate, so transport does not save you -

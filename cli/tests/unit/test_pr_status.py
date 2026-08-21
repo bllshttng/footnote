@@ -1,4 +1,4 @@
-"""Tests for `fno pr status` verdict logic (x-8b64 G).
+"""Tests for `fno do pr status` verdict logic (x-8b64 G).
 
 The non-trivial part is classifying a mixed statusCheckRollup: CheckRun entries
 carry status+conclusion (conclusion empty until COMPLETED), StatusContext
@@ -595,7 +595,7 @@ def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
 
 # ---- x-e601: ready conjoins review coverage, ready_blockers names the conjunct ----
 #
-# `fno pr merge` already refused on uncovered coverage while this verb printed
+# `fno do pr merge` already refused on uncovered coverage while this verb printed
 # ready: true from the same payload (the specimen set: five PRs at once, each
 # green and uncovered). ready now conjoins coverage exactly the way merge
 # reads it, and the blockers list is the positive marker for WHICH conjunct
@@ -1536,7 +1536,7 @@ def test_run_status_fetch_failure_is_error(monkeypatch, capsys):
     assert out["settled"] is False
 
 
-# --- x-705b: optional-review signal on `fno pr status` ---------------------
+# --- x-705b: optional-review signal on `fno do pr status` ---------------------
 #
 # These exercise read_optional_review_state with a fake `runner` (no gh) plus the
 # run_status integration. "Optional" resolves to the hardcoded bots regardless of

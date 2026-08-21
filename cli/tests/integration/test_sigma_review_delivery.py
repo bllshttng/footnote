@@ -37,7 +37,7 @@ def test_zero_bot_blocking_artifact_blocks_until_durable_disposition(
     published = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--publish-sigma",
             str(report),
             *common,
@@ -50,7 +50,7 @@ def test_zero_bot_blocking_artifact_blocks_until_durable_disposition(
     assert published.exit_code == 0, published.output
     assert json.loads(published.output)["finding_count"] == 1
 
-    inspected = CliRunner().invoke(app, ["review", "--inspect-sigma", *common])
+    inspected = CliRunner().invoke(app, ["do", "review", "--inspect-sigma", *common])
     assert inspected.exit_code == 0, inspected.output
     artifact = json.loads(inspected.output)
     assert artifact["status"] == "accepted"
@@ -95,7 +95,7 @@ def test_zero_bot_blocking_artifact_blocks_until_durable_disposition(
     stale = CliRunner().invoke(
         app,
         [
-            "review",
+            "do", "review",
             "--inspect-sigma",
             *[
                 "head-b" if token == "head-a" else token

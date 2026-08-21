@@ -1,4 +1,4 @@
-"""`fno pr merge` reconcile and node-resolution coverage.
+"""`fno do pr merge` reconcile and node-resolution coverage.
 
 The ship-phase provenance stamp that gave this file its name moved to
 `fno backlog update --pr-number` (the PR-link choke point every shipped node
@@ -47,7 +47,7 @@ def _sessions(g: Path, node_id: str) -> list[dict]:
     return next(e for e in read_graph(g) if e["id"] == node_id).get("sessions", [])
 
 
-# --- fno pr merge closes its own node (baked-in reconcile, no memory) ---------
+# --- fno do pr merge closes its own node (baked-in reconcile, no memory) ---------
 
 _FOOT = "https://github.com/bllshttng/footnote/pull"
 

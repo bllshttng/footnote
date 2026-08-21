@@ -297,7 +297,7 @@ is_code_payload() {
     *) return 1 ;;      # seed | handoff
   esac
 }
-# A claude `/target <node>` worker isolates ITSELF at cold-start (`fno target
+# A claude `/target <node>` worker isolates ITSELF at cold-start (`fno do target
 # start` -> `fno worktree ensure` -> the harness `EnterWorktree` tool), which
 # moves the session's cwd while leaving its PROJECT at the launch dir. Pre-
 # creating here instead binds the project to the worktree: claude keys
@@ -308,13 +308,13 @@ is_code_payload() {
 # (and the branch name, spawn-derived vs `/target`'s own).
 #
 # Gated on claude because `EnterWorktree` is a Claude Code harness tool: a
-# codex/opencode worker can run `fno target start` but cannot move its session
+# codex/opencode worker can run `fno do target start` but cannot move its session
 # into the result (a `cd` dies with the shell), so it still needs pre-creation --
 # and its transcripts never land in ~/.claude/projects/ anyway. `/execute` and `/fix`
 # refuse on a protected branch rather than isolating, so they keep it everywhere.
 #
 # Both a NODE and a literal `/target` message are required, and neither is
-# incidental. The cold-start that does the isolating is `fno target start
+# incidental. The cold-start that does the isolating is `fno do target start
 # <node>`, so a free-text `/target ship the thing` has nothing to resolve --
 # unattended it hits the location-refusal backstop and aborts. And PAYLOAD_MODE
 # defaults to `build`, so a caller that omits --payload-mode while passing a
@@ -429,7 +429,7 @@ cmd+=(--name "$NAME")
 # x-9d11 mechanical refusal carrier: when the spawn message itself carries the
 # --no-merge posture flag (normalize.sh or harness_map injected it), export the
 # env var too so the worker's init folds the refusal even if it never passes
-# the flag through to `fno target start/init` (post-compaction, thin skill
+# the flag through to `fno do target start/init` (post-compaction, thin skill
 # layer). The flag stays the attributable carrier; the env is the backstop.
 # Scoped to /target-family first tokens (same vocabulary as harness_map's
 # message_carries_no_merge): a /think or /review prompt that MENTIONS the flag

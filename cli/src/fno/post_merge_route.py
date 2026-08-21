@@ -5,7 +5,7 @@ runner would have to re-derive. The pr-watch daemon is the sole merge detector;
 it calls :func:`dispatch_post_merge_ritual` here, which asks
 :func:`decide_post_merge_route` for the single warm/cold/defer verdict, reserves
 a durable receipt, and then either live-injects the ritual into the borrowed
-session or runs ``fno pr ritual <n> --autonomous`` directly. No post-merge path
+session or runs ``fno do pr ritual <n> --autonomous`` directly. No post-merge path
 creates a background thread.
 
 The module owns the decision so a later caller adopts one function instead of
@@ -32,7 +32,7 @@ from fno.harness_identity import canonical_handle, current_session_ids
 # conditional headless judgment leg is the single model-capable layer on both,
 # so a borrowed live session cannot re-derive the ritual unbounded (the PR #575
 # -> #577 failure mode this closes).
-WARM_PROMPT = "fno pr ritual {pr} --autonomous"
+WARM_PROMPT = "fno do pr ritual {pr} --autonomous"
 
 def _live_codex_registry_entry(session_id: str):
     """A codex registry candidate addressable as ``session_id``, preferring one
@@ -151,7 +151,7 @@ def inject_pr_merged(
 ) -> Tuple[bool, str]:
     """Live-inject the ritual verb into the originating peer. Never raises.
 
-    Injects the RAW ``WARM_PROMPT`` command - the same ``fno pr ritual <pr>
+    Injects the RAW ``WARM_PROMPT`` command - the same ``fno do pr ritual <pr>
     --autonomous`` verb the cold path runs as a subprocess, NOT an
     ``<fno_mail>`` envelope, so the peer EXECUTES it rather than treating it as
     chat. ``claude`` uses the control.sock reply (a busy recipient queues the
@@ -477,7 +477,7 @@ def _finalize_origin_ledger(
 
 @dataclass(frozen=True)
 class ColdRitualResult:
-    """Outcome of one bounded ``fno pr ritual <n> --autonomous`` subprocess run.
+    """Outcome of one bounded ``fno do pr ritual <n> --autonomous`` subprocess run.
 
     ``tail`` is the bounded stdout receipt (the verb prints a per-leg
     ``step=<name> status=<ok|skipped|failed>`` line) carried into the dispatch
@@ -488,7 +488,7 @@ class ColdRitualResult:
 
 
 def _default_run_ritual_verb(pr_number: int, cwd: str) -> ColdRitualResult:
-    """Run ``fno pr ritual <n> --autonomous`` from the candidate canonical root.
+    """Run ``fno do pr ritual <n> --autonomous`` from the candidate canonical root.
 
     A bounded subprocess: the launchd tick never overlaps, so an unbounded verb
     would wedge every future tick (x-97d8). A non-zero exit is a dispatch failure
@@ -500,7 +500,7 @@ def _default_run_ritual_verb(pr_number: int, cwd: str) -> ColdRitualResult:
 
         cmd = [
             *_subprocess_util.fno_py_cmd(),
-            "pr", "ritual", str(pr_number), "--autonomous",
+            "do", "pr", "ritual", str(pr_number), "--autonomous",
         ]
         proc = subprocess.run(
             cmd, capture_output=True, text=True, cwd=cwd, timeout=300
@@ -537,7 +537,7 @@ def dispatch_post_merge_ritual(
     this function owns the marker + claim dedup (the only idempotency layer - the
     receipt never is), reserves a durable receipt before any action, then either
     live-injects the ritual verb into the borrowed session or runs
-    ``fno pr ritual <n> --autonomous`` directly. No post-merge path creates a
+    ``fno do pr ritual <n> --autonomous`` directly. No post-merge path creates a
     background thread.
 
     ``auto_run=False`` is a clean defer: one deferred receipt, no work, no marker.

@@ -192,7 +192,7 @@ def test_message_option_value_does_not_block_autogen_name():
 
 def test_argv_payload_resume_flag_is_not_scanned():
     # A --resume inside the provider payload must pass through untouched: it is
-    # the child command's flag, not an fno resume request (no --substrate bg added).
+    # the child command's flag, not an fno do resume request (no --substrate bg added).
     argv = ["spawn", "--name", "w", "--argv", "--", "tool", "--resume", "deadbeef"]
     assert _norm(argv) == argv
 

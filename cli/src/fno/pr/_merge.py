@@ -549,7 +549,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         pass
 
     # Ship provenance used to be stamped here on a real merge, recording whoever
-    # ran `fno pr merge`. That names the merger, not the implementer, and a merge
+    # ran `fno do pr merge`. That names the merger, not the implementer, and a merge
     # that lands out-of-band (gh, the web UI, or GitHub's native auto-merge)
     # bypasses this primitive entirely - so it served neither consumer. The ship
     # row now lands at `fno backlog update --pr-number` (the PR-link choke point
@@ -617,9 +617,9 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
     """Close every node the just-merged PR closes, synchronously (x-59a6).
 
     ``_run_post_merge_followups`` only drops a ``.triage-pending`` sentinel for a
-    later stop-hook / ritual to consume; a standalone ``fno pr merge`` from a
+    later stop-hook / ritual to consume; a standalone ``fno do pr merge`` from a
     worktree or bg session never fires that hook, so the node stays open - the
-    exact gap that made ``fno pr merge`` no better than ``gh pr merge``. Close it
+    exact gap that made ``fno do pr merge`` no better than ``gh pr merge``. Close it
     here so the merge always closes its own loop, with no memory/workaround.
 
     Delegates entirely to ``fno backlog reconcile --pr-number --repo`` (the
@@ -717,7 +717,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         repo = repo_slug_from_url(pr_url) or resolve_current_repo_slug(cwd or os.getcwd())
         if not repo:
             print(
-                f"fno pr merge: could not resolve a repo for PR #{pr_number} - "
+                f"fno do pr merge: could not resolve a repo for PR #{pr_number} - "
                 "refusing to reconcile without repo scoping (post-merge node "
                 "close skipped; a later full sweep still catches it)",
                 file=sys.stderr,
@@ -736,7 +736,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
             # node(s) OPEN - the exact gap this closes. run() returns rather
             # than raises, so surface it explicitly instead of a silent success.
             print(
-                f"fno pr merge: reconcile for PR #{pr_number} failed: "
+                f"fno do pr merge: reconcile for PR #{pr_number} failed: "
                 f"{(res.stderr or res.stdout or '').strip()[:200]}",
                 file=sys.stderr,
             )
@@ -753,7 +753,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
             closure_refused = obj.get("closure_refused")
             if closure_refused:
                 print(
-                    f"fno pr merge: reconcile for PR #{pr_number} bound nothing: "
+                    f"fno do pr merge: reconcile for PR #{pr_number} bound nothing: "
                     f"{closure_refused}",
                     file=sys.stderr,
                 )
@@ -761,7 +761,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:
         # Never block the merge outcome on the node-close (mirrors
         # _sync_graph_merge_status: SystemExit covers a corrupt-graph exit).
         print(
-            f"fno pr merge: post-merge node reconcile for PR #{pr_number} "
+            f"fno do pr merge: post-merge node reconcile for PR #{pr_number} "
             "skipped (non-fatal)",
             file=sys.stderr,
         )
@@ -994,7 +994,7 @@ def _run_post_merge_followups(pr_number: int, strategy: str, cwd: str) -> None:
     # Per-PR artifact consolidation (best-effort; degrades cleanly when the
     # script is absent, e.g. a bare pip install). The consolidator lives in the
     # PLUGIN tree (`<plugin>/scripts/lib/consolidate-artifacts.sh`), not the
-    # target repo, so resolve the plugin root first - else `fno pr merge` run in
+    # target repo, so resolve the plugin root first - else `fno do pr merge` run in
     # a footnote-managed target repo would silently skip it every time (codex P2
     # on PR #524). CLAUDE_PLUGIN_ROOT / FNO_REPO_ROOT are read directly (a
     # PRIVATE resolution, not the shared resolve_repo_root/resolve_plugin_script
@@ -1372,7 +1372,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # `auto-merge` token grants nothing on its own. Without this the
     # sanctioned verb is a WEAKER gate than raw `gh pr merge`, which the
     # git-protection hook already guards on this same field.
-    # Absent manifest or absent field -> proceed: a manual `fno pr merge`
+    # Absent manifest or absent field -> proceed: a manual `fno do pr merge`
     # outside a target session is legitimate and must not start refusing.
     approved = _read_state_field(
         os.path.join(_repo_state_dir(repo), "target-state.md"),
@@ -1403,7 +1403,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
 
     # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
     # nothing reviewed. The predicate lives in _coverage_gate - one copy,
-    # shared with the hook-facing `fno pr coverage-check` verb - and this path
+    # shared with the hook-facing `fno do pr coverage-check` verb - and this path
     # passes recompute=True, firing the standalone producer once when no row
     # describes the head (x-3a3f). Consume the review_coverage event loop-check
     # emits (Ownership: Rust computes, Python reads); missing/stale/zero/
@@ -1471,7 +1471,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # plan-grain, so an inline run with no separate planning thread has zero
     # planned rows and passes; this catches an orphan plan that never shipped.
     # A merge gate is required because a stop-gate-only check is skipped by a
-    # direct `fno pr merge`; the stop gate (loopcheck.rs) holds the other path.
+    # direct `fno do pr merge`; the stop gate (loopcheck.rs) holds the other path.
     _plan_path = _plan_path_for_pr(pr_number, repo)
     if _plan_path and _pr_payload_is_code(repo, pr_number):
         from fno.plan.fidelity import compute_plan_fidelity
@@ -1492,7 +1492,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
 
     # (2b) Merge serialization + overlap hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
-    # PR whose changed files OVERLAP the base move is held for `fno pr rebase`
+    # PR whose changed files OVERLAP the base move is held for `fno do pr rebase`
     # first, so a lane never merges code the base moved under. The predicate is
     # overlap, not distance: a base move that touches none of the PR's files
     # cannot carry a semantic conflict into this merge, while holding on
@@ -1524,7 +1524,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                         pr_number,
                         "held",
                         "stale base: overlap probe unavailable (base moved; "
-                        "could not compare file sets); run fno pr rebase, "
+                        "could not compare file sets); run fno do pr rebase, "
                         "then retry",
                         "none",
                         err=False,
@@ -1540,7 +1540,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                         pr_number,
                         "held",
                         f"stale base: base move touches files this PR also "
-                        f"changes ({shown}{extra}); run fno pr rebase, then "
+                        f"changes ({shown}{extra}); run fno do pr rebase, then "
                         "retry",
                         "none",
                         err=False,

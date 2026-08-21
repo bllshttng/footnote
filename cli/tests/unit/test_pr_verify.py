@@ -285,7 +285,7 @@ def test_failing_required_check_blocks_exit_1(tmp_path, gh_on, monkeypatch, caps
 
 def test_pending_check_flows_to_remediation_not_failing(tmp_path, gh_on, monkeypatch, capsys):
     """A still-running check is not-green, not failing: verify must not label
-    it required_checks_failing (that would refuse what `fno pr merge` holds
+    it required_checks_failing (that would refuse what `fno do pr merge` holds
     under a different name, round 10). It flows into remediation reporting."""
     sf = _state_file(tmp_path)
     rollup = [
@@ -378,7 +378,7 @@ def test_bounded_remediation_cleanup_split_from_merge(tmp_path, monkeypatch, del
     """x-9d11: the remediation merge carries no --delete-branch (gh's local
     delete is the worktree false-failure shape) and no --auto (one arming
     path); when delete_branch_on_merge is set, the REMOTE ref is deleted as a
-    warn-only post-merge step, exactly like `fno pr merge`."""
+    warn-only post-merge step, exactly like `fno do pr merge`."""
     sf = _state_file(tmp_path)
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)
     monkeypatch.setattr(

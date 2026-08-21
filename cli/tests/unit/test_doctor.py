@@ -1019,7 +1019,7 @@ def _dead_pr_watch(monkeypatch) -> None:
         "_pr_watch_liveness",
         lambda: {
             "enabled": True, "verdict": "dead", "detail": "no tick recorded",
-            "fix": "fno pr-watch install", "loaded": True, "last_tick": None,
+            "fix": "fno do pr watch install", "loaded": True, "last_tick": None,
         },
     )
 

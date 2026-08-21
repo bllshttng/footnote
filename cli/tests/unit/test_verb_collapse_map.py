@@ -64,7 +64,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 346, (
+    assert len(mapped) == 416, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -125,7 +125,7 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     groups_with_dispatch = {row["current-leaf"].split()[0] for row in rows if row["tier"] == "T1"}
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
-    assert projected == 80
+    assert projected == 81
     assert projected <= 99
 
 

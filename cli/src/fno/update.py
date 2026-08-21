@@ -1292,7 +1292,7 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
     warn = q(
         "fno update: fno-py never reappeared after the install, so the launchd "
         "agents were NOT refreshed onto the new binary. Run by hand: "
-        "fno pr-watch refresh; fno backlog groom --refresh-agent"
+        "fno do pr watch refresh; fno backlog groom --refresh-agent"
     )
     return (
         f" {wait} if {probe}; then {{ {body}; }} || true; "
@@ -1447,7 +1447,7 @@ def update_command(
 
         _fno = _resolve_fno_binary()
         refresh_cmds = [
-            [_fno, "pr-watch", "refresh"],
+            [_fno, "do", "pr", "watch", "refresh"],
             [_fno, "backlog", "groom", "--refresh-agent"],
         ]
         _await_bin = _fno

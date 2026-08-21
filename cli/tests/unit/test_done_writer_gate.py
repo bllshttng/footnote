@@ -500,7 +500,7 @@ def test_metadata_update_on_a_done_node_skips_the_gate(done_graph, monkeypatch):
 def test_reconcile_style_close_stamps_merge_evidence(done_graph, monkeypatch):
     """An evidenced close records merge_status, so orientation can require it.
 
-    Making `fno target status` demand merge_status is only correct if the
+    Making `fno do target status` demand merge_status is only correct if the
     normal post-merge closers write it; otherwise every genuinely merged node
     would render "awaiting merge" right after GitHub confirmed the merge.
     """

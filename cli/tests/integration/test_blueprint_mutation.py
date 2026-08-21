@@ -429,7 +429,7 @@ class TestAC1ERR:
     def test_in_progress_without_execution_strategy_is_still_blueprintable(self, tmp_path):
         """`in_progress` alone is NOT proof that blueprint ran.
 
-        `fno target init` acquiring a node claim projects `in_progress` onto the
+        `fno do target init` acquiring a node claim projects `in_progress` onto the
         plan doc along a forward-only axis, so the documented /target design-rung
         branch (init, then blueprint) would refuse itself: holding the claim needed
         to work the node made the node unblueprintable, and resetting the doc did
@@ -550,11 +550,11 @@ class TestAC3HP:
             f"Expected exit 1 for nonexistent path, got {result.returncode}"
 
     def test_nonexistent_path_stderr_mentions_plan_path(self, tmp_path):
-        """AC3-HP: missing doc points to fno plan path, not /think."""
+        """AC3-HP: missing doc points to fno do plan path, not /think."""
         nonexistent = tmp_path / "does_not_exist.md"
         result = _run_mutate(nonexistent)
         assert "plan path" in result.stderr.lower(), \
-            f"Expected 'fno plan path' guidance in stderr: {result.stderr}"
+            f"Expected 'fno do plan path' guidance in stderr: {result.stderr}"
         assert "think" not in result.stderr.lower(), \
             f"blueprint owns the plan; no /think redirect: {result.stderr}"
 
@@ -585,7 +585,7 @@ class TestAC3EDGE:
             f"Expected exit 1 for feature description, got {result.returncode}"
 
     def test_feature_description_mentions_plan_path(self):
-        """AC3-EDGE: raw description points to fno plan path, not /think."""
+        """AC3-EDGE: raw description points to fno do plan path, not /think."""
         cmd = [sys.executable, str(MUTATE_SCRIPT), "build a new feature"]
         result = subprocess.run(
             cmd,
@@ -594,7 +594,7 @@ class TestAC3EDGE:
             cwd=str(REPO_ROOT),
         )
         stderr = result.stderr.lower()
-        assert "plan path" in stderr, f"Expected 'fno plan path' guidance in stderr: {result.stderr}"
+        assert "plan path" in stderr, f"Expected 'fno do plan path' guidance in stderr: {result.stderr}"
         assert "think" not in stderr, f"blueprint owns the plan; no /think redirect: {result.stderr}"
 
 

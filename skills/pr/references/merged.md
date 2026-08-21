@@ -2,11 +2,11 @@
 # Post-merge ritual
 
 The ~90% of this ritual that is pure CLI orchestration now runs as ONE idempotent
-hidden verb: `fno pr ritual <pr>`. This body runs that verb, reads its receipts,
+hidden verb: `fno do pr ritual <pr>`. This body runs that verb, reads its receipts,
 and does only the **judgment residue** itself - the parts that need a human (or a
 headless LLM leg) reading the merged diff.
 
-1. **Mechanical core** - `fno pr ritual <n>` closes the node, harvests the retro,
+1. **Mechanical core** - `fno do pr ritual <n>` closes the node, harvests the retro,
    advances auto-continue, closes the skill-diff loop, syncs the canonical
    checkout, archives the worktree, and reaps dead agent-view rows. One run, one
    receipt block, never a swallowed failure.
@@ -40,7 +40,7 @@ Merge-detection dispatches this ritual as a background worker with no human to
 prompt (the watcher passes an `autonomous` token; a manual headless run sets
 `POST_MERGE_NONINTERACTIVE=1`). In that mode:
 
-- Run `fno pr ritual <n> --autonomous` (the flag also turns on under
+- Run `fno do pr ritual <n> --autonomous` (the flag also turns on under
   `POST_MERGE_NONINTERACTIVE=1`).
 - The verb spawns the judgment leg itself as ONE headless one-shot
   (`fno agents spawn --substrate headless`) when its inputs are non-empty, never
@@ -56,8 +56,8 @@ recently merged PR for this repo (no argument needed).
 ## Step 2: Run the mechanical core
 
 ```bash
-fno pr ritual <pr>            # attended: you do the judgment below
-fno pr ritual <pr> --autonomous   # autonomous: verb spawns the judgment leg
+fno do pr ritual <pr>            # attended: you do the judgment below
+fno do pr ritual <pr> --autonomous   # autonomous: verb spawns the judgment leg
 ```
 
 The verb prints one receipt line per leg, then exits non-zero if any leg failed:
@@ -256,13 +256,13 @@ rule), never as `backlog idea` nodes.
 
 ## See also
 
-- The verb: `fno pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in
+- The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in
   `cli/src/fno/pr/cli.py`.
 - Plan + locked decisions:
   `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
 - Design + locked decisions (original ritual):
   `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`.
 - Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog advance`,
-  `fno skill-diff reconcile`, `fno pr sync-canonical`, `fno backlog find`,
+  `fno skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`,
   `fno backlog capture add`, `fno carveout`, `fno agents spawn`.
 - The cross-project message bus (different thing): `skills/mail/SKILL.md`.

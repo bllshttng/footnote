@@ -149,7 +149,7 @@ def resume_bind(
             "advice": (
                 "inspect `fno backlog provenance "
                 f"{ident['graph_node_id']}` or reclaim via "
-                f"`fno target start {ident['graph_node_id']}`"
+                f"`fno do target start {ident['graph_node_id']}`"
             ),
         }
 

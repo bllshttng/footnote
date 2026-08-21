@@ -1,4 +1,4 @@
-"""fno pr-watch CLI surface.
+"""fno do pr watch CLI surface.
 
 Four verbs:
   tick      - the launchd entry; builds real adapters and calls tick()
@@ -403,7 +403,7 @@ def tick() -> None:
             except Exception as exc:  # noqa: BLE001 - a backstop never breaks the tick
                 log.warning("pr-watch: silence sweep failed: %s", exc)
 
-            # The fleet leg's own watermark and its liveness proof. `fno pr-watch
+            # The fleet leg's own watermark and its liveness proof. `fno do pr watch
             # status` reported the agent loaded through a six-hour outage, so a
             # status line is not evidence that anything ticked; a file with a
             # timestamp is.

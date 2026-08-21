@@ -1,6 +1,6 @@
 """The `doc` deliverable (Group 2, US3): ship a cited brief from the evidence store.
 
-`fno research` retrieves to a cache `sources.jsonl` (Group 1). The ship step
+`fno do research` retrieves to a cache `sources.jsonl` (Group 1). The ship step
 turns that into a *deliverable*: a markdown brief `<slug>.md` plus its evidence
 sidecar `<slug>.sources.jsonl`, both written to `config.research.output_dir`.
 
@@ -16,7 +16,7 @@ Three contracts the eval (US5) leans on:
 `output_dir` is fail-loud when unset: the ship step never guesses a landing path
 (the `parking_lot_path` lesson, AC5).
 
-This is the Python-level deliverable. A standalone `fno research` run is its own
+This is the Python-level deliverable. A standalone `fno do research` run is its own
 terminal: it reports `DoneAdvisory` (the non-PR completion state) rather than
 opening a PR.
 """

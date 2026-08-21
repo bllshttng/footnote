@@ -1,4 +1,4 @@
-"""`fno target init --deliverables N` stamps the scope denominator (x-cbab, AC1).
+"""`fno do target init --deliverables N` stamps the scope denominator (x-cbab, AC1).
 
 A plan-less code run historically had no denominator, so "shipped 1 of 4" was
 inexpressible rather than unreported. `--deliverables N` declares the count into
@@ -32,6 +32,11 @@ case "$1" in
   backlog) exit 1 ;;
   paths) exit 0 ;;
   worktree) exit 0 ;;
+  do)
+    case "$2:$3" in
+      target:check-dispatch-hold) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   target)
     case "$2" in
       check-dispatch-hold) exit 0 ;;
@@ -108,7 +113,7 @@ def _invoke_init(args: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     from fno.cli import app
 
     load_settings.cache_clear()
-    return CliRunner().invoke(app, ["target", "init", "--input", "some-feature", *args])
+    return CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature", *args])
 
 
 @pytest.mark.parametrize("bad", ["0", "-1", "-3"])
@@ -151,7 +156,7 @@ def test_deliverables_flag_reaches_the_manifest_writer_env(
 
     load_settings.cache_clear()
     r = CliRunner().invoke(
-        app, ["target", "init", "--input", "some-feature", "--deliverables", "4"]
+        app, ["do", "target", "init", "--input", "some-feature", "--deliverables", "4"]
     )
     assert r.exit_code == 0, r.output
     assert captured["env"].get("TARGET_DELIVERABLES") == "4"
@@ -186,7 +191,7 @@ def test_omitting_deliverables_does_not_set_the_env_carrier(
     from fno.cli import app
 
     load_settings.cache_clear()
-    r = CliRunner().invoke(app, ["target", "init", "--input", "some-feature"])
+    r = CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature"])
     assert r.exit_code == 0, r.output
     assert "TARGET_DELIVERABLES" not in captured["env"]
 
@@ -291,7 +296,7 @@ def _invoke_init_node(monkeypatch: pytest.MonkeyPatch, node: dict, deliverables:
     from fno.cli import app
 
     load_settings.cache_clear()
-    args = ["target", "init", "--input", "x-test"]
+    args = ["do", "target", "init", "--input", "x-test"]
     if deliverables:
         args += ["--deliverables", "1"]
     return CliRunner().invoke(app, args)
@@ -348,6 +353,6 @@ def test_init_never_refuses_a_node_with_a_bound_plan(
     load_settings.cache_clear()
     plan = tmp_path / "plan.md"
     plan.write_text("# Plan\n", encoding="utf-8")
-    r = CliRunner().invoke(app, ["target", "init", "--plan-path", str(plan)])
+    r = CliRunner().invoke(app, ["do", "target", "init", "--plan-path", str(plan)])
     assert r.exit_code == 0, r.output
     assert "no scope denominator" not in r.output

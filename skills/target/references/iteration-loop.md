@@ -122,10 +122,10 @@ When your only outstanding work is an async external check - CI still running, o
 1. **Arm a harness-tracked watcher with a hard timeout.** Use a background task the harness re-invokes the model on when it exits - background `Bash` (`run_in_background`) or a `Monitor` - whose command embeds a hard timeout, e.g.:
 
    ```bash
-   i=0; while [ $i -lt 30 ]; do fno pr status <PR> 2>/dev/null | grep -q '"settled": true' && break; sleep 60; i=$((i+1)); done
+   i=0; while [ $i -lt 30 ]; do fno do pr status <PR> 2>/dev/null | grep -q '"settled": true' && break; sleep 60; i=$((i+1)); done
    ```
 
-   The counted loop is the heartbeat: it ends on its own after ~30 minutes, so a wedged read still wakes the session. Spell the bound with shell builtins, never `timeout(1)`. That is GNU coreutils, and a stock macOS ships neither it nor `gtimeout`. A command naming it dies with `command not found` before the read runs, so the watcher no-ops. Detaching the task itself (`nohup`, `disown`, a trailing `&`) is FORBIDDEN - it exits without re-invoking anyone, so the session idles forever. The CI read inside `fno pr status` is REST, so this spends none of the per-user GraphQL quota every session on the machine shares. Do NOT reach for `gh pr checks --watch` or a `gh pr view` poll: `hooks/git-protection.py` DENIES both, so that recipe cannot run at all. Grep for the POSITIVE `"settled": true` marker, never the absence of "pending". A rate-limited or failed read carries neither word, so an absence test reads that as settled.
+   The counted loop is the heartbeat: it ends on its own after ~30 minutes, so a wedged read still wakes the session. Spell the bound with shell builtins, never `timeout(1)`. That is GNU coreutils, and a stock macOS ships neither it nor `gtimeout`. A command naming it dies with `command not found` before the read runs, so the watcher no-ops. Detaching the task itself (`nohup`, `disown`, a trailing `&`) is FORBIDDEN - it exits without re-invoking anyone, so the session idles forever. The CI read inside `fno do pr status` is REST, so this spends none of the per-user GraphQL quota every session on the machine shares. Do NOT reach for `gh pr checks --watch` or a `gh pr view` poll: `hooks/git-protection.py` DENIES both, so that recipe cannot run at all. Grep for the POSITIVE `"settled": true` marker, never the absence of "pending". A rate-limited or failed read carries neither word, so an absence test reads that as settled.
 
 2. **End your turn with the tag, and nothing else.** After arming the watcher, close the turn with:
 

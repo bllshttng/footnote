@@ -43,7 +43,7 @@ Parse the first argument token:
 
   ```
   '/pr merge' is ambiguous - did you mean:
-    fno pr merge   land the PR now (the merge primitive, a CLI verb)
+    fno do pr merge   land the PR now (the merge primitive, a CLI verb)
     /pr merged     run the post-merge ritual on an already-merged PR
   ```
 
@@ -76,7 +76,7 @@ fi
 
 ### 2a-bis. Stale-base guard (before any dispatch)
 
-A branch cut from a stale local HEAD ships a PR full of phantom deletions (changes you never made appear as reverts). Refuse before dispatching the worker; the check fails open on a fetch flake and points at `fno pr rebase`:
+A branch cut from a stale local HEAD ships a PR full of phantom deletions (changes you never made appear as reverts). Refuse before dispatching the worker; the check fails open on a fetch flake and points at `fno do pr rebase`:
 
 ```bash
 BASE="${BASE:-origin/main}"   # re-default: this block may run standalone
@@ -93,12 +93,12 @@ candidate_fno() {
     return 127
   fi
 }
-candidate_fno pr base-check --base "$BASE" || {
+candidate_fno do pr base-check --base "$BASE" || {
   rc=$?
   # 3 = stale, 4 = unrelated histories, 127 = missing CLI; all refuse.
   [ "$rc" -ge 3 ] && { echo "refusing to open a PR from a bad base (see above)."; exit "$rc"; }
 }
-policy_json="$(candidate_fno pr evidence-required --base "$BASE")" || {
+policy_json="$(candidate_fno do pr evidence-required --base "$BASE")" || {
   echo "PR creation refused: verification policy could not be evaluated." >&2
   exit 1
 }
@@ -107,7 +107,7 @@ policy_required="$(printf '%s' "$policy_json" | jq -er 'if .required == true the
   exit 1
 }
 if [ "$policy_required" = "true" ]; then
-  candidate_fno pr evidence-check --allow-rebase-equivalent || {
+  candidate_fno do pr evidence-check --allow-rebase-equivalent || {
     echo "PR creation refused: no full/passed verification receipt for HEAD, and no earlier receipt whose patches match it." >&2
     echo "Run scripts/ci/preflight.sh (required by config.preflight.required = true)." >&2
     exit 1
@@ -143,7 +143,7 @@ Load [check.md](references/check.md) and execute it in full, in this context. Th
 
 ## Step 4: merged mode (the post-merge ritual)
 
-Load [merged.md](references/merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno plan reconcile-status --apply` (x-f34f), harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
+Load [merged.md](references/merged.md) and execute it in full, in this context. That body is the canonical post-merge ritual: resolve the per-project inbox path from settings (fail loud if unset), close + stamp the backlog node via `fno backlog reconcile`, project stale plan frontmatter status from graph truth via `fno do plan reconcile-status --apply` (x-f34f), harvest retro / carveout items, write prose follow-ups to the project's vault inbox, file triage-worthy work as backlog nodes, and offer a backfill / handoff slot before close. It runs in the router's own main context.
 
 ## Multi-CLI
 

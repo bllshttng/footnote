@@ -9,7 +9,7 @@ See also [auto-merge.md](auto-merge.md) for the cross-skill auto-merge protocol.
 If `auto_merge_approved: true` in target-state.md, run rebase before `/pr create`:
 
 ```bash
-fno pr rebase --base=origin/main
+fno do pr rebase --base=origin/main
 ```
 
 See [ship-phase.md](ship-phase.md) for the full exit-42 dispatch loop. State update rules per exit:
@@ -27,11 +27,11 @@ See [ship-phase.md](ship-phase.md) for the full exit-42 dispatch loop. State upd
 
 After `external_review_passed: true` (or skipped), if `auto_merge_approved: true`:
 
-Docs are advisory (control-plane step 6, ab-f8e5f214): there is no docs pre-gate on auto-merge. `fno target init` no longer writes a docs-completion field, so nothing reads one. Docs run before ship so they ride in the same PR, but a missing docs pass never blocks the merge.
+Docs are advisory (control-plane step 6, ab-f8e5f214): there is no docs pre-gate on auto-merge. `fno do target init` no longer writes a docs-completion field, so nothing reads one. Docs run before ship so they ride in the same PR, but a missing docs pass never blocks the merge.
 
 ```bash
 PR_NUMBER=$(sed -n 's/^pr_number:[[:space:]]*//p' .fno/target-state.md | xargs)
-RESULT=$(fno pr merge "$PR_NUMBER")
+RESULT=$(fno do pr merge "$PR_NUMBER")
 OUTCOME=$(echo "$RESULT" | jq -r '.outcome')
 ```
 
@@ -52,14 +52,14 @@ A `failed` outcome does NOT block the promise. The PR was created successfully; 
 
 When deciding whether to auto-merge, resolve in this order (first match wins):
 
-1. **`TARGET_NO_MERGE=1`** (set by `fno target init --no-merge`, or exported) - auto_merge_approved = false
+1. **`TARGET_NO_MERGE=1`** (set by `fno do target init --no-merge`, or exported) - auto_merge_approved = false
 2. **`no-merge` as a whole token in the invocation** - auto_merge_approved = false
 3. **`TARGET_AUTO_MERGE=1`** - auto_merge_approved = true
 4. **Local `.fno/config.toml`** - `config.auto_merge.enabled`
 5. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
 6. **Default** - false
 
-`init-target-state.sh` implements this chain and is the only place it lives. The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the signal the git-protection hook, `fno pr merge`, and `fno-agents finalize` all read.
+`init-target-state.sh` implements this chain and is the only place it lives. The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the signal the git-protection hook, `fno do pr merge`, and `fno-agents finalize` all read.
 
 **Arming happens at the gate, not at PR creation.** `worker/ship.py` used to arm GitHub's native auto-merge the moment the PR existed, gated only on this field. That pre-authorized a merge before anything had been verified: once `--auto` is set GitHub owns the timing and fires as soon as its own branch protections pass, so a reviewer posting a blocking finding after CI greens loses the race. `fno-agents finalize` arms it instead, on the `DonePRGreen` terminal only, so the merge authorizes a state loop-check just verified (PR up, CI green, no unaddressed blocking finding). A reviewer that has not posted yet gets the whole CI duration before the merge is armed at all.
 
@@ -69,7 +69,7 @@ FORBIDDEN: auto-merging based on any inference other than this chain.
 
 **The chain is deliberately asymmetric, and every refusal outranks every grant.** Rung 2 honors a `no-merge` token in the invocation because autonomous dispatch bakes exactly that token into its command (`harness_map._AUTONOMOUS_COMMAND`), where it arrives as prose no flag parser sees. There is no matching rung for `auto-merge`: honoring a *grant* discovered in free text would let arbitrary prose manufacture merge authority, whereas honoring a refusal fails safe. A positional `auto-merge` therefore grants nothing on its own and needs `TARGET_AUTO_MERGE=1` or `config.auto_merge.enabled`.
 
-Rung 2 sits ABOVE the `TARGET_AUTO_MERGE` grant deliberately. Nothing in the codebase sets that variable, so the only way it is ever set is inheritance from an ancestor shell or a spawning parent - the same trap `fno target init` scrubs for `TARGET_BEASTMODE`. An inherited grant must not defeat a refusal typed into this run's invocation, or an autonomously dispatched `/target no-merge <id>` merges anyway.
+Rung 2 sits ABOVE the `TARGET_AUTO_MERGE` grant deliberately. Nothing in the codebase sets that variable, so the only way it is ever set is inheritance from an ancestor shell or a spawning parent - the same trap `fno do target init` scrubs for `TARGET_BEASTMODE`. An inherited grant must not defeat a refusal typed into this run's invocation, or an autonomously dispatched `/target no-merge <id>` merges anyway.
 
 The token match is whole-token (space-padded), so `no-merger` or a path like `plans/no-merge-notes.md` does not revoke a configured grant. A standalone `no-merge` inside free text still matches and suppresses auto-merge, which is the safe direction.
 

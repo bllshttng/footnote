@@ -1,4 +1,4 @@
-"""Blast-radius size-modulation tests for `fno target init` (task 1.2, x-518f).
+"""Blast-radius size-modulation tests for `fno do target init` (task 1.2, x-518f).
 
 Two layers:
   * ``_modulate_size`` - the pure floor-up / cautious-down / fail-safe decision

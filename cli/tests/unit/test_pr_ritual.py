@@ -1,4 +1,4 @@
-"""Tests for `fno pr ritual` (x-bbde) and its four absorbed bugs.
+"""Tests for `fno do pr ritual` (x-bbde) and its four absorbed bugs.
 
 The legs shell existing fno verbs; a fake runner stands in for fno/gh/git so
 every leg is exercised without a real backlog/graph/gh. Pure helpers
@@ -168,14 +168,13 @@ def test_leg_skill_diff_calls_real_verb(tmp_path, capsys):
 
 
 def test_leg_sync_canonical_calls_real_verb(tmp_path, capsys):
-    # x-c4ff: the canonical-sync leg calls the existing `pr sync-canonical`.
+    # x-c4ff: the canonical-sync leg calls the existing canonical spelling.
     runner = FakeRunner()
     pm = SimpleNamespace(sync_command="git pull", self_reap=False, parking_lot_path=None)
     r = _bare(tmp_path, runner)
     r.ctx.pm = pm
     r.leg_sync_canonical()
-    sub = _argv_sub(runner.calls, "pr")
-    assert sub is not None and "sync-canonical" in sub
+    assert any(c[1:4] == ["do", "pr", "sync-canonical"] for c in runner.calls)
 
 
 def test_sync_canonical_skipped_when_unconfigured(tmp_path, capsys):
@@ -215,7 +214,7 @@ def test_failing_leg_records_failure_and_exit(tmp_path, capsys):
     class _FailSync(FakeRunner):
         def __call__(self, argv, *, cwd=None, timeout=None):
             super().__call__(argv, cwd=cwd, timeout=timeout)
-            if len(argv) > 1 and argv[1] == "pr" and "sync-canonical" in argv:
+            if argv[1:4] == ["do", "pr", "sync-canonical"]:
                 return Result(3, "sync failed: boom", "")
             return super().__call__(argv, cwd=cwd, timeout=timeout) if False else self._last
 
@@ -230,7 +229,7 @@ def test_failing_leg_records_failure_and_exit(tmp_path, capsys):
 
         def __call__(self, argv, *, cwd=None, timeout=None):
             self._inner.calls.append(list(argv))
-            if len(argv) > 1 and argv[1] == "pr" and "sync-canonical" in argv:
+            if argv[1:4] == ["do", "pr", "sync-canonical"]:
                 return Result(3, "sync failed: boom", "")
             return FakeRunner.__call__(self._inner, argv, cwd=cwd, timeout=timeout)
 

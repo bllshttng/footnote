@@ -38,10 +38,15 @@ run_init() {
     (
         cd "$tmp"
         git init -q >/dev/null 2>&1
-        mkdir -p .fno
+        mkdir -p .fno home/.fno bin
+        cat > bin/fno <<EOF
+#!/usr/bin/env bash
+exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
+EOF
+        chmod +x bin/fno
         env -i \
-            HOME="$HOME" \
-            PATH="$PATH" \
+            HOME="$tmp/home" \
+            PATH="$tmp/bin:$PATH" \
             TARGET_START=1 \
             TARGET_INPUT="test" \
             ${size_env:+TARGET_SIZE="$size_env"} \

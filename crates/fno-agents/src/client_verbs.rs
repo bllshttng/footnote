@@ -1395,7 +1395,7 @@ fn set_first(slot: &mut String, val: &str) {
 /// Lines inside the multi-line `input` quoted scalar are UNTRUSTED (their keys
 /// never assign) so a `/target` argument containing `harness: ...` cannot forge
 /// an identity field -- the same forgery surface `finalize::parse_manifest_fields`
-/// guards for the merge posture. The manifest is not strict YAML, `fno target
+/// guards for the merge posture. The manifest is not strict YAML, `fno do target
 /// init` writes quoted scalars, so a line scan matches the writer rather than a
 /// YAML lib. Kept here rather than folded into finalize because finalize owns
 /// completion/merge fields and this owns session-identity fields; the scan is a

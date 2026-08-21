@@ -3,7 +3,7 @@
 Two triggers reach the ritual and only one verifies the merge.
 
   pr-watch daemon   fires on a gh-backed `state == MERGED`     external truth
-  `fno pr merged N` reaches `_resolve_pr`, which returns the    an ARGUMENT
+  `fno do pr merged N` reaches `_resolve_pr`, which returns the    an ARGUMENT
                     caller's number unchecked (`if pr: return int(pr)`)
 
 `leg_archive` used to read only `headRefName` from its `gh pr view` call. On an

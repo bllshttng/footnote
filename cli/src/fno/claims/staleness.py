@@ -190,7 +190,7 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     # dead pid inside its TTL looks like a pure wedge. But that TTL IS the
     # boot window: it is documented to outlive its spawner precisely so a
     # second dispatcher does not launch onto a node whose worker has not
-    # reached `fno target init` yet. A background sweep reaping it collapses
+    # reached `fno do target init` yet. A background sweep reaping it collapses
     # the dedup window and re-dispatches into the gap, and it also voids the
     # `dispatch:think:<node>:<reason>` tokens, which have no node claim behind
     # them at all. Expiry still frees these on schedule through the arm above.

@@ -16,10 +16,10 @@ So the gate never asks how many deliverables a node has. It asks whether a denom
 denominator_absent := payload_is_code AND plan_path == "" AND deliverables is None
 ```
 
-Three structured field reads, zero prose. `payload_is_code` is `domain == "code"` at init. The merge gate uses the real PR diff. `fno target init` refuses a code node with no plan and no declared count. It names both exits that create a denominator:
+Three structured field reads, zero prose. `payload_is_code` is `domain == "code"` at init. The merge gate uses the real PR diff. `fno do target init` refuses a code node with no plan and no declared count. It names both exits that create a denominator:
 
 1. `/fno:blueprint quick "..."` writes a plan enumerating the tasks. `plan_path` fills. The denominator is the task count.
-2. `fno target init --deliverables N` stamps `deliverables: N` into the immutable manifest.
+2. `fno do target init --deliverables N` stamps `deliverables: N` into the immutable manifest.
 
 Exit 2 is deliberately cheap. A run that stamps 1 and ships one of four leaves a falsifiable claim on the record. That is exactly what that failed node lacked. A missing band and a never-planned band stop being indistinguishable.
 
@@ -44,16 +44,16 @@ build_plan_fidelity(..., unmeasurable="refuse")    # gate: an unjoined row is a 
 
 `unmeasurable="unjoined"` is the default. It is byte-identical to the prior scoreboard output. `unmeasurable="refuse"` adds a top-level `gate` key. That key marks the unjoined rows as a would-be refusal. The join itself never changes. The scoreboard and the gate cannot disagree about the same PR.
 
-The carveout waiver lives in `cli/src/fno/plan/fidelity.py`. The fold does not do it. Each unjoined planned row needs a covering carveout or the gate refuses. A PR-body sentence is not a carveout. `fno plan fidelity --json <plan>` is the single entry point.
+The carveout waiver lives in `cli/src/fno/plan/fidelity.py`. The fold does not do it. Each unjoined planned row needs a covering carveout or the gate refuses. A PR-body sentence is not a carveout. `fno do plan fidelity --json <plan>` is the single entry point.
 
 ### Both readers are required
 
 A guard on one of N reachable paths is decorative. The two readers enforce independently:
 
-- **Stop gate** (`crates/fno-agents/src/loopcheck.rs`): `evaluate_plan_fidelity` shells `fno plan fidelity --json`. It mirrors `evaluate_done_probes`. It blocks `DonePRGreen` until each shortfall carries a carveout. It fails open on a missing or stale `fno` so a stale install cannot wedge every run. The merge gate is the backstop. `fno doctor` flags the staleness.
+- **Stop gate** (`crates/fno-agents/src/loopcheck.rs`): `evaluate_plan_fidelity` shells `fno do plan fidelity --json`. It mirrors `evaluate_done_probes`. It blocks `DonePRGreen` until each shortfall carries a carveout. It fails open on a missing or stale `fno` so a stale install cannot wedge every run. The merge gate is the backstop. `fno doctor` flags the staleness.
 - **Merge gate** (`cli/src/fno/pr/_merge.py`): it imports `compute_plan_fidelity` in-process. It refuses the merge on an uncovered shortfall. It fails open on a probe crash so a broken gate cannot wedge a green merge.
 
-A stop-gate-only check is skipped by a direct `fno pr merge`. A merge-gate-only check is skipped by every autonomous loop that terminates without merging. The join is plan-grain. An inline run with no separate planning thread has zero planned rows and passes. The gate catches an orphan plan that never shipped.
+A stop-gate-only check is skipped by a direct `fno do pr merge`. A merge-gate-only check is skipped by every autonomous loop that terminates without merging. The join is plan-grain. An inline run with no separate planning thread has zero planned rows and passes. The gate catches an orphan plan that never shipped.
 
 ## Carveout severity, stamped by provenance
 
@@ -63,6 +63,6 @@ A carveout created to satisfy the fidelity gate is, by construction, a planned d
 
 ## The deliverables-1 ratio measurement
 
-The cheap exit `--deliverables 1` is load-bearing risk. If it becomes reflexive, the gate degrades to a formality. The ratio of `deliverables: 1` inits to plan-backed inits is measured off the ledger. Read it with `fno target denominator-ratio`. If it climbs past roughly 80 percent, the exit is a bypass and `enumerated_scope` needs widening.
+The cheap exit `--deliverables 1` is load-bearing risk. If it becomes reflexive, the gate degrades to a formality. The ratio of `deliverables: 1` inits to plan-backed inits is measured off the ledger. Read it with `fno do target denominator-ratio`. If it climbs past roughly 80 percent, the exit is a bypass and `enumerated_scope` needs widening.
 
 A stamped 1 still beats today. A stamped 1 is falsifiable. An absent denominator is not.

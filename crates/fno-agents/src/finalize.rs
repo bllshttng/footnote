@@ -1133,7 +1133,7 @@ fn write_ledger_record(
 
 // ── stamp (ship only) ────────────────────────────────────────────────────────
 
-/// After a stamp writes, validate the plan's frontmatter via `fno plan validate`
+/// After a stamp writes, validate the plan's frontmatter via `fno do plan validate`
 /// (the same read-only verb). Non-fatal-but-loud: a non-zero exit (e.g. a stamp
 /// that left `status` unset) is reported on stderr for the next session to fix;
 /// the stamp is never rolled back and finalize never fails on it (AC1-FR). A
@@ -1146,6 +1146,7 @@ fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
     match py_module(cwd)
         .arg("-m")
         .arg("fno.cli")
+        .arg("do")
         .arg("plan")
         .arg("validate")
         .arg(&full)
@@ -1153,12 +1154,12 @@ fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
     {
         Ok(out) if out.status.success() => {}
         Ok(out) => eprintln!(
-            "finalize: post-stamp `fno plan validate` FAILED (exit {:?}); stamp NOT rolled back - fix the plan frontmatter next session:\n{}\n{}",
+            "finalize: post-stamp `fno do plan validate` FAILED (exit {:?}); stamp NOT rolled back - fix the plan frontmatter next session:\n{}\n{}",
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).trim(),
             String::from_utf8_lossy(&out.stderr).trim()
         ),
-        Err(e) => eprintln!("finalize: post-stamp `fno plan validate` spawn failed: {e}"),
+        Err(e) => eprintln!("finalize: post-stamp `fno do plan validate` spawn failed: {e}"),
     }
 }
 
@@ -1781,7 +1782,7 @@ fn valid_project_id(s: &str) -> bool {
 /// Best-effort PR metadata for the current HEAD/branch through the REST reader.
 fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
     let mut command = Command::new("fno");
-    command.args(["pr", "info"]);
+    command.args(["do", "pr", "info"]);
     if let Some(number) = number {
         command.arg(number.to_string());
     }
@@ -1810,7 +1811,7 @@ pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
     parse_pr_ref(&serde_json::to_vec(&payload).ok()?)
 }
 
-/// Pure parse of REST `fno pr info` output, with the legacy GraphQL field kept
+/// Pure parse of REST `fno do pr info` output, with the legacy GraphQL field kept
 /// for callers carrying cached payloads.
 fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
     let v: Value = serde_json::from_slice(stdout).ok()?;
@@ -2046,14 +2047,14 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// appending anything, so a retried terminal fire is a no-op on GitHub's side.
 ///
 /// `config.auto_merge.merge_strategy` and `.delete_branch_on_merge` shape the
-/// argv, matching `fno pr merge`. The strategy used to be hardcoded `--merge`,
+/// argv, matching `fno do pr merge`. The strategy used to be hardcoded `--merge`,
 /// carried over verbatim from the PR-creation call site this replaced, so a
 /// squash-only repo was armed with a merge method it forbids - and because
 /// arming is log-only, GitHub's rejection was one stderr line inside a stop
 /// hook. The symptom was not a wrong commit shape but auto-merge silently never
 /// working, indistinguishable from nobody having opted in.
 ///
-/// `require_checks_pass` is deliberately NOT read. On `fno pr merge` it decides
+/// `require_checks_pass` is deliberately NOT read. On `fno do pr merge` it decides
 /// whether `--auto` is passed at all (false meaning "merge now, do not wait");
 /// here `--auto` IS the operation and `loop-check` has already verified green,
 /// so honoring it would let a config value turn arming into a no-op.
@@ -2129,7 +2130,7 @@ fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> 
 
 fn dispatch_hold_refusal(cwd: &Path, number: u64) -> Option<String> {
     match Command::new("fno")
-        .args(["pr", "hold-check", number.to_string().as_str()])
+        .args(["do", "pr", "hold-check", number.to_string().as_str()])
         .current_dir(cwd)
         .output()
     {
@@ -2153,7 +2154,7 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
     }
     // Stacked-base guard: a PR merged into a base branch that no longer leads to
     // the default branch reports MERGED and ships nothing. This arm reaches
-    // `gh pr merge` without passing through `fno pr merge`, so it calls the
+    // `gh pr merge` without passing through `fno do pr merge`, so it calls the
     // shared predicate itself - a guard on one of N reachable merge paths is
     // decorative.
     //
@@ -2172,7 +2173,7 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
     // production Rust, so each extra access here fails CI with a message about
     // plan frontmatter that has nothing to do with this code.
     match Command::new("fno")
-        .args(["pr", "base-lineage-check", pr_arg.as_str()])
+        .args(["do", "pr", "base-lineage-check", pr_arg.as_str()])
         .current_dir(cwd)
         .output()
     {
@@ -2879,7 +2880,7 @@ mod tests {
             parse_pr_ref(br#"{"number": 358, "url": "https://x/pull/358"}"#),
             Some((358, "https://x/pull/358".to_string()))
         );
-        // REST `fno pr info` names the same field `pr`.
+        // REST `fno do pr info` names the same field `pr`.
         assert_eq!(
             parse_pr_ref(br#"{"pr": 358, "url": "https://x/pull/358"}"#),
             Some((358, "https://x/pull/358".to_string()))

@@ -587,7 +587,7 @@ def test_await_binary_warns_actionably_when_the_binary_never_appears(tmp_path: P
     out = _sp.run(["/bin/sh", "-c", line], capture_output=True, text=True)
     assert "REFRESH1" not in out.stdout, "must not run the refresh without a binary"
     assert "were NOT refreshed" in out.stderr, out.stderr
-    assert "fno pr-watch refresh" in out.stderr, out.stderr
+    assert "fno do pr watch refresh" in out.stderr, out.stderr
     # Best-effort: a missing binary must never fail the update itself.
     assert out.returncode == 0, out
 
@@ -2251,7 +2251,7 @@ def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
     import inspect
 
     src = inspect.getsource(update.update_command)
-    assert '"pr-watch", "refresh"' in src
+    assert '"do", "pr", "watch", "refresh"' in src
     assert '"backlog", "groom", "--refresh-agent"' in src
 
 

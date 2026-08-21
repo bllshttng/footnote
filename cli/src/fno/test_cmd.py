@@ -151,6 +151,16 @@ def _child_env(root: Path) -> dict:
     if _AMBIENT_MODE == "dirty":
         parent = poison(os.environ, _poison_fixtures(root))
     env = neutralise(parent, _sandbox())
+    # A nested `fno test` can run inside an outer xdist worker. Its child is a
+    # fresh pytest controller, not that worker, so inherited transport markers
+    # make pytest-xdist send session-finish over a closed channel and strand the
+    # outer suite in teardown.
+    for name in (
+        "PYTEST_XDIST_WORKER",
+        "PYTEST_XDIST_WORKER_COUNT",
+        "PYTEST_XDIST_TESTRUNUID",
+    ):
+        env.pop(name, None)
     src = str((root / "cli" / "src").resolve())
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")

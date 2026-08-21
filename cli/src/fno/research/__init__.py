@@ -1,4 +1,4 @@
-"""`fno research` - retrieve + store (ddgs backbone -> sources.jsonl)."""
+"""`fno do research` - retrieve + store (ddgs backbone -> sources.jsonl)."""
 from __future__ import annotations
 
 __all__ = ["research_command"]

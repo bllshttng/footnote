@@ -32,12 +32,12 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 |-------------|--------------|
 | `fno event emit\|audit` | events.jsonl writes + audit. |
 | `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
-| `fno pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
-| `fno pr merge\|verify\|rebase` | PR ops with canonical guards. |
-| `fno plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
-| `fno phase kill-check` | Plan kill-criteria evaluation. |
+| `fno do pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
+| `fno do pr merge\|verify\|rebase` | PR ops with canonical guards. |
+| `fno do plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
+| `fno do phase kill-check` | Plan kill-criteria evaluation. |
 | `fno inbox notify TITLE BODY` | OS notification. |
-| `fno state` | State files. Only legal post-init target-manifest write: first-fill of empty `plan_path` via `fno state set --field plan_path` (else exit 5). |
+| `fno do state` | State files. Only legal post-init target-manifest write: first-fill of empty `plan_path` via `fno do state set --field plan_path` (else exit 5). |
 | `fno-agents loop run --driver target` | The unified Rust loop; front door `scripts/run-target-loop.sh`. |
 | `fno whoami\|status` | Self-introspection; run when confused after compaction. |
 | `fno mail send\|reply\|unread\|ack` | Cross-project messaging over the jsonl bus; live-inject-first, durable fallback. |
@@ -83,8 +83,8 @@ Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 | "What state am I in after compaction?" | `fno whoami` then `fno status` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |
-| "Is this PR ready to merge?" | `fno pr status <n>` |
-| "Merge an approved PR" | `fno pr merge` |
-| "Rebase before merge" | `fno pr rebase --base=origin/main` |
+| "Is this PR ready to merge?" | `fno do pr status <n>` |
+| "Merge an approved PR" | `fno do pr merge` |
+| "Rebase before merge" | `fno do pr rebase --base=origin/main` |
 
 When in doubt, prefer the smaller / more atomic surface. A skill spawns a new agent context; a CLI call doesn't.

@@ -643,7 +643,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     """Drop the open do row this claim's acquire opened, for a worker whose
     post-acquire validation refused it.
 
-    Acquiring is not doing. ``fno target init`` takes the claim purely as a
+    Acquiring is not doing. ``fno do target init`` takes the claim purely as a
     serialization point and only then re-runs its containment gate; a worker
     refused there releases without ``--stamp-do`` because it must not proceed -
     but the acquire stamp had already opened its row, leaving the node reading

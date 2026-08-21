@@ -14,7 +14,7 @@ Research, not planning. `/fno:blueprint` owns the plan and its approval.
 
 Read the argument left to right: an optional substrate token, an optional brief token, then the question (node id, slug, or free text).
 
-**Substrate.** `bg` hands the question to a background worker (`fno think dispatch <node>`) and returns its receipt immediately. `subagent` runs the process below in a subagent. Neither token: run it here, inline.
+**Substrate.** `bg` hands the question to a background worker (`fno do think dispatch <node>`) and returns its receipt immediately. `subagent` runs the process below in a subagent. Neither token: run it here, inline.
 
 **Codex posture**. When `$CODEX_THREAD_ID` is nonblank, before routing, Print exactly once: `codex posture: think researches inline by default. The bg token dispatches a background worker and subagent a subagent.`
 
@@ -29,8 +29,8 @@ Read the argument left to right: an optional substrate token, an optional brief 
 
 ## The process
 
-1. **Ground.** Run `fno think inspect "<question>" --json` and read the whole receipt. It reports source status, never a verdict. An unavailable search is not "nothing found". A stale schema is not "no DB change". Inspect what it cites before deciding relevance.
+1. **Ground.** Run `fno do think inspect "<question>" --json` and read the whole receipt. It reports source status, never a verdict. An unavailable search is not "nothing found". A stale schema is not "no DB change". Inspect what it cites before deciding relevance.
 2. **Investigate primary sources** - source code, specs, first-party APIs - never a secondary write-up of them. Follow every claim back to the source that owns it. Every claim you write carries a `file:line` or a URL. A claim you cannot trace is written down as untraced.
-3. **Write one Markdown file** at the path `fno plan path --slug "<slug>" [--node <id>]` prints, citing each claim's source. List only sources you actually read.
+3. **Write one Markdown file** at the path `fno do plan path --slug "<slug>" [--node <id>]` prints, citing each claim's source. List only sources you actually read.
 
 Print the file path and stop. Turning findings into a plan is `/fno:blueprint <path>`.

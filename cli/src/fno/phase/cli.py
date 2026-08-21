@@ -1,4 +1,4 @@
-"""fno phase CLI - thin wrapper over the `fno-agents kill-check` Rust verb.
+"""fno do phase CLI - thin wrapper over the `fno-agents kill-check` Rust verb.
 
 Formerly sourced scripts/lib/kill-criteria.sh; the predicate evaluator is now
 folded into the bundled fno-agents binary (US1, ab-58645f63), so the verb runs
@@ -7,7 +7,7 @@ script dependency. The Python wrapper still resolves the default plan_path from
 .fno/target-state.md and forwards it to the binary, preserving the prior
 behavior.
 
-Note: fno phase verify (phase-verifier.sh) removed in Task 3.2
+Note: fno do phase verify (phase-verifier.sh) removed in Task 3.2
 (control-plane collapse, ab-d0337fbc). Only kill-check remains.
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ def _read_state_field(field: str) -> Optional[str]:
         return None
     except Exception as exc:
         typer.echo(
-            f"fno phase: could not parse {state}: {exc}",
+            f"fno do phase: could not parse {state}: {exc}",
             err=True,
         )
         return None
@@ -72,7 +72,7 @@ def kill_check(
     binary = resolve_binary()
     if binary is None:
         typer.echo(
-            "fno phase kill-check: the fno-agents binary was not found. It ships "
+            "fno do phase kill-check: the fno-agents binary was not found. It ships "
             "in the `pip install fno` wheel and with the plugin; reinstall fno or "
             "run `fno update --rust`, or set FNO_AGENTS_BIN to its path.",
             err=True,

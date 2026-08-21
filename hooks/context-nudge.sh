@@ -377,7 +377,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         # pass, which has no such manifest, still fires on real pressure above.
         PLAN_PATH=""
         if command -v fno >/dev/null 2>&1; then
-            PLAN_PATH=$(with_timeout 3 fno state show --type target --field plan_path 2>/dev/null | head -1 || true)
+            PLAN_PATH=$(with_timeout 3 fno do state show --type target --field plan_path 2>/dev/null | head -1 || true)
         fi
         _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session compact trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now: your session id, mail handle, and claims all survive it. ${_compact_ask}"
         if [[ -n "$PLAN_PATH" ]]; then

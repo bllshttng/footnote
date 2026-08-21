@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_gc_dead_target_manifest.sh - x-4af4 T3: the session-start GC archives a
 # DEAD target manifest (owning session gone) and leaves a LIVE one in place.
-# Hermetic: stubs `fno` so `target status`/`state archive` need no real graph.
+# Hermetic: stubs `fno` so `do target status`/`do state archive` need no real graph.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -26,8 +26,8 @@ check_contains() {
     fi
 }
 
-# Sandbox with a stubbed `fno` whose `target status --json` reports $1 as the
-# manifest-live verdict, and whose `state archive` moves the file like the real
+# Sandbox with a stubbed `fno` whose `do target status --json` reports $1 as the
+# manifest-live verdict, and whose `do state archive` moves the file like the real
 # verb. Returns the sandbox dir.
 make_sandbox() {
     local verdict="$1" dir
@@ -35,12 +35,15 @@ make_sandbox() {
     mkdir -p "$dir/bin" "$dir/.fno"
     cat > "$dir/bin/fno" <<STUB
 #!/usr/bin/env bash
-if [[ "\$1" == "target" && "\$2" == "status" ]]; then
+if [[ "\$1" == "do" && "\$2" == "target" && "\$3" == "status" ]]; then
   echo '{ "node": "x-1", "manifest-live": "${verdict} (test)" }'
-elif [[ "\$1" == "state" && "\$2" == "archive" ]]; then
-  p=""; shift 2
+elif [[ "\$1" == "do" && "\$2" == "state" && "\$3" == "archive" ]]; then
+  p=""; shift 3
   while [[ \$# -gt 0 ]]; do [[ "\$1" == "--path" ]] && p="\$2"; shift; done
   [[ -n "\$p" ]] && mv "\$p" "\$p.archived.test.md"
+elif [[ "\$1" == "target" || "\$1" == "state" ]]; then
+  echo "deprecated root reached" >&2
+  exit 2
 fi
 STUB
     chmod +x "$dir/bin/fno"

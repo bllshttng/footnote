@@ -1,6 +1,6 @@
 """Advisory cross-process lock serializing fno's two plan-doc writers.
 
-``fno plan stamp`` (the ship gate) and status_fanout's ``_append_plan_progress``
+``fno do plan stamp`` (the ship gate) and status_fanout's ``_append_plan_progress``
 both do a whole-file read-modify-write on a node's plan doc. Atomic writes stop
 torn reads but NOT lost updates, so a stamp landing during a progress append
 silently drops one side unless the two serialize.

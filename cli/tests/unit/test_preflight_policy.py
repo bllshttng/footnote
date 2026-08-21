@@ -2,7 +2,7 @@
 
 `local_verification_required` is the ONE function that decides whether a full
 local `scripts/ci/preflight.sh` receipt is required; every Python lane
-(`fno pr evidence-required`, the worker ship lane, the batch lane) routes
+(`fno do pr evidence-required`, the worker ship lane, the batch lane) routes
 through it, and the bash ship path asks it via the CLI. These tests pin the
 returned reason string, not just the boolean, because the reason is the
 receipt three blocked workers needed on 2026-08-19.
@@ -144,8 +144,8 @@ def test_ship_phase_bash_path_asks_the_policy() -> None:
     """
     ship_phase = REPO_ROOT / "skills" / "target" / "references" / "ship-phase.md"
     content = ship_phase.read_text(encoding="utf-8")
-    assert "fno pr evidence-required" in content, (
-        "skills/target/references/ship-phase.md must ask fno pr evidence-required "
+    assert "fno do pr evidence-required" in content, (
+        "skills/target/references/ship-phase.md must ask fno do pr evidence-required "
         "before running scripts/ci/preflight.sh; a guard on one of two reachable "
         "paths is decorative"
     )

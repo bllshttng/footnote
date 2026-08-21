@@ -41,7 +41,7 @@ class Meta:
 FIELD_META: dict[str, Meta] = {
     "schema_version": Meta("never", "Settings schema version; managed by fno, not hand-set."),
     # --- config.paths.* (all defaulted; advanced) ---
-    "state_dir": Meta("advanced", "Root dir for global fno state.", default_source="default"),
+    "state_dir": Meta("advanced", "Root dir for global fno do state.", default_source="default"),
     "plans_dir": Meta("advanced", "Where folder plans are written.", default_source="default"),
     "plans_filename": Meta("advanced", "Plan/design-doc filename template: strftime codes plus {slug} and {node} placeholders; must render to a bare *.md name.", default_source="default"),
     "branch.prefix": Meta("advanced", "Prefix for dispatched worktree branches: <prefix>/<slug>-<node>.", default_source="default"),
@@ -130,7 +130,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     "post_merge.auto_run": Meta(
         "advanced",
-        "Let the pr-watch daemon (the sole merge detector) run `fno pr ritual "
+        "Let the pr-watch daemon (the sole merge detector) run `fno do pr ritual "
         "<pr> --autonomous` for a newly-merged PR (opt-in; default off). "
         "Reconcile no longer dispatches a ritual.",
     ),
@@ -153,7 +153,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.research.* ---
     "research.output_dir": Meta(
         "advanced",
-        "Landing dir for the `fno research` doc deliverable (brief + sources sidecar); "
+        "Landing dir for the `fno do research` doc deliverable (brief + sources sidecar); "
         "vault area, not repo-relative. Unset => ship fails loud (never guesses).",
     ),
     "done_probes": Meta(
@@ -360,12 +360,12 @@ FIELD_META: dict[str, Meta] = {
     "auto_merge.grant": Meta(
         "advanced",
         "WHO may merge once enabled passes (actor scope): 'none' = humans only "
-        "via `fno pr merge`; 'dispatch' = autonomously dispatched /target workers "
+        "via `fno do pr merge`; 'dispatch' = autonomously dispatched /target workers "
         "may merge too. Replaces the deprecated dispatch.auto_merge bool. Any "
         "unknown value degrades to 'none'.",
     ),
     "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
-    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Executor paths only (`fno pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook."),
+    "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Executor paths only (`fno do pr merge`, pr verify); GitHub's native auto-merge queue has no branch-delete hook."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),

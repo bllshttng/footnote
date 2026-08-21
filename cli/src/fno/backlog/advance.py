@@ -35,7 +35,7 @@ The ``dispatch:<id>`` reservation uses a TTL claim (not PID-liveness) precisely
 so it survives advance's exit (AC1-CLAIM): the just-dispatched node stays
 "claimed" for the boot window, so a concurrent reconcile/post-merge sees it as
 already-being-worked. The spawned worker acquires ``node:<id>`` cleanly on its
-own ``fno target init`` (free at that point); the reservation then expires by
+own ``fno do target init`` (free at that point); the reservation then expires by
 TTL once the worker owns the node.
 """
 
@@ -241,7 +241,7 @@ def selection_guards(
         Belt-and-braces: the write-site refusal (x-d9a4) already stops new
         double-bindings, so this is a read of a state that should not exist.
         It is also only HALF the coverage - selection_guards is autonomous-only
-        (see the design-stage note below), so `fno target init` carries the
+        (see the design-stage note below), so `fno do target init` carries the
         named-dispatch half. A guard on one of two reachable paths is
         decorative.
 
@@ -1312,7 +1312,7 @@ def _run_setup_worktree(worktree: Path, canonical_root: Path) -> None:
     falls through to global config. Best-effort: a bare `pip install fno` ships
     no repo scripts, and a link failure must not abort an otherwise-launchable
     lane, so any non-zero / missing-script outcome is swallowed (the worker's
-    own `fno target start` re-heals what it can).
+    own `fno do target start` re-heals what it can).
     """
     script = canonical_root / "scripts" / "setup" / "setup-worktree.sh"
     if not script.exists():
@@ -1371,7 +1371,7 @@ def _ensure_lane_worktree(
     # the symlink those links would land in the CANONICAL checkout; the later
     # seed would then replace `.fno` with a bare real dir, stranding the lane
     # without its settings.yaml/state links. Heal first so setup populates the
-    # REAL per-worktree dir (mirrors the heal `fno target start` does before its
+    # REAL per-worktree dir (mirrors the heal `fno do target start` does before its
     # setup hook). A fresh worktree has no `.fno` yet, so this is a no-op there.
     fno_dir = worktree / ".fno"
     if fno_dir.is_symlink():
@@ -1404,7 +1404,7 @@ def _seed_lane_local_settings(
 
     fno_dir = worktree / ".fno"
     # A reused worktree may carry `.fno` as a WHOLE-DIR symlink to canonical (the
-    # bg-worktree footgun `fno target start` already heals). Writing through it
+    # bg-worktree footgun `fno do target start` already heals). Writing through it
     # would create/overwrite the CANONICAL config.local.toml, so every lane
     # would then share one project.id - the exact collision this seed prevents.
     # Unlink and recreate a real per-worktree dir first.
@@ -1447,7 +1447,7 @@ def dispatch_lanes(
     per pick, LD#8), then for each pick: isolates a worktree off origin/main,
     seeds its per-lane `.fno/settings.local.yaml` (x-cbce), and spawns a detached
     `claude --bg` `/target --no-merge` worker rooted in that worktree. The worker's
-    `fno target init` reconciles the already-held slot rather than acquiring a
+    `fno do target init` reconciles the already-held slot rather than acquiring a
     fresh one.
 
     ``max_lanes == 1`` dispatches a single node (the retargeted active_backlog

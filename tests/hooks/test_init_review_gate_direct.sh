@@ -8,7 +8,7 @@
 # full run on a typo'd config.review.github_apps login, surfacing only at the
 # stop gate. A guard on one of two reachable paths is decorative.
 #
-# The gate is delegated to `fno target check-review-gate`, so these scenarios
+# The gate is delegated to `fno do target check-review-gate`, so these scenarios
 # stub `fno` and assert on the SCRIPT's handling of its exit code. What the
 # verdicts themselves decide is pinned in
 # cli/tests/unit/test_target_init_review_gate.py; that split is deliberate, the
@@ -50,7 +50,7 @@ _ALL_TMPS=()
 trap 'rm -rf ${_ALL_TMPS[@]+"${_ALL_TMPS[@]}"}' EXIT
 
 # ── Helper: isolated repo + a stub `fno` that logs every invocation ──
-# The stub answers ONLY `target check-review-gate` with $2; every other fno
+# The stub answers ONLY `do target check-review-gate` with $2; every other fno
 # subcommand the script makes later (config get, claim status, backlog get)
 # exits 0 silently, so a scenario tests the gate and nothing else.
 # Usage: make_repo <tmpvar> <gate_exit_code>
@@ -67,10 +67,14 @@ make_repo() {
 
   cat > "${_dir}/bin/fno" << STUB
 #!/usr/bin/env bash
-if [[ "\$1" == "target" && "\$2" == "check-review-gate" ]]; then
+if [[ "\$1" == "do" && "\$2" == "target" && "\$3" == "check-review-gate" ]]; then
   echo "gate-called" >> "${_dir}/gate-calls.log"
   echo "stub refusal: config.review.github_apps names a bot" >&2
   exit ${_gate_rc}
+fi
+if [[ "\$1" == "target" ]]; then
+  echo "deprecated target root reached" >&2
+  exit 2
 fi
 exit 0
 STUB

@@ -328,7 +328,7 @@ def test_fetch_failure_aborts(repo: Path):
     assert wt.exists(), "no worktree may be removed after a fetch abort"
 
 
-# ── AC2-EDGE: local-only .fno state survives the reap ───────────────────────
+# ── AC2-EDGE: local-only .fno do state survives the reap ───────────────────────
 def test_salvage_preserves_local_state(repo: Path):
     (repo / ".fno").mkdir()
     (repo / ".fno" / "config.toml").write_text("canonical\n")

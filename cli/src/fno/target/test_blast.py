@@ -1,4 +1,4 @@
-"""Unit tests for the blast-radius classifier + `fno target blast-check` verb.
+"""Unit tests for the blast-radius classifier + `fno do target blast-check` verb.
 
 Covers task 1.1 acceptance (AC1-EDGE empty/unparseable map -> unknown; the
 classifier half of AC2-EDGE/AC1-FR is exercised here; the init-modulation
@@ -195,7 +195,7 @@ _PLAN = """\
 |---|---|---|
 | `cli/src/fno/target/blast.py` | create | 1.1 |
 | `scripts/lib/config.sh` | modify | 1.2 |
-| fno target init writer (locate in cli/src/fno) | modify | 1.2 |
+| fno do target init writer (locate in cli/src/fno) | modify | 1.2 |
 | init-modulation test | create | 1.2 |
 
 ## Next Section

@@ -1,7 +1,7 @@
 """Tests for the /review sigma cross-model routing seam (x-7137 US3).
 
 Covers the shared resolver (``resolve_panel_providers``), the accessor the
-skill consumes (``panel_provider_routing``), the ``fno review --print-providers``
+skill consumes (``panel_provider_routing``), the ``fno do review --print-providers``
 flag, and the "one resolution path, no drift" invariant: the skill's routing
 equals what the ``build_review_runner`` panel resolves for the same inputs.
 """
@@ -120,11 +120,11 @@ def test_routing_matches_panel_resolution_no_drift(
 def test_print_providers_flag_off_emits_empty_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`fno review --print-providers` with cross-model OFF prints `{}` and exits 0."""
+    """`fno do review --print-providers` with cross-model OFF prints `{}` and exits 0."""
     monkeypatch.setattr(
         review_mod, "_read_cross_model_config", lambda: ({}, False)
     )
-    result = CliRunner().invoke(app, ["review", "--print-providers"])
+    result = CliRunner().invoke(app, ["do", "review", "--print-providers"])
     assert result.exit_code == 0
     assert json.loads(result.stdout.strip()) == {}
 
@@ -147,7 +147,7 @@ def test_review_cli_pins_pre_panel_head_to_the_diff(tmp_path: Path) -> None:
         result = CliRunner().invoke(
             app,
             [
-                "review",
+                "do", "review",
                 "--diff",
                 str(diff),
                 "--session-id",
@@ -199,7 +199,7 @@ def test_print_providers_flag_emits_routing_json(
     monkeypatch.setattr(pr, "load_implementer_provider", lambda _sid: "claude")
     monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude", "codex"])
 
-    result = CliRunner().invoke(app, ["review", "--print-providers"])
+    result = CliRunner().invoke(app, ["do", "review", "--print-providers"])
     assert result.exit_code == 0
     routing = json.loads(result.stdout.strip())
     assert routing["code_reviewer"]["provider"] == "codex"
@@ -226,7 +226,7 @@ def test_print_providers_includes_explicit_route_model(
         lambda provider, model: {"ROUTE": f"{provider}/{model}"},
     )
 
-    result = CliRunner().invoke(app, ["review", "--print-providers"])
+    result = CliRunner().invoke(app, ["do", "review", "--print-providers"])
     assert result.exit_code == 0, result.output
     route = json.loads(result.stdout)["code_reviewer"]
     assert route == {
@@ -303,7 +303,7 @@ def test_print_providers_resolves_session_from_state(
     monkeypatch.setattr(pr, "available_provider_kinds", lambda: ["claude", "codex"])
 
     result = CliRunner().invoke(
-        app, ["review", "--print-providers", "--state", str(state)]
+        app, ["do", "review", "--print-providers", "--state", str(state)]
     )
     assert result.exit_code == 0
     assert seen["sid"] == "SESS-FROM-STATE"

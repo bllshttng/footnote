@@ -24,7 +24,7 @@ graph TD
     C --> E[Canonical Python evaluator]
     F --> E
     E --> V[Complete DeliveryVerdict]
-    V --> B[Hidden fno delivery evaluate boundary]
+    V --> B[Hidden fno do delivery evaluate boundary]
     B --> L[Rust loop-check]
     L --> T[DoneDelivery]
     T --> Z[Rust finalize]
@@ -91,7 +91,7 @@ A declined approval is a blocked prerequisite rather than evidence that the deli
 The inspection and Rust process boundary is hidden from the curated top-level menu:
 
 ```bash
-fno delivery evaluate --json --plan-path path/to/plan.md --events .fno/events.jsonl
+fno do delivery evaluate --json --plan-path path/to/plan.md --events .fno/events.jsonl
 ```
 
 The response version is `delivery-evaluate-response.v1`, with status `inactive`, `evaluated`, or `undeterminable`.

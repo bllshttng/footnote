@@ -17,7 +17,7 @@ _ENV = {"COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"}
     "argv",
     [
         # gate-set and phase-verify removed by the control-plane collapse
-        # wedge (ab-d0337fbc): the `fno gate` sub-app is gone and `fno phase`
+        # wedge (ab-d0337fbc): the `fno gate` sub-app is gone and `fno do phase`
         # keeps only kill-check.
         ["pr", "verify", "--help"],
         ["pr", "rebase", "--help"],

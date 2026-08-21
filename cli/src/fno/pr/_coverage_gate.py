@@ -10,8 +10,8 @@ the two readers that already disagree stay two, not three.
 
 One predicate, three reachable surfaces:
 
-  - ``_merge.py``        ``fno pr merge`` (recompute=True)            -> checked
-  - ``cli.py``           ``fno pr coverage-check`` (recompute=False)  -> checked
+  - ``_merge.py``        ``fno do pr merge`` (recompute=True)            -> checked
+  - ``cli.py``           ``fno do pr coverage-check`` (recompute=False)  -> checked
   - ``hooks/git-protection.py`` for a bare ``gh pr merge``, via the verb
     above, stdlib-only and unable to import this module                -> checked
 
@@ -20,7 +20,7 @@ the Rust producer and is budgeted in minutes, while a PreToolUse hook has a
 60s harness budget and a killed hook emits no verdict at all. So the
 invariant between hook and guard is deliberately one-directional - the hook
 never ALLOWS what the guard refuses, but on a missing or stale row the hook
-denies where ``fno pr merge`` may yet allow after recomputing. The recovery
+denies where ``fno do pr merge`` may yet allow after recomputing. The recovery
 from a wrong deny is one command; the recovery from a wrong allow is a
 revert.
 
@@ -50,7 +50,7 @@ UNANSWERED = 4
 # The 3am release valve, read in the ONE predicate so it opens on every
 # surface the docs point at. `docs/best-practices.md` and
 # `docs/troubleshooting.md` both tell the operator to route merges through
-# `fno pr merge` and name the `coverage-override` label as the only way past
+# `fno do pr merge` and name the `coverage-override` label as the only way past
 # an uncovered head. Read it anywhere but here and that is false: the gate
 # refuses at step 2a, the publisher's override branch is never reached, and
 # the only path through is the raw `gh` the same docs forbid.
@@ -96,7 +96,7 @@ def covered_conjuncts(
     """Which gate conjuncts a coverage row satisfies: ``(covered, failed)``.
 
     The single spelling of "does this row clear the coverage guard", consumed
-    by ``coverage_verdict`` below AND by ``fno pr status``'s ``ready``
+    by ``coverage_verdict`` below AND by ``fno do pr status``'s ``ready``
     conjunct, so status can never report ready on a row merge refuses (a
     partial copy of this predicate is exactly how it did). ``failed`` is
     empty when covered, else one of ``uncovered`` / ``no_local_pass`` /

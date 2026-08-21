@@ -32,14 +32,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$REPO_ROOT/skills/target/scripts/handoff.sh"
 CONTEXT_PROBE="$REPO_ROOT/skills/target/scripts/context-probe.sh"
 
-# The `fno` stub delegates `plan rung` to the real CLI (see the stub body), so
+# The `fno` stub delegates `do plan rung` to the real CLI (see the stub body), so
 # it needs this checkout's sources and an interpreter that can import them.
 # Prefer the worktree venv; a bare python3 works when the deps are present.
 export FNO_SRC="$REPO_ROOT/cli/src"
 # Pick an interpreter that can actually IMPORT the CLI, and refuse to run if
 # none can. Choosing one that merely exists is how this suite silently went
 # ~60% vacuous: a linked worktree has no cli/.venv, the bare-python3 fallback
-# lacked typer, `fno plan rung` died, and every scenario parked at that gate
+# lacked typer, `fno do plan rung` died, and every scenario parked at that gate
 # while still matching its loose "parked" assertion (x-f804).
 export FNO_PYTHON=""
 for _cand in \
@@ -259,6 +259,19 @@ echo "fno $*" >> "$CALL_LOG"
 subcmd1="${1:-}"
 subcmd2="${2:-}"
 
+if [ "$subcmd1 $subcmd2 ${3:-}" = "do plan rung" ]; then
+  # Delegate to the REAL implementation instead of stubbing a verdict. This
+  # gate's entire contract IS the rung vocabulary, so a stub that re-derived
+  # it would test the stub - and a second copy of the vocabulary is the exact
+  # thing `fno do plan rung` exists to delete.
+  exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli do plan rung "${4:-}"
+fi
+
+if [ "$subcmd1 $subcmd2" = "plan rung" ]; then
+  echo "deprecated plan root reached" >&2
+  exit 2
+fi
+
 case "$subcmd1 $subcmd2" in
   "agents spawn")
     rc_file="$SCENARIO_DIR/fno-ask-rc"
@@ -346,20 +359,13 @@ case "$subcmd1 $subcmd2" in
   "agents rm")
     exit 0
     ;;
-  "plan rung")
-    # Delegate to the REAL implementation instead of stubbing a verdict. This
-    # gate's entire contract IS the rung vocabulary, so a stub that re-derived
-    # it would test the stub - and a second copy of the vocabulary is the exact
-    # thing `fno plan rung` exists to delete.
-    exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli plan rung "${3:-}"
-    ;;
   context*)
     # Delegate to the REAL implementation. The context-probe shim resolves to
     # `fno context`, so a stub that silently no-ops it via the *) catch-all
     # would hand every pressure scenario an empty reading and let the suite
     # pass vacuously - the x-f804 hazard through a different door. The probe's
     # contract IS reading real context, so a stub that fakes a reading tests the
-    # stub. Same precedent and reasoning as `plan rung` above.
+    # stub. Same precedent and reasoning as `do plan rung` above.
     exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli "$@"
     ;;
   *)
@@ -1282,7 +1288,7 @@ HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprin
 check_contains "x-3ad5: an unknown status is still parked" "parked" "$output"
 
 # ---------------------------------------------------------------------------
-# Scenario 6b: x-3571 - the gate delegates to `fno plan rung`
+# Scenario 6b: x-3571 - the gate delegates to `fno do plan rung`
 #
 # The gate no longer parses `^status:` itself. Two things follow that the
 # vocabulary scenarios above cannot show: a pre-design rung parks (it used to
@@ -1300,18 +1306,23 @@ for st in idea stub; do
   HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 run_handoff "$SBX" "blueprint-do"
   check_contains "x-3571: pre-design rung '$st' parks" "parked" "$output"
   check_contains "x-3571: '$st' parks naming the rung" "rung 'idea'" "$output"
+  check_contains "x-3571: '$st' uses canonical do plan rung" "fno do plan rung" "$(cat "$CALL_LOG")"
 done
 
 # A stale fno (no `rung` verb) must park loudly, not pass silently and not
-# blame the plan. Overwrite the stub so `plan rung` fails the way an older
+# blame the plan. Overwrite the stub so `do plan rung` fails the way an older
 # installed binary does: exit 2, nothing on stdout.
 SBX="$(make_sandbox s6b-stale)"
 CALL_LOG="$SBX/call-log"
 cat > "$SBX/stub-bin/fno" <<'STALEEOF'
 #!/usr/bin/env bash
 echo "fno $*" >> "${CALL_LOG:-/dev/null}"
-if [ "${1:-} ${2:-}" = "plan rung" ]; then
+if [ "${1:-} ${2:-} ${3:-}" = "do plan rung" ]; then
   echo "No such command 'rung'." >&2
+  exit 2
+fi
+if [ "${1:-} ${2:-}" = "plan rung" ]; then
+  echo "deprecated plan root reached" >&2
   exit 2
 fi
 exit 0

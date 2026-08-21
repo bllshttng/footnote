@@ -1,4 +1,4 @@
-"""`fno pr logs` - the agent-facing CI reader (x-32af US2).
+"""`fno do pr logs` - the agent-facing CI reader (x-32af US2).
 
 `gh` is injected rather than reached, so the failure paths that matter most
 (unauthenticated, expired retention, a job that is not an Actions job) are

@@ -261,8 +261,8 @@ def test_update_without_source_rev_skips_marker_chain(
     # after the install. Assert the atomic rename that actually lands the marker,
     # which is both specific to the marker chain and a stronger claim.
     assert "mv " not in joined
-    # The pr-watch refresh still rides the successful install (best-effort).
-    assert "pr-watch refresh" in joined
+    # The canonical watcher refresh still rides the successful install (best-effort).
+    assert "do pr watch refresh" in joined
 
 
 def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(

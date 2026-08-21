@@ -1,4 +1,4 @@
-"""Tests for config.research - the `fno research` doc-deliverable config block.
+"""Tests for config.research - the `fno do research` doc-deliverable config block.
 
 The `doc` deliverable writes the brief + sources sidecar to
 `config.research.output_dir`. That path is the vault area for research output

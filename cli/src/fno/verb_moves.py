@@ -22,8 +22,8 @@ class Move(NamedTuple):
 
     ``kind="deprecated"`` forwards, prints the new spelling to stderr, and
     is removed one release out. ``kind="alias"`` forwards silently and is
-    permanent. ``silent_leaves`` carves hot leaves out of the deprecation
-    print, so a busy spelling stays quiet while its siblings announce.
+    permanent. ``kind="leaf-alias"`` is the post-expiry state: only entries
+    in ``permanent_leaves`` forward, while retired siblings fail loud.
 
     NamedTuple rather than dataclass: this module imports on every
     invocation with arguments, ``typing`` is already warm there, and
@@ -34,18 +34,30 @@ class Move(NamedTuple):
 
     kind: str
     to: str
-    silent_leaves: frozenset[str] = frozenset()
+    permanent_leaves: frozenset[str] = frozenset()
 
 
 VERB_MOVES: dict[str, Move] = {
     "approvals": Move(kind="deprecated", to="inbox approvals"),
+    "delivery": Move(kind="deprecated", to="do delivery"),
+    "loops": Move(kind="deprecated", to="do loops"),
     "notify": Move(kind="deprecated", to="inbox notify"),
     "outstanding": Move(kind="deprecated", to="inbox outstanding"),
+    "phase": Move(kind="deprecated", to="do phase"),
+    "plan": Move(kind="deprecated", to="do plan"),
     "pr": Move(
         kind="deprecated",
         to="do pr",
-        silent_leaves=frozenset({"status", "merge", "rebase"}),
+        permanent_leaves=frozenset({"status", "merge", "rebase"}),
     ),
+    "pr-watch": Move(kind="deprecated", to="do pr watch"),
+    "research": Move(kind="deprecated", to="do research"),
+    "resume": Move(kind="deprecated", to="do resume"),
+    "review": Move(kind="deprecated", to="do review"),
+    "state": Move(kind="deprecated", to="do state"),
+    "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
+    "target": Move(kind="deprecated", to="do target"),
+    "think": Move(kind="deprecated", to="do think"),
 }
 
 
@@ -59,22 +71,29 @@ def destination_is_registered(move: Move, roots: Collection[str]) -> bool:
     return move.to.split(maxsplit=1)[0] in roots
 
 
+def forwarding_args(rest: list[str], move: Move) -> list[str] | None:
+    """Destination argv, or None when a post-expiry sibling is retired."""
+    if move.kind == "leaf-alias" and (not rest or rest[0] not in move.permanent_leaves):
+        return None
+    return [*move.to.split(), *rest]
+
+
 def deprecation_line(verb: str, rest: list[str], move: Move) -> str | None:
     """The one stderr line a moved spelling prints, or None to stay silent.
 
-    ``kind="alias"`` never prints. A ``deprecated`` entry whose first
-    argument sits in ``silent_leaves`` never prints - that is how a hot
+    ``kind="alias"`` and ``kind="leaf-alias"`` never print. A ``deprecated`` entry whose first
+    argument sits in ``permanent_leaves`` never prints - that is how a hot
     leaf keeps its two-level spelling permanently and quietly. A
-    deprecated entry that carries ``silent_leaves`` announces the
+    deprecated entry that carries ``permanent_leaves`` announces the
     leaf-qualified destination for every other first argument
     (``fno pr create`` -> ``fno do pr create``); an entry without them
     announces the bare destination, because its arguments are values
     (``fno inbox notify TITLE BODY``), not subcommands to teach.
     """
-    if move.kind == "alias":
+    if move.kind in {"alias", "leaf-alias"}:
         return None
-    if rest and rest[0] in move.silent_leaves:
+    if rest and rest[0] in move.permanent_leaves:
         return None
-    if move.silent_leaves and rest and not rest[0].startswith("-"):
+    if move.permanent_leaves and rest and not rest[0].startswith("-"):
         return f"fno {verb} {rest[0]} is now fno {move.to} {rest[0]}"
     return f"fno {verb} is now fno {move.to}"

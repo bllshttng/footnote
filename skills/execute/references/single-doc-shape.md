@@ -10,7 +10,7 @@ A plan is always a single `.md` file (G1 blocks authoring new folder plans; G3 r
 
 1. Calls `fno.plan._doc.load_plan(Path(plan_input))` to parse frontmatter and sections.
 2. Extracts the `## Execution Strategy` section via `doc.get_section("Execution Strategy")`.
-3. Delegates the fenced YAML body to `fno.plan.brief.parse_execution_strategy` (the canonical Execution Strategy parser - single source of truth, shared with `fno plan brief`) to get `execution_mode` / `scope` / `projects` / `waves`.
+3. Delegates the fenced YAML body to `fno.plan.brief.parse_execution_strategy` (the canonical Execution Strategy parser - single source of truth, shared with `fno do plan brief`) to get `execution_mode` / `scope` / `projects` / `waves`.
 4. Builds and returns an `ExecutionStrategy` dataclass (`waves: List[Wave]`, `scope`, `project_tasks`).
 
 `orchestrator.py` also has a lower-level `parse_execution_strategy(index_path: str)` - a self-contained, stdlib-only regex parser used directly by `main()`'s CLI entry point (`orchestrator.py <path-to-plan.md>`). It reads the same `## Execution Strategy` fenced YAML block from any single file; it does not go through `fno.plan._doc`.

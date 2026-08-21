@@ -60,7 +60,7 @@ def test_unscannable_plans_root_returns_none(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI-level: `fno plan folder-audit` fail-toward-defer paths
+# CLI-level: `fno do plan folder-audit` fail-toward-defer paths
 # ---------------------------------------------------------------------------
 
 

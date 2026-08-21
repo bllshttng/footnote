@@ -1264,7 +1264,7 @@ def config_file() -> Path:
 # ---------------------------------------------------------------------------
 # Plugin-script resolution with a self-healing persisted pointer (#2)
 # ---------------------------------------------------------------------------
-# `fno target init` / `fno gate set` need scripts that ship with the PLUGIN
+# `fno do target init` / `fno gate set` need scripts that ship with the PLUGIN
 # (hooks/, scripts/lib/), not the active project. From a foreign project with
 # no env hint those were unreachable (the uv-tool wheel carries no hooks/, and
 # CLAUDE_PLUGIN_ROOT is not propagated to `fno` subprocesses), forcing a

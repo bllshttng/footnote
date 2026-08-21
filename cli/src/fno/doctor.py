@@ -1643,10 +1643,10 @@ def _emit_human(
     pw = result.get("pr_watch") or {}
     pw_verdict = pw.get("verdict")
     if pw_verdict == "dead":
-        fix = pw.get("fix") or "fno pr-watch install"
+        fix = pw.get("fix") or "fno do pr watch install"
         out(
             f"fno doctor: pr-watch enabled but not running ({pw.get('detail')}); "
-            f"run `{fix}`, then verify with `fno pr-watch status`."
+            f"run `{fix}`, then verify with `fno do pr watch status`."
         )
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
@@ -1798,7 +1798,7 @@ def _emit_human(
         out(
             f"fno doctor: post-merge sync STALE - the canonical checkout is not "
             f"synced with recent merges ({pms.get('detail')}); run "
-            "`fno pr sync-canonical --pr-number <n>` and check "
+            "`fno do pr sync-canonical --pr-number <n>` and check "
             "~/.fno/pr-watcher.err.log."
         )
     elif pms.get("state") == "unknown":

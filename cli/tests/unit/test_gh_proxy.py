@@ -197,8 +197,8 @@ def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, cap
             75,
             "",
             "GraphQL discretionary read refused: reset at 2026-08-19T00:00:00Z. "
-            "Use `fno pr info 930` for state/head/mergeability and `fno pr status 930` "
-            "for CI; stop retrying GraphQL until reset. `fno pr status` still contains "
+            "Use `fno do pr info 930` for state/head/mergeability and `fno do pr status 930` "
+            "for CI; stop retrying GraphQL until reset. `fno do pr status` still contains "
             "optional review-thread and coverage reads that are GraphQL; those reads "
             "preserve the reserved coverage budget.",
         ),
@@ -206,7 +206,7 @@ def test_direct_pr_view_reaches_the_shared_floor_and_diagnostic(monkeypatch, cap
     with pytest.raises(SystemExit, match="75"):
         gh_proxy.main()
     err = capsys.readouterr().err
-    assert "Use `fno pr info 930`" in err
+    assert "Use `fno do pr info 930`" in err
     assert "stop retrying GraphQL until reset" in err
     assert "coverage reads that are GraphQL" in err
 

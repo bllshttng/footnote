@@ -43,11 +43,11 @@ def test_propagate_returncode_normalises_negative_signal_codes() -> None:
 
 
 # Note: the former test_pr_merge_normalises_negative_returncode was retired
-# with the fno pr port (ab-d4c98550): `fno pr merge` no longer forwards a bash
+# with the fno do pr port (ab-d4c98550): `fno do pr merge` no longer forwards a bash
 # subprocess returncode (it runs in-package via _merge.run_merge, returning
 # clean 0/1/2/127), so there is no signal-killed child code to normalise on
 # this path. propagate_returncode itself is still exercised above and by the
-# remaining bash-forwarding wrappers (e.g. fno plan).
+# remaining bash-forwarding wrappers (e.g. fno do plan).
 
 
 def test_notify_bare_invocation_does_not_assertion_error() -> None:
@@ -92,13 +92,13 @@ def test_phase_verify_surfaces_state_parse_error(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo_root))
     monkeypatch.chdir(repo_root)
 
-    result = runner.invoke(app, ["phase", "verify", "do"])
+    result = runner.invoke(app, ["do", "phase", "verify", "do"])
     # Either stderr contains a parse diagnostic, or the wrapper falls
     # through to pv_run with empty session_id and pv_run returns 0.
     # We accept either outcome but the parse-error message must reach
     # the user when stderr is captured separately.
     combined_output = result.output + (str(result.exception) if result.exception else "")
-    # The new code writes "fno phase: could not parse" to stderr.
+    # The new code writes "fno do phase: could not parse" to stderr.
     # CliRunner mix_stderr defaults to True so it merges into output.
     assert (
         "could not parse" in combined_output

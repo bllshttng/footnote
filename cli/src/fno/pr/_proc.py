@@ -1,6 +1,6 @@
-"""Subprocess helpers shared by the in-package ``fno pr`` ports.
+"""Subprocess helpers shared by the in-package ``fno do pr`` ports.
 
-The ``fno pr {merge,verify,rebase}`` verbs were ported from bash to in-package
+The ``fno do pr {merge,verify,rebase}`` verbs were ported from bash to in-package
 Python that shells to ``gh`` / ``git`` (ab-d4c98550). This module centralises
 the one idiom they all need: run an external tool, capture text output, and
 distinguish "tool not installed" from "tool ran and failed". Centralising it

@@ -569,13 +569,13 @@ def compare_and_rebind(
     - local same-holder, prior PID dead  -> atomically rebind to ``new_pid``.
 
     Never creates a missing/free claim and never archives another holder (that
-    is the explicit ``fno target start`` successor path). Emits ``claim_rebound``;
+    is the explicit ``fno do target start`` successor path). Emits ``claim_rebound``;
     raises ``RebindRefused`` on any refusal.
 
     ``new_holder`` moves the claim to a DIFFERENT holder on proof of the prior
     one (x-cd1e). The dispatch handover needs it: ``fno agents spawn --node``
     takes the node claim before the worker exists, and the worker's own
-    ``fno target init`` must then take it over rather than find it held and
+    ``fno do target init`` must then take it over rather than find it held and
     abort. ``acquire_claim`` cannot do this - it raises ``ClaimHeldByOther`` for
     a different holder on a live claim - and the same-holder rebind above cannot
     either, because the two ends genuinely have different names.
@@ -628,7 +628,7 @@ def compare_and_rebind(
         except ClaimGoneAway:
             raise RebindRefused(
                 "claim vanished; this target no longer owns the node "
-                "(use `fno target start` to reclaim)",
+                "(use `fno do target start` to reclaim)",
                 state="free",
             )
         except ClaimCorrupted:
@@ -704,7 +704,7 @@ def compare_and_rebind(
             # A live prior pid is in fact the NORMAL case on the blocking
             # substrates. `fno agents spawn --substrate headless` (and `--once`)
             # stays in dispatch_spawn for the worker's whole run, so the spawner
-            # is still alive when the worker reaches `fno target init`. Refusing
+            # is still alive when the worker reaches `fno do target init`. Refusing
             # there left the worker unclaimed for the full lease, which is the
             # free-read this whole change exists to close, reintroduced on the
             # one substrate that blocks.

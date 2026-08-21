@@ -5,7 +5,7 @@ This keeps strong project grounding without forcing every request through the sa
 
 ## The three layers
 
-`fno think inspect` is the deterministic discovery layer.
+`fno do think inspect` is the deterministic discovery layer.
 It reads repository, backlog, PR, database-artifact, and project-lesson evidence and emits typed source status without mutating code or state.
 
 `/fno:think` is the research layer.
@@ -49,4 +49,4 @@ An unavailable GitHub search is not “no matching PR,” missing or stale schem
 The model decides relevance only after inspecting the cited evidence.
 
 The receipt is derived and read-only.
-Backlog changes still go through `fno backlog`, target manifest first-fill still goes through `fno state set`, and schema refresh still goes through the established `fno codemap --db-schema` artifact path.
+Backlog changes still go through `fno backlog`, target manifest first-fill still goes through `fno do state set`, and schema refresh still goes through the established `fno codemap --db-schema` artifact path.

@@ -74,7 +74,7 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         "backlog",
         None,
         "unclaim",
-        "the forward transition is a claim acquired by `fno target init`",
+        "the forward transition is a claim acquired by `fno do target init`",
     ),
     # -- carve-outs --
     Pair("carveout", "add", "update"),

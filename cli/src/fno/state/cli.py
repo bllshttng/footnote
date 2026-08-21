@@ -1,4 +1,4 @@
-"""fno state subcommands - show, set, validate, init, archive, list-fields."""
+"""fno do state subcommands - show, set, validate, init, archive, list-fields."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ import yaml
 from fno.handoff.output import merge_json_flag
 from fno.tombstones import tombstone_group_cls
 
-cli = typer.Typer(name="state", help="manage fno state files", no_args_is_help=True, cls=tombstone_group_cls("state"))
+cli = typer.Typer(name="state", help="manage fno do state files", no_args_is_help=True, cls=tombstone_group_cls("state"))
 
 
 @cli.callback()
@@ -272,18 +272,18 @@ def init(
     ),
 ) -> None:
     """Create a fresh state file with default values."""
-    # Redirect target-session bootstraps to `fno target init` (Change 3).
-    # A bare `fno state init` (default type=target, default output path)
+    # Redirect target-session bootstraps to `fno do target init` (Change 3).
+    # A bare `fno do state init` (default type=target, default output path)
     # writes an empty stub the stop hook archives - the recurring
-    # substitution for the pathless init-target-state.sh. `fno target init`
+    # substitution for the pathless init-target-state.sh. `fno do target init`
     # records input/plan_path + the owner_cwd worktree binding and refuses
     # stubs. An explicit --output is a deliberate, non-bootstrap use (e.g.
     # tests) and is left alone, as is --allow-stub. Checked before any heavy
     # import so the redirect fires even where optional deps are unavailable.
     if type_ == "target" and output is None and not allow_stub:
         typer.echo(
-            "target sessions must bootstrap with 'fno target init' "
-            "(records input/plan_path/owner_cwd binding); 'fno state init' "
+            "target sessions must bootstrap with 'fno do target init' "
+            "(records input/plan_path/owner_cwd binding); 'fno do state init' "
             "writes a stub the stop hook will archive.",
             err=True,
         )

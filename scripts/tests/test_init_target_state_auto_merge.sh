@@ -179,7 +179,7 @@ rm -rf "$T"
 
 # ---- Test 3c2: the dispatch string reaches the fold as prose only ----
 # harness_map._AUTONOMOUS_COMMAND is "/target --no-merge {id}". The worker
-# translates the flag onto `fno target start`, which sets TARGET_NO_MERGE -
+# translates the flag onto `fno do target start`, which sets TARGET_NO_MERGE -
 # the refusal is carried by the flag path (test 3), never by the fold reading
 # the command string. Prose that merely mentions the flag is inert here.
 

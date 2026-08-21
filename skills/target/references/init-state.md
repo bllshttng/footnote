@@ -58,13 +58,13 @@ The size profile sets the base values for all toggles. Individual flags then ove
 
 ## Step 1c-blast: Blast-Radius Modulation (AUTO, opt-in, x-518f)
 
-When `config.target.blast.enabled: true` **and** the input is a plan or node (a File Ownership Map exists), `fno target init` performs a deterministic blast read on the plan's touched surface BEFORE it writes the immutable manifest, and modulates the size resolved in Step 1c. This is fully internal to the verb — there is no separate LLM step — but the agent should understand the resulting `target_size` may differ from the operator/default size, and an announce line is printed to stderr:
+When `config.target.blast.enabled: true` **and** the input is a plan or node (a File Ownership Map exists), `fno do target init` performs a deterministic blast read on the plan's touched surface BEFORE it writes the immutable manifest, and modulates the size resolved in Step 1c. This is fully internal to the verb — there is no separate LLM step — but the agent should understand the resulting `target_size` may differ from the operator/default size, and an announce line is printed to stderr:
 
 - **high blast** (touched surface matches the blast map: the loc-ratchet control-plane globs plus a general auth/migrations/sql/infra/billing list, extended by `config.target.blast.high_blast_globs`) → ceremony is **floored at `M`**, non-overridable downward even over an explicit `S`. Announce: `blast: high (<matched-path>) -> floor M ...`.
 - **low blast** (all paths known, none match) **and no size was pinned** → **downgraded to `S`** (do + PR, fast path). An explicit operator size is never downgraded. Announce: `blast: low -> fast path S ...`. Suppressed when `config.target.blast.downgrade: false` (safety-only mode: floor up, never down).
-- **unknown** (empty/unparseable map, classifier error, or `fno target blast-check` failure) → **no change**, fail-safe to the Step 1c size. A blast read never blocks init.
+- **unknown** (empty/unparseable map, classifier error, or `fno do target blast-check` failure) → **no change**, fail-safe to the Step 1c size. A blast read never blocks init.
 
-Disabled (the default) is byte-for-byte the pre-feature behavior. Inspect a plan's verdict directly with `fno target blast-check <plan>` (prints `{verdict, matched_paths, reason}`; `--quiet` for the bare token).
+Disabled (the default) is byte-for-byte the pre-feature behavior. Inspect a plan's verdict directly with `fno do target blast-check <plan>` (prints `{verdict, matched_paths, reason}`; `--quiet` for the bare token).
 
 ## Step 2: Initialize State
 
@@ -139,7 +139,7 @@ modeled as one backlog node per project (linked by `blocked_by`), each
 shipping its own PR. See the "CROSS-PROJECT IS RETIRED (migration shim)"
 section in SKILL.md.
 
-`fno target init` still persists `cross_project: false` by default (the
+`fno do target init` still persists `cross_project: false` by default (the
 manifest schema field is retained for back-compat with already-stamped
 legacy plans, whose graduation timing `fno-agents finalize` still honors).
 A legacy plan carrying `scope: cross-project` (or a `cross-project`
@@ -214,7 +214,7 @@ See [domain-profiles.md](domain-profiles.md) for full schema and examples.
 
 ## Step 3d2: Discovery Gate (idea input only)
 
-When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (x-42c5, operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. When no prior `/think` doc exists, the discovery protocol (and `/blueprint` after it) self-grounds via `fno think inspect`.
+When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (x-42c5, operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. When no prior `/think` doc exists, the discovery protocol (and `/blueprint` after it) self-grounds via `fno do think inspect`.
 
 ```
 DISCOVERY GATE -> plan -> execute -> review -> ship

@@ -211,7 +211,7 @@ def _spawn_guard_decision(
     ``handover_holder``, when given, also takes the ``node:<id>`` claim under
     that holder for the launch window, so the node reads as worked from the
     moment it is dispatched rather than from whenever the worker reaches its
-    own ``fno target init``.
+    own ``fno do target init``.
 
     ``no_reserve`` makes this a pure PROBE: it takes no reservation, no node
     claim, and performs no recovery. Every mutation in this function is gated on
@@ -284,7 +284,7 @@ def _spawn_guard_decision(
             # The roster is READ HERE, outside the recovery mutex. Reading it
             # under the lock shells out to the harness while holding a mutex
             # `compare_and_rebind` waits only five seconds for, so a peer's
-            # probe could make the worker's own `fno target init` handover fail
+            # probe could make the worker's own `fno do target init` handover fail
             # as claim-held-by-other. Handing the reading in leaves nothing
             # under the lock but a dictionary lookup.
             try:
@@ -462,7 +462,7 @@ def _spawn_guard_decision(
         # --node is the only dispatch path holding the node id as a TYPED
         # argument rather than as prose to be re-derived, which is why the claim
         # belongs here and why there are exactly two producers of this key, not
-        # more. The other is `fno target init`, and the worker inherits this
+        # more. The other is `fno do target init`, and the worker inherits this
         # claim from it rather than taking a second one.
         #
         # A failure to claim is NOT a refusal to launch. The reservation above
@@ -480,7 +480,7 @@ def _spawn_guard_decision(
         except CLAIM_UNAVAILABLE as exc:
             # SOMEBODY ELSE HOLDS THE NODE, and that is not a hiccup. The
             # reservation above only dedups other DISPATCHERS, so a session that
-            # already claimed this node through its own `fno target init` is
+            # already claimed this node through its own `fno do target init` is
             # invisible to it. Swallowing this as best-effort put a second
             # worker on a node a live session was building, which is the whole
             # failure this PR exists to close.
@@ -527,7 +527,7 @@ def _spawn_guard_decision(
 #: Lease on the spawn-side node claim. It has to outlive the launch-to-init gap
 #: or the node reads free again mid-launch, which is the exact hole this closes;
 #: the reservation's 3m is the window for ONE process to fork, not for a harness
-#: to boot and reach its first `fno target init`. It stays short because a spawn
+#: to boot and reach its first `fno do target init`. It stays short because a spawn
 #: that dies inside it strands the node until expiry, and an expired claim is
 #: provably dead on its own so the wedge self-clears.
 HANDOVER_TTL = "15m"

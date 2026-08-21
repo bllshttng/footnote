@@ -1,7 +1,7 @@
 """CLI-wiring coverage for `fno observer` (x-57a5, Task 7).
 
 Sweep and replay are exercised with injected seams (fake corpus, fake gh, fake
-spawn, no real worktree) so no test touches the network, real ~/.fno state, or
+spawn, no real worktree) so no test touches the network, real ~/.fno do state, or
 spawns a session. Asserts the anti-silent contract (a state word + the right
 events), the insufficient guard (no run_complete), replay's A2 rejection, the
 replay tool-fault path, and the one hard failure: an isolation violation.

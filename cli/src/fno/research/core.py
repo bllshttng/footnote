@@ -1,4 +1,4 @@
-"""Core retrieval+store engine for `fno research` (Group 1: retrieve + store).
+"""Core retrieval+store engine for `fno do research` (Group 1: retrieve + store).
 
 The `scout` research executor's primitive. One retrieval path:
 
@@ -170,7 +170,7 @@ def normalize_query(topic: str) -> str:
     if not q or len(q.split()) < MIN_QUERY_WORDS:
         raise EmptyQuery(
             f"topic too thin: {topic!r}. Give at least {MIN_QUERY_WORDS} words, "
-            'e.g. fno research "CA CCLD financials".'
+            'e.g. fno do research "CA CCLD financials".'
         )
     return q
 

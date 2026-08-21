@@ -25,7 +25,7 @@ PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 STATE_FILE=".fno/target-state.md"
 
 # ── Plugin-root pointer (best-effort, idempotent) ────────────────────
-# Persist the plugin root to ~/.fno/plugin-root so `fno target init` and
+# Persist the plugin root to ~/.fno/plugin-root so `fno do target init` and
 # `fno gate set` can find their plugin scripts when run from a foreign project
 # with no env hint. `fno` is a uv-tool install whose wheel does not carry
 # hooks/, and CLAUDE_PLUGIN_ROOT is not propagated to arbitrary `fno`
@@ -381,7 +381,7 @@ if command -v fno >/dev/null 2>&1; then
     rs_today="$(date +%Y-%m-%d 2>/dev/null || echo "")"
     if [[ -n "$rs_today" && "$(cat "$rs_watermark" 2>/dev/null || echo "")" != "$rs_today" ]]; then
         mkdir -p .fno 2>/dev/null; printf '%s\n' "$rs_today" >"$rs_watermark" 2>/dev/null || true
-        ( fno plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
+        ( fno do plan reconcile-status --apply >/dev/null 2>&1 & ) 2>/dev/null || true
     fi
     # Grooming fallback, for the codex/gemini path only: claude registers the
     # same script directly in hooks.json (this wrapper is not in that list), and
@@ -391,7 +391,7 @@ if command -v fno >/dev/null 2>&1; then
     # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
     # (one stat, cheap on no change), so no shell watermark; backgrounded + output
     # discarded so it can never corrupt this hook's JSON.
-    ( fno plan sync >/dev/null 2>&1 & ) 2>/dev/null || true
+    ( fno do plan sync >/dev/null 2>&1 & ) 2>/dev/null || true
 fi
 
 hydrate_state_provider_context

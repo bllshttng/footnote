@@ -84,6 +84,11 @@ case "$1" in
   backlog) exit 1 ;;                      # backlog get/update -> 1 (no graph)
   paths) exit 0 ;;                        # paths shell-stub -> 0; hook evals stdout (empty => STATE_DIR fallback)
   worktree) exit 0 ;;                     # worktree policy -> 0; hook reads stdout (empty => harness-native default)
+  do)
+    case "$2:$3" in
+      target:check-dispatch-hold) exit 0 ;;
+      *) exit 1 ;;
+    esac ;;
   target)
     case "$2" in
       check-dispatch-hold) exit 0 ;;

@@ -46,6 +46,7 @@ cat > "$BIN/fno" <<EOF
 # STUB_FNO_SLOW (committed only by the FIFO test) widens the window between a
 # waiter acquiring the lock and finishing its run, so ticket order is observable.
 [[ -f STUB_FNO_SLOW ]] && sleep 4
+[[ "\${1:-}" == "do" ]] && shift
 if [[ "\$*" == *"paths.worktrees_base"* ]]; then
     echo "$WT_BASE"
     exit 0

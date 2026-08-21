@@ -1,4 +1,4 @@
-"""Tests for the `fno research` CLI ship-step wiring (US3, AC1/AC5).
+"""Tests for the `fno do research` CLI ship-step wiring (US3, AC1/AC5).
 
 `run_round` is stubbed (no network); the test exercises the deliver wiring:
 default-deliver writes the brief to config.research.output_dir, and an unset

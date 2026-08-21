@@ -21,7 +21,7 @@ heading is not a second planning gate.
 
 ## The Protocol
 
-1. Run `fno think inspect "<seed>" --json` and read the whole receipt. It reports typed source status for the repository, the graph node, duplicate candidates, PR search, schema, and the active pitfalls. Inspect what it cites before forming any question.
+1. Run `fno do think inspect "<seed>" --json` and read the whole receipt. It reports typed source status for the repository, the graph node, duplicate candidates, PR search, schema, and the active pitfalls. Inspect what it cites before forming any question.
 2. Enumerate 3-5 unknowns as a numbered list of targeted questions
 3. Each question must be specific and actionable
 4. Questions should cover these categories:

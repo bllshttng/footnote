@@ -32,8 +32,17 @@ fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
 
+fn python_executable() -> PathBuf {
+    let venv = pythonpath().join("../.venv/bin/python");
+    if venv.is_file() {
+        venv
+    } else {
+        PathBuf::from("python3")
+    }
+}
+
 fn python_available() -> bool {
-    let probe = Command::new("python3")
+    let probe = Command::new(python_executable())
         .arg("-c")
         .arg("import fno.agents.harnesses.codex")
         .env("PYTHONPATH", pythonpath())
@@ -153,7 +162,7 @@ except c.CodexInvocationError as e:
     // interleave with the fork.
     let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
-    let mut cmd = Command::new("python3");
+    let mut cmd = Command::new(python_executable());
     cmd.arg("-c").arg(&code);
     // Defense in depth: explicitly clear every FAKE_CODEX_* var that any
     // sibling test might set. If global env IS dirty at fork time despite

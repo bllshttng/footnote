@@ -100,7 +100,7 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
          \x20       open(store, 'w').write(json.dumps(data))\n\
          \x20   print('q-test')\n\
          \x20   sys.exit(0)\n\
-         if args[:2] == ['pr', 'info']:\n\
+         if args[:3] == ['do', 'pr', 'info']:\n\
          \x20   p = os.environ.get('FNO_STUB_PR_INFO', 'pr-info.json')\n\
          \x20   if os.path.exists(p):\n\
          \x20       sys.stdout.write(open(p).read())\n\
@@ -111,7 +111,7 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     .unwrap();
     fs::set_permissions(&fno_stub, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // REST `fno pr info` payload the stubs serve: finalize resolves the
+    // REST `fno do pr info` payload the stubs serve: finalize resolves the
     // branch PR through the CLI's REST reader now, not gh, so the harness
     // answers from a file a test can delete to play "no open PR".
     let pr_info = cwd.join("pr-info.json");
@@ -187,15 +187,15 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     // assert the flag shape finalize passes (a rename on either side of the
     // Rust->Python boundary fails here, not silently in production).
     // fno.cli stub: finalize's post-stamp frontmatter validation shells
-    // `python3 -m fno.cli plan validate <path>`; record it and pass, so the
+    // `python3 -m fno.cli do plan validate <path>`; record it and pass, so the
     // call is observable and the loud non-fatal branch stays quiet in a
     // healthy run.
     fs::write(
         pypath.join("fno/cli.py"),
         "import sys\n\
          args = sys.argv[1:]\n\
-         if args[:2] == ['plan', 'validate']:\n\
-         \x20    open('calls.log','a').write('plan-validate %s\\n' % ' '.join(args[2:]))\n\
+         if args[:3] == ['do', 'plan', 'validate']:\n\
+         \x20    open('calls.log','a').write('plan-validate %s\\n' % ' '.join(args[3:]))\n\
          \x20    sys.exit(0)\n\
          sys.exit(1)\n",
     )
@@ -545,6 +545,10 @@ fn finalize_ship_gated() {
         "ledger: {c}"
     );
     assert!(c.contains("stamp-plan stamp"), "stamp must fire: {c}");
+    assert!(
+        c.contains("plan-validate"),
+        "canonical do plan validation must run after stamp: {c}"
+    );
     assert!(
         !c.contains("stamp-plan graduate"),
         "graduate must NOT fire at ship (done = merged): {c}"
@@ -1116,7 +1120,7 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         "#!/bin/sh\n\
          echo \"fno $*\" >> calls.log\n\
          case \"$*\" in\n\
-         \x20\x20 'pr info'*)\n\
+         \x20\x20 'do pr info'*)\n\
          \x20\x20   if [ -f \"$FNO_STUB_PR_INFO\" ]; then cat \"$FNO_STUB_PR_INFO\"; exit 0; fi\n\
          \x20\x20   exit 1 ;;\n\
          esac\n",
@@ -1565,7 +1569,7 @@ fn finalize_arms_with_merge_on_an_invalid_strategy() {
 /// gh exits right after queueing and GitHub's server-side merge deletes
 /// nothing, so the flag bought nothing at arm time - while its LOCAL delete
 /// attempt was the x-7267 false-failure shape. Remote cleanup after a
-/// `fno pr merge` merge is this verb's post-merge step, not an arm flag.
+/// `fno do pr merge` merge is this verb's post-merge step, not an arm flag.
 #[test]
 fn finalize_arm_never_carries_delete_branch() {
     for body in [

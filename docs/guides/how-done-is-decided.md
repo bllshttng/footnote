@@ -21,7 +21,7 @@ It reads them from GitHub through one decision verb.
 Read the PR's CI from outside the session:
 
 ```bash
-fno pr status <PR_NUMBER>
+fno do pr status <PR_NUMBER>
 ```
 
 It prints the CI verdict: green, red, pending, or unknown.
@@ -40,7 +40,7 @@ The answer can come from the coalescing cache. That cache keys one row per repo,
 Read the run's manifest:
 
 ```bash
-fno state show
+fno do state show
 ```
 
 It prints the node, the plan path, and the merge flags.
@@ -68,7 +68,7 @@ It is waiting because the world has not caught up.
 The agent's own text is not evidence.
 "Almost done" in the transcript does not move the gate.
 The decision verb reads GitHub, not the transcript.
-Trust `fno pr status` for CI, not the agent's self-report.
+Trust `fno do pr status` for CI, not the agent's self-report.
 
 ## Stop it yourself
 

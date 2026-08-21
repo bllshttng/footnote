@@ -1,4 +1,4 @@
-"""Tests for fno plan reconcile-status (x-ff83 W2).
+"""Tests for fno do plan reconcile-status (x-ff83 W2).
 
 Covers the two-tier normalization map, in-place status rewrite (body
 byte-intact), signal-gated archiving, and idempotency / never-downgrade.

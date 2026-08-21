@@ -1,10 +1,10 @@
-"""Optional-review signal for `fno pr status` (x-705b).
+"""Optional-review signal for `fno do pr status` (x-705b).
 
 x-d996 raised the drain-optional-review floor with SKILL.md prose, but prose is
 miss-able: an agent shortcut to `gh pr checks` + `reviewDecision` (empty for a
 `COMMENTED` bot review) and promised green without ever reading the inline
 findings. This attaches the signal to the ONE command the loop already polls -
-`fno pr status` - so the green verdict can't arrive divorced from the
+`fno do pr status` - so the green verdict can't arrive divorced from the
 unread-findings state.
 
 The read is strictly additive and time-boxed: any failure degrades to the
@@ -572,7 +572,7 @@ def read_review_coverage(
     """The ``review_coverage`` verdict for a PR, recomputed once when there is
     no usable row and ``recompute`` is set (x-3a3f). The default stays a pure
     read so direct callers (and hermetic tests) never spawn a subprocess; the
-    two gate surfaces - ``fno pr merge`` and ``fno pr status`` - opt in.
+    two gate surfaces - ``fno do pr merge`` and ``fno do pr status`` - opt in.
     Event-read failures degrade to the unknown sentinel. When ``head`` is
     supplied, verdict freshness fails closed unless Git proves the reviewed
     commit remains in that head's history.
@@ -601,8 +601,8 @@ def read_review_coverage(
         "stale_verdicts": latest.get("stale_verdicts", []),
     }
     # The raw verdict list rides along when present (older events carry none):
-    # the local-pass conjunct scans it, and dropping it here made `fno pr
-    # status` refuse forever on a row `fno pr merge` accepted (round 3, PR 917).
+    # the local-pass conjunct scans it, and dropping it here made `fno do pr
+    # status` refuse forever on a row `fno do pr merge` accepted (round 3, PR 917).
     if latest.get("verdicts") is not None:
         shaped["verdicts"] = latest["verdicts"]
     if note:
@@ -718,12 +718,12 @@ def publish_coverage_status(
 
     Reads with ``recompute=False``: a publisher must never spawn the 120s
     ``fno-agents`` subprocess. The caller has already caused the row to exist
-    (the stop hook, the standalone verb, or ``fno pr merge``'s own gate read).
+    (the stop hook, the standalone verb, or ``fno do pr merge``'s own gate read).
 
     The verdict is the SAME predicate the merge gate enforces
     (``_coverage_gate.coverage_verdict``, imported, never restated): a status
     check that disagrees with the gate it certifies is worse than none.
-    A caller that already holds the gate's answer (``fno pr merge``) passes it
+    A caller that already holds the gate's answer (``fno do pr merge``) passes it
     as ``gate_verdict`` so the receipt stamps the decision that actually let
     the merge through, never a fresh read that may have flipped since.
     Success names the reviewed count and the sha it was computed at; failure

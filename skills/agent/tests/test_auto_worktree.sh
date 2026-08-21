@@ -281,7 +281,7 @@ has "legacy \$fno:do worktree'd" "$(cat "$TMP/err24")" "auto-worktree: $TMP/cond
 # --- delegation: a claude /target isolates itself, so spawn.sh must NOT (x-6c22)
 # The session's PROJECT is fixed at launch cwd with no rename hook, so launching
 # in a pre-created worktree mints a throwaway ~/.claude/projects/ dir per spawn.
-# The worker's own cold-start (`fno target start` -> EnterWorktree) creates the
+# The worker's own cold-start (`fno do target start` -> EnterWorktree) creates the
 # worktree instead, keeping the transcript in the repo's canonical project dir.
 
 # 13. claude /target passthrough -> no worktree here, launched at the repo ROOT.
@@ -352,7 +352,7 @@ err21="$(cat "$TMP/err21")"
 has  "prose build pre-created" "$err21" "auto-worktree: $TMP/conductor/workspaces/myrepo/spawn-prose-build"
 no   "prose build not delegated" "$err21" "delegated to the worker cold-start"
 
-# 16. non-claude keeps pre-creation: a codex/opencode worker can run `fno target
+# 16. non-claude keeps pre-creation: a codex/opencode worker can run `fno do target
 #     start` but has no EnterWorktree tool to move its session into the result,
 #     so removing pre-creation there would strand it on the main checkout.
 out18="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-oc-target" \
@@ -364,7 +364,7 @@ no   "opencode build not delegated" "$err18" "delegated to the worker cold-start
 [[ -d "$TMP/conductor/workspaces/myrepo/spawn-oc-target" ]] && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: opencode build lost its worktree"; }
 
 # 17. a FREE-TEXT claude /target (passthrough, no node) keeps pre-creation. The
-#     cold-start that would isolate it is `fno target start <node>`, and there is
+#     cold-start that would isolate it is `fno do target start <node>`, and there is
 #     no node; unattended, that path hits the location-refusal backstop on
 #     canonical main and aborts, so delegating would strand the worker.
 out19="$(HOME="$TMP" PATH="$STUBDIR:$PATH" bash "$SPAWN" --name "spawn-freetext-target" \

@@ -1,9 +1,9 @@
-"""fno resume receipt - CLI surface for the durable typed resume receipt.
+"""fno do resume receipt - CLI surface for the durable typed resume receipt.
 
 Producer/consumer over the immutable receipt artifact:
-  fno resume receipt write    snapshot current state -> immutable versioned file
-  fno resume receipt validate revalidate the latest receipt against live state
-  fno resume receipt show     load + print a receipt (parse-checked)
+  fno do resume receipt write    snapshot current state -> immutable versioned file
+  fno do resume receipt validate revalidate the latest receipt against live state
+  fno do resume receipt show     load + print a receipt (parse-checked)
 
 The producer is called at a phase/handoff boundary (the caller knows node,
 session, generation, HEAD). The consumer is called by a successor session

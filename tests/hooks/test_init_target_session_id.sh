@@ -161,7 +161,7 @@ fi
 # ── (c) manifest heredoc must not run command substitution ───────────
 # Regression: the manifest heredoc is unquoted (`<< EOF`) so it can expand
 # $vars, which means an unescaped backtick in a comment line executes as a
-# command. The dispatch-pins comment mentions `fno target start`/`init`; if
+# command. The dispatch-pins comment mentions `fno do target start`/`init`; if
 # those backticks aren't escaped, init spews "No such command 'start'" +
 # "init: command not found" to stderr and writes the collapsed literal
 # "chosen at /," into every manifest. Prior scenarios ran init with
@@ -187,7 +187,7 @@ STATE_C="${TMP_C}/.fno/target-state.md"
 [[ -f "$STATE_C" ]] || fail "(c): target-state.md was not created"
 
 # The literal comment (backticks intact) must be present verbatim.
-grep -qF 'chosen at `fno target start`/`init`, carried' "$STATE_C" \
+grep -qF 'chosen at `fno do target start`/`init`, carried' "$STATE_C" \
   || fail "(c): dispatch-pins comment was mangled (backticks ran as command substitution)"
 pass "(c): dispatch-pins comment kept its backticks literal"
 

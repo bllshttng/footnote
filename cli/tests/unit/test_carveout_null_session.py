@@ -7,7 +7,7 @@ them the moment the reader DOES have a session, with no banner, because the
 banner only covers the reader-has-no-session case.
 
 The concrete break that motivates this file: file a carve-out before
-`fno target init`, then list after init in the same session, and `add` and
+`fno do target init`, then list after init in the same session, and `add` and
 `list` no longer round-trip.
 """
 from __future__ import annotations

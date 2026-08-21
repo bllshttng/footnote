@@ -36,7 +36,7 @@ def test_discretionary_read_is_refused_at_floor_before_graphql(tmp_path):
     )
     assert result.returncode == _quota.REFUSED
     assert calls == [["/real/gh", "api", "rate_limit"]]
-    assert "fno pr info 930" in result.stderr
+    assert "fno do pr info 930" in result.stderr
     assert "stop retrying GraphQL until" in result.stderr
     assert "still contains optional review-thread and coverage reads" in result.stderr
 

@@ -465,7 +465,7 @@ def doctor_cmd(
         "--review",
         help="Report whether every config.review.reviewers entry can actually "
         "run in this session (read-only). Diagnostic twin of the refusal "
-        "`fno target init` performs.",
+        "`fno do target init` performs.",
     ),
     json_out: bool = typer.Option(
         False,
@@ -844,7 +844,7 @@ def _couple_pr_watch(enabled: bool) -> None:
             # AC1-ERR: activation failed but enable stuck; surface loudly.
             typer.echo(
                 f"pr-watch: WARNING enabled but activation failed ({outcome}); "
-                "config stays enabled. Run `fno pr-watch install` or check `fno doctor`.",
+                "config stays enabled. Run `fno do pr watch install` or check `fno doctor`.",
                 file=sys.stderr,
             )
     else:
@@ -856,7 +856,7 @@ def _couple_pr_watch(enabled: bool) -> None:
             # signal that the watcher did not actually stop.
             typer.echo(
                 "pr-watch: WARNING disable set but launchctl unload failed; the "
-                "agent may still be running. Run `fno pr-watch uninstall` or "
+                "agent may still be running. Run `fno do pr watch uninstall` or "
                 "`launchctl unload ~/Library/LaunchAgents/sh.fno.pr-watcher.plist`.",
                 file=sys.stderr,
             )

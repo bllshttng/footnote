@@ -1,6 +1,6 @@
-"""`fno pr logs [<pr>]` - why did CI fail, in 40 lines.
+"""`fno do pr logs [<pr>]` - why did CI fail, in 40 lines.
 
-`fno pr` could merge, verify, rebase and report a verdict, but not answer the
+`fno do pr` could merge, verify, rebase and report a verdict, but not answer the
 one question an agent actually asks after a red check. With no verb for it the
 agent reached past footnote to `gh run view --log`, which downloads a zip of
 EVERY job in the run and pastes the whole thing into a transcript that then
@@ -15,7 +15,7 @@ Two shapes make this cheap. `statusCheckRollup[].detailsUrl` already ends in
 lookup; and `gh api .../actions/jobs/<id>/logs` returns that ONE job's log
 rather than the run-wide archive.
 
-Exit codes are `fno pr status`'s alphabet, so a caller branches on `$?`:
+Exit codes are `fno do pr status`'s alphabet, so a caller branches on `$?`:
     0  green    - every check passed; nothing fetched, no log written
     1  red      - at least one check failed; its log is spooled and tailed
     2  pending  - a check is still running; neither pass nor fail
@@ -70,7 +70,7 @@ def _gh_failure_reason(res: Result) -> str:
 
 
 def _fail(reason: str, res: Optional[Result] = None) -> int:
-    sys.stderr.write(f"fno pr logs: cannot read CI state: {reason}\n")
+    sys.stderr.write(f"fno do pr logs: cannot read CI state: {reason}\n")
     if res is not None:
         tail = (res.stderr or res.stdout).strip().splitlines()[-3:]
         for line in tail:
@@ -122,7 +122,7 @@ def _spool(root: Path, text: str) -> Optional[Path]:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, dest)
     except OSError as exc:
-        sys.stderr.write(f"fno pr logs: fetched the log but could not write {dest}: {exc}\n")
+        sys.stderr.write(f"fno do pr logs: fetched the log but could not write {dest}: {exc}\n")
         tmp.unlink(missing_ok=True)
         return None
     return dest
@@ -170,7 +170,7 @@ def run_logs(
             matched = [c for c in failing if job.lower() in _check_name(c).lower()]
         if not matched:
             sys.stderr.write(
-                f"fno pr logs: no failing check matches --job {job!r}; "
+                f"fno do pr logs: no failing check matches --job {job!r}; "
                 f"failing: {', '.join(names)}\n"
             )
             return 1
@@ -187,7 +187,7 @@ def run_logs(
     res = run(["gh", "api", f"repos/{owner}/{repo}/actions/jobs/{job_id}/logs"], cwd=cwd)
     if not res.ok:
         sys.stderr.write(
-            f"fno pr logs: could not fetch the log for {_check_name(target)}: "
+            f"fno do pr logs: could not fetch the log for {_check_name(target)}: "
             f"{_gh_failure_reason(res)}\n"
         )
         return 1
@@ -217,5 +217,5 @@ def main(argv: Sequence[str]) -> int:
     try:
         return run_logs(str(argv[0]) if argv else None)
     except ToolMissing:
-        sys.stderr.write("fno pr logs: gh not found on PATH\n")
+        sys.stderr.write("fno do pr logs: gh not found on PATH\n")
         return 127

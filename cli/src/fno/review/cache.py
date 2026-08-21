@@ -1,7 +1,7 @@
 """git_sha-keyed result cache for idempotent review re-runs.
 
 Cache results keyed by ``session_id + git_sha(HEAD) + prompt_hash``.
-A second ``fno review`` on an unchanged tree returns the cached artifact
+A second ``fno do review`` on an unchanged tree returns the cached artifact
 instead of re-spawning 6 workers.
 
 Cache layout::

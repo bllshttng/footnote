@@ -1,4 +1,4 @@
-"""Tests for `fno pr sync-canonical` (x-47be, task 1.2 / US2 + US5).
+"""Tests for `fno do pr sync-canonical` (x-47be, task 1.2 / US2 + US5).
 
 Every branch of run_sync_canonical is exercised via dependency injection: no
 real gh, git, shell, or canonical filesystem. Claims are redirected to a tmp

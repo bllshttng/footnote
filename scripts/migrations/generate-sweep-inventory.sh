@@ -50,17 +50,17 @@ output_path = Path(sys.argv[2])
 MAPPINGS = [
     (r"\bbash (?:\./)?scripts/lib/set-gate\.sh\b", "fno gate set"),
     (r"\bbash (?:\./)?scripts/lib/emit-gate-transition\.sh\b", "fno gate transition"),
-    (r"\bbash (?:\./)?scripts/lib/verify-pr-merged\.sh\b", "fno pr verify --kind merged"),
-    (r"\bbash (?:\./)?scripts/lib/verify-review-replies\.sh\b", "fno pr verify --kind reviews"),
-    (r"\bbash (?:\./)?scripts/lib/phase-verifier\.sh\b", "fno phase verify"),
-    (r"\bbash (?:\./)?scripts/lib/kill-criteria\.sh\b", "fno phase kill-check"),
+    (r"\bbash (?:\./)?scripts/lib/verify-pr-merged\.sh\b", "fno do pr verify --kind merged"),
+    (r"\bbash (?:\./)?scripts/lib/verify-review-replies\.sh\b", "fno do pr verify --kind reviews"),
+    (r"\bbash (?:\./)?scripts/lib/phase-verifier\.sh\b", "fno do phase verify"),
+    (r"\bbash (?:\./)?scripts/lib/kill-criteria\.sh\b", "fno do phase kill-check"),
     (r"\bbash (?:\./)?scripts/lib/infer-task-executor\.sh\b", "python3 -m fno.executor._surface"),
     (r"\bbash (?:\./)?scripts/lib/parse-locked-executor\.sh\b", "python3 -m fno.executor._locked"),
-    (r"\bbash (?:\./)?scripts/lib/rebase-resolve\.sh\b", "fno pr rebase"),
+    (r"\bbash (?:\./)?scripts/lib/rebase-resolve\.sh\b", "fno do pr rebase"),
     (r"\bbash (?:\./)?scripts/lib/notify\.sh\b", "fno notify"),
-    (r"\bbash (?:\./)?scripts/lib/pr-merge\.sh\b", "fno pr merge"),
+    (r"\bbash (?:\./)?scripts/lib/pr-merge\.sh\b", "fno do pr merge"),
     (r"\bpython3? (?:\./)?scripts/roadmap-tasks\.py\b", "fno backlog"),
-    (r"\bpython3? (?:\./)?scripts/lib/stamp-plan\.py\b", "fno plan stamp"),
+    (r"\bpython3? (?:\./)?scripts/lib/stamp-plan\.py\b", "fno do plan stamp"),
 ]
 
 # Catch-all for unmapped direct invocations (flag for human review).

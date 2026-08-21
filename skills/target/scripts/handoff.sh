@@ -314,14 +314,14 @@ if [ ! -f "$PLAN_PATH" ]; then
   exit "$_EXIT_PARKED"
 fi
 
-# Is this plan dispatchable? `fno plan rung` is the single readiness authority;
+# Is this plan dispatchable? `fno do plan rung` is the single readiness authority;
 # this script does not classify statuses of its own. Exit 0 means dispatchable,
 # and ANY non-zero exit parks - an unclassifiable plan, an unknown status word,
 # or a missing `fno` (127) all land in the same fail-closed branch this block
 # has always had. That policy is now named in fno.graph.ladder rather than
 # implied by a case arm here.
 set +o pipefail
-_RUNG_OUT="$(fno plan rung "$PLAN_PATH" 2>/dev/null)"
+_RUNG_OUT="$(fno do plan rung "$PLAN_PATH" 2>/dev/null)"
 _RUNG_EC=$?
 set -o pipefail
 if [ "$_RUNG_EC" -ne 0 ]; then
@@ -331,7 +331,7 @@ if [ "$_RUNG_EC" -ne 0 ]; then
     # than this verb exits 2 the same way a usage error does, so name the
     # likely cause - a bare "rung 'unknown'" would send the operator hunting
     # through the plan for a problem that is in their PATH.
-    echo "parked $NODE_ID reason=\"'fno plan rung' did not answer; installed fno may predate it - run 'fno update' or 'fno doctor --fix'\""
+    echo "parked $NODE_ID reason=\"'fno do plan rung' did not answer; installed fno may predate it - run 'fno update' or 'fno doctor --fix'\""
   else
     echo "parked $NODE_ID reason=\"plan rung '$_RUNG' is not dispatchable\""
   fi
@@ -489,7 +489,7 @@ _RECEIPT_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
 _RECEIPT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 _RECEIPT_REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)"
 _TMP_RECEIPT_ERR="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/fno-receipt-err.$$")"
-if fno resume receipt write \
+if fno do resume receipt write \
       --node "$NODE_ID" \
       --session "$SESSION_ID" \
       --phase "$BOUNDARY" \

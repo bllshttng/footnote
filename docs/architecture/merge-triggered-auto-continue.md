@@ -55,7 +55,7 @@ The terminal path (`/pr merged <pr>`) is the same minus the SessionStart hook.
 The answer is the codebase's existing bridge-token pattern, identical to `skills/target/scripts/handoff.sh` and `skills/target/scripts/dispatch-node.sh`:
 
 - `advance` reserves `dispatch:<id>` as a **TTL claim** (3 minutes, not PID-liveness) before spawning. The TTL outlives `advance`'s exit, so for the boot window the node reads as already-claimed (AC1-CLAIM). On any spawn failure the reservation is released so the node stays re-dispatchable (AC2-FR).
-- The spawned worker acquires `node:<id>` cleanly on its own `fno target init` (it is free at that point - `advance` never holds `node:<id>`). Once the worker owns `node:<id>`, the `dispatch:<id>` reservation expires harmlessly by TTL.
+- The spawned worker acquires `node:<id>` cleanly on its own `fno do target init` (it is free at that point - `advance` never holds `node:<id>`). Once the worker owns `node:<id>`, the `dispatch:<id>` reservation expires harmlessly by TTL.
 - `advance` honors a live `walker:<root>` (a megawalk owns the project) and skips, so a merge landing mid-walk never produces a second worker (AC2-EDGE).
 
 Claim roots are routed like the `fno claim` CLI's `_node_aware_root`: `node:<id>` lives in the global (`$HOME`) claims root; `walker:<root>` and `dispatch:<id>` use the canonical-repo-root claims dir. The walker key is `walker:<canonical_repo_root>`, byte-identical to the key the Rust megawalk loop writes.

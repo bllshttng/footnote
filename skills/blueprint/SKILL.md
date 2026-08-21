@@ -80,7 +80,7 @@ and always carries full frontmatter (see the Kill Criteria block under [Gates](#
 
 ### Plan Save Location
 
-Resolve the save path with `fno plan path --slug "<slug>" [--node "<node-id>"]` - it joins the plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json`, then `plans_dir` in `.fno/config.toml` / `~/.fno/config.toml`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`). Do NOT hand-assemble the filename; the verb is the convention. If `fno` is unavailable, ask the user where to save and suggest running `/setup`.
+Resolve the save path with `fno do plan path --slug "<slug>" [--node "<node-id>"]` - it joins the plans dir (`.claude/settings.local.json` → `plansDirectory`, then `.claude/settings.json`, then `plans_dir` in `.fno/config.toml` / `~/.fno/config.toml`) with the `config.plans_filename` template (default `%Y%m%d-{slug}-{node}.md`). Do NOT hand-assemble the filename; the verb is the convention. If `fno` is unavailable, ask the user where to save and suggest running `/setup`.
 
 ### Session State Initialization
 
@@ -141,11 +141,11 @@ fi
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
    proceeds; it does not block.
 2b. **Discovery grounding** - A supplied design doc carries cited findings, and `/blueprint` compiles it without re-running discovery.
-   When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
+   When creating a fresh plan from raw prose or a node-seeded path with no cited findings, blueprint grounds itself first. Run `fno do think inspect "<seed>" --json` for the receipt. It reports duplicate candidates, schema status, and the active pitfalls.
    Then load `references/discovery-gate.md`. Ask at most 3 questions with `quick`, or 5 otherwise.
    For a plan that needs deeper investigation than the receipt, run `/think` first. Think writes cited findings that blueprint then compiles.
 
-2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`) and `closure` for the resolved node (`status`, `pr_number`, `superseded_by`). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions.
+2d. **Consolidation Gate** - every plan, on the full-context main thread, between grounding (2b) and the write (3). A supplied design doc skips 2b, so no receipt exists on that path. Run `fno do think inspect "<node id or seed>" --json` here to get one, because the gate applies to that path too. Read the receipt's `graph` payload: `duplicates` (ranked top-K, each row carrying `id`, `score`, `reason`) and `closure` for the resolved node (`status`, `pr_number`, `superseded_by`). The scores are a reading aid, not a verdict. A real family and pure noise both sit near 0.26. Make the judgment here, with the node details, the plan seed, and the code in hand. Never delegate this call to a subprocess or a spawned agent. A truncated context reading that list decides confidently and is wrong in both directions.
 
    When `graph.closure.status` is `done` or `superseded`, halt before compiling. Report the closure fields. Do not finalize `status: ready` onto work that already shipped.
 
@@ -167,9 +167,9 @@ fi
      preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
      into `…-x-8af8-x-8af8.md` (US4). Do NOT rename a supplied doc.
    - **Creating fresh** (no design doc): write to the path printed by
-     `fno plan path --slug "{slug}"`; when this is **node-seeded** (`$CLAIMS_ID` set,
+     `fno do plan path --slug "{slug}"`; when this is **node-seeded** (`$CLAIMS_ID` set,
      e.g. a direct `/blueprint x-8af8` with no prior `/think`), pass the node too:
-     `fno plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
+     `fno do plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
      artifact author on the direct path and cannot lean on `/think`'s save rule,
      so it must produce the node-bearing name itself. First **reuse if claimed**:
      if a plans-dir file already carries `$CLAIMS_ID` in its frontmatter or ends
@@ -503,7 +503,7 @@ Environment-specific traps that defy reasonable assumptions.
 - **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
 - **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.
 - **`done_probes` must end in a predicate and assert freshness.** `... | tail -5` masks the real exit status (reads as a pass); `test -f <file>` passes vacuously against launch-day residue. Bound every probe in time.
-- **Plans save to the Obsidian vault, not git `docs/`.** Use `fno plan path --slug`; never hand-assemble the filename.
+- **Plans save to the Obsidian vault, not git `docs/`.** Use `fno do plan path --slug`; never hand-assemble the filename.
 
 ## References
 

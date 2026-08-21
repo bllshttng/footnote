@@ -5,7 +5,7 @@ testable without invoking Typer machinery.
 
 The global LaunchAgent (``sh.fno.pr-watcher``) polls ``~/.fno/graph.json`` for
 open-PR backlog nodes and fires headless ``/fno:pr check`` or ``/fno:pr merged``
-via ``fno pr-watch tick``.  ONE agent globally -- no per-repo plists.
+via ``fno do pr watch tick``.  ONE agent globally -- no per-repo plists.
 
 Design constraints (locked):
   - NO ANTHROPIC_API_KEY in EnvironmentVariables (auth via macOS keychain OAuth)
@@ -332,7 +332,7 @@ def heal_watcher(*, launch_agents_dir: Path) -> tuple[str, int]:
     """
     plist_path = launch_agents_dir / _PLIST_FILENAME
     if not plist_path.exists():
-        return (f"no plist at {plist_path}; run `fno pr-watch install`", 1)
+        return (f"no plist at {plist_path}; run `fno do pr watch install`", 1)
     return bounce(plist_path=plist_path)
 
 
@@ -349,7 +349,7 @@ def refresh_watcher(
     plist first so the daemon picks up the freshly-installed binary path, a
     fresh captured PATH, and a new mtime (so doctor's ``healthy-pending`` grace
     applies until the next tick instead of a transient false ``dead``). Called
-    by ``fno pr-watch refresh`` at the tail of ``fno update`` so an update
+    by ``fno do pr watch refresh`` at the tail of ``fno update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
     """
@@ -800,9 +800,9 @@ def liveness_report(
     if not enabled:
         return verdict("disabled", "pr_watch.enabled=false")
     if not plist_exists:
-        return verdict("dead", "enabled but no LaunchAgent plist installed", "fno pr-watch install")
+        return verdict("dead", "enabled but no LaunchAgent plist installed", "fno do pr watch install")
     if not loaded:
-        return verdict("dead", "plist present but agent not loaded", "fno pr-watch install")
+        return verdict("dead", "plist present but agent not loaded", "fno do pr watch install")
 
     # A freshly (re)installed plist newer than the last tick is awaiting its
     # first post-install tick (RunAtLoad=false, so up to one interval passes
@@ -819,7 +819,7 @@ def liveness_report(
         return verdict(
             "dead",
             f"no tick recorded and installed more than 2x interval ({threshold}s) ago",
-            "fno pr-watch install",
+            "fno do pr watch install",
         )
 
     age = now - tick_epoch
@@ -827,7 +827,7 @@ def liveness_report(
         return verdict(
             "dead",
             f"last tick {int(age)}s ago (> 2x interval {threshold}s)",
-            "fno pr-watch install",
+            "fno do pr watch install",
         )
     return verdict("healthy", f"last tick {int(age)}s ago")
 

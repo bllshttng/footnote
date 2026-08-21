@@ -120,7 +120,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
 
-Each reviewer also declares what it NEEDS in order to run - `sigma` needs subagent dispatch, `code-review` needs an operator, `declare` needs nothing - in `_RESOLVABLE_REVIEWERS` (`cli/src/fno/config/__init__.py`). `fno target init` resolves that against the running session and refuses a gate nothing here can satisfy; `fno config doctor --review` reports the same read-only. A reviewer that cannot run is never quietly swapped for `declare`: that would clear the gate with no review behind it.
+Each reviewer also declares what it NEEDS in order to run - `sigma` needs subagent dispatch, `code-review` needs an operator, `declare` needs nothing - in `_RESOLVABLE_REVIEWERS` (`cli/src/fno/config/__init__.py`). `fno do target init` resolves that against the running session and refuses a gate nothing here can satisfy; `fno config doctor --review` reports the same read-only. A reviewer that cannot run is never quietly swapped for `declare`: that would clear the gate with no review behind it.
 
 ## Your skill can be someone's ship gate
 
@@ -150,7 +150,7 @@ That helper takes any reviewer name, which is why a registered reviewer needs no
 **Rung two: emit your findings.** Call `fno annotate add -m "<finding>" --node <id>` and the gate becomes real.
 An unaddressed blocking finding holds the loop until someone resolves it, independently of any attestation, and it needs no new footnote machinery on your side.
 
-`requires = "skill"` is checked at `fno target init`: a skill that resolves on none of the harness's skill roots refuses there, naming the roots searched, rather than wedging the stop gate after the work is done.
+`requires = "skill"` is checked at `fno do target init`: a skill that resolves on none of the harness's skill roots refuses there, naming the roots searched, rather than wedging the stop gate after the work is done.
 When the probe cannot answer - a harness footnote does not know, an unreadable root, a `plugin:skill` qualified name whose cache layout footnote does not read - it resolves `unverifiable` and proceeds with one note, because refusing a session over a reviewer that is actually installed is the worse failure.
 
 A registered reviewer never enters `_RESOLVABLE_REVIEWERS`; the two are unioned at lookup time, and a built-in wins a name collision, so no project can redefine `sigma` into something weaker.

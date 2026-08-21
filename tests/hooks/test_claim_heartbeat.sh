@@ -79,10 +79,15 @@ case "\$1 \$2" in
     [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]] && touch "${TMP_DIR}/refresh-observed"
     exit "\${STUB_REFRESH_RC:-0}"
     ;;
-  "pr bind-created")
+  "do pr")
+    [[ "\${3:-}" == "bind-created" ]] || exit 0
     printf '%s\n' "\${STUB_BIND_OUTPUT:-{\"outcome\":\"bound\"}}"
     [[ -n "\${STUB_BIND_SLEEP:-}" ]] && sleep "\$STUB_BIND_SLEEP"
     exit "\${STUB_BIND_RC:-0}"
+    ;;
+  "pr bind-created")
+    echo "deprecated pr root reached" >&2
+    exit 2
     ;;
 esac
 exit 0
@@ -475,9 +480,9 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
 printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
 if [[ "$bind_calls" -eq 1 ]] \
-    && grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
+    && grep -q "do pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
     && grep -q -- "--owner 182b29c8-owner-uuid" "$CALLLOG"; then
   pass "T23 successful raw gh pr create invokes the binder once"
 else
@@ -490,7 +495,7 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stderr:"failed: https://github.com/acme/widgets/pull/42 and https://github.com/acme/widgets/pull/43"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
-if grep -q "pr bind-created" "$CALLLOG"; then
+if grep -q "do pr bind-created" "$CALLLOG"; then
   fail "T24 ambiguous output invoked the binder"
 elif [[ "$err" != *"ambiguous PR URLs"* ]]; then
   fail "T24 ambiguous output emitted no diagnostic: [$err]"
@@ -504,7 +509,7 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{exit_code:1,stderr:"failed after reserving https://github.com/acme/widgets/pull/42"}}')"
 printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
-if grep -q "pr bind-created" "$CALLLOG"; then
+if grep -q "do pr bind-created" "$CALLLOG"; then
   fail "T25 failed gh result invoked the binder"
 else
   pass "T25 failed gh result mutates nothing"
@@ -516,7 +521,7 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"019f-codex",tool_name:"exec_command",tool_input:{cmd:"gh pr create --fill"},tool_response:{exit_code:0,stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
 printf '%s' "$payload" | FNO_PLATFORM=codex CODEX_THREAD_ID="019f-codex" bash "$HOOK" >/dev/null 2>&1
-if grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG"; then
+if grep -q "do pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG"; then
   pass "T26 Codex tool_input.cmd invokes the binder"
 else
   fail "T26 Codex cmd payload did not invoke binder; calls: $(cat "$CALLLOG")"
@@ -528,7 +533,7 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"echo prep && gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
-if grep -q "pr bind-created" "$CALLLOG"; then
+if grep -q "do pr bind-created" "$CALLLOG"; then
   fail "T27 compound command invoked binder"
 elif [[ "$err" != *"not attributable"* ]]; then
   fail "T27 compound refusal emitted no diagnostic: [$err]"
@@ -600,8 +605,8 @@ fi
 export STUB_BIND_RC=1 STUB_BIND_OUTPUT='{"outcome":"refused","refusal":"branch unknown"}'
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
-manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 \
       && "$err" == *"branch unknown"* && "$err" == *"$manual"* ]]; then
   pass "T32 binder refusal retries once, then prints exact manual recovery"
@@ -646,8 +651,8 @@ payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash
 started="$(date +%s)"
 err="$(printf '%s' "$payload" | FNO_PR_BIND_CREATED_TIMEOUT=1 CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
 elapsed=$(( $(date +%s) - started ))
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
-manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
+manual="fno do pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
 if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 && "$elapsed" -le 5 \
       && "$err" == *"timed out"* && "$err" == *"$manual"* ]]; then
   pass "T34 binder timeout retries once, stays bounded, and prints recovery"
@@ -691,7 +696,7 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" --arg cmd 'gh pr create --body "literal ; & | text"' '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
 if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
   pass "T37 quoted shell punctuation remains one attributable gh invocation"
 else
@@ -705,7 +710,7 @@ rm -f "${CWD}/.fno/target-state.md"
 formatted_cmd="$(printf 'gh pr create \\\n  --fill')"
 payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$formatted_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
 if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
   pass "T38 backslash-newline formatting is attributable"
 else
@@ -719,7 +724,7 @@ rm -f "${CWD}/.fno/target-state.md"
 compound_cmd="$(printf 'gh pr create --fill\necho second-command')"
 payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$compound_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
-bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+bind_calls="$(grep -c "do pr bind-created" "$CALLLOG" || true)"
 if [[ "$bind_calls" -eq 0 && "$err" == *"not attributable"* ]]; then
   pass "T39 actual multiline compound command refuses binding"
 else

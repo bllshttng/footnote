@@ -71,7 +71,7 @@ It was also structurally the wrong source: a second-hand percentage whose denomi
 ### Why the PreCompact arm hook was silent
 
 `hooks/arm-handoff-precompact.sh` is registered on `PreCompact` and enabled by default, yet it never armed once.
-It gated on `kill -0 owner_pid`, and `owner_pid` is the transient `fno target init` wrapper pid that dies within about a second of init returning, so the gate rejected every live session and the hook returned before reading the payload or running the probe.
+It gated on `kill -0 owner_pid`, and `owner_pid` is the transient `fno do target init` wrapper pid that dies within about a second of init returning, so the gate rejected every live session and the hook returned before reading the payload or running the probe.
 `owner_pid` can only ever prove life, never death; death is asserted from the node claim, which is session-pid anchored and TTL-protected.
 The hook now follows the same asymmetry as `cli/src/fno/target/orient.py::_manifest_liveness`.
 

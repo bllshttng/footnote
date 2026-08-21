@@ -1,4 +1,4 @@
-"""fno pr CLI - in-package gh/git PR operations (ab-d4c98550).
+"""fno do pr CLI - in-package gh/git PR operations (ab-d4c98550).
 
 Verbs:
     merge  - merge a PR with the fno-canonical guards (-> _merge.py)
@@ -247,7 +247,7 @@ def logs(
             full=full,
         )
     except ToolMissing as exc:
-        typer.echo(f"fno pr logs: {exc.tool} not found on PATH", err=True)
+        typer.echo(f"fno do pr logs: {exc.tool} not found on PATH", err=True)
         rc = 127
     raise typer.Exit(code=rc)
 
@@ -257,7 +257,7 @@ def logs(
     help=(
         "Refuse a PR whose branch base is > 24h of main history behind "
         "origin/main (phantom-deletion guard). Exit 0 fresh|bypass|fail-open, "
-        "3 stale (points at `fno pr rebase`), 4 unrelated histories. Bypass "
+        "3 stale (points at `fno do pr rebase`), 4 unrelated histories. Bypass "
         "with FNO_PR_BASE_OK=stale-acknowledged (emits gate_escape)."
     ),
 )
@@ -291,7 +291,7 @@ def base_lineage_check(
     try:
         rc = _base_lineage.run_base_lineage_check(pr_number)
     except ToolMissing as exc:
-        typer.echo(f"fno pr base-lineage-check: {exc.tool} not found on PATH", err=True)
+        typer.echo(f"fno do pr base-lineage-check: {exc.tool} not found on PATH", err=True)
         rc = 127
     raise typer.Exit(code=rc)
 
@@ -442,7 +442,7 @@ def rebase(ctx: typer.Context) -> None:
         "leg failed; no leg is swallowed. The judgment residue (deferral triage "
         "+ parking-lot prose) is done inline by an attended caller, or spawned "
         "as one headless one-shot under --autonomous (never bg). Hidden: the "
-        "`fno pr merged` skill is the attended front door."
+        "`fno do pr merged` skill is the attended front door."
     ),
 )
 def ritual(

@@ -139,10 +139,10 @@ SCOPE_BASE="$MERGE_BASE"
 SCOPE_REASON="first-round"
 
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md 2>/dev/null | head -1 | xargs)
-PR_NUMBER=$(fno pr info 2>/dev/null | jq -r '.pr // empty')
+PR_NUMBER=$(fno do pr info 2>/dev/null | jq -r '.pr // empty')
 PRIOR_HEAD=""
 if [ -n "$NODE_ID" ] && [ -n "$PR_NUMBER" ]; then
-  PRIOR_HEAD=$(fno review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
+  PRIOR_HEAD=$(fno do review --sigma-last-head --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" 2>/dev/null || true)
 fi
 
 if [ -n "$PRIOR_HEAD" ]; then
@@ -179,7 +179,7 @@ Fallback semantics, each mapping to full scope:
 | Increment touches `CLAUDE.md`, `AGENTS.md`, or `.claude/rules/` (at any depth) | `rules-changed` | A new rule can condemn already-cleared code |
 | Increment is empty | resets to `first-round` | A zero-file dispatch passes vacuously |
 
-`PRIOR_HEAD` is a snapshot from an artifact, not proof the commit is still reachable. The `git merge-base --is-ancestor` check is the verification, and it is not optional. A non-zero exit from `fno review --sigma-last-head` is a normal, expected input meaning "review everything". It must never raise into the pass.
+`PRIOR_HEAD` is a snapshot from an artifact, not proof the commit is still reachable. The `git merge-base --is-ancestor` check is the verification, and it is not optional. A non-zero exit from `fno do review --sigma-last-head` is a normal, expected input meaning "review everything". It must never raise into the pass.
 
 ### Step 2: Run Base Agents (MANDATORY - Always Run)
 
@@ -216,7 +216,7 @@ When its cited quote still validates at the current head, a prior blocking findi
 1. Read the prior round's report. `PRIOR_HEAD` satisfies the inspect validator's expected head by construction, so the existing read surface returns the body. Keep the exit status: it decides what an empty result means.
 
    ```bash
-   if PRIOR_REPORT=$(fno review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
+   if PRIOR_REPORT=$(fno do review --inspect-sigma --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
      --sigma-head "$PRIOR_HEAD" --json 2>/dev/null); then
      INSPECT=ok
    else
@@ -261,7 +261,7 @@ bash scripts/scan-antipatterns.sh .
 Before generating the report, re-verify the PR is still eligible:
 ```bash
 # Re-check PR state (may have changed during review)
-PR_NUMBER=$(fno pr info | jq -er .pr)
+PR_NUMBER=$(fno do pr info | jq -er .pr)
 gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER" --jq '{state: (.state | ascii_upcase), isDraft: .draft}'
 ```
 - If PR is now closed/merged → skip posting, report locally only
@@ -319,11 +319,11 @@ Resolve the reviewed head before dispatch and retain it as `REVIEWED_HEAD`; reso
 
 ```bash
 NODE_ID=$(sed -n 's/^graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | xargs)
-PR_INFO=$(fno pr info)
+PR_INFO=$(fno do pr info)
 PR_NUMBER=$(printf '%s' "$PR_INFO" | jq -er .pr)
 CURRENT_HEAD=$(printf '%s' "$PR_INFO" | jq -er .head_sha)
 ROUND_ID="${REVIEWED_HEAD:0:12}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-fno review --publish-sigma "$REPORT_FILE" \
+fno do review --publish-sigma "$REPORT_FILE" \
   --sigma-node "$NODE_ID" --sigma-pr "$PR_NUMBER" \
   --sigma-head "$REVIEWED_HEAD" --sigma-current-head "$CURRENT_HEAD" \
   --sigma-round "$ROUND_ID" \
@@ -399,8 +399,8 @@ The artifact remains authoritative if this comment call fails.
 <!--
   Cross-model review routing (config.review.agent_routes / legacy agent_harnesses) is
   documented in the "Cross-Model Review Routing" section below. It is resolved
-  by `fno review --print-providers`, the SAME resolver the `fno review` panel
-  uses, so /review sigma and fno review never drift.
+  by `fno do review --print-providers`, the SAME resolver the `fno do review` panel
+  uses, so /review sigma and fno do review never drift.
 -->
 
 ## After the review: what happens with findings
@@ -425,7 +425,7 @@ recommendation: RECOMMEND RESTART". Honor sequence:
 By default every panel agent runs through `Task()` on the invoking harness.
 An operator can route specific agents through a full harness, route-provider, and model tuple for a genuine cross-model read by setting `config.review.agent_routes`.
 Legacy `config.review.cross_model` and `config.review.agent_harnesses` remain supported.
-Configure them in `.fno/config.toml`, which is the same config the internal `fno review` panel honors.
+Configure them in `.fno/config.toml`, which is the same config the internal `fno do review` panel honors.
 When none of these routing options is set, this whole section is a no-op and the panel is byte-for-byte today's harness-local run.
 
 ```yaml
@@ -446,7 +446,7 @@ The mapping is just `_`<->`-`.
 ### Step R1: resolve routing (do NOT reimplement it)
 
 Before dispatching the panel, ask the CLI for the per-agent routing.
-This is the one resolver, using the same `provider_resolution` path that `fno review` dispatches through, so `/review sigma` and `fno review` never disagree:
+This is the one resolver, using the same `provider_resolution` path that `fno do review` dispatches through, so `/review sigma` and `fno do review` never disagree:
 
 ```bash
 # --session-id is optional; pass it when running inside a target session so the
@@ -456,9 +456,9 @@ This is the one resolver, using the same `provider_resolution` path that `fno re
 # plain "${a[@]}" errors under bash set -u, and the guarded "${a[@]+...}" form
 # passes one EMPTY argument under zsh.
 if [ -n "${SESSION_ID:-}" ]; then
-  ROUTING="$(fno review --print-providers --session-id "$SESSION_ID")"
+  ROUTING="$(fno do review --print-providers --session-id "$SESSION_ID")"
 else
-  ROUTING="$(fno review --print-providers)"
+  ROUTING="$(fno do review --print-providers)"
 fi
 INVOKING_HARNESS="$(fno whoami 2>/dev/null | sed -n 's/^harness:[[:space:]]*//p' | head -1 | xargs)"
 [ -n "$INVOKING_HARNESS" ] || INVOKING_HARNESS=unknown

@@ -54,7 +54,7 @@ packaged hooks provide the supported target-loop and safety lifecycle described 
 Codex app worktrees are managed under `$CODEX_HOME/worktrees` and start from tracked files in the selected Git branch.
 That is why `.codex/agents/*.toml`, `.codex-plugin/plugin.json`, `hooks/codex-hooks.json`, and `.agents/plugins/marketplace.json` are committed.
 
-Start a target chat from the canonical repository project in Codex Desktop, then run `fno target start <node>`.
+Start a target chat from the canonical repository project in Codex Desktop, then run `fno do target start <node>`.
 Under the default `harness-native` policy, the command prints `native-handoff=required` and creates no worktree, branch, manifest, or claim.
 Use `/worktree` or **Hand off -> Worktree** in that same chat and rerun the exact command from the Codex-managed worktree.
 The retry verifies Desktop rollout identity, the `$CODEX_HOME/worktrees` boundary, Git registration against the canonical common directory, clean detached state, and the remote main base before creating `feature/<node>` and initializing the target.

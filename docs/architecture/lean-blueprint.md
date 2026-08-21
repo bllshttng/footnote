@@ -63,7 +63,7 @@ For the full section-ownership reference including valid/invalid transition exam
 Workers never read the canonical plan directly. The operator dispatches a scoped brief at task-assignment time using:
 
 ```bash
-fno plan brief <plan-path> --task <task-id> [--format markdown|json]
+fno do plan brief <plan-path> --task <task-id> [--format markdown|json]
 ```
 
 The brief contains: one paragraph of project context from Overview, the task's spec from Execution Strategy, acceptance criteria tagged for this task or untagged (fail-open), Locked Decisions whose `affects_surface` intersects the task's file surface plus all untagged ones, Failure Modes filtered the same way, the task's file list, and any Patterns to Reuse whose source file falls within the task's surface. Output is roughly 500-800 words.
@@ -82,8 +82,8 @@ For operator's detection and dispatch logic, see [skills/execute/references/sing
 
 ## Migration path
 
-- **PR1 (this PR):** single-doc support added; folder plans still work unchanged. `/blueprint` on a design doc appends execution sections in place. `fno plan brief` is available.
-- **PR2 (planned):** `fno plan migrate-folder <path>` converts an existing folder plan to single-doc on opt-in. Folder plans show a deprecation warning at operator read time.
+- **PR1 (this PR):** single-doc support added; folder plans still work unchanged. `/blueprint` on a design doc appends execution sections in place. `fno do plan brief` is available.
+- **PR2 (planned):** `fno do plan migrate-folder <path>` converts an existing folder plan to single-doc on opt-in. Folder plans show a deprecation warning at operator read time.
 - **PR3 (no date):** folder-plan support removed entirely, conditioned on soak period completing.
 
 ## References

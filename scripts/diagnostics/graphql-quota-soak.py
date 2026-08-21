@@ -145,7 +145,7 @@ def run_soak(args: argparse.Namespace) -> int:
         workers = live_workers(cwd, fno_bin)
         probe_code, probe, probe_error = run_json(
             [
-                fno_bin, "pr", "graphql-exec", "--purpose", "discretionary", "--",
+                fno_bin, "do", "pr", "graphql-exec", "--purpose", "discretionary", "--",
                 "api", "graphql", "-f", "query=query { viewer { login } }",
             ],
             cwd=cwd,
@@ -170,7 +170,9 @@ def run_soak(args: argparse.Namespace) -> int:
         time.sleep(min(args.interval, args.duration - elapsed))
 
     duration = time.monotonic() - started
-    info_code, info, info_error = run_json([fno_bin, "pr", "info", str(args.pr)], cwd=cwd)
+    info_code, info, info_error = run_json(
+        [fno_bin, "do", "pr", "info", str(args.pr)], cwd=cwd
+    )
     if info_code != 0 or not info.get("head_sha"):
         raise RuntimeError(f"REST PR info failed: {info_error or info}")
     head = info["head_sha"]

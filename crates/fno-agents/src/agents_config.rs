@@ -182,7 +182,7 @@ fn table_review_optional_apps(t: &toml::Table) -> Option<Vec<String>> {
 ///
 /// Trimmed as well as lowercased, matching Python's `_coerce_affirmative`, which
 /// does `v.strip().lower()`. Without the trim a padded `" yes "` reads as false
-/// here while `fno pr merge` reads it as true, and the numeric callers below
+/// here while `fno do pr merge` reads it as true, and the numeric callers below
 /// fail their `parse()` on padding the Python side tolerates. Trimming in this
 /// one shared normalizer covers every caller; trimming per caller would leave
 /// the siblings diverged.

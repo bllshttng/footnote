@@ -6,7 +6,7 @@
 //!   3. `{"type":"turn.completed"}`
 //!
 //! The fake binary is injected via a temporary bin dir on PATH via std::process::Command::env.
-//! `AgentsHome::at` pins the fno state dir. No daemon, no network.
+//! `AgentsHome::at` pins the fno do state dir. No daemon, no network.
 
 use fno_agents::codex_ask::{dispatch_codex_ask, dispatch_codex_once};
 use fno_agents::paths::AgentsHome;

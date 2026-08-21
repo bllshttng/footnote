@@ -250,7 +250,7 @@ def test_self_review_invocation_names_the_harness_verb():
     assert rc.self_review_invocation("codex") == "/review"
     assert rc.self_review_invocation("opencode") == "/review-changes"
     assert rc.self_review_invocation("claude") == "/code-review medium --comment"
-    # An unknown harness gets the portable fno review, NEVER claude's verb
+    # An unknown harness gets the portable fno do review, NEVER claude's verb
     # silently - a wrong answer where no answer was available.
     assert rc.self_review_invocation("agy") == "/fno:review"
     assert rc.self_review_invocation(None) == "/fno:review"
@@ -357,7 +357,7 @@ def test_code_review_is_scoped_to_harnesses_with_a_verb():
     assert on("codex").status == "satisfiable"
     assert on("opencode").status == "satisfiable"
     assert "run `/review-changes`" in on("opencode").reason
-    # agy has no native verb; its recorded fallback IS the fno review, so the
+    # agy has no native verb; its recorded fallback IS the fno do review, so the
     # verdict stays satisfiable with a runnable instruction.
     assert on("agy").status == "satisfiable"
     assert "run `/fno:review`" in on("agy").reason
@@ -368,7 +368,7 @@ def test_code_review_is_scoped_to_harnesses_with_a_verb():
 
 
 def test_review_invocation_verb_prints_the_render(monkeypatch, tmp_path):
-    """'fno target review-invocation' is the bridge the refusal sites call:
+    """'fno do target review-invocation' is the bridge the refusal sites call:
     stdout is exactly one line, the render for the requested harness, sized by
     the diff at the caller's root. Expected strings are built through the same
     functions the verb uses, so no concrete level is spelled here."""

@@ -4,7 +4,7 @@ After Phase 06, worker/review.py dispatches the internal sigma-review
 orchestrator (orchestrate_review_parallel + score_findings + write_artifact)
 rather than polling GitHub.
 
-AC2-END-TO-END: With mocked runner, fno review produces an artifact whose
+AC2-END-TO-END: With mocked runner, fno do review produces an artifact whose
   frontmatter passes gate check for quality_check_passed.
 AC2-VERDICT-BLOCKED: critical finding -> verdict: blocked; gate returns ok=False.
 AC2-VERDICT-READY: info-only findings -> verdict: ready-to-merge; gate passes.

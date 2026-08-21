@@ -1,4 +1,4 @@
-"""`fno target init` refuses a review gate this session cannot satisfy (x-cdc7).
+"""`fno do target init` refuses a review gate this session cannot satisfy (x-cdc7).
 
 PR #618 discovered its unsatisfiable `reviewers: [sigma]` gate at the stop gate,
 after the feature was built and pushed, and then misreported it for fifteen
@@ -230,7 +230,7 @@ def test_detect_session_reads_harness_and_substrate():
 
 def test_unclassifiable_session_is_unverifiable_not_unavailable():
     """A plain terminal has no harness marker. Refusing it would break
-    `fno target init` outright in every repo that configures a reviewer, and it
+    `fno do target init` outright in every repo that configures a reviewer, and it
     is not the same claim as "this harness cannot dispatch subagents"."""
     s = detect_session({})
     assert s.harness == "unknown"
@@ -369,7 +369,7 @@ def test_unattended_table_without_enabled_falls_through(
 ):
     """The per-KEY guard is load-bearing, not defensive: without it this raises
     KeyError, and the resolution path is deliberately NOT swallowed, so the
-    traceback escapes `fno target init`."""
+    traceback escapes `fno do target init`."""
     cfg = tmp_path / "settings.yaml"
     cfg.write_text("schema_version: 1\nconfig:\n  unattended:\n    reason: ci\n")
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
@@ -456,7 +456,7 @@ def _invoke_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: str
     load_settings.cache_clear()
     from fno.cli import app
 
-    return CliRunner().invoke(app, ["target", "init", "--input", "some-feature"])
+    return CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature"])
 
 
 def test_init_command_refuses_and_prints_the_reason(
@@ -528,7 +528,7 @@ def test_codex_can_satisfy_a_sigma_gate():
     and runs the panel sequentially - slower, but it still reaches a verdict and
     still attests (docs/HARNESSES.md, docs/SKILL-COMPAT-MATRIX.md).
 
-    Treating codex as incapable hard-exits `fno target init` on a configuration
+    Treating codex as incapable hard-exits `fno do target init` on a configuration
     the project documents as supported: a false refusal, which is a worse
     failure than the late wedge this check exists to prevent."""
     (v,) = resolve_reviewers(["sigma"], CODEX_HEADLESS)
@@ -647,7 +647,7 @@ def _invoke_init_apps(
     load_settings.cache_clear()
     from fno.cli import app
 
-    return CliRunner().invoke(app, ["target", "init", "--input", "some-feature"])
+    return CliRunner().invoke(app, ["do", "target", "init", "--input", "some-feature"])
 
 
 def test_init_command_refuses_a_typo_github_app(
@@ -704,7 +704,7 @@ def _invoke_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, review_block: 
     load_settings.cache_clear()
     from fno.cli import app
 
-    return CliRunner().invoke(app, ["target", "check-review-gate"])
+    return CliRunner().invoke(app, ["do", "target", "check-review-gate"])
 
 
 def test_check_review_gate_is_silent_and_zero_on_an_empty_config(
@@ -809,7 +809,7 @@ def test_the_script_reads_the_marker_this_module_writes():
     assert '"${FNO_TARGET_INIT_GATED:-}" != "1"' in text, (
         "init-target-state.sh must still READ the marker, not merely mention it"
     )
-    assert "fno target check-review-gate && _RG_RC=0" in text, (
+    assert "fno do target check-review-gate && _RG_RC=0" in text, (
         "init-target-state.sh must still INVOKE the gate, not merely name it"
     )
     # And the NUMERAL. Bash cannot import the constant, so it restates it as a
@@ -837,7 +837,7 @@ def test_refusal_code_is_one_click_can_never_produce(
 
     monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "absent.yaml"))
     load_settings.cache_clear()
-    stale = CliRunner().invoke(app, ["target", "no-such-verb-x4a60"])
+    stale = CliRunner().invoke(app, ["do", "target", "no-such-verb-x4a60"])
     assert stale.exit_code == 2
     assert stale.exit_code != REVIEW_GATE_REFUSED
 
@@ -845,7 +845,7 @@ def test_refusal_code_is_one_click_can_never_produce(
 def test_init_still_speaks_exit_2_on_a_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """AC2-HP. The verb's private exit code must not leak into `fno target
+    """AC2-HP. The verb's private exit code must not leak into `fno do target
     init`, whose refusal contract is byte-for-byte unchanged."""
     r = _invoke_init(
         tmp_path, monkeypatch, "[sigma]",

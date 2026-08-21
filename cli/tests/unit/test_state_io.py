@@ -67,7 +67,7 @@ def test_iso_timestamp_preserved_as_string(tmp_path: Path) -> None:
     which then fails schemas declaring updated_at as Optional[str]. The custom
     loader strips the timestamp resolver so ISO strings stay strings.
 
-    Surfacing PR: example-pipeline Wave 7 followup item 6 (fno state set --field
+    Surfacing PR: example-pipeline Wave 7 followup item 6 (fno do state set --field
     pr_number errored with `Input should be a valid string` pointing at the
     untouched updated_at field).
     """

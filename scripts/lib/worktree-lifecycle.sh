@@ -49,7 +49,7 @@ fi
 # Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
 # immutable manifest has no status field, so the durable signal is the node
 # claim (session-pid anchored + TTL). owner_pid is checked last and only as a
-# positive signal: it is the transient `fno target init` wrapper pid, dead about
+# positive signal: it is the transient `fno do target init` wrapper pid, dead about
 # a second after init returns, so on its own this returned 1 for every live
 # session and the merged-cleanup sweep would prune a running target's worktree.
 _wt_live() {
@@ -375,7 +375,7 @@ case "${1:-status}" in
         shift
         # Cross-references the agents registry (real session names + measured
         # live/exited status) instead of `.fno/target-state.md`'s owner_pid,
-        # which names the short-lived `fno target init` CLI invocation and
+        # which names the short-lived `fno do target init` CLI invocation and
         # reads as dead within seconds of session start - see
         # scripts/lib/worktree-status.py for the verified specimen.
         if command -v python3 >/dev/null 2>&1; then

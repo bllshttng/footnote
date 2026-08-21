@@ -38,12 +38,12 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
             ProducerReach::Reachable,
         ),
         (
-            "fno pr merge <n>",
+            "fno do pr merge <n>",
             "recompute-once in _review_coverage_for_pr",
             ProducerReach::Reachable,
         ),
         (
-            "fno pr status <n>",
+            "fno do pr status <n>",
             "read through the shared recompute helper",
             ProducerReach::Reachable,
         ),
@@ -55,14 +55,14 @@ fn path_table() -> Vec<(&'static str, &'static str, ProducerReach)> {
             ProducerReach::SafeDirection("cannot be starved: terminal-allow implies run_done ran"),
         ),
         (
-            "fno pr coverage-check <n> without --recompute (and the git-protection hook through it)",
+            "fno do pr coverage-check <n> without --recompute (and the git-protection hook through it)",
             "default is the no-recompute read: a recompute shells the Rust producer \
              at minutes while a PreToolUse hook has a 60s budget, and a killed hook \
              emits no verdict at all. --recompute is producer-reachable, same as \
-             `fno pr merge`",
+             `fno do pr merge`",
             ProducerReach::SafeDirection(
                 "one-directional by design: on a missing or stale row this DENIES \
-                 where `fno pr merge` may yet allow after recomputing. An empty \
+                 where `fno do pr merge` may yet allow after recomputing. An empty \
                  read is an answer and refuses. Recovery from a wrong deny is one \
                  command; from a wrong allow it is a revert",
             ),
@@ -265,12 +265,12 @@ fn every_reachable_path_produces_an_event() {
                         proven += 1;
                     }
                     python_row => {
-                        // fno pr merge / fno pr status: their end-to-end proof
+                        // fno do pr merge / fno do pr status: their end-to-end proof
                         // lives in the Python suites; here we only acknowledge
                         // the row so adding a table row without a runtime arm
                         // in THIS test fails the coverage counter below.
                         assert!(
-                            python_row.starts_with("fno pr "),
+                            python_row.starts_with("fno do pr "),
                             "new reachable row {python_row} has no runtime arm"
                         );
                     }
@@ -342,15 +342,15 @@ fn new_reader_sites_must_join_the_table() {
         let known = match name.as_str() {
             "_reviews.py" => true, // the shared reader/helper itself
             // The merge guard's predicate, lifted out of `run_merge` unchanged so
-            // `fno pr merge` and `fno pr coverage-check` ask it through one copy.
+            // `fno do pr merge` and `fno do pr coverage-check` ask it through one copy.
             // Whitelisted for the same reason `_reviews.py` is: it is the shared
             // body, not a new path. Unlike `_reviews.py`, its row is enforced:
             // exact equality, so no renamed or split sibling row satisfies the arm.
             "_coverage_gate.py" => table_names.iter().any(|n| {
-                *n == "fno pr coverage-check <n> without --recompute (and the git-protection hook through it)"
+                *n == "fno do pr coverage-check <n> without --recompute (and the git-protection hook through it)"
             }),
-            "_merge.py" => table_names.iter().any(|n| *n == "fno pr merge <n>"),
-            "_status.py" => table_names.iter().any(|n| *n == "fno pr status <n>"),
+            "_merge.py" => table_names.iter().any(|n| *n == "fno do pr merge <n>"),
+            "_status.py" => table_names.iter().any(|n| *n == "fno do pr status <n>"),
             _ => false,
         };
         assert!(
@@ -409,7 +409,7 @@ fn every_table_row_names_a_path_that_exists() {
         .collect();
 
     for (path_name, _, _) in path_table() {
-        if let Some(rest) = path_name.strip_prefix("fno pr ") {
+        if let Some(rest) = path_name.strip_prefix("fno do pr ") {
             let verb = rest.split_whitespace().next().unwrap_or("");
             assert!(
                 !verb.is_empty() && cli.contains(&format!("\"{verb}\"")),

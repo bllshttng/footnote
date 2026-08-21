@@ -2102,7 +2102,7 @@ def cmd_decompose(
     #     the graph lock (mirrors the _set_expected_count doc write below), because
     #     it reads settings (plans_content_dir walks .claude/settings) and settings
     #     reads never happen under the lock. Each child is born at its CANONICAL
-    #     `fno plan path` name, routed into the CHILD project's plans dir - not the
+    #     `fno do plan path` name, routed into the CHILD project's plans dir - not the
     #     epic's dir, not the legacy `.group-<slug>.md` name (x-d6a6).
     # US4: transcribe the epic's why (intent + Locked Decisions) once - every child
     # scaffold is born grounded, AND a fan-out seed carries it so the /think worker
@@ -2390,7 +2390,7 @@ def cmd_decompose(
             typer.echo(
                 f"warning: could not record expected_url_count={expected_count} on "
                 f"{base}: {detail}. The shared doc will graduate after the FIRST "
-                f"group ships unless you run: fno plan set-expected --plan-path "
+                f"group ships unless you run: fno do plan set-expected --plan-path "
                 f"{base} --count {expected_count}",
                 err=True,
             )
@@ -6977,7 +6977,7 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     - ``cost_usd`` / ``cost_sessions`` stay. The spend happened.
     - ``locked_by`` / ``claimed_at`` stay null. ``done`` cleared them, and
       inventing a holder here would give the node a claim no lockfile backs;
-      claims are acquired by ``fno target init``.
+      claims are acquired by ``fno do target init``.
     - ``deferred_at`` / ``queued_at`` stay null. ``done`` cleared those too, and
       re-parking is ``defer``'s job - the same policy ``cmd_unsupersede``
       applies to un-containment.
@@ -7087,7 +7087,7 @@ def _release_contained_children(entries: list[dict], owner_id: Optional[str]) ->
     reversible defer keeps its folded delivery unit intact so undefer restores
     the same one-PR scope. A permanently dead unit will never merge, so
     ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
-    its children, while ``selection_guards`` and ``fno target init`` keep
+    its children, while ``selection_guards`` and ``fno do target init`` keep
     refusing them: unbuildable, uncloseable, invisible to every sweep.
 
     Un-contained, never closed: a unit dying is not a claim that its children
@@ -8859,7 +8859,7 @@ def cmd_reconcile(
             # an OPEN or CLOSED-unmerged PR - the caller could later
             # abandon or close it unmerged, leaving a claimed node
             # holding a dead ref. The three real callers (the ritual,
-            # fno pr merge, the bare sweep) only ever reach this with an
+            # fno do pr merge, the bare sweep) only ever reach this with an
             # already-merged PR; this guards a direct manual
             # `--pr-number` invocation against the same premature bind.
             #
@@ -8937,7 +8937,7 @@ def cmd_reconcile(
 
     # Auto-bind closure claims for every OTHER merged PR this sweep just
     # discovered on its own (x-59a6). --pr-number above covers the two paths
-    # that already KNOW the PR number (the post-merge ritual, `fno pr
+    # that already KNOW the PR number (the post-merge ritual, `fno do pr
     # merge`); a THIRD path merges with no caller ever naming a number at
     # all - an operator merging in the GitHub UI, or a king's automation -
     # and is caught only later by this bare sweep's own forward/reverse scan.

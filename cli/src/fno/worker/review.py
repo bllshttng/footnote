@@ -312,7 +312,7 @@ def _publish_durable_sigma(
     session_id: str,
     reviewed_head: str,
 ) -> None:
-    """Publish direct ``fno review`` output through the shared sigma writer."""
+    """Publish direct ``fno do review`` output through the shared sigma writer."""
     state = _read_state(state_path)
     from fno.worker.ship import _read_graph_node_id
 
@@ -396,8 +396,8 @@ def _publish_durable_sigma(
 def panel_provider_routing(session_id: Optional[str]) -> dict[str, Any]:
     """Resolve every panel agent -> provider via the SAME path the panel uses.
 
-    The accessor behind ``fno review --print-providers``: it gives the
-    ``/review sigma`` skill the identical per-agent routing the ``fno review``
+    The accessor behind ``fno do review --print-providers``: it gives the
+    ``/review sigma`` skill the identical per-agent routing the ``fno do review``
     panel would dispatch, so the two surfaces never drift (the "one resolution
     path" invariant). Returns an empty dict when cross-model is OFF (all-claude).
     Never raises.
@@ -439,7 +439,7 @@ def review_assurance(
 ) -> dict[str, Any]:
     """Classify this review's policy and resolve it against real capacity.
 
-    The production accessor behind ``fno review --assess-assurance``: it assesses
+    The production accessor behind ``fno do review --assess-assurance``: it assesses
     the policy against the reviewer that will ACTUALLY run, not raw capacity.
 
     - implementer family + whether it was established come from real ledger

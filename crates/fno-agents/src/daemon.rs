@@ -9407,7 +9407,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn recovery_skips_claude_shellout_rows_no_spurious_inconsistent() {
         // x-1b1e regression: v9 gives a claude `--bg`/`ask` row a non-empty
         // short_id (the jobId), and an adopted row keeps its external pid. Neither
-        // has an fno state.json (their process is claude's, not a daemon PTY), so
+        // has an fno do state.json (their process is claude's, not a daemon PTY), so
         // recover() must NOT probe state_json(jobId) and emit a spurious
         // agent_inconsistent -- the empty-short_id proxy no longer catches them.
         let home = tmp_home("recover-claude-shellout");

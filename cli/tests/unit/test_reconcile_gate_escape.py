@@ -184,7 +184,7 @@ def test_placeholder_pr_number_no_emit_no_fetch(tmp_path):
 # The x-0eaf finding-3 caveat that used to sit here - loop-check writes
 # review_coverage to the SESSION worktree's .fno/events.jsonl while reconcile
 # reads the CANONICAL one, so the escape never fires in the default worktree
-# workflow - was real, and it was the same divergence that made `fno pr merge`
+# workflow - was real, and it was the same divergence that made `fno do pr merge`
 # refuse a PR that had been reviewed. x-f43c closed it: loop-check emits
 # review_coverage to BOTH logs (repo-scoped), and every reader consults the
 # global one alongside its project log. `test_coverage_read_spans_the_global_log`

@@ -1,4 +1,4 @@
-"""Common shared types for fno state schemas."""
+"""Common shared types for fno do state schemas."""
 from __future__ import annotations
 
 import re

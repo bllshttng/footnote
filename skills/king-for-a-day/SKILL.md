@@ -190,7 +190,7 @@ No observation probe is proof a peer is dead: `peek`, discovery, a stale status 
 `fno agents list` · `status` (daemon liveness + per-agent state) · `top` (every live worker process, fno-spawned and foreign alike) · `logs <name>` · `peek <handle>` (read-only observation of any peer you could message) · `needs` (the needs-me queue) · `digest --session <s>` (catch-up fold) · `trace <name>` (dispatch lifecycle).
 
 **Merge a finished child.**
-`fno pr merge <n>` lands a green child PR, and doing so is in-lane when the wave gate is what is blocking your tail.
+`fno do pr merge <n>` lands a green child PR, and doing so is in-lane when the wave gate is what is blocking your tail.
 Config is the consent: merge only when `auto_merge.enabled` (or the project's equivalent posture) already permits it, never as a judgment call you make yourself.
 This is the difference between a track that walks and one that silently wedges, so check it before you conclude a wave is stuck.
 
@@ -228,7 +228,7 @@ Either stamp shrinks the queue. A bare `-> parked:` with no reason does not.
 fno backlog epic status <epic>          # children: status, worker, PR
 fno backlog get <id>                    # one node in full
 fno agents top                          # who is actually running right now
-fno pr list --state open
+fno do pr list --state open
 ```
 
 Read the epic's plan doc too.
@@ -239,9 +239,9 @@ A node claiming to be ready with no plan, and a blocked node whose blocker merge
 
 `done` is stamped at finalize, not at merge, so a child can read `done` while its PR sits open and unmerged. This is not cosmetic. It is the wave gate. A stale `done` means the whole tail behind it is waiting on a merge nobody performed.
 
-Run `fno pr info <n>` for state, head, and mergeability, and run `fno pr status <n>` for CI on every child whose PR number you are treating as landed. Reconcile before you plan a single edge.
+Run `fno do pr info <n>` for state, head, and mergeability, and run `fno do pr status <n>` for CI on every child whose PR number you are treating as landed. Reconcile before you plan a single edge.
 
-Do not hand-read `gh pr view --json statusCheckRollup`: it retains superseded runs and reports them as `FAILURE`, so a green PR reads red. `fno pr status` keeps only the latest run per check name, and its `ready_blockers` names which gate holds. For per-check truth outside fno, use `gh run list --workflow=<wf> --branch <br>`.
+Do not hand-read `gh pr view --json statusCheckRollup`: it retains superseded runs and reports them as `FAILURE`, so a green PR reads red. `fno do pr status` keeps only the latest run per check name, and its `ready_blockers` names which gate holds. For per-check truth outside fno, use `gh run list --workflow=<wf> --branch <br>`.
 
 **Check that the merge machinery is alive.**
 A dead pr-watch is silent and looks exactly like "no PRs finished recently."
@@ -297,7 +297,7 @@ An L-sized node with no design should get a `/think` pass, not a builder.
 When an S node is next in a chain you just serialized but unselectable for want of a plan, author the plan and link it.
 The alternatives are all worse: hand-spawning into a saturated project oversubscribes it, and spawning a whole session to write one page is absurd overhead.
 This is the one exception to "not a driver", and it is narrow: quick plans for small nodes inside your own scope, never implementation, never an L node (those get `/think`).
-Use `fno plan path` for the canonical filename.
+Use `fno do plan path` for the canonical filename.
 
 **3d. Batch blueprints: up to three per session, one plan per shape.**
 

@@ -179,15 +179,15 @@ def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = F
         stamp = datetime.fromtimestamp(reset, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         window = f"reset at {stamp}"
     if len(args) >= 2 and list(args[:2]) == ["pr", "list"]:
-        cheap = "Use `fno pr list` for a REST-backed PR listing"
+        cheap = "Use `fno do pr list` for a REST-backed PR listing"
     else:
         cheap = (
-            f"Use `fno pr info {pr}` for state/head/mergeability and "
-            f"`fno pr status {pr}` for CI"
+            f"Use `fno do pr info {pr}` for state/head/mergeability and "
+            f"`fno do pr status {pr}` for CI"
         )
     return (
         f"GraphQL discretionary read refused: {window}. {cheap}; stop retrying GraphQL "
-        "until reset. `fno pr status` still contains optional review-thread and coverage reads "
+        "until reset. `fno do pr status` still contains optional review-thread and coverage reads "
         "that are GraphQL; those reads preserve the reserved coverage budget."
     )
 

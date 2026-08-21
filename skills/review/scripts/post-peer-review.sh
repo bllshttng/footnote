@@ -69,8 +69,8 @@ main() {
 
   # Resolve the current head sha so the marker + inline commit_id pin to HEAD.
   local head_sha
-  head_sha="$(GH_TOKEN="$tok" fno pr info "$pr" | jq -er .head_sha)" \
-    || die "fno pr info failed for PR #$pr (gate stays unmet)"
+  head_sha="$(GH_TOKEN="$tok" fno do pr info "$pr" | jq -er .head_sha)" \
+    || die "fno do pr info failed for PR #$pr (gate stays unmet)"
   local marker; marker="$(head_marker "$provider" "$head_sha")"
 
   # Anti-gaming (codex P1 on #205): the peer MUST post under an account distinct

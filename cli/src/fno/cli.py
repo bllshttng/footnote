@@ -53,10 +53,15 @@ from fno._lazy_group import make_lazy_group_cls
 # hidden; promotion to the menu is a deliberate, lint-gated act (see fno lint).
 LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     # Sub-apps (Typer instances) -----------------------------------------
-    "state": ("fno.state.cli:cli", "manage fno state files", {"hidden": True}),
+    "do": (
+        "fno.do_cli:do_app",
+        "Delivery work: plans, targets, reviews, PRs, state, and supporting operations.",
+        {"hidden": True},
+    ),
+    "state": ("fno.state.cli:cli", "manage fno do state files", {"hidden": True}),
     "target": (
         "fno.target_cli:target_app",
-        "Target session bootstrap (fno target init)",
+        "Target session bootstrap (fno do target init)",
         {"hidden": True},
     ),
     "backlog": ("fno.graph.cli:cli", "Feature graph management"),
@@ -269,6 +274,7 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
     "dispatch": set(),
+    "do": set(),
     "evals": set(),
     "event": {"emit"},
     "loops": {"resume-all"},
@@ -877,7 +883,7 @@ def review(
         "--print-providers",
         help="Print the per-agent cross-model provider routing as JSON and exit "
         "(no panel run). The /review sigma skill consumes this so it dispatches "
-        "the same providers as the fno review panel.",
+        "the same providers as the fno do review panel.",
     ),
     publish_sigma: Optional[Path] = typer.Option(
         None,

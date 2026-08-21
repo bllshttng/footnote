@@ -308,7 +308,7 @@ def parse_ownership_map(plan_text: str) -> list[str]:
 
     Reads the first table column under the heading, strips backticks, and keeps
     only path-like cells (drops prose rows such as ``init-modulation test`` or
-    ``fno target init writer (locate ...)``). Returns [] when the section is
+    ``fno do target init writer (locate ...)``). Returns [] when the section is
     absent or holds no path-like rows (-> classify returns ``unknown``).
     """
     lines = plan_text.splitlines()

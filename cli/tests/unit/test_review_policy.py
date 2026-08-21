@@ -197,7 +197,7 @@ def test_quota_exhausted_alternate_falls_back_for_soft_policy() -> None:
     assert v.effective == "portable"
 
 
-# ---- fno review --assess-assurance: the CLI gate exits nonzero when unsatisfied ----
+# ---- fno do review --assess-assurance: the CLI gate exits nonzero when unsatisfied ----
 
 
 def test_cli_assess_assurance_exits_3_when_unsatisfied() -> None:
@@ -212,7 +212,7 @@ def test_cli_assess_assurance_exits_3_when_unsatisfied() -> None:
     with patch("fno.worker.review.review_assurance", return_value=unsat):
         result = CliRunner().invoke(
             app,
-            ["review", "--assess-assurance", "--policy-size", "S", "--risk-surface", "merge-gate"],
+            ["do", "review", "--assess-assurance", "--policy-size", "S", "--risk-surface", "merge-gate"],
         )
     assert result.exit_code == 3
     assert '"satisfied": false' in result.stdout
@@ -222,7 +222,7 @@ def test_cli_assess_assurance_exits_0_when_satisfied() -> None:
     sat = {"policy": "portable", "satisfied": True, "effective": "portable", "reason": "ok"}
     with patch("fno.worker.review.review_assurance", return_value=sat):
         result = CliRunner().invoke(
-            app, ["review", "--assess-assurance", "--policy-size", "S"]
+            app, ["do", "review", "--assess-assurance", "--policy-size", "S"]
         )
     assert result.exit_code == 0
 

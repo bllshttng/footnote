@@ -48,7 +48,7 @@ TOMBSTONES: dict[str, str] = {
     ),
     "reality-check": (
         "nothing - the external-reality probes had no caller. The `gh` probe's "
-        "job is done by `fno pr status <n>`"
+        "job is done by `fno do pr status <n>`"
     ),
     "wake": (
         "nothing - the wake-signal ADMIN verbs had no caller. Wake signals "
@@ -134,7 +134,7 @@ TOMBSTONES: dict[str, str] = {
     ),
     "resume receipt version": (
         "nothing - the schema version had no reader; "
-        "`fno resume receipt validate` fails on a version it cannot read"
+        "`fno do resume receipt validate` fails on a version it cannot read"
     ),
     "runtime probe": "`fno doctor` - the live environment-health check",
     "runtime reap-dead-workers": (
@@ -150,14 +150,14 @@ TOMBSTONES: dict[str, str] = {
         "`fno.paths.ledger_json()` is the in-process resolver"
     ),
     "state validate": (
-        "nothing - `fno state set` validates on write, which is where an "
+        "nothing - `fno do state set` validates on write, which is where an "
         "invalid field is actually stopped"
     ),
     "stub-manifest check-pr": (
-        "`fno stub-manifest reconcile-validate` - the drift gate with callers"
+        "`fno do pr stub-manifest reconcile-validate` - the drift gate with callers"
     ),
     "stub-manifest validate": (
-        "`fno stub-manifest reconcile-validate` - it validates the manifest as "
+        "`fno do pr stub-manifest reconcile-validate` - it validates the manifest as "
         "part of the check that runs"
     ),
     # --- Flag-shaped names: a verb whose name was a mode of another verb. The
@@ -177,7 +177,7 @@ TOMBSTONES: dict[str, str] = {
         "silent success when the lane holds none"
     ),
     "target resume-bind": (
-        "`fno target init` - it acquires the node claim against the live "
+        "`fno do target init` - it acquires the node claim against the live "
         "session pid, which is the rebinding this verb did separately"
     ),
     # --- Top-level deletes from the verb-root audit. Each scored zero or

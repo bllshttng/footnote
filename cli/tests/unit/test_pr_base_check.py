@@ -71,7 +71,7 @@ def test_stale_branch_refused_with_fix(tmp_path):  # AC1-ERR
     assert msg is not None
     assert "days behind" in msg
     assert "phantom deletions" in msg
-    assert "fno pr rebase --base=origin/main" in msg
+    assert "fno do pr rebase --base=origin/main" in msg
     assert "FNO_PR_BASE_OK=stale-acknowledged" in msg
 
 

@@ -62,7 +62,8 @@ fi
 if [[ "${1:-}" == "claim" && "${2:-}" == "release" ]]; then
     key="$3"; rm -f "$FAKE_CLAIMS/$(_slug "$key")"; exit 0
 fi
-if [[ "${1:-}" == "loops" && "${2:-}" == "status" ]]; then echo "not paused"; exit 0; fi
+if [[ "${1:-}" == "do" && "${2:-}" == "loops" && "${3:-}" == "status" ]]; then echo "not paused"; exit 0; fi
+if [[ "${1:-}" == "loops" && "${2:-}" == "status" ]]; then echo "deprecated loops root reached" >&2; exit 2; fi
 exit 0
 FAKE
 chmod +x "$FAKEBIN/fno"
@@ -102,6 +103,7 @@ rm -f "$CANON/.fno/.eval-sweep-stamp"
 eval_sweep_maybe_fire "$WT"
 [[ -f "$CANON/.fno/.eval-sweep-stamp" ]] || fail "canonical stamp not created from worktree fire"
 [[ ! -f "$WT/.fno/.eval-sweep-stamp" ]] || fail "stamp wrongly created in worktree-local .fno"
+grep -q '^do loops status$' "$FNO_CALL_LOG" || fail "pause probe did not use canonical do loops status"
 pass "US1: fire from worktree stamps the canonical .fno"
 
 # Second fire within the window: throttle short-circuits before any claim call.

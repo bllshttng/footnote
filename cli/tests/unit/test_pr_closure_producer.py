@@ -298,7 +298,7 @@ def test_hook_denies_a_bare_create_from_a_node_branch(monkeypatch):
         "the refusal prescribes a literal trailer again, which is the "
         "unverified-mint defect this text was rewritten to close"
     )
-    assert "fno pr closure-trailer" in reason
+    assert "fno do pr closure-trailer" in reason
 
 
 def test_hook_allows_a_non_node_branch(monkeypatch):
@@ -622,7 +622,7 @@ def test_hook_denies_the_full_pretooluse_payload(node_branch_repo):
     assert payload["permissionDecision"] == "deny"
     reason = payload["permissionDecisionReason"]
     assert "x-49ec" in reason
-    assert "fno pr closure-trailer" in reason
+    assert "fno do pr closure-trailer" in reason
     assert "Backlog-Closure: x-49ec" not in reason
 
 

@@ -1,4 +1,4 @@
-"""fno pr ritual - the mechanical core of the post-merge ritual (x-bbde).
+"""fno do pr ritual - the mechanical core of the post-merge ritual (x-bbde).
 
 One idempotent verb runs the ~90% of ``skills/pr/references/merged.md`` that is
 pure CLI orchestration. Per leg it shells the existing fno verb, captures the
@@ -472,10 +472,10 @@ class Ritual:
         else:
             self._emit("reconcile", _FAILED, f"exit={r.returncode}")
         # Step 2a: plan frontmatter. Idempotent.
-        self._leg("plan-reconcile", ["plan", "reconcile-status", "--apply"])
+        self._leg("plan-reconcile", ["do", "plan", "reconcile-status", "--apply"])
         # Ship provenance used to be stamped here (`session add --phase ship` on
         # the PR). It recorded the ritual session, not the implementer, and only
-        # fired on the `fno pr merged` path. The ship row now lands at
+        # fired on the `fno do pr merged` path. The ship row now lands at
         # `fno backlog update --pr-number` (the PR-link choke point), which every
         # shipped node passes through regardless of how it merged.
 
@@ -508,7 +508,7 @@ class Ritual:
         if not getattr(self.ctx.pm, "sync_command", None):
             self._emit("sync-canonical", _SKIPPED, "not configured")
             return
-        self._leg("sync-canonical", ["pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
+        self._leg("sync-canonical", ["do", "pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
                   timeout=900.0)
 
     def _merged_state(self) -> tuple[Optional[str], Optional[str]]:
@@ -524,7 +524,7 @@ class Ritual:
         session) a worker who finished and now waits on review passes cleanly.
 
         The merge is not self-evident on every trigger. The pr-watch daemon
-        fires on a gh-backed `state == MERGED`, but `fno pr merged <n>` reaches
+        fires on a gh-backed `state == MERGED`, but `fno do pr merged <n>` reaches
         `_resolve_pr`, which returns a caller-supplied number unchecked. On that
         path the merge is an ARGUMENT, so the guard belongs here at the leg,
         where a removal actually happens, not at resolve.
@@ -980,6 +980,6 @@ def _truthy(v: object) -> bool:
 
 def run_ritual(pr: Optional[int], autonomous: bool, cwd: Optional[Path] = None,
                runner: Callable = _run) -> int:
-    """Entry point for the `fno pr ritual` command. Returns shell exit code."""
+    """Entry point for the `fno do pr ritual` command. Returns shell exit code."""
     ritual = Ritual(pr, autonomous, Path(cwd or Path.cwd()), runner=runner)
     return ritual.run()

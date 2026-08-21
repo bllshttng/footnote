@@ -99,7 +99,7 @@ def test_blueprint_frontmatter_stays_stampable() -> None:
 
 
 def test_state_frontmatter_prose_not_folded(tmp_path: Path) -> None:
-    """`fno state` manifests carry free text (`input`); it must not fold either."""
+    """`fno do state` manifests carry free text (`input`); it must not fold either."""
     path = tmp_path / "target-state.md"
     write_frontmatter(path, {"type": "target", "input": _LONG_PROSE}, "# State\n")
 

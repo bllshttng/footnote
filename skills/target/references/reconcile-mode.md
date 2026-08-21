@@ -22,7 +22,7 @@ The command carries the `--reconcile <manifest-path>` token (alongside
 
 ## Pipeline
 
-Init as normal (`fno target init`), then before the do phase:
+Init as normal (`fno do target init`), then before the do phase:
 
 ### 1. Pull main (the blocker's schema is now landed)
 
@@ -33,7 +33,7 @@ git fetch origin && git rebase origin/main   # or merge, per project convention
 ### 2. The drift gate (Locked Decision 5 - executable truth, never a doc diff)
 
 ```bash
-fno stub-manifest reconcile-validate --node "$NODE" --root "$ROOT"
+fno do pr stub-manifest reconcile-validate --node "$NODE" --root "$ROOT"
 ```
 
 Branch on the exit code:
@@ -58,11 +58,11 @@ suite, not just a swap.
 Then finalize and flip the PR ready:
 
 ```bash
-fno stub-manifest reconcile-finalize --node "$NODE" --root "$ROOT"   # clears the hold signal
+fno do pr stub-manifest reconcile-finalize --node "$NODE" --root "$ROOT"   # clears the hold signal
 gh pr ready <pr-number>                                              # draft -> ready
 ```
 
-`reconcile-finalize` flips the manifest's `reconciled` flag so `fno pr merge`
+`reconcile-finalize` flips the manifest's `reconciled` flag so `fno do pr merge`
 stops refusing the PR. The `gh pr ready` flip is the skill's job (kept out of the
 pure CLI state write). Emit `<promise>` only after CI is green on the now-ready PR.
 

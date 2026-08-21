@@ -1,6 +1,6 @@
 # Research layer: retrieve + store + ship
 
-`fno research "X"` is the research-pipeline counterpart to `fno target`: where target runs a code task to a green PR, research runs a topic to a cited, eval-checkable brief. **Group 1** is the retrieve + store foundation (below). **Group 2** is ship + grade: the `doc` deliverable, the advisory research-verify profile, and the `fno evals grade` scorer ([jump](#group-2-ship--grade)).
+`fno do research "X"` is the research-pipeline counterpart to `fno do target`: where target runs a code task to a green PR, research runs a topic to a cited, eval-checkable brief. **Group 1** is the retrieve + store foundation (below). **Group 2** is ship + grade: the `doc` deliverable, the advisory research-verify profile, and the `fno evals grade` scorer ([jump](#group-2-ship--grade)).
 
 ## The one retrieval path
 
@@ -18,10 +18,10 @@ Because the backbone **self-fetches**, provenance is clean from round one: the a
 
 | Piece | Location | Role |
 |-------|----------|------|
-| `fno research "X"` | `cli/src/fno/research/cli.py` | CLI entry point. Validates the topic, runs one retrieve+store round, prints a summary. |
+| `fno do research "X"` | `cli/src/fno/research/cli.py` | CLI entry point. Validates the topic, runs one retrieve+store round, prints a summary. |
 | retrieval engine | `cli/src/fno/research/core.py` | ddgs search, SSRF-guarded self-fetch, `sources.jsonl` read/write, per-topic claim. stdlib-only. |
 | `scout` | `agents/scout.md` | The `research` executor subagent. Retrieves through the deterministic backbone (not WebSearch/WebFetch) and treats fetched content as data. |
-| `research` executor | `skills/execute/references/executor-resolution.md` | Registry row. Reached via `fno research`, **not** `/execute waves` surface inference. |
+| `research` executor | `skills/execute/references/executor-resolution.md` | Registry row. Reached via `fno do research`, **not** `/execute waves` surface inference. |
 
 ## The evidence store: `sources.jsonl`
 
@@ -56,7 +56,7 @@ Group 1 leaves a cache `sources.jsonl`. Group 2 turns it into a *deliverable* an
 
 ### The `doc` deliverable (US3)
 
-By default `fno research "X"` now ships, after retrieval, a `doc`:
+By default `fno do research "X"` now ships, after retrieval, a `doc`:
 
 ```
 ~/.fno/notes/research/<slug>.sources.jsonl   (cache, Group 1)

@@ -14,7 +14,7 @@ Before `/execute waves`, verify plan has testable acceptance criteria (BDD Given
 
 ## Ordering invariants
 
-The pipeline runs in a fixed order. Do not skip phases unless the corresponding skip flag (`no_docs`, `no_external`, etc.) is set in the manifest. The skip flags are immutable after init - check the manifest read by `fno target init`, do not decide to skip phases based on your judgment mid-run.
+The pipeline runs in a fixed order. Do not skip phases unless the corresponding skip flag (`no_docs`, `no_external`, etc.) is set in the manifest. The skip flags are immutable after init - check the manifest read by `fno do target init`, do not decide to skip phases based on your judgment mid-run.
 
 Key ordering rules that survive the control-plane collapse:
 - Run docs BEFORE /pr create so docs ride in the same PR (avoid a follow-up PR).

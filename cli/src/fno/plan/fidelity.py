@@ -11,7 +11,7 @@ This module owns the carveout waiver - the one thing the fold does not. Each
 unjoined planned row needs a covering carveout or the gate refuses. A PR-body
 sentence is not a carveout. Both gate readers route through the single decision
 here: ``_merge.py`` imports :func:`compute_plan_fidelity`; ``loopcheck.rs``
-shells ``fno plan fidelity --json``.
+shells ``fno do plan fidelity --json``.
 """
 from __future__ import annotations
 

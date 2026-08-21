@@ -697,7 +697,7 @@ def _unclaimed_node_basis(
     BLIND SPOT, stated here beside the two the module header already records.
     A row whose node did not resolve carries ``node=None`` and cannot be
     checked, and that is PRECISELY the shape of a worker that never ran
-    ``fno target init``: ``Row.node`` comes from the worktree manifest and then
+    ``fno do target init``: ``Row.node`` comes from the worktree manifest and then
     the session-keyed ledger, and both are written downstream of init. So this
     catches the manifest-written-but-unclaimed case and nothing else. Reading it
     as "every unclaimed worker is flagged" would make it the same decorative

@@ -3,7 +3,7 @@
 The finalize invocation is injected via the ``finalize_origin`` seam so no real
 ``fno-agents finalize`` fires; ``resolve_warm_session`` is stubbed so liveness is
 deterministic. The cold ritual verb is injected via ``run_verb`` so no real
-``fno pr ritual`` subprocess fires. A separate slow-marked smoke test exercises
+``fno do pr ritual`` subprocess fires. A separate slow-marked smoke test exercises
 the REAL binary.
 """
 from __future__ import annotations

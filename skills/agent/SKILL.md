@@ -469,7 +469,7 @@ is in `spawn.sh` (deterministic), so you do nothing here except relay the receip
 
 **Delegation for a self-isolating payload (x-6c22).** One case skips the
 pre-creation above: a **claude** `/target` carrying a **resolved node**. That
-worker isolates itself at cold-start - `fno target start <node>` runs `fno
+worker isolates itself at cold-start - `fno do target start <node>` runs `fno
 worktree ensure` and then the harness `EnterWorktree` tool - so `spawn.sh`
 launches it at the repo ROOT and lets it own the worktree. Doing both would be
 worse: `EnterWorktree` moves the session's cwd but leaves its PROJECT at the
@@ -482,7 +482,7 @@ is honored either way. Only the timing, the owner, and the branch name move.
 
 Three conditions, all load-bearing. **claude**, because `EnterWorktree` is a
 Claude Code harness tool and a codex/opencode `/fno:target` worker cannot move
-its session into a worktree it creates. **A node**, because `fno target start`
+its session into a worktree it creates. **A node**, because `fno do target start`
 has nothing to resolve without one - a free-text `/target ship it` never
 isolates, it hits the location-refusal backstop. **A literal `/target`
 message**, because `payload_mode` defaults to `build`, so a caller passing a

@@ -1,4 +1,4 @@
-"""fno pr sync-canonical - post-merge canonical-checkout sync (x-47be).
+"""fno do pr sync-canonical - post-merge canonical-checkout sync (x-47be).
 
 Pure-mechanical, fail-open. After a PR merges, bring the CANONICAL checkout and
 its installed tooling up to the merged HEAD by running the project's configured

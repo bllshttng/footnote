@@ -29,6 +29,25 @@ def _load():
 vc = _load()
 
 
+def test_substitution_sweep_keeps_three_signals_independent(tmp_path):
+    corpus = tmp_path / "scripts"
+    corpus.mkdir()
+    (corpus / "calls.sh").write_text(
+        'owned="$(fno do target resolve-owned-identity)"\n'
+        'policy="$(candidate_fno do pr evidence-required)"\n'
+        'status="$("$fno_cmd" do loops status)"\n'
+        'fno do plan validate\n'
+    )
+
+    counts = vc.sweep_substitutions(
+        tmp_path, {"do"}, extra_prefixes={"candidate_fno"}
+    )
+
+    assert counts["glued-binary"]["do"] == 1
+    assert counts["glued-wrapper"]["do"] == 1
+    assert counts["variable-binary"]["do"] == 1
+
+
 def test_load_curriculum_strips_comments_and_flags_unknown(tmp_path):
     leaves = {"backlog get", "mail send", "agents loop-check"}
     curr = tmp_path / "curriculum.txt"

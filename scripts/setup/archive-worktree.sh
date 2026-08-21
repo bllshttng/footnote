@@ -23,7 +23,7 @@
 #   2  strict check failed (use --force to override)
 #   3  user declined process-kill prompt
 #   4  git worktree remove failed
-#   5  salvage of local-only .fno state failed (worktree kept)
+#   5  salvage of local-only .fno do state failed (worktree kept)
 #   6  app-owned Codex worktree (archive the associated chat instead)
 
 set -euo pipefail
@@ -260,7 +260,7 @@ if [[ "$FORCE" -eq 0 ]]; then
   #    IN_PROGRESS; the modern immutable manifest has no status field. The
   #    durable liveness signal is the NODE CLAIM (session-pid anchored + TTL).
   #    owner_pid is checked last and only as a positive signal: it is the
-  #    transient `fno target init` wrapper pid, dead about a second after init
+  #    transient `fno do target init` wrapper pid, dead about a second after init
   #    returns, so on its own this check was a silent no-op for every current
   #    session and would happily archive a running target's worktree.
   TARGET_STATE="$TARGET/.fno/target-state.md"
@@ -397,7 +397,7 @@ if [[ -n "$ALL_PIDS" ]]; then
   fi
 fi
 
-# ---- Salvage local-only .fno state before removal (data-loss guard) ------
+# ---- Salvage local-only .fno do state before removal (data-loss guard) ------
 # A worktree's .fno mixes symlinks (canonical state) with REAL local-only
 # files (artifacts/, scratchpad/, target-state.md, *.log) that
 # `git worktree remove` would delete silently. Copy every real (non-symlink)

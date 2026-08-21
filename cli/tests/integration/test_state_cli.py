@@ -1,4 +1,4 @@
-"""Integration tests for `fno state` subcommands.
+"""Integration tests for `fno do state` subcommands.
 
 Uses subprocess so we test the real CLI entry point, not just Python APIs.
 Tests use tmp_path fixtures to isolate state files.
@@ -81,7 +81,7 @@ def make_state_file(tmp_path: Path, content: str = MINIMAL_STATE) -> Path:
 def test_ac1_hp_show_json(tmp_path: Path) -> None:
     """AC1-HP: fno --json state show --path FILE outputs valid JSON."""
     state_file = make_state_file(tmp_path)
-    result = run_cli("--json", "state", "show", "--path", str(state_file))
+    result = run_cli("--json", "do", "state", "show", "--path", str(state_file))
     assert result.returncode == 0, f"stderr: {result.stderr}"
     data = json.loads(result.stdout)
     assert data["status"] == "IN_PROGRESS"
@@ -91,7 +91,7 @@ def test_ac1_hp_show_json(tmp_path: Path) -> None:
 def test_ac1_hp_show_field(tmp_path: Path) -> None:
     """AC1-HP: state show --field returns single value."""
     state_file = make_state_file(tmp_path)
-    result = run_cli("state", "show", "--path", str(state_file), "--field", "status")
+    result = run_cli("do", "state", "show", "--path", str(state_file), "--field", "status")
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert result.stdout.strip() == "IN_PROGRESS"
 
@@ -99,7 +99,7 @@ def test_ac1_hp_show_field(tmp_path: Path) -> None:
 def test_ac1_hp_show_field_json(tmp_path: Path) -> None:
     """AC1-HP: state show --field --json returns {field: value}."""
     state_file = make_state_file(tmp_path)
-    result = run_cli("--json", "state", "show", "--path", str(state_file), "--field", "status")
+    result = run_cli("--json", "do", "state", "show", "--path", str(state_file), "--field", "status")
     assert result.returncode == 0, f"stderr: {result.stderr}"
     data = json.loads(result.stdout)
     assert data["status"] == "IN_PROGRESS"
@@ -112,7 +112,7 @@ def test_ac2_hp_set_field(tmp_path: Path) -> None:
     state_file = make_state_file(tmp_path)
 
     result = run_cli(
-        "state", "set",
+        "do", "state", "set",
         "--path", str(state_file),
         "--field", "status",
         "--value", "COMPLETE",
@@ -120,7 +120,7 @@ def test_ac2_hp_set_field(tmp_path: Path) -> None:
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
     # Verify via show
-    result2 = run_cli("state", "show", "--path", str(state_file), "--field", "status")
+    result2 = run_cli("do", "state", "show", "--path", str(state_file), "--field", "status")
     assert result2.stdout.strip() == "COMPLETE"
 
 
@@ -145,7 +145,7 @@ def test_set_field_with_iso_updated_at_in_file(tmp_path: Path) -> None:
     )
 
     result = run_cli(
-        "state", "set",
+        "do", "state", "set",
         "--path", str(state_file),
         "--field", "iteration",
         "--value", "2",
@@ -166,7 +166,7 @@ def test_ac2_hp_set_body_unchanged(tmp_path: Path) -> None:
     original_data, original_body = _read_fm(state_file)
 
     run_cli(
-        "state", "set",
+        "do", "state", "set",
         "--path", str(state_file),
         "--field", "iteration",
         "--value", "99",
@@ -187,7 +187,7 @@ def test_ac3_err_set_invalid_status(tmp_path: Path) -> None:
     """AC3-ERR: state set with invalid status exits 1 with clear error."""
     state_file = make_state_file(tmp_path)
     result = run_cli(
-        "state", "set",
+        "do", "state", "set",
         "--path", str(state_file),
         "--field", "status",
         "--value", "GARBAGE",
@@ -206,7 +206,7 @@ def test_ac5_hp_init_creates_file(tmp_path: Path) -> None:
     """AC5-HP: state init creates a state file with defaults."""
     output = tmp_path / "new-state.md"
     result = run_cli(
-        "state", "init",
+        "do", "state", "init",
         "--type", "target",
         "--output", str(output),
     )
@@ -221,7 +221,7 @@ def test_ac5_err_init_file_exists(tmp_path: Path) -> None:
     output = tmp_path / "existing.md"
     output.write_text("---\nstatus: COMPLETE\n---\n")
     result = run_cli(
-        "state", "init",
+        "do", "state", "init",
         "--type", "target",
         "--output", str(output),
     )
@@ -233,7 +233,7 @@ def test_ac5_err_init_file_exists(tmp_path: Path) -> None:
 def test_archive_creates_backup(tmp_path: Path) -> None:
     """HP: state archive moves the state file to a backup path."""
     state_file = make_state_file(tmp_path)
-    result = run_cli("state", "archive", "--path", str(state_file))
+    result = run_cli("do", "state", "archive", "--path", str(state_file))
     assert result.returncode == 0, f"stderr: {result.stderr}"
     # Original is gone or a backup exists
     archived = list(tmp_path.glob("*.archived*")) + list(tmp_path.glob("*.bak*"))

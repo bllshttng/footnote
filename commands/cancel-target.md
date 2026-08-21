@@ -17,7 +17,7 @@ Cancels a target pipeline. Behavior depends on whether a state file exists:
   the `/fno:target` invocation), which re-blocks exit on every stop.
   Leaving it lets the hook write `BLOCKED` as a durable terminal record
   (postmortem + ledger + the backlog node returning to `ready`); the next
-  `fno target init` archives that terminal state cleanly.
+  `fno do target init` archives that terminal state cleanly.
 
 - **Orphan (no state file):** the session was driven off-ceremony (init
   skipped) or a prior cancel removed the file. Clearing the orphan block

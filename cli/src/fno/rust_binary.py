@@ -2,7 +2,7 @@
 
 Pure filesystem lookup: stdlib only, no ``fno`` imports at all, which is why it
 sits at the platform layer rather than under ``fno.agents``. Its callers span
-every layer (``fno phase kill-check``, ``fno doctor``, ``fno restart``, the
+every layer (``fno do phase kill-check``, ``fno doctor``, ``fno restart``, the
 post-merge ledger finalizer, the relay, the agents runtime), and the ones below
 the runtime were paying an upward import for what is four ``os.access`` checks.
 
