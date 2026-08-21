@@ -151,7 +151,7 @@ tail -5 /tmp/gate.log
 `set -o pipefail` also fixes the pipeline case, but it is a property of the shell you happen to be in rather than of the command you are reading, so it does not travel with a command pasted into a review, a hook, or a chat message.
 
 A gate that compares commits fails a different way: it answers the right question about the wrong version.
-`scripts/ci/loc-ratchet.sh` diffs against the merge base, so running it while your change is still unstaged measures the previous commit and passes for work it never saw.
+Diff-based checks compare committed content with the merge base, so running one while your change is still unstaged can measure the previous commit and miss the work you intended to inspect.
 Commit first, then run it.
 Otherwise the verdict you are reading belongs to someone else's diff.
 

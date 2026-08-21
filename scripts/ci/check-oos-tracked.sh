@@ -14,7 +14,7 @@
 #
 # Rule inside that section:
 #   - A standalone `oos-ok: <rationale>` line waives the WHOLE section (mirrors
-#     loc-ratchet's `loc-exception:`) - for genuinely-nothing-to-track cases.
+#     an explicit exception) - for genuinely-nothing-to-track cases.
 #   - Otherwise every ITEM must carry a tracked ref on its own text: a node id
 #     (`<prefix>-<hex>`) or a carveout (`cv-<hex>`), or an inline `oos-ok:`. A
 #     bullet/numbered line is one item; a section with no list is treated as a
@@ -25,7 +25,7 @@
 #   PR_BODY   the PR body
 #
 # Exit 0 when clean (or no OOS section, or empty body); exit 1 on an untracked
-# item. Absent/empty PR_BODY = nothing to gate = pass (mirrors loc-ratchet's
+# item. Absent/empty PR_BODY = nothing to gate = pass (mirrors the former gate's
 # "unset PR_BODY = no exception declared").
 #
 # Run locally (bash 3.2 safe - the maintainer's macOS /bin/bash):
@@ -44,7 +44,7 @@ BODY="${PR_BODY:-}"
 # PR/issue is not a backlog node; route those through `oos-ok: tracked in #123`.
 REF='\b[a-z][a-z0-9]{0,6}-[0-9a-f]{4,}\b'
 # An inline waiver on an item, or (standalone) on the whole section. Requires a
-# non-empty rationale (a bare `oos-ok:` does not waive), like loc-exception:.
+# non-empty rationale (a bare `oos-ok:` does not waive).
 OOSOK='oos-ok:[[:space:]]*[^[:space:]]'
 
 # match <ere> <string> [i] -> true if <string> matches. Uses grep WITHOUT -q so

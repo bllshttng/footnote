@@ -2,14 +2,14 @@
 
 A staleness defense: when a PR changes control-plane code, the docs that describe that control plane should travel in the same diff. Docs that drift away from the code they describe rot silently. This check is the nudge that keeps them together.
 
-It is the sibling of the [LOC ratchet](loc-ratchet.md): same control-plane path set, same merge-base diff mechanics, opposite enforcement posture. The ratchet is **blocking** (it fails CI on net growth without an exception); doc colocation is **advisory** (it warns and never blocks).
+It is advisory: it warns and never blocks. The control-plane path set remains in the historically named `loc-ratchet-manifest.yaml` because the blast-radius router also consumes that file.
 
 ## What it does
 
 On every PR, [`scripts/ci/control-plane-doc-colocation.sh`](../../scripts/ci/control-plane-doc-colocation.sh):
 
 1. Computes the changed-file set as `git diff --name-only <merge-base> HEAD`, with the base resolved from `BASE_REF` (GitHub Actions sets it from `github.base_ref`) or an explicit `--base <ref>`.
-2. Classifies each changed file as control-plane or not, using the **same `include:` and `exclude:` lists** the LOC ratchet reads from [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml). Both sets are parsed from the manifest (with the same match semantics the ratchet uses), so test files (`**/tests/**`, `test_*`, `*_test.*`) are excluded without a hardcoded list that could drift.
+2. Classifies each changed file as control-plane or not using the `include:` and `exclude:` lists in [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml), so test files (`**/tests/**`, `test_*`, `*_test.*`) are excluded without a hardcoded list that could drift.
 3. Checks whether any changed file lives under `docs/architecture/`.
 4. If control-plane code changed **and** no `docs/architecture/` file did, it emits a `::warning` annotation plus a GitHub step-summary entry listing the control-plane files. Otherwise it prints `PASS`.
 
@@ -17,7 +17,7 @@ The script **always exits 0**. The signal is the annotation, not a red check.
 
 ## Why one path list
 
-Reading both the control-plane path set (`include:`) and the exclusions (`exclude:`) from `loc-ratchet-manifest.yaml` rather than duplicating them means the two checks can never disagree about what "control plane" is. Add a path to the manifest once, and both the ratchet and this nudge pick it up. The current include set:
+Reading both the control-plane path set (`include:`) and the exclusions (`exclude:`) from `loc-ratchet-manifest.yaml` avoids duplicating the blast-radius router's definition of "control plane." Add a path to the manifest once, and both consumers pick it up. The current include set:
 
 - `hooks/`
 - `scripts/lib/`
@@ -34,7 +34,7 @@ Two layers keep this out of the merge gate:
 - The "Check control-plane doc colocation" step, in [`.github/workflows/guards.yml`](../../.github/workflows/guards.yml)'s `guards-pr` job, sets `continue-on-error: true`. The run succeeds regardless of branch protection.
 - The script exits 0 on every path, including the warning path. Any error it would otherwise raise (no base ref, missing manifest, failed diff) degrades to a soft no-op notice rather than a failure.
 
-There is intentionally no exception ledger (unlike the ratchet's `loc-exception:` + trajectory protocol). A warning you disagree with is simply ignored; the goal is a reminder, not a checkpoint.
+There is intentionally no exception ledger. A warning you disagree with is simply ignored; the goal is a reminder, not a checkpoint.
 
 ## Acting on a warning
 

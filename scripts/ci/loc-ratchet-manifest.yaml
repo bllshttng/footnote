@@ -1,7 +1,7 @@
 # loc-ratchet-manifest.yaml
 #
-# Single source of scope for the LOC ratchet CI gate (ab-c9777486).
-# See scripts/ci/loc-ratchet.sh for gate mechanics.
+# Historical filename retained for compatibility. This is the shared
+# control-plane scope for blast-radius routing and advisory doc colocation.
 #
 # Include-entry semantics (all entries are relative to the repo root):
 #   trailing /  = directory prefix: any file whose path starts with this prefix

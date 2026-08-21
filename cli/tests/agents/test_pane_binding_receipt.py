@@ -342,7 +342,7 @@ def test_bound_equals_short_id_truthiness(provider: str) -> None:
 #: A harness whose transport key is NOT short_id (US8). Named rather than
 #: inlined because `MuxSpawnResult.provider` is an older spelling of the harness
 #: axis, and a harness literal bound to a `provider=` keyword is the four-axis
-#: confusion `scripts/ci/check-axis-vocabulary.sh` exists to catch.
+#: confusion the axis-vocabulary contract exists to prevent.
 HARNESS_WITHOUT_SHORT_ID = "opencode"
 
 

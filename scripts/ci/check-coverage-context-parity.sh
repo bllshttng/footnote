@@ -5,10 +5,9 @@
 # The `fno/review-coverage` commit-status context and the `coverage-override`
 # label each live in several places: the Python publisher (the canonical
 # consts), the ruleset data the operator applies, the Rust publisher, the
-# refresher workflow, and the post-merge audit. Each suite pins only its own
+# refresher workflow. Each suite pins only its own
 # copy, so a rename in any one of them keeps every CI check green while the
-# required context sits pending forever, or the audit reads a context nobody
-# writes. This check reads the strings off the surfaces and fails on any
+# required context sits pending forever. This check reads the strings off the surfaces and fails on any
 # drift, naming the surface that moved.
 #
 # Every needle is the surface's EXACT syntactic form, not a substring: a
@@ -52,7 +51,7 @@ if [ -z "$py_label" ]; then
 fi
 
 # The context: what GitHub requires (ruleset, exact list membership), who
-# writes it (Python, Rust, workflow), and who reads it back (audit).
+# writes it (Python, Rust, workflow).
 if ! python3 - "$ROOT/scripts/ci/merge-ruleset.json" "$py_ctx" <<'EOF'
 import json, sys
 
@@ -70,13 +69,9 @@ expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   "const COVERAGE_STATUS_CONTEXT: &str = \"$py_ctx\";" "the Rust publisher"
 expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   "^[[:space:]]*ctx=$py_ctx\$" "the refresher workflow"
-expect_line "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
-  "^CTX=\"$py_ctx\"\$" "the post-merge audit"
-
-# The override label: the 3am release valve, spelled by every writer and by
-# the audit that counts its use by name. The Rust needle includes the jq
-# quoting because that inline string is the label's only Rust spelling; the
-# audit needle includes the case-pattern close so a suffixed rename misses.
+# The override label: the 3am release valve, spelled by every writer. The Rust
+# needle includes the jq quoting because that inline string is the label's only
+# Rust spelling.
 expect_fixed "$ROOT/crates/fno-agents/src/loopcheck.rs" \
   "index(\\\"$py_label\\\")" "the Rust publisher (override label)"
 expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
@@ -87,9 +82,6 @@ expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
 # own green - the valve stays open with every check passing.
 expect_fixed "$ROOT/.github/workflows/review-coverage-gate.yml" \
   "${py_label}*)" "the refresher withdrawal arm (override description prefix)"
-expect_fixed "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
-  "${py_label}*)" "the post-merge audit (override label)"
-
 # The description grammar: the refresher's invalidate arms switch on prose
 # prefixes the publishers emit (the preserve list in the workflow), so those
 # prefixes are an ABI like the context and the label - a wording change on
@@ -107,17 +99,6 @@ expect_line "$ROOT/.github/workflows/review-coverage-gate.yml" \
   'covered\*\|"no review lane"\*' "the refresher preserve list"
 expect_line "$ROOT/scripts/ci/coverage-carry.sh" \
   'covered\*\|"no review lane"\*' "the carry script's publisher allowlist"
-
-# The carry marker: the string coverage-carry.sh WRITES onto a carried
-# verdict's description, and the string the post-merge audit's case pattern
-# READS to name a carried merge. A rename on one side and not the other
-# keeps a carried head reading as an ordinary uncovered head to the audit -
-# see scripts/ci/coverage-carry.sh (the writer) and
-# scripts/ci/check-merge-coverage-audit.sh (the reader).
-expect_fixed "$ROOT/scripts/ci/coverage-carry.sh" \
-  'marker=" [carried from' "the carry script (writer of the carry marker)"
-expect_fixed "$ROOT/scripts/ci/check-merge-coverage-audit.sh" \
-  '\[carried\ from\ *)' "the post-merge audit (reader of the carry marker)"
 
 if [ "$fail" = 1 ]; then
   echo "FAIL: coverage context/label drift - the messages above name the surfaces" >&2

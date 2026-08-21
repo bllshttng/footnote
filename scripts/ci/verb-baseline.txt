@@ -20,7 +20,7 @@
 # rather than emitting a byte-identical file plus a success line.
 # A deliberate addition carries a PR-body line:
 #   verb-exception: <rationale>
-# (mirrors `loc-exception:` so contributors learn one idiom, not two).
+# (an explicit rationale keeps the exception reviewable).
 # Two PRs that each add a verb both edit this file; the merge conflict is the
 # intended review moment, not tooling noise.
 #

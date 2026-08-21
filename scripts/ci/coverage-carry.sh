@@ -49,9 +49,8 @@ if [ "$before" = "$ZERO_SHA" ] || [ "$before" = "$head" ]; then
   no_carry "no-previous-head"
 fi
 
-# The combined-status endpoint: one entry per context, the latest - the same
-# read check-merge-coverage-audit.sh uses and for the same tie-breaking
-# reason (the status list is newest-first with one-second granularity, so a
+# The combined-status endpoint returns one latest entry per context. The
+# status list is newest-first with one-second granularity, so a
 # same-second tie needs the combined endpoint, not the list). One request
 # returns both fields tab-separated, rather than two round trips for the
 # same already-fetched response.

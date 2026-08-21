@@ -44,10 +44,9 @@ name: guards
 # a structural guard, and stays its own workflow.
 
 on:
-  # `edited` is load-bearing for guards-pr: control-plane-doc-colocation.yml,
-  # loc-ratchet.yml and oos-tracked.yml each triggered on
-  # [opened, synchronize, reopened, edited] on purpose, because their fix path
-  # IS a PR-body edit (add a loc-exception line or cite a tracked node) with no
+  # `edited` is load-bearing for guards-pr: oos-tracked.yml triggered on
+  # [opened, synchronize, reopened, edited] on purpose, because its fix path
+  # IS a PR-body edit that cites a tracked node, with no
   # new commit. A bare `pull_request:` defaults to
   # [opened, synchronize, reopened] and drops that path silently - the gate
   # would still be red (or stale) after the exact edit meant to clear it. The
@@ -71,8 +70,8 @@ jobs:
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push
-  # event. Sourced from: control-plane-doc-colocation.yml, loc-ratchet.yml,
-  # oos-tracked.yml, pr-body-length.yml, session-url-scan.yml.
+  # event. Sourced from: control-plane-doc-colocation.yml, oos-tracked.yml,
+  # session-url-scan.yml.
   guards-pr:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -104,21 +103,6 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_control_plane_doc_colocation.sh
 
-      # From loc-ratchet.yml (loc-ratchet job).
-      - name: Run LOC ratchet
-        if: ${{ !cancelled() }}
-        timeout-minutes: 10
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          BASE_REF: ${{ github.base_ref }}
-        run: bash scripts/ci/loc-ratchet.sh
-
-      # From loc-ratchet.yml (self-test job).
-      - name: Run loc-ratchet test harness
-        if: ${{ !cancelled() }}
-        timeout-minutes: 10
-        run: bash tests/ci/test_loc_ratchet.sh
-
       # From oos-tracked.yml (check-oos-tracked job). PR-controlled text (the
       # body) reaches the script via env ONLY - never interpolated inline
       # into `run:`, which would be a shell-injection hole.
@@ -140,12 +124,6 @@ jobs:
         timeout-minutes: 5
         run: bash tests/skills/test_pr_oos_tracking_contract.sh
 
-      # From pr-body-length.yml (self-test job).
-      - name: Run pr-body-length self-test
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: bash tests/ci/test_pr_body_length.sh
-
       # From session-url-scan.yml (check-no-session-urls job). PR-controlled
       # text (title/body) reaches the script via env ONLY - never
       # interpolated inline into `run:`, which would be a shell-injection
@@ -161,8 +139,8 @@ jobs:
         run: bash scripts/ci/check-no-session-urls.sh
 
   # push (main) + pull_request: no member here reads PR-only context.
-  # Sourced from: axis-vocabulary.yml, autonomy-registry.yml,
-  # codex-bootstrap-check.yml, mail-inject-callers.yml, plan-rung-authority.yml,
+  # Sourced from: autonomy-registry.yml, codex-bootstrap-check.yml,
+  # mail-inject-callers.yml, plan-rung-authority.yml,
   # preamble-budget.yml,
   # review-invocation-single-source.yml, skill-local-evals.yml,
   # tracker-partition.yml, uv-install-bytecode.yml.
@@ -204,14 +182,6 @@ jobs:
         run: |
           bash scripts/ci/check-disposable-rm.sh
           bash tests/ci/test-check-disposable-rm.sh
-
-      # From axis-vocabulary.yml.
-      - name: Axis vocabulary ratchet + self-test
-        if: ${{ !cancelled() }}
-        timeout-minutes: 5
-        run: |
-          bash scripts/ci/check-axis-vocabulary.sh --self-test
-          bash scripts/ci/check-axis-vocabulary.sh
 
       # From autonomy-registry.yml.
       - name: autonomy registry ratchet

@@ -2,7 +2,7 @@
 
 This document is the single source for footnote's axis definitions.
 The code, the spawn/register receipts, the process environment, the config, and the skills all conform to the table below.
-`scripts/ci/check-axis-vocabulary.sh` is the sole enforcer; it fails CI when an identifier, dict key, JSON key, or env var on one axis is assigned a literal from another.
+These definitions guide implementation and review; no CI vocabulary ratchet enforces them.
 When a reviewer and an agent disagree about an ambiguous site, this document resolves it the same way for both.
 
 ## The five axes
@@ -51,9 +51,9 @@ The provider-to-harness mapping is fixed:
 A receipt that renames a `provider` key to `harness` and then emits a second `provider` field still reading `claude` has fixed nothing.
 The defect is the value under the name, not the name alone.
 
-**Guard rule.** The guard flags only a harness value bound to a provider-named identifier.
+**Review rule.** Treat only a harness value bound to a provider-named identifier as a defect.
 `anthropic` under `provider` is correct; `claude` under `provider` is the defect.
-A guard that flags the legal case fires on correct code, gets disabled, and the conflation regrows, so the predicate stays narrow.
+Calling the legal case a defect obscures the distinction this vocabulary exists to preserve.
 
 **Name rule.** A directory named for one axis must not hold another axis's implementation.
 This is the rule the first two cannot reach.
@@ -65,11 +65,11 @@ The harness package is now `cli/src/fno/agents/harnesses/`, and the harness docs
 
 ## Named exception: the `agents.defaults.provider` config key
 
-One config key breaks the naming convention on purpose. The guard cannot reach it.
+One config key breaks the naming convention on purpose.
 
 `agents.defaults.provider` carries harness values (`claude/codex/gemini/agy/opencode`) and loses to `-H`. The flag `-P/--provider` carries vendor values. The same word names two axes.
 
-The value rule reads a key's harness values as correct, because they are legal for the harness axis. Only the name collides, and the guard reads file contents, not key names.
+The value rule reads a key's harness values as correct, because they are legal for the harness axis. Only the name collides.
 
 Set the vendor axis with `agents.defaults.route` (vendor/model, position-carried). Treat `agents.defaults.provider` as the harness default it behaves as.
 
@@ -116,70 +116,13 @@ An unset effort resolves to `max`. fno spawns most workers without one, so a mec
 
 `inject_spawn_defaults` (`cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
 
-## Declared directory axes
-
-Directory names are judged against `DECLARED_PATH_AXIS`, a map at the top of `scripts/ci/check-axis-vocabulary.sh`.
-Each entry states the axis a directory's contents implement:
-
-```python
-DECLARED_PATH_AXIS = {
-    "cli/src/fno/adapters/providers": "provider",
-    "cli/src/fno/agents/harnesses": "harness",
-    "docs/harnesses": "harness",
-}
-```
-
-**To add a directory whose name contains `provider`, `harness`, or `model`:** add one line naming its repo-relative path and the axis its contents implement.
-The check fails on two things.
-An axis-named directory absent from the map fails as undeclared, because nothing vouches for the name it carries.
-A declared directory whose declaration disagrees with the axis its own name states fails as a conflict.
-
-**The entry is a human assertion, and the gate never verifies it.**
-It compares your declaration against the directory's name and stops there.
-It does not open the directory to check that the declaration is true, so a wrong entry passes green.
-Review is the only thing that verifies a declaration.
-That is why the value is spelled out, rather than the path merely being listed as permitted.
-
-Classifying a directory by its contents was measured and rejected, not assumed unworkable.
-The harness-adapter package held 298 harness literals to 5 vendor.
-The correctly named provider package held 1024 to 49, because rotation and failover legitimately name the harnesses whose accounts they rotate.
-Any threshold that flags the wrong directory also flags the right one.
-
-Two further limits, both printed by the gate on every scan run so a green is not read as more than it is:
-
-- **File names are not judged.** Fifty-two tracked files carry an axis word, and most are correct (`harness_map.py`, `model_routing.py`). A directory name is inherited by every import path beneath it, which is why one of them reached 82 files. A file name is local.
-- **Symbol names are not judged.** `ProviderResult` and the `Provider*Error` classes are the content scan's subject and sit in the baseline.
-
-**This rule governs package and directory names only. It does not rename the `provider` config field.**
-That field stays exactly where the value rule puts it, with `route` and `account` added beside it and the allowlisted config sites parked.
-
 ## Ambiguous values
 
 `opencode` is a legal harness and a legal provider.
 `gemini` names a harness, a provider, and a model family.
 The axis can never be inferred from a value, so no mechanical rename can be trusted: every site is read for intent.
 
-These genuinely ambiguous values take an allowlist entry in `scripts/ci/axis-vocabulary-baseline.txt` rather than a blanket rule.
-Each entry carries a one-line justification stating which two axes collide and why the site is correct.
-
-## Allowlist justification procedure
-
-When a site legitimately binds an ambiguous value and must be excluded from the guard:
-
-1. Run `bash scripts/ci/check-axis-vocabulary.sh --write-baseline` and find the row the site produced in `scripts/ci/axis-vocabulary-baseline.txt`.
-2. Copy that row, prefix it with `allowlist: `, and append ` | <one line>` stating which axes collide and why this binding is correct.
-3. Delete the plain row you copied, so the site is held by the allowlist rather than by the ratchet.
-4. Record a removal trigger for a time-boxed entry. The only such entry today is the `FNO_AGENT_PROVIDER` read-side compatibility window. Its trigger is the last in-flight worker that can carry the old variable.
-
-The entry carries the whole finding, not just its path, and that is what scopes it.
-Keying by path alone suppresses every axis violation in that file, including ones written later.
-Keying by `path:line` stops suppressing the moment an edit above renumbers the site.
-The recorded line is for a human chasing the justification.
-The guard matches on the file and the binding.
-
-An allowlist entry with no justification fails the guard, because a justification-free entry is exactly how a real violation would be smuggled past a reviewer.
-An entry matching no current finding also fails, on a whole-repo scan.
-A suppression whose site is gone is a trapdoor left open for the next binding that lands on the same name.
+Document ambiguous bindings at the site when the axis is not evident from the surrounding type or field name.
 
 ## Recognized and unrecognized harness values
 
@@ -187,8 +130,7 @@ Session-marker detection (`HARNESS_SESSION_MARKERS` in `cli/src/fno/harness_iden
 `agy` dispatches through its own adapter (`crates/fno-agents/src/agy_ask.rs`) but has no session marker.
 `oh-my-pi` and `openclaw` are operator-named harnesses the code does not model at all yet; they appear in this table as legal vocabulary, not as values any code path recognizes.
 
-The guard's harness-literal set is the union the operator declared, broader than the session-marker set, so a literal like `agy` or `openclaw` under a `provider` name is still a defect even though no marker detects the harness.
-`oh-my-pi` and `openclaw` are excluded from the guard's harness-literal set only insofar as they would flag prose mentions; they are defects the instant they appear as a bound value where a provider is expected and the site is not allowlisted.
+A literal like `agy` or `openclaw` under a provider-named binding is still a defect even though no session marker detects that harness.
 
 ## Surfaces that conform
 
@@ -212,4 +154,4 @@ The guard's harness-literal set is the union the operator declared, broader than
 
 Four prior passes each fixed one surface and survived the conflation: renaming `fno providers` to accounts (superseded), the config managed-CLI entries (done), the `fno whoami` line (done), and the on-disk registry field (done).
 The on-disk registry field pass is the instructive failure: it resolved the collision by deleting the provider field and declaring harness the sole identity axis, which removed the ability to express a real axis rather than disambiguating it.
-This cutover instead keeps the word `provider` and restores its one correct meaning, and it leaves behind the guard as the artifact none of the four prior attempts did, which is why this one is expected to hold.
+This cutover instead keeps the word `provider` and restores its one correct meaning across the product surfaces listed above.

@@ -6,14 +6,13 @@
 # WITHOUT also touching docs/architecture/. Staleness defense — the docs that
 # describe the control plane should travel in the same diff as the change.
 #
-# Same shape as loc-ratchet.sh (merge-base diff against BASE_REF), but:
+# Uses a merge-base diff against BASE_REF, but:
 #   - It is ADVISORY: it always exits 0. The signal is a ::warning annotation
 #     plus a GitHub step-summary line, surfaced by a continue-on-error job.
 #   - The control-plane path set is read from scripts/ci/loc-ratchet-manifest.yaml
-#     (the SAME include: list the LOC ratchet uses), so the two checks can never
-#     disagree about what counts as control plane.
+#     so this nudge and blast-radius routing share one definition.
 #
-# Base ref resolution (mirrors loc-ratchet.sh):
+# Base ref resolution:
 #   --base <ref>  overrides; otherwise BASE_REF env -> "origin/$BASE_REF".
 #
 # Exit code is always 0. Read-only. No state writes.
@@ -72,8 +71,8 @@ CHANGED=$(git diff --name-only "$MB" HEAD 2>/dev/null) \
 
 # ── Manifest path sets: include:/exclude: blocks from the loc-ratchet manifest ─
 # Reuse the manifest as the SINGLE source of truth for BOTH the control-plane
-# path set AND the exclusions, so this nudge and the LOC ratchet can never drift
-# on either. Match semantics (loc-ratchet-manifest.yaml header):
+# path set AND the exclusions, so this nudge and blast routing cannot drift on
+# either. Match semantics (loc-ratchet-manifest.yaml header):
 #   include:  trailing "/" -> dir prefix; trailing "*" -> path-prefix glob;
 #             otherwise -> exact file match.
 #   exclude:  leading "**/" stripped; trailing "/**" -> path-segment rule;
@@ -100,7 +99,7 @@ EXCLUDES=$(parse_manifest_section exclude)
 [[ -n "$INCLUDES" ]] || notice_and_exit "manifest has no include: entries"
 
 # A file is excluded if any manifest exclude: pattern matches. Mirrors
-# loc-ratchet.sh's exclude semantics exactly (strip leading "**/"; trailing
+# The manifest's exclude semantics (strip leading "**/"; trailing
 # "/**" is a path-segment rule; otherwise a basename glob). Empty EXCLUDES ->
 # nothing excluded.
 is_excluded() {
