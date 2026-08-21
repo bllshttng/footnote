@@ -142,6 +142,31 @@ def test_a_failing_job_is_still_named_ci_red():
     assert "ci_red" in _blockers(rollup)
 
 
+@pytest.mark.parametrize("conclusion", ["CANCELLED", "STALE"])
+def test_a_taken_away_job_is_named_for_retrigger(conclusion):
+    """A cancelled or stale latest run is red, unsettled, and retriggerable."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": conclusion},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert (verdict, code) == ("red", 1)
+    assert counts["unsettled_fail"] == 1
+    assert _blockers(rollup) == ["ci_cancelled_retrigger"]
+
+
+def test_a_real_failure_dominates_a_taken_away_sibling():
+    """A retriggerable sibling never relabels a concluded failure."""
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {"name": "smoke", "status": "COMPLETED", "conclusion": "CANCELLED"},
+    ]
+    verdict, code, counts = _status.verdict_for(rollup)
+    assert (verdict, code) == ("red", 1)
+    assert counts["unsettled_fail"] == 1
+    assert counts["fail"] == 2
+    assert _blockers(rollup) == ["ci_red"]
+
+
 def test_a_status_only_red_is_never_named_ci_red():
     """The PR 997 shape. Every job passed and a commit status failed.
 

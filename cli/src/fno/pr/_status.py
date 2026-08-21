@@ -199,6 +199,9 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     `counts["unsettled"]` counts latest runs with NO settled marker (an absent
     result: cancelled, stale, still running), and `settled` is derived from it
     positively elsewhere - never from the absence of a pending run.
+    `counts["unsettled_fail"]` narrows that positive count to rows that also
+    classify as failures, so callers can distinguish a taken-away run from a
+    concluded failure without inferring either outcome from an absence.
 
     A would-be-green tally is refused when NO entry is a real check-run (the
     `name` key, produced by GitHub Actions/apps via the check-runs API) -
@@ -219,12 +222,15 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
         "fail": 0,
         "pending": 0,
         "unsettled": 0,
+        "unsettled_fail": 0,
     }
     for c in deduped:
         kind = _classify(c)
         counts[kind] += 1
         if not _has_settled_marker(c):
             counts["unsettled"] += 1
+            if kind == "fail":
+                counts["unsettled_fail"] += 1
         if c.get("name") not in (None, ""):
             counts["check_runs"] += 1
             if kind == "fail":
@@ -312,9 +318,10 @@ def _ready_blockers(
     A bare ``ready: false`` has one explanation per conjunct (a red check, an
     unresolved optional finding, coverage unknown or uncovered) and a reader
     cannot tell them apart; the list is the positive marker that names what is
-    holding. A red is split by the KIND of row that failed: ``ci_<verdict>``
-    when a real check-run failed, ``commit_status_red`` when a commit
-    StatusContext failed and no job failed at all.
+    holding. A red is split by the KIND of result: ``ci_red`` when a check-run
+    reached a failing conclusion, ``ci_cancelled_retrigger`` when every failure
+    is a taken-away run, and ``commit_status_red`` when a commit StatusContext
+    failed and no job failed at all.
     ``unknown`` coverage blocks and is named as its own blocker: the
     reason a read returned unknown is a separate question (x-b56a), this only
     reports that the answer is missing. Fail-closed everywhere: an unset
@@ -367,6 +374,13 @@ def _ready_blockers(
         # fail_check_runs` reads true there too, and the honest test is that
         # EVERY failing row is a status, not merely that no job was among them.
         if (
+            verdict == "red"
+            and counts
+            and counts.get("unsettled_fail")
+            and counts.get("unsettled_fail") == counts.get("fail")
+        ):
+            blockers.append("ci_cancelled_retrigger")
+        elif (
             verdict == "red"
             and counts
             and counts.get("fail_statuses")
