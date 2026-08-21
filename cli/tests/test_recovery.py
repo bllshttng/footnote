@@ -1574,7 +1574,7 @@ class TestRedispatch:
         monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
 
     def _patch_run(self, monkeypatch, *, stop_rc=0, stop_out=b"", force_release_rc=0,
-                   spawn_rc=0, stamp_rc=0, clear_rc=0):
+                   spawn_rc=0, spawn_exc=None, stamp_rc=0, clear_rc=0):
         """Stub subprocess.run; record the (markered) calls for assertions."""
         from types import SimpleNamespace
         import subprocess as sp
@@ -1594,6 +1594,8 @@ class TestRedispatch:
             if all(tok in cmd for tok in ("claim", "release", "--force")):
                 return SimpleNamespace(returncode=force_release_rc)
             if cmd[:3] == ["fno-py", "agents", "spawn"]:
+                if spawn_exc is not None:
+                    raise spawn_exc
                 return SimpleNamespace(returncode=spawn_rc)
             if cmd[:3] == ["fno-py", "backlog", "update"]:
                 owner = cmd[cmd.index("--locked-by") + 1]
@@ -1646,6 +1648,7 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand()) is False
         assert self._index_of(calls, ["fno-py", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+        assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
 
     def test_pane_refusal_runs_the_named_pane_kill_then_rotates(self, monkeypatch):
         # The daemon refuses `agents stop` on a pane row and NAMES the pane-kill
@@ -1679,6 +1682,8 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch, force_release_rc=1)
         assert recovery._redispatch(self._cand()) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
 
     def test_done_node_not_redispatched(self, monkeypatch):
         # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
@@ -1704,6 +1709,19 @@ class TestRedispatch:
 
         assert recovery._redispatch(self._cand()) is False
         assert "could not clear dead owner for x-370f" in caplog.text
+
+    def test_spawn_timeout_after_stop_clears_corpse(self, monkeypatch):
+        import subprocess
+
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(
+            monkeypatch,
+            spawn_exc=subprocess.TimeoutExpired(cmd="spawn", timeout=60),
+        )
+
+        assert recovery._redispatch(self._cand()) is False
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
 
     def test_successful_spawn_repoints_node_to_replacement(self, monkeypatch):
         self._patch_resolve(monkeypatch)
@@ -1777,6 +1795,8 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is not None
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
 
 
 class TestReviveBgThread:

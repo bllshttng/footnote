@@ -1004,6 +1004,7 @@ def _redispatch(
         return False
     name = getattr(candidate, "name", None)
     agent = f"failover-{candidate.short_id}"
+    old_worker_stopped = False
     try:
         if name:
             # Kill the rate-limited worker. This does NOT free its node claim.
@@ -1036,6 +1037,7 @@ def _redispatch(
                     # then spawning would put two /target workers on one node. Bail to
                     # the nudge to preserve the at-most-one-worker invariant (codex P2).
                     return False
+            old_worker_stopped = True
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
@@ -1047,6 +1049,8 @@ def _redispatch(
         if rel.returncode != 0:
             # Claim still held → a spawn would refuse on it. Bail so the caller
             # nudges instead of reporting a respawn that cannot start.
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             return False
         # US3 managed auto-switch: materialize the swapped-to account into the
         # shared slot HERE - after the exhausted worker is stopped (so it no
@@ -1056,6 +1060,8 @@ def _redispatch(
         # ANOTHER live session / store failure) aborts the respawn: free the lane
         # slot and bail to the nudge, same as a spawn failure.
         if pre_spawn is not None and not pre_spawn():
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
         # --provider claude: the swap already installed the new claude record as
@@ -1077,7 +1083,8 @@ def _redispatch(
             # (above), so clear the stopped worker's graph pointer and free any
             # dispatch-time lane slot or lane-fill keeps skipping the node as
             # peer-owned until the slot TTL (G4).
-            _clear_dead_owner(node, cwd)
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
         try:
@@ -1099,6 +1106,8 @@ def _redispatch(
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
+        if old_worker_stopped:
+            _clear_dead_owner(node, cwd)
         return False
 
 
