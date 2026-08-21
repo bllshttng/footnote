@@ -543,14 +543,88 @@ fn global_claims_dir() -> PathBuf {
         .join("claims")
 }
 
-/// `target-<node-id>-<slug>` -> node id. Loose on purpose: a mis-parse yields a
-/// key that does not resolve -> no badge (fail-quiet), never a wrong badge.
-pub(crate) fn parse_node_id_from_name(name: &str) -> Option<String> {
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re =
-        RE.get_or_init(|| regex::Regex::new(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)").unwrap());
-    re.captures(name).map(|c| c[1].to_string())
+fn is_lower_token(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase())
+}
+
+fn is_prefix_token(token: &str) -> bool {
+    token.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+fn is_hex_run(token: &str, min_len: usize) -> bool {
+    (min_len..=8).contains(&token.len())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+fn is_well_formed_node_id(candidate: &str) -> bool {
+    let Some((prefix, hex)) = candidate.split_once('-') else {
+        return false;
+    };
+    is_prefix_token(prefix) && is_hex_run(hex, 4)
+}
+
+/// Node-id candidates embedded in a worker name, in the order a caller should
+/// try them. Loose on purpose: the caller resolves each against real ids, so a
+/// loose match can yield no badge but never a wrong badge.
+///
+/// Three live spellings, measured against a registry dump on 2026-08-20:
+/// `t-xd7be-tally-claude-sonnet` -> `x-d7be` (hyphen dropped),
+/// `king-cliverbs-x-c1b9-g2` -> `x-c1b9` (hyphenated), and
+/// `t-fd2a-finish` -> `fd2a` (bare hex, prefix-less).
+pub(crate) fn node_id_candidates(name: &str) -> Vec<String> {
+    let tokens: Vec<&str> = name.split('-').collect();
+    let mut candidates = Vec::new();
+    let mut push = |candidate: String| {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    for pair in tokens.windows(2) {
+        if is_prefix_token(pair[0]) && is_hex_run(pair[1], 3) {
+            push(format!("{}-{}", pair[0], pair[1]));
+        }
+    }
+    for token in &tokens {
+        for (split, _) in token.char_indices().skip(1) {
+            let (head, tail) = token.split_at(split);
+            if is_lower_token(head) && is_hex_run(tail, 3) {
+                push(format!("{head}-{tail}"));
+            }
+        }
+    }
+    if tokens.len() > 1 {
+        for token in tokens {
+            if is_hex_run(token, 4) {
+                push(token.to_string());
+            }
+        }
+    }
+    candidates
+}
+
+/// Resolve the first candidate in `name` that names a real key in `known`.
+/// Bare-hex candidates match by hex suffix only when exactly one key matches;
+/// ambiguity resolves to none.
+pub(crate) fn resolve_node_id<V>(name: &str, known: &HashMap<String, V>) -> Option<String> {
+    node_id_candidates(name).into_iter().find_map(|candidate| {
+        if known.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if !is_hex_run(&candidate, 4) {
+            return None;
+        }
+        let matches: Vec<&String> = known
+            .keys()
+            .filter(|key| key.split_once('-').is_some_and(|(_, hex)| hex == candidate))
+            .collect();
+        (matches.len() == 1).then(|| matches[0].clone())
+    })
 }
 
 /// Percent-encode a claim key to its lockfile stem, matching the Python writer's
@@ -1043,10 +1117,12 @@ fn build_truth_badges_at(
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(node_id) = parse_node_id_from_name(name) else {
-            continue;
-        };
-        let Some(sid) = live_claim_session(claims_dir, &node_id) else {
+        let Some(sid) = node_id_candidates(name)
+            .into_iter()
+            .filter(|candidate| is_well_formed_node_id(candidate))
+            .find_map(|node_id| live_claim_session(claims_dir, &node_id).map(|sid| (node_id, sid)))
+            .map(|(_, sid)| sid)
+        else {
             continue;
         };
         if let Some(&age) = ages.get(&sid) {
@@ -2906,21 +2982,75 @@ config_dir = "~/.claude-alt"
     }
 
     #[test]
-    fn parse_node_id_from_worker_name() {
-        assert_eq!(
-            parse_node_id_from_name("target-x-4a48-fleet-status").as_deref(),
-            Some("x-4a48")
-        );
-        assert_eq!(
-            parse_node_id_from_name("target-ab-1a2b3c4d-slug").as_deref(),
-            Some("ab-1a2b3c4d")
-        );
-        assert_eq!(
-            parse_node_id_from_name("target-x-4a48").as_deref(),
-            Some("x-4a48")
-        );
-        assert_eq!(parse_node_id_from_name("phasestall"), None);
-        assert_eq!(parse_node_id_from_name("worker-x-4a48-foo"), None);
+    fn resolves_node_id_from_worker_name() {
+        let known = HashMap::from([
+            ("x-d7be".to_string(), ()),
+            ("x-c1b9".to_string(), ()),
+            ("x-cd1e".to_string(), ()),
+            ("x-4a48".to_string(), ()),
+            ("ab-1a2b3c4d".to_string(), ()),
+            ("x-fd2a".to_string(), ()),
+        ]);
+        for (name, expected) in [
+            ("t-xd7be-tally-claude-sonnet", "x-d7be"),
+            ("king-cliverbs-x-c1b9-g2", "x-c1b9"),
+            ("build-xcd1e", "x-cd1e"),
+            ("target-x-4a48-fleet-status", "x-4a48"),
+            ("target-ab-1a2b3c4d-slug", "ab-1a2b3c4d"),
+            ("target-x-4a48", "x-4a48"),
+            ("t-fd2a-finish", "x-fd2a"),
+        ] {
+            assert_eq!(
+                resolve_node_id(name, &known).as_deref(),
+                Some(expected),
+                "{name}"
+            );
+        }
+        assert_eq!(resolve_node_id("phasestall", &known), None);
+        let empty: HashMap<String, ()> = HashMap::new();
+        assert_eq!(resolve_node_id("worker-x-4a48-foo", &empty), None);
+    }
+
+    /// Copied verbatim from `fno agents list` on 2026-08-20. The negative
+    /// half ensures loose candidates cannot turn ordinary worker names into
+    /// wrong node badges.
+    const LIVE_NAMES: &[(&str, Option<&str>)] = &[
+        ("t-xd7be-tally-claude-sonnet", Some("x-d7be")),
+        ("bp-xf920-toml", Some("x-f920")),
+        ("king-cliverbs-x-c1b9-g2", Some("x-c1b9")),
+        ("bp-sccache-x455f", Some("x-455f")),
+        ("build-xcd1e", Some("x-cd1e")),
+        ("bp-slotleak-xba39", Some("x-ba39")),
+        ("t-fd2a-finish", Some("x-fd2a")),
+        ("t-x7979-ship-agy", Some("x-7979")),
+        ("king-machinecost-x-f7b9", Some("x-f7b9")),
+        ("30d3c7e0", None),
+        ("4763481e", None),
+        ("rebase-988", None),
+        ("bp-prcol-naming", None),
+        ("king-footnote-g4", None),
+        ("codexprobe-bind", None),
+    ];
+
+    #[test]
+    fn live_registry_names_resolve_without_false_positives() {
+        let known = LIVE_NAMES
+            .iter()
+            .filter_map(|(_, expected)| expected.map(|id| (id.to_string(), ())))
+            .collect::<HashMap<_, _>>();
+        for (name, expected) in LIVE_NAMES {
+            assert_eq!(
+                resolve_node_id(name, &known).as_deref(),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_bare_hex_node_id_resolves_to_none() {
+        let known = HashMap::from([("x-abcd".to_string(), ()), ("y-abcd".to_string(), ())]);
+        assert_eq!(resolve_node_id("t-abcd-finish", &known), None);
     }
 
     #[test]
