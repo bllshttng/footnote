@@ -465,11 +465,13 @@ setup_env
 rm -f "${CWD}/.fno/target-state.md"
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
 printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
-if grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 ]] \
+    && grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
     && grep -q -- "--owner 182b29c8-owner-uuid" "$CALLLOG"; then
-  pass "T23 successful raw gh pr create invokes the idempotent binder"
+  pass "T23 successful raw gh pr create invokes the binder once"
 else
-  fail "T23 expected bind-created call; calls: $(cat "$CALLLOG")"
+  fail "T23 expected one bind-created call; calls: $(cat "$CALLLOG")"
 fi
 teardown_env
 
@@ -588,10 +590,13 @@ fi
 export STUB_BIND_RC=1 STUB_BIND_OUTPUT='{"outcome":"refused","refusal":"branch unknown"}'
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
-if [[ "$rc" -eq 0 && "$err" == *"branch unknown"* ]]; then
-  pass "T32 binder refusal is nonfatal and diagnostic"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 \
+      && "$err" == *"branch unknown"* && "$err" == *"$manual"* ]]; then
+  pass "T32 binder refusal retries once, then prints exact manual recovery"
 else
-  fail "T32 refusal rc=$rc diagnostic=[$err]"
+  fail "T32 refusal rc=$rc calls=$bind_calls diagnostic=[$err]"
 fi
 teardown_env
 
@@ -623,17 +628,21 @@ else
 fi
 rm -rf "$REAL_TMP"
 
-# ── T34: binder timeout is nonfatal, diagnostic, and does not retry ────────
+# ── T34: binder timeout retries once, stays bounded, and diagnoses ────────
 setup_env
 rm -f "${CWD}/.fno/target-state.md"
-export STUB_BIND_SLEEP=2
+export STUB_BIND_SLEEP=10
 payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+started="$(date +%s)"
 err="$(printf '%s' "$payload" | FNO_PR_BIND_CREATED_TIMEOUT=1 CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+elapsed=$(( $(date +%s) - started ))
 bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
-if [[ "$rc" -eq 0 && "$bind_calls" -eq 1 && "$err" == *"timed out"* ]]; then
-  pass "T34 binder timeout is bounded, nonfatal, and diagnostic"
+manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 && "$elapsed" -le 5 \
+      && "$err" == *"timed out"* && "$err" == *"$manual"* ]]; then
+  pass "T34 binder timeout retries once, stays bounded, and prints recovery"
 else
-  fail "T34 timeout rc=$rc calls=$bind_calls diagnostic=[$err]"
+  fail "T34 timeout rc=$rc calls=$bind_calls elapsed=${elapsed}s diagnostic=[$err]"
 fi
 teardown_env
 
@@ -649,6 +658,20 @@ elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
   fail "T35 positive free result was not throttled"
 else
   pass "T35 missing claim never refreshes and throttles the positive no-op"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T36: suspect exact-holder handover is renewable ──────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="suspect"
+run_hook_sid "owner" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166 --holder spawn-handover:build-x-a166 --ttl 15m" "$CALLLOG"; then
+  pass "T36 suspect exact-holder handover refreshes after spawner exit"
+else
+  fail "T36 suspect exact-holder handover was not refreshed; calls: $(cat "$CALLLOG")"
 fi
 unset FNO_NODE FNO_NODE_CLAIM_HOLDER
 teardown_env

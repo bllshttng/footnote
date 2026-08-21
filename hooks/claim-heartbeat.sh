@@ -175,17 +175,28 @@ if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ ]] \
       fi
       _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
       [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
-      _BIND_OUTPUT="$(with_timeout "${FNO_PR_BIND_CREATED_TIMEOUT:-5}" \
-        fno "${_bind_args[@]}" 2>&1)"
-      _BIND_RC=$?
-      if [[ "$_BIND_RC" -eq 124 ]]; then
-        echo "claim-heartbeat: PR binding timed out; will retry on later activity" >&2
-      elif [[ "$_BIND_RC" -ne 0 ]]; then
-        _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" \
-          | jq -r '.refusal // .error // empty' 2>/dev/null)"
-        [[ -n "$_BIND_REASON" ]] || _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" | head -1)"
-        [[ -n "$_BIND_REASON" ]] || _BIND_REASON="binder exited $_BIND_RC"
-        echo "claim-heartbeat: PR binding skipped: $_BIND_REASON" >&2
+      _BIND_MANUAL="fno pr bind-created --url $_CREATED_PR_URLS --repo $CWD"
+      [[ -n "$_BIND_OWNER" ]] && _BIND_MANUAL="$_BIND_MANUAL --owner $_BIND_OWNER"
+      _BIND_ATTEMPT=0
+      _BIND_RC=1
+      _BIND_OUTPUT=""
+      _BIND_TIMEOUT="${FNO_PR_BIND_CREATED_TIMEOUT:-2}"
+      while [[ "$_BIND_ATTEMPT" -lt 2 && "$_BIND_RC" -ne 0 ]]; do
+        _BIND_ATTEMPT=$((_BIND_ATTEMPT + 1))
+        _BIND_OUTPUT="$(with_timeout "$_BIND_TIMEOUT" \
+          fno "${_bind_args[@]}" 2>&1)"
+        _BIND_RC=$?
+      done
+      if [[ "$_BIND_RC" -ne 0 ]]; then
+        if [[ "$_BIND_RC" -eq 124 ]]; then
+          _BIND_REASON="timed out"
+        else
+          _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" \
+            | jq -r '.refusal // .error // empty' 2>/dev/null)"
+          [[ -n "$_BIND_REASON" ]] || _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" | head -1)"
+          [[ -n "$_BIND_REASON" ]] || _BIND_REASON="binder exited $_BIND_RC"
+        fi
+        echo "claim-heartbeat: PR binding failed after 2 attempts: $_BIND_REASON; run: $_BIND_MANUAL" >&2
       fi
     fi
   fi
@@ -227,7 +238,10 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       | jq -r '.holder // empty' 2>/dev/null)"
     if [[ "$_HANDOVER_STATUS_VALID" != 1 ]]; then
       echo "claim-heartbeat: handover claim status unreadable for node:$_HANDOVER_NODE; refresh remains due" >&2
-    elif [[ "$_RECORDED_HANDOVER_STATE" == live \
+    # The short-lived spawner normally exits before init, so its unexpired
+    # handover becomes SUSPECT. The TTL still protects it and permits renewal.
+    elif [[ ( "$_RECORDED_HANDOVER_STATE" == live \
+              || "$_RECORDED_HANDOVER_STATE" == suspect ) \
             && "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
       if with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
         fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
