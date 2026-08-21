@@ -3582,6 +3582,17 @@ def cmd_hold(
 
     if off:
         result = hold_mod.release(handle, held_for_s=0)
+        # Report the FLAG first. Both lines below describe delivery, and an
+        # operator who asked for the hold to stop is asking about the flag. A
+        # registry this could not write leaves mail held while the receipt says
+        # "hold off", which is a lie about their own session.
+        if not result["policy_cleared"]:
+            sys.stderr.write(
+                f"hold NOT off: the registry write failed, so {handle} still "
+                "reads bus-only and mail is still held. Retry, or check "
+                "`fno agents list` for the row.\n"
+            )
+            raise typer.Exit(code=1)
         if result["held_count"]:
             print(
                 f"hold off: delivered {result['held_count']} held message(s) "

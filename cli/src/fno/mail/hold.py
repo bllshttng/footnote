@@ -505,7 +505,8 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     # Keeping the clock on a failed write also lets this delivery through. The
     # gate reads a bus-only row with a LAPSED clock as not-holding, so the
     # digest still lands; the same row with no clock is refused outright.
-    if set_policy(handle, None):
+    policy_cleared = set_policy(handle, None)
+    if policy_cleared:
         clear(handle)
 
     try:
@@ -562,6 +563,7 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         held_for_s=held_for_s,
         outcome=outcome,
         miss_reason=(miss_reason[0] if miss_reason else None),
+        policy_cleared=policy_cleared,
     )
     return {
         "handle": handle,
@@ -570,4 +572,8 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
         "held_for_s": held_for_s,
         "outcome": outcome,
         "miss_reason": (miss_reason[0] if miss_reason else None),
+        # Whether the FLAG actually came off. A caller that asked for the hold
+        # to stop needs to know whether it stopped; reporting delivery while
+        # the row still refuses is success on a no-op path.
+        "policy_cleared": policy_cleared,
     }

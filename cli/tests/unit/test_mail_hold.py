@@ -278,6 +278,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
                 "held_for_s": 300,
                 "outcome": "delivered",
                 "miss_reason": None,
+                "policy_cleared": True,
             },
         )
     ]
@@ -326,6 +327,23 @@ def test_a_successful_policy_write_drops_the_clock(monkeypatch):
     hold_mod.release(HANDLE)
 
     assert hold_mod.read(HANDLE) is None
+
+
+def test_release_reports_whether_the_flag_actually_came_off(monkeypatch):
+    """`--off` asks about the FLAG, so the result must answer about the flag.
+
+    Both of that verb's receipts describe delivery. A registry it could not
+    write leaves mail held while the line reads "hold off", which is a lie
+    about the operator's own session.
+    """
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [])
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: False)
+    assert hold_mod.release(HANDLE)["policy_cleared"] is False
+
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    assert hold_mod.release(HANDLE)["policy_cleared"] is True
 
 
 def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
