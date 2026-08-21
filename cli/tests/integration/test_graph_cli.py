@@ -1448,6 +1448,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     assert row["locked_by"] == "worker-replacement"
     assert row["session_id"] == "worker-replacement"
     assert row["claimed_at"] != old
+    assert "ownership_defect" not in row
 
     cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
     assert cleared.exit_code == 0, cleared.output
@@ -1455,6 +1456,7 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     assert row["locked_by"] is None
     assert row["session_id"] is None
     assert row["claimed_at"] is None
+    assert "ownership_defect" not in row
 
 
 def test_remove_pr_drops_entry_by_number(tmp_graph):

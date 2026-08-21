@@ -132,12 +132,25 @@ def test_ac1_hp_recompute_claimed():
 def test_ac1_hp_recompute_stale_lock_cleared():
     """AC1-HP: stale lock is cleared and entry reverts to ready."""
     old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-    entries = [_entry("ab-hhhhhhhh", session_id="old-sess", claimed_at=old)]
+    entries = [
+        _entry(
+            "ab-hhhhhhhh",
+            session_id="old-sess",
+            claimed_at=old,
+            ownership_defect={
+                "kind": "stale-active-owner-unverified",
+                "node_id": "ab-hhhhhhhh",
+                "holder": "old-sess",
+                "liveness": "unverified",
+            },
+        )
+    ]
     result = recompute_statuses(entries)
     e = result[0]
     assert e["status"] == "ready"
     assert e["session_id"] is None
     assert e["claimed_at"] is None
+    assert "ownership_defect" not in e
 
 
 def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
@@ -146,16 +159,22 @@ def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
     entry = _entry(
         "ab-livework1",
         status="in_progress",
-        locked_by="dead-worker",
-        session_id="dead-worker",
+        locked_by="worker-unverified",
+        session_id="worker-unverified",
         claimed_at=old,
     )
 
     result = recompute_statuses([entry])
 
     assert result[0]["status"] == "in_progress"
-    assert entry["locked_by"] == "dead-worker"
-    assert entry["session_id"] == "dead-worker"
+    assert result[0]["ownership_defect"] == {
+        "kind": "stale-active-owner-unverified",
+        "node_id": "ab-livework1",
+        "holder": "worker-unverified",
+        "liveness": "unverified",
+    }
+    assert entry["locked_by"] == "worker-unverified"
+    assert entry["session_id"] == "worker-unverified"
     assert entry["claimed_at"] == old
 
 
@@ -164,17 +183,44 @@ def test_old_lock_on_legacy_claimed_node_is_migrated_and_preserved():
     entry = _entry(
         "ab-livework2",
         status="claimed",
-        locked_by="dead-legacy-worker",
-        session_id="dead-legacy-worker",
+        locked_by="legacy-worker-unverified",
+        session_id="legacy-worker-unverified",
         claimed_at=old,
     )
 
     result = recompute_statuses([entry])
 
     assert result[0]["status"] == "in_progress"
-    assert entry["locked_by"] == "dead-legacy-worker"
-    assert entry["session_id"] == "dead-legacy-worker"
+    assert result[0]["ownership_defect"] == {
+        "kind": "stale-active-owner-unverified",
+        "node_id": "ab-livework2",
+        "holder": "legacy-worker-unverified",
+        "liveness": "unverified",
+    }
+    assert entry["locked_by"] == "legacy-worker-unverified"
+    assert entry["session_id"] == "legacy-worker-unverified"
     assert entry["claimed_at"] == old
+
+
+def test_active_owner_defect_clears_when_age_is_no_longer_stale():
+    now = datetime.now(timezone.utc).isoformat()
+    entry = _entry(
+        "ab-livework3",
+        status="in_progress",
+        locked_by="worker-live",
+        session_id="worker-live",
+        claimed_at=now,
+        ownership_defect={
+            "kind": "stale-active-owner-unverified",
+            "node_id": "ab-livework3",
+            "holder": "worker-live",
+            "liveness": "unverified",
+        },
+    )
+
+    result = recompute_statuses([entry])
+
+    assert "ownership_defect" not in result[0]
 
 
 def test_ac1_hp_recompute_cascade_unblock_ignores_blocked_by_at_write_time():

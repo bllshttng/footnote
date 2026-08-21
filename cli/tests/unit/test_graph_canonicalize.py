@@ -175,6 +175,34 @@ def test_rank_in_canonical_field_order():
     assert "rank" in CANONICAL_FIELD_ORDER
 
 
+def test_ownership_defect_has_canonical_lifecycle_position():
+    assert "ownership_defect" in CANONICAL_FIELD_ORDER
+    assert CANONICAL_FIELD_ORDER.index("claimed_at") < CANONICAL_FIELD_ORDER.index(
+        "ownership_defect"
+    )
+    assert CANONICAL_FIELD_ORDER.index("ownership_defect") < CANONICAL_FIELD_ORDER.index(
+        "completed_at"
+    )
+
+
+def test_ownership_defect_round_trips_through_entry_schema():
+    from fno.graph.types import Entry
+
+    marker = {
+        "kind": "stale-active-owner-unverified",
+        "node_id": "ab-schema001",
+        "holder": "worker-old",
+        "liveness": "unverified",
+    }
+    dumped = Entry(
+        id="ab-schema001",
+        title="Schema marker",
+        locked_by="worker-old",
+        ownership_defect=marker,
+    ).model_dump()
+    assert dumped["ownership_defect"] == marker
+
+
 def test_rank_backfilled_null_on_next_mutation(tmp_path):
     """A node with no ``rank`` key gets ``rank: null`` written on the next
     mutation -- self-healing backfill, like the status-forward migration."""

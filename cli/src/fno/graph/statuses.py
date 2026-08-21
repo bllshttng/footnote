@@ -166,6 +166,10 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # write path never round-trips that value to disk; the next read
         # recomputes it fresh regardless.
         e["blocked_reason"] = None
+        # This marker is recomputed from the row's current lifecycle shape on
+        # every write. Clear first so an owner replacement, explicit release,
+        # or terminal transition cannot retain an obsolete diagnosis.
+        e.pop("ownership_defect", None)
 
         if e.get("completed_at"):
             e["status"] = "done"
@@ -197,14 +201,18 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
         # merge-time provenance. A persisted in-progress state is different:
         # claimed_at age alone cannot prove the owner died, so preserve that
         # pointer until an explicit repair replaces or clears it.
-        if (
-            e.get("status") != "in_progress"
-            and e.get("locked_by")
-            and is_stale_lock(e)
-        ):
-            e["locked_by"] = None
-            e["session_id"] = None  # keep the one-release mirror in sync
-            e["claimed_at"] = None
+        if e.get("locked_by") and is_stale_lock(e):
+            if e.get("status") == "in_progress":
+                e["ownership_defect"] = {
+                    "kind": "stale-active-owner-unverified",
+                    "node_id": e["id"],
+                    "holder": e["locked_by"],
+                    "liveness": "unverified",
+                }
+            else:
+                e["locked_by"] = None
+                e["session_id"] = None  # keep the one-release mirror in sync
+                e["claimed_at"] = None
 
         # A node carrying a PR that has not closed (merge sets completed_at, so
         # `done` wins above) is IN REVIEW: hold it out of the dispatch pool
