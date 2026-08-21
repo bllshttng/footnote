@@ -296,6 +296,38 @@ def test_release_fires_its_marker_even_when_nothing_was_held(monkeypatch):
     assert advanced == []
 
 
+def test_a_failed_policy_write_keeps_the_clock_so_the_hold_stays_recoverable(monkeypatch):
+    """A partial failure must not land somewhere worse than the failure.
+
+    Clearing the clock regardless left a bus-only row with no clock, and that
+    never lapses, so a hold that failed to lift became permanent with no
+    automatic path back: `tidy_lapsed` needs a clock it no longer has.
+    """
+    _expire(HANDLE)
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: False)
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [])
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+
+    hold_mod.release(HANDLE)
+
+    clock = hold_mod.read(HANDLE)
+    assert clock is not None, "a failed policy write must keep the clock"
+    # Still lapsed, so the gate lets mail through and the next turn boundary
+    # retries the tidy.
+    assert hold_mod.lapsed(HANDLE) is True
+
+
+def test_a_successful_policy_write_drops_the_clock(monkeypatch):
+    _expire(HANDLE)
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    monkeypatch.setattr("fno.bus.cursor.scan_unread", lambda *a, **k: [])
+    monkeypatch.setattr("fno.agents.events.emit", lambda *a, **k: None)
+
+    hold_mod.release(HANDLE)
+
+    assert hold_mod.read(HANDLE) is None
+
+
 def test_the_release_delivers_through_the_lane_dispatcher(monkeypatch):
     """Not through the claude injector, which is one lane of several.
 

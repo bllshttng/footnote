@@ -374,22 +374,29 @@ def resolve_entry(handle: str):
 
 
 def set_policy(handle: str, policy: Optional[str]) -> bool:
-    """Stamp ``delivery_policy`` on the registry row named ``handle``.
+    """Stamp ``delivery_policy`` on the registry row addressed by ``handle``.
 
-    Returns True when a row was found and written. Separate from
-    ``register_existing_session`` because that verb resolves the AMBIENT
-    session, and the release path runs in a detached timer process that has no
-    ambient identity of its own.
+    Returns whether the DESIRED STATE now holds, not whether a row was edited.
+    So a handle with no registry row returns True: no row carries a policy, so
+    the caller's "clear it" is already satisfied and there is nothing to strand.
+    False means only that the registry could not be read or written, which is
+    the one case where a flag may still be set behind the caller's back.
+
+    The distinction is load-bearing for :func:`release`, which drops the clock
+    on True. Collapsing "no such row" and "registry unreadable" into one False
+    kept the clock forever for every handle that has no row, which is every
+    sandbox and every handle whose session already exited.
+
+    Separate from ``register_existing_session`` because that verb resolves the
+    AMBIENT session, and the release path runs in a detached timer process with
+    no ambient identity of its own.
     """
     from fno.agents.registry import update_registry
-
-    found = [False]
 
     def _updater(entries):
         for entry in entries:
             if handle in addresses(entry):
                 entry.delivery_policy = policy
-                found[0] = True
                 break
         return entries
 
@@ -397,7 +404,7 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
         update_registry(_updater)
     except Exception:  # noqa: BLE001 - a registry hiccup never breaks the caller
         return False
-    return found[0]
+    return True
 
 
 def dedupe(messages: list) -> list[tuple[object, int, list[str]]]:
@@ -485,8 +492,18 @@ def release(handle: str, *, held_for_s: int = 0) -> dict:
     from fno.agents import events
     from fno.bus.cursor import advance_cursor, scan_unread
 
-    set_policy(handle, None)
-    clear(handle)
+    # Clear the FLAG first, and drop the clock only once that write succeeded.
+    # The old order discarded set_policy's result and cleared the clock either
+    # way, which turned a partial failure into a worse state than the failure:
+    # a bus-only row with no clock never lapses, so a hold that failed to lift
+    # became PERMANENT, and no automatic path clears it - `tidy_lapsed` needs a
+    # clock it no longer has.
+    #
+    # Keeping the clock on a failed write also lets this delivery through. The
+    # gate reads a bus-only row with a LAPSED clock as not-holding, so the
+    # digest still lands; the same row with no clock is refused outright.
+    if set_policy(handle, None):
+        clear(handle)
 
     try:
         messages = scan_unread(handle, warn=False)
