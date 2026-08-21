@@ -169,6 +169,13 @@ def serialize_entry(
         "crown_level": entry.crown_level,
         "crown_scope": entry.crown_scope,
         "crown_grantor": entry.crown_grantor,
+        # How this session came to exist: "operator" for one a human started by
+        # hand, "spawn" for a footnote-created worker, null for a row nothing
+        # stamped. The reap lane REFUSES on "operator", so a human auditing that
+        # refusal has to be able to read the field it turned on - and until
+        # x-944f this projection did not emit it at all, which left the one
+        # answer to "is somebody sitting in this?" visible to nobody.
+        "origin": entry.origin,
         # The mux hosting ref ({session, pane_id}) for a pane-hosted row, else
         # null. Exposed so a caller can address the pane - e.g. close a handed-off
         # teammate with `fno mux pane kill <session>:<pane_id>` (a mux row's
@@ -387,6 +394,19 @@ def render_table(
         name = row.get("name") or "-"
         if row.get("crown"):
             name = f"{name} [{row['crown']}]"
+        # Same ASCII-marker treatment for the one origin value that CHANGES a
+        # decision: the reap lane never deletes an operator row's worktree.
+        # "spawn" gets no marker - it is the common case and a badge on every
+        # worker row is noise.
+        #
+        # Scope, stated so nobody reads more into this than it does: this is the
+        # PYTHON table only. `fno agents list` routes to the Rust renderer
+        # whenever an installed binary is present, and that table carries
+        # neither this marker nor the older crown one. The auditable surface for
+        # a reap refusal is --json, which BOTH projections emit and which
+        # schemas/agents-list-row.json pins.
+        if row.get("origin") == "operator":
+            name = f"{name} [operator]"
         display_rows.append(
             {
                 "name": name,

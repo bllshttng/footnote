@@ -46,6 +46,14 @@ RATE_LIMIT_TAIL = "API Error: 429 rate limit, window resets at 02:48:21 SGT"
 # session that merely stopped writing.
 FINISHED_TAIL = "<promise>PR is green and reviewed</promise>"
 
+# Well outside REAP_RECENT_MESSAGE_S measured from NOW_1840. A row that is meant
+# to reach a REAP verdict has to carry a stale last_message_at, because x-944f
+# makes an ABSENT stamp UNKNOWN: absence has two causes (nothing stamped it, the
+# session never spoke) and the predicate cannot tell them apart. Fixtures that
+# assert a refusal from an EARLIER read leave the stamp unset on purpose - that
+# is what proves the earlier guard still answers first.
+STALE_MESSAGE_STAMP = "2026-08-15T00:00:00Z"
+
 
 def _facts(
     text: str, age_min: float = 5, role: str = "assistant", kind: str = "text"
@@ -210,7 +218,8 @@ def test_identity_joins_on_claim_holder_not_name():
     # Two rows whose NAMES both carry node x-9d11, but the recorded manifest
     # node differs (x-2222 vs none). Only the claim/manifest join may decide.
     rows = [
-        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a"),
+        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -229,7 +238,8 @@ def test_identity_joins_on_claim_holder_not_name():
 
 def test_node_done_reaps_and_own_claim_does_not():
     rows = [
-        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1"),
+        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -299,7 +309,8 @@ def test_deliverable_reaps_regardless_of_age():
     # A row whose node is done with its PR merged reaps at any age; age
     # decides what to do with an UNKNOWN row, never a finished one.
     rows = [Row("e65d5fff-0000", "t-xd214-mail-raw-onto-rpc", "blocked",
-                "x-d214", "/canonical")]
+                "x-d214", "/canonical", origin="spawn",
+                last_message_at=STALE_MESSAGE_STAMP)]
     [v] = _run(
         rows,
         {"e65d5fff-0000": _facts("blocked mid turn", age_min=87852)},
@@ -1411,7 +1422,8 @@ def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
     rows = [
         Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5"),
         Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5"),
-        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo"),
+        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1610,8 +1622,10 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     """
     # A live sibling by TRANSCRIPT, while its roster state says stopped.
     rows = [
-        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one"),
-        Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one"),
+        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
+        Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one",
+            origin="spawn", last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1709,7 +1723,8 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     pins the shape instead: whatever fails, the answer is UNKNOWN, and the
     only way to YES is through three positive markers.
     """
-    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+              origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
     quiet = _facts(FINISHED_TAIL, age_min=120)
 
     def boom(_n):
@@ -1815,7 +1830,8 @@ def test_a_session_still_in_play_is_never_reaped():
     """Silence is a reading about the last write, never a verdict that the
     work is over. A worker parked on <watching>, one holding a question, and
     one waiting out a rate limit are all silent and all still in play."""
-    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+              origin="spawn", last_message_at=STALE_MESSAGE_STAMP)
     nodes = {"x-done": {"status": "done"}}
 
     parked = _facts("<watching>ci</watching>", age_min=200)
@@ -2120,3 +2136,214 @@ def test_the_advisory_reaches_the_digest():
         "terminal_harness_rows": 0,
     }
     assert "t-worker" in digest_text(payload)
+
+
+# ---------------------------------------------------------------------------
+# x-944f: the two reap protectors
+# ---------------------------------------------------------------------------
+
+# 30 minutes before NOW_1840, so it is INSIDE REAP_RECENT_MESSAGE_S (2h).
+RECENT_MESSAGE_STAMP = "2026-08-16T18:10:00Z"
+
+
+def test_an_operator_row_is_refused_and_the_basis_names_origin():
+    """Rule 3: a session a human started by hand is never reaped.
+
+    Every other precondition is satisfied on purpose - node done, sole
+    occupant, transcript present, tail finished, quiet for hours, stamp
+    stale. The ONLY thing standing between this row and a deleted worktree
+    is `origin`, which is what makes the assertion about `origin` and not
+    about the fixture.
+    """
+    row = Row("aaaa1111-0000", "hand-started", "working", "x-done", "/wt/solo",
+              origin="operator", last_message_at=STALE_MESSAGE_STAMP)
+
+    answer, basis = _decide(
+        row,
+        facts=_facts(FINISHED_TAIL, age_min=200),
+        nodes={"x-done": {"status": "done"}},
+    )
+
+    assert answer == watchdog.REAP_NO
+    assert "origin=operator" in basis
+    # By IDENTITY against the module constant, never a copy of its wording: a
+    # duplicated literal here would stay green while the emitted rule drifted.
+    assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
+
+
+def test_the_operator_refusal_outranks_every_later_read():
+    """The origin protector answers FIRST, so it holds even when the reads
+    below it cannot run at all. An operator row with no transcript is still
+    refused for being an operator's, not for the missing transcript."""
+    row = Row("aaaa1111-0000", "hand-started", "working", "x-done", "/wt/solo",
+              origin="operator")
+
+    answer, basis = _decide(row, facts=None, nodes={"x-done": {"status": "done"}})
+
+    assert answer == watchdog.REAP_NO
+    assert "origin=operator" in basis
+
+
+def test_the_three_origin_values_reach_three_different_verdicts():
+    """`None`, "spawn" and "operator" are THREE facts, not two.
+
+    Collapsing never-recorded into not-an-operator is the defect this node was
+    filed against, and the first cut of this predicate committed it: only
+    "operator" refused, so `None` fell through to the delete exactly like a
+    known worker. Each value now reaches a verdict the others cannot.
+    """
+    expected = {
+        "operator": watchdog.REAP_NO,
+        None: watchdog.REAP_UNKNOWN,
+        "spawn": watchdog.REAP_YES,
+    }
+    for origin, want in expected.items():
+        row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+                  origin=origin, last_message_at=STALE_MESSAGE_STAMP)
+        answer, basis = _decide(
+            row,
+            facts=_facts(FINISHED_TAIL, age_min=200),
+            nodes={"x-done": {"status": "done"}},
+        )
+        assert answer == want, f"origin={origin!r} gave {answer}: {basis}"
+
+
+def test_an_adopted_row_survives_its_recency_stamp_going_stale():
+    """The reachable case the first cut of this predicate would have deleted.
+
+    `mint_adopted_entry` writes `origin: None` beside a FRESH
+    `last_message_at`, and adopt takes in both a session a human started by
+    hand and a footnote orphan. Inside the window the stamp protects the row.
+    This asserts what happens AFTER it goes stale, which is where the two
+    protectors used to fall silent together and hand over a worktree nobody
+    could prove was a worker's.
+    """
+    adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
+                  "/wt/solo", origin=None, last_message_at=STALE_MESSAGE_STAMP)
+
+    answer, basis = _decide(
+        adopted,
+        facts=_facts(FINISHED_TAIL, age_min=200),
+        nodes={"x-done": {"status": "done"}},
+    )
+
+    assert answer == watchdog.REAP_UNKNOWN
+    assert "origin was never recorded" in basis
+    assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
+
+
+def test_the_unrecorded_origin_read_never_silences_a_more_specific_refusal():
+    """The same late placement the recency read needed, for the same reason.
+
+    Put up beside the early operator read, this answers first on every refusal
+    and the specific guards below it stop speaking. Each row here carries an
+    unrecorded origin, so an early read would have swallowed all three.
+    """
+    quiet = _facts(FINISHED_TAIL, age_min=200)
+    nodes = {"x-done": {"status": "done"}}
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared",
+              origin=None, last_message_at=STALE_MESSAGE_STAMP)
+
+    _, basis = _decide(row, facts=quiet, nodes=nodes, cotenants=1)
+    assert "share /wt/shared" in basis
+
+    _, basis = _decide(row, facts=_facts("<watching>ci</watching>", age_min=200),
+                       nodes=nodes)
+    assert "watching" in basis
+
+    _, basis = _decide(row, facts=None, nodes=nodes)
+    assert "no transcript to read" in basis
+
+
+def test_a_recent_message_protects_and_the_basis_names_recency_and_the_age():
+    """Rule 2: liveness is last-message recency, not a pid.
+
+    The transcript reads FINISHED and hours quiet, which is exactly what a
+    dead process looks like to this lane. A message landed 30m ago anyway.
+    The operator drives sessions by hand in ways no probe observes, so the
+    stamp refuses the reap whatever any pid says.
+    """
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+              origin="spawn", last_message_at=RECENT_MESSAGE_STAMP)
+
+    answer, basis = _decide(
+        row,
+        facts=_facts(FINISHED_TAIL, age_min=200),
+        nodes={"x-done": {"status": "done"}},
+    )
+
+    assert answer == watchdog.REAP_NO
+    assert watchdog.REAP_PROTECTION_RULES["recency"] in basis
+    # The MEASURED age, so a human auditing the refusal can check the window
+    # rather than take the verdict's word for it.
+    assert "30m ago" in basis
+
+
+def test_an_unreadable_stamp_is_unknown_and_never_reaps():
+    """Absent has two causes - nothing stamped it, the session never spoke -
+    and this lane cannot tell them apart, so it answers UNKNOWN like every
+    other unreadable read here. Asserted as the UNKNOWN verdict, which is a
+    positive marker, never as the absence of a reap."""
+    for stamp in (None, "", "not-a-timestamp"):
+        row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+                  origin="spawn", last_message_at=stamp)
+        answer, basis = _decide(
+            row,
+            facts=_facts(FINISHED_TAIL, age_min=200),
+            nodes={"x-done": {"status": "done"}},
+        )
+        assert answer == watchdog.REAP_UNKNOWN, f"stamp={stamp!r}: {basis}"
+        assert watchdog.REAP_PROTECTION_RULES["recency"] in basis
+
+
+def test_the_recency_read_never_silences_a_more_specific_refusal():
+    """The protector runs LAST, and this is what that position buys.
+
+    Placed earlier it answered first on every refusal, so a row refused for a
+    shared worktree reported "recency unproven" instead - the specific guard
+    still ran and could never speak. Each row here has an unreadable stamp,
+    so an early read would have swallowed all three.
+    """
+    quiet = _facts(FINISHED_TAIL, age_min=200)
+    nodes = {"x-done": {"status": "done"}}
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/shared")
+
+    # Shared worktree still names the worktree.
+    _, basis = _decide(row, facts=quiet, nodes=nodes, cotenants=1)
+    assert "share /wt/shared" in basis
+
+    # A tail still in play still names the tail.
+    _, basis = _decide(row, facts=_facts("<watching>ci</watching>", age_min=200),
+                       nodes=nodes)
+    assert "watching" in basis
+
+    # An unreadable transcript still names the transcript.
+    _, basis = _decide(row, facts=None, nodes=nodes)
+    assert "no transcript to read" in basis
+
+
+def test_fleet_rows_carries_both_protectors_off_the_registry_row():
+    """The two fields were always one line away in `fleet_rows`, and
+    discarding them is why every reap decision was made without them. A
+    protector the predicate cannot see is not a protector."""
+    assert "origin" in watchdog.Row._fields
+    assert "last_message_at" in watchdog.Row._fields
+    # Defaulted, so an older construction site keeps working and the default
+    # is the honest never-recorded rather than a fabricated "spawn".
+    blank = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    assert blank.origin is None
+    assert blank.last_message_at is None
+
+
+def test_origin_is_on_the_shared_list_row_contract():
+    """A field the reap lane REFUSES on has to be readable by the human
+    auditing that refusal. It was rendered by nobody, so the refusal was
+    unauditable. The contract file is what pins both serializers to it."""
+    import json as _json
+    import pathlib as _pathlib
+
+    contract = _json.loads(
+        (_pathlib.Path(watchdog.__file__).resolve().parents[4]
+         / "schemas" / "agents-list-row.json").read_text()
+    )
+    assert "origin" in contract["required"]

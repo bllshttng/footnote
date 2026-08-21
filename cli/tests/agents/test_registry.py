@@ -685,14 +685,19 @@ def test_ac5_hp_write_registry_uses_paths_default(tmp_path: Path, monkeypatch) -
 
 
 def test_us2_schema_version_is_three() -> None:
-    """The on-disk schema version is 7 after the screen-manifest bump.
+    """The deliberate schema-version canary: bumping is never accidental.
 
-    (Test name retained for greppability of the original US2 commit;
-    the value tracks the latest bump.)
+    This is the ONE place the number is written out. Three sibling copies used
+    to assert it incidentally, in tests about host_mode and delivery_policy,
+    and every one of their docstrings had drifted to a stale version (7, 12)
+    while the literal was hand-bumped past them. A canary nobody can read is
+    not a canary, so the copies are gone and this one carries the job.
+
+    (Test name retained for greppability of the original US2 commit.)
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION == 16
 
 
 def test_v15_model_provider_round_trips_without_collapsing_harness(
@@ -866,12 +871,10 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
 ) -> None:
     """The v4 host_mode forward-compat bump reads cleanly with host_mode
     preserved, and the widened accepted range still reads v1..=v4 (the bump
-    must not drop back-compat reads; ab-a171ceb2). The current SCHEMA_VERSION
-    is 12 after the route-settings-path bump."""
+    must not drop back-compat reads; ab-a171ceb2)."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import SCHEMA_VERSION, load_registry
+    from fno.agents.registry import load_registry
 
-    assert SCHEMA_VERSION == 15
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1896,9 +1899,13 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     assert loaded[0].session_id == "7c5dcf5d"
 
     # Write-back drops the legacy key and carries short_id at the current schema.
+    # Read from the constant, not a literal: the claim is "whatever this binary
+    # writes", which is exactly what a hand-edited number stops being.
+    from fno.agents.registry import SCHEMA_VERSION
+
     write_registry(loaded, path=registry_path)
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 15
+    assert raw["schema_version"] == SCHEMA_VERSION
     row = raw["agents"][0]
     assert "claude_short_id" not in row
     assert row["short_id"] == "7c5dcf5d"

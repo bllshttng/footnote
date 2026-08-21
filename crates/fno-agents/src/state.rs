@@ -102,7 +102,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // v15 restores `provider` with its literal model-provider meaning, separate
 // from the harness identity. Rows through v14 still treat an on-disk provider
 // as the removed harness alias and migrate it at the read choke point.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 15;
+//
+// v16 (x-944f) adds `origin` and `spawn_trigger` - two fields Python's
+// AgentEntry has written for releases and Rust never modelled, so every Rust
+// write re-serialized the row from the typed struct and dropped them. Measured
+// 2026-08-20: 0 of 37 live rows carried either key. The bump is what turns a
+// pre-v16 binary's SILENT erasure into a loud refusal, which is the same
+// reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=16.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 16;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -359,7 +366,12 @@ pub struct MuxRef {
 
 /// One registry row (design schema v6). Optional fields default to `None` and
 /// are preserved across `update_registry` because the whole row round-trips
-/// through this typed struct.
+/// through this typed struct -- but ONLY for fields this struct models. A
+/// Python `AgentEntry` field with no counterpart here is DROPPED on the next
+/// Rust write, silently, because there is no serde catch-all. `origin` and
+/// `spawn_trigger` sat outside the struct that way until x-944f and read
+/// 0-of-37 populated on the live fleet as a result. Adding a Python-only field
+/// means mirroring it here in the same commit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegistryEntry {
     pub name: String,
@@ -572,6 +584,23 @@ pub struct RegistryEntry {
     /// daemon's read-modify-write would drop a Python-stamped policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_policy: Option<String>,
+    /// Registration origin (x-944f, v16), mirroring Python's `AgentEntry`:
+    /// `Some("operator")` for a session a human started by hand (`fno agents
+    /// register`, `/fno-me`), `Some("spawn")` for a footnote-created worker,
+    /// `None` for a row nothing ever stamped. The reap lane reads it as a
+    /// PROTECTOR: an operator row is never reaped. That makes the erasure this
+    /// mirror closes a safety defect, not a cosmetic one -- before it, every
+    /// Rust write dropped the stamp and every reap decision was made without
+    /// the one field that answers "is a human sitting in this session".
+    /// `None` and `"spawn"` are NOT the same fact; only `"operator"` protects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// What caused this spawn (x-42c5), mirroring Python's `AgentEntry`. Same
+    /// X3 passthrough as `origin` and erased by the same defect: it shipped
+    /// Python-only and read 0-of-37 on the live fleet. Distinct from `origin`,
+    /// which answers only human-or-not; this carries the cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_trigger: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1574,6 +1603,8 @@ mod tests {
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            origin: None,
+            spawn_trigger: None,
             legacy_claude_short_id: None,
         }
     }
@@ -2144,6 +2175,62 @@ mod tests {
     }
 
     #[test]
+    fn origin_survives_a_daemon_read_modify_write() {
+        // v16 (x-944f): Python stamps `origin` at both register paths and the
+        // reap lane reads it as a PROTECTOR - an operator session is never
+        // reaped. Rust did not model the field, so every daemon write dropped
+        // it and the protector was unreachable: 0 of 37 live rows carried the
+        // key. This is the passthrough assertion that closes it, in the same
+        // shape as delivery_policy (v14).
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("hand-started"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // (a) An unstamped row OMITS the key rather than serializing null, so
+        // Python's AgentEntry(**row) reads it as never-recorded.
+        assert!(wire["agents"][0].get("origin").is_none());
+
+        // (b) A pre-v16 row (key absent) reads as never-recorded, not corrupt.
+        let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(reg.entries[0].origin, None);
+
+        // (c) The daemon must re-emit a Python-stamped origin, not drop it.
+        //     This is the assertion that was false before x-944f.
+        wire["agents"][0]["origin"] = serde_json::Value::from("operator");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(reg.entries[0].origin.as_deref(), Some("operator"));
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["origin"], "operator",
+            "the daemon must re-emit a Python-stamped origin, not drop it"
+        );
+    }
+
+    #[test]
+    fn spawn_trigger_survives_a_daemon_read_modify_write() {
+        // v16 (x-944f): the same erasure hit `spawn_trigger`, which shipped
+        // under x-42c5 as a Python-only field. One struct change fixes both,
+        // so both are asserted.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("triggered"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        assert!(wire["agents"][0].get("spawn_trigger").is_none());
+
+        wire["agents"][0]["spawn_trigger"] = serde_json::Value::from("think_spawn:work-start");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            reg.entries[0].spawn_trigger.as_deref(),
+            Some("think_spawn:work-start")
+        );
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["spawn_trigger"], "think_spawn:work-start",
+            "the daemon must re-emit a Python-stamped spawn trigger, not drop it"
+        );
+    }
+
+    #[test]
     fn screen_state_cross_language_round_trip_parity() {
         // v7: the additive `screen_state` verdict must round-trip both
         // directions across the Rust<->Python registry boundary, exactly like
@@ -2500,12 +2587,18 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            // One past THIS binary, derived so a schema bump cannot quietly
+            // turn the future-schema fixture into a current-schema one and
+            // leave the test asserting a condition it no longer sets up.
+            format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
 
@@ -2526,12 +2619,16 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":{"state":"live","since":1},"created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            // Derived, not literal: see the sibling fixture above.
+            format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":{{"state":"live","since":1}},"created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
 
@@ -2567,12 +2664,14 @@ mod tests {
         let dir = tmpdir("version-write-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        let newer = r#"{"schema_version":16,"agents":[]}"#;
-        std::fs::write(&path, newer).unwrap();
+        // Derived from the constant so a bump cannot make "newer" mean "ours".
+        let newer_version = REGISTRY_SCHEMA_VERSION + 1;
+        let newer = format!(r#"{{"schema_version":{newer_version},"agents":[]}}"#);
+        std::fs::write(&path, &newer).unwrap();
 
         match update_registry(&path, |reg| reg.entries.clear()) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 16);
+                assert_eq!(found, newer_version);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
@@ -3051,12 +3150,18 @@ mod tests {
         let path = dir.join("registry.json");
         std::fs::write(
             &path,
-            r#"{"schema_version":16,"agents":[
-                {"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"},
-                {"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
-                 "status":"live","created_at":"2026-01-01T00:00:00Z"}
-            ]}"#,
+            // One past THIS binary, derived so a schema bump cannot quietly
+            // turn the future-schema fixture into a current-schema one and
+            // leave the test asserting a condition it no longer sets up.
+            format!(
+                r#"{{"schema_version":{},"agents":[
+                {{"name":"future","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"hibernating","created_at":"2026-01-01T00:00:00Z"}},
+                {{"name":"readable","cwd":"/x","log_path":"/l","harness":"claude",
+                 "status":"live","created_at":"2026-01-01T00:00:00Z"}}
+            ]}}"#,
+                REGISTRY_SCHEMA_VERSION + 1
+            ),
         )
         .unwrap();
         let (reg, raw) = load_registry_with_counts(&path).unwrap();

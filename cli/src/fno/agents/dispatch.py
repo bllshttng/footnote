@@ -1056,6 +1056,11 @@ def _codex_create_path(
         model=model,
         effort=effort,
         harness_session_id=session_id,
+        # The THIRD Python path that mints a worker row, after the pane and bg
+        # paths. Its Rust counterpart in codex_ask.rs stamps this, so leaving it
+        # off here made one codex worker read "spawn" and another read absent
+        # purely by which language created it.
+        origin="spawn",
     )
 
     try:
@@ -1595,6 +1600,11 @@ def _claude_create_path(
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
         spawn_trigger=spawn_trigger,
+        # The SAME stamp the pane path writes. Two Python paths mint a worker
+        # row - pane and bg - and stamping only one would leave the reap lane
+        # reading absent on every bg worker, which is a producer on one of N
+        # paths: the field reads unpopulated rather than merely unreliable.
+        origin="spawn",
         # x-ae2d: the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM

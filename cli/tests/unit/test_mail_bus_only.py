@@ -250,11 +250,7 @@ def test_the_policy_token_is_a_delivery_fact_not_a_liveness_verdict():
 
 
 def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch):
-    from fno.agents.registry import (
-        SCHEMA_VERSION,
-        load_registry,
-        register_existing_session,
-    )
+    from fno.agents.registry import load_registry, register_existing_session
 
     entry = register_existing_session(
         provider=HARNESS,
@@ -264,7 +260,6 @@ def test_register_stamps_bus_only_and_flagless_reregister_preserves(monkeypatch)
         delivery_policy="bus-only",
     )
     assert entry.delivery_policy == "bus-only"
-    assert SCHEMA_VERSION == 15
 
     # A re-firing SessionStart hook (no policy kwarg) must not clobber the
     # stamp -- the operator would silently revert to injectable.

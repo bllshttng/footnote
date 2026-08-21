@@ -185,7 +185,13 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # harness="claude" and provider="zai", while "opencode" is valid on either
 # axis. Rows from v1..v14 retain the legacy meaning where `provider` was a
 # harness alias and are migrated only while reading those schema versions.
-SCHEMA_VERSION = 15
+# v16 (x-944f): `origin` and `spawn_trigger` gain their Rust counterparts in
+# `RegistryEntry`. Python has written both for releases; Rust never modelled
+# them, so every Rust write re-serialized the row from its typed struct and
+# dropped the keys. Measured 2026-08-20: 0 of 37 live rows carried either. The
+# bump is not for a new Python field - it is what turns a pre-v16 binary's
+# SILENT erasure into a loud refusal, the same reason v11-v14 bumped.
+SCHEMA_VERSION = 16
 
 
 class RegistryVersionError(RuntimeError):
@@ -282,10 +288,14 @@ class AgentEntry:
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
     # Registration origin: "operator" for a session a human started by hand (the
-    # SessionStart register hook / ``fno agents register``); absent for a
-    # spawn/host worker row. Additive-optional (None default) so pre-existing
-    # rows and the Rust RegistryEntry round-trip losslessly, and absence reads
-    # as worker -- the attended-miss escalation lane fails toward silence.
+    # SessionStart register hook / ``fno agents register``), "spawn" for a
+    # footnote-created worker, None for a row nothing ever stamped. Those are
+    # THREE values, not two. Absence does NOT read as worker: the reap lane
+    # treats a never-recorded origin as UNKNOWN and refuses, because an absence
+    # cannot separate "no human here" from "nobody wrote it down". Reading it
+    # the other way is the defect this field's own node was filed against.
+    # Additive-optional so pre-existing rows and the Rust RegistryEntry
+    # round-trip losslessly.
     origin: Optional[str] = None
 
     # ----------------------------------------------------------------------

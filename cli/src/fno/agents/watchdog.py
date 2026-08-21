@@ -45,10 +45,17 @@ from typing import Any, Callable, Optional
 # The shipped tail classifier is the POSITIVE resumability marker: its
 # ``stalled`` verdict asserts the session went silent while still owing its
 # next move, which is a fact about the tail rather than an absence in it.
-from fno.agents.session_truth import classify_tail
+from fno.agents.session_truth import STALLED_AFTER_S, classify_tail
 
 Verdict = namedtuple("Verdict", "row_id name state verdict basis action")
-Row = namedtuple("Row", "row_id name state node cwd")
+#: ``origin`` and ``last_message_at`` are read off the joined registry entry in
+#: ``fleet_rows`` and consulted by ``reap_decision`` as PROTECTORS. They default
+#: to None so an older construction site (and every test that builds a Row
+#: positionally) still works, and because None is the honest never-recorded -
+#: distinct from "recorded as not-an-operator" or "recorded as never spoke".
+Row = namedtuple(
+    "Row", "row_id name state node cwd origin last_message_at", defaults=(None, None)
+)
 #: ``records`` is [(epoch_s_or_None, text)] newest-last; ``tail_text`` is the
 #: flattened join of those texts; ``last_role``/``last_text`` describe the LAST
 #: record so the wake gate can run the shipped tail classifier (a POSITIVE
@@ -365,6 +372,32 @@ REAP_YES = "yes"
 REAP_NO = "no"
 REAP_UNKNOWN = "unknown"
 
+#: The two reap-protection rules, in the text every refusal that enforces them
+#: quotes verbatim. They live here, next to the code that applies them, rather
+#: than in a config key or a prompt: a rule the decision itself emits cannot
+#: drift from the decision, and two measurements in this repo (x-7d6b, x-bb60)
+#: found prompt-level rules decay. There is deliberately no knob - an operator
+#: session is never reapable and a recent message always protects, so a config
+#: value here would only be a way to turn the safety off.
+#:
+#: Tests assert membership of THESE objects in a basis string, never a
+#: duplicated literal, so a reworded rule cannot leave the assertions green
+#: while the emitted text says something else.
+REAP_PROTECTION_RULES = {
+    "origin": (
+        "a session a human started by hand is never reaped"
+    ),
+    "recency": (
+        "liveness is last-message recency, not a pid; a recent message "
+        "protects the session whatever the pid says"
+    ),
+}
+
+#: How recent a message has to be to protect. Reuses the module-neighbour that
+#: already names itself the reap-safety window (``session_truth.STALLED_AFTER_S``)
+#: rather than minting a second number that can drift from it.
+REAP_RECENT_MESSAGE_S = STALLED_AFTER_S
+
 
 def lane_armed(settings: Any) -> bool:
     """Will the tick actually sweep? One condition, every reader.
@@ -438,10 +471,21 @@ def reap_decision(
     failure mode of a bug here is a row a human has to look at, which is the
     direction this lane is allowed to fail in.
 
+    Two PROTECTORS bracket the reads, and either one alone refuses (x-944f).
+    A row whose ``origin`` reads ``"operator"`` is a session a human started by
+    hand and is never reaped; that one answers FIRST, because no reading of a
+    transcript outranks it. A row whose ``last_message_at`` falls inside the
+    protection window is protected by that recency whatever its pid says - the
+    mirror of x-9de7, which forbade the opposite inference - and that one
+    answers LAST, so every read with a more specific reason gets to speak
+    before it. Each refusal quotes its rule out of ``REAP_PROTECTION_RULES``
+    so the text and the behaviour cannot drift apart.
+
     The positive signals a reap needs, all of them present: the DELIVERABLE
     is settled (the node is done, or another live session holds its claim),
-    the worktree is this row's ALONE, no 429 window is open, and the
-    transcript says the session DECLARED ITSELF FINISHED.
+    the row is not an operator's, the worktree is this row's ALONE, no 429
+    window is open, the transcript says the session DECLARED ITSELF FINISHED,
+    and nothing spoke to it inside the protection window.
 
     That last one used to be silence past a 900s bar, which is the defect
     this whole predicate exists to end: silence is a reading about the last
@@ -491,7 +535,23 @@ def reap_decision(
         # The deliverable is not settled. This one IS a read that answered.
         return REAP_NO, ""
 
-    # Read two: occupancy. `rm` deletes the WORKTREE, and a linked worktree
+    # Read two: WHO owns this session. Placed ahead of every read that costs
+    # I/O so a protected row never spends the budget, and ahead of the
+    # transcript because no reading of a transcript can outrank the fact that a
+    # human started the session by hand.
+    #
+    # Only the literal "operator" protects. `None` is never-recorded and
+    # `"spawn"` is a worker, and collapsing those two into one "not an
+    # operator" is precisely the defect this node was filed against: before
+    # x-944f every Rust write dropped the field, so every row read absent and
+    # every reap was decided without it.
+    if row.origin == "operator":
+        return REAP_NO, (
+            f"{reap_basis} but origin=operator, and "
+            f"{REAP_PROTECTION_RULES['origin']}"
+        )
+
+    # Read three: occupancy. `rm` deletes the WORKTREE, and a linked worktree
     # proves its .git is a file, never that one session owns it. Two rows
     # were measured working one tree on one node.
     if cotenants:
@@ -500,7 +560,7 @@ def reap_decision(
             f"never reaped on a shared worktree"
         )
 
-    # Read three: the transcript. None has two causes - never written, and
+    # Read four: the transcript. None has two causes - never written, and
     # could not be read - and this lane cannot tell them apart, so it treats
     # neither as evidence.
     if facts is None:
@@ -513,7 +573,7 @@ def reap_decision(
             f"{reap_basis} but no parseable last event, so quiet is unproven"
         )
 
-    # Read four: a session waiting out a rate limit is silent and is NOT
+    # Read five: a session waiting out a rate limit is silent and is NOT
     # finished. Reap outranks reroute in the table, so without this the
     # destructive lane got first look at exactly the rows reroute exists for.
     if window == "live":
@@ -529,7 +589,7 @@ def reap_decision(
             f"tool activity"
         )
 
-    # Read five: is this session finished with the tree? The SAME call the
+    # Read six: is this session finished with the tree? The SAME call the
     # occupancy tally makes, deliberately, because when the two derived it
     # separately they disagreed about a parked session and the disagreement
     # deleted a worktree somebody was sitting in.
@@ -539,10 +599,122 @@ def reap_decision(
             f"{reap_basis}, quiet {_mins(now_s, facts.last_event_epoch)}m, "
             f"but the tail reads {truth}, which is a session still in play"
         )
+    # Read seven: an UNRECORDED owner is UNKNOWN, never "not a human's".
+    #
+    # The early read above protects the literal "operator". This one closes the
+    # hole underneath it, and the hole was the node's own thesis turned back on
+    # the fix: absent read as not-an-operator-session rather than as
+    # never-recorded, one value carrying two facts. The recency read below has
+    # always treated its own absence that way. Origin did not, so the two
+    # protectors applied opposite rules to the same kind of silence.
+    #
+    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
+    # beside a FRESH last_message_at, and adopt takes in both a session a human
+    # started by hand and a footnote orphan. For two hours the stamp protects
+    # the row. After that both protectors fall silent and a hand-started
+    # session's worktree is deletable. The synthesized-row minter has the same
+    # shape.
+    #
+    # LATE, beside recency, for the reason the recency read is late. Placed up
+    # at the early origin read it would answer first on every refusal and
+    # silence the shared-worktree, unreadable-transcript and still-in-play
+    # guards, which is the exact bug already fixed once in this predicate.
+    #
+    # The marginal cost is small, because a row only reaches here by carrying a
+    # parseable stamp already. What it newly protects is precisely the
+    # dangerous set: a stamped row whose owner nothing ever recorded.
+    # Read eight: recency, as the LAST protector. The mirror of x-9de7, not a
+    # repeat of it: that node forbade inferring DEATH from silence, this one
+    # makes a recent message an active refusal whatever the pid says, because
+    # the operator drives sessions by hand in ways no probe observes.
+    #
+    # LAST, deliberately, and this position is the whole of its correctness.
+    # Placed ahead of the reads above it answered FIRST on every refusal, so a
+    # row refused for sharing a worktree, for an unreadable transcript, or for
+    # a tail still parked on <watching> reported "recency unproven" instead -
+    # each of those guards still ran and none of them could ever speak. A
+    # refusal whose reason names the wrong read is worse than no reason, and
+    # the guards it silenced are decorative. Here it catches only what every
+    # other read passed: a transcript that says finished, and a registry stamp
+    # that says somebody spoke to this session anyway. That gap IS rule 2.
+    #
+    # An absent or unparseable stamp is UNKNOWN, never a fall-through to the
+    # delete. Absent has two causes - nothing ever stamped it, and the session
+    # genuinely never spoke - and this lane cannot tell them apart, which is
+    # the rule every other unreadable input here already gets. State the cost
+    # plainly: measured 2026-08-20, 12 of 23 live rows carried the stamp, so
+    # reap now declines the rest and hands them to a human instead. That is the
+    # direction this lane is allowed to fail in.
+    # POSITIVE evidence first, then the two absences. A recent message is a
+    # reading that ANSWERED, so it outranks both "nobody recorded the owner"
+    # and "nobody recorded a message" - each of which is only a silence. Order
+    # them the other way and a protected row reports an absence as its reason,
+    # which is the same wrong-reason defect the placement above exists to stop.
+    recent_age_s = _stamp_age_s(row.last_message_at, now_s)
+    if recent_age_s is not None and recent_age_s <= REAP_RECENT_MESSAGE_S:
+        return REAP_NO, (
+            f"{reap_basis}, tail reads {truth}, but last message was "
+            f"{int(recent_age_s / 60)}m ago, inside the "
+            f"{int(REAP_RECENT_MESSAGE_S / 60)}m protection window: "
+            f"{REAP_PROTECTION_RULES['recency']}"
+        )
+
+    # An UNRECORDED owner is UNKNOWN, never "not a human's".
+    #
+    # The early read protects the literal "operator". This closes the hole
+    # underneath it, and the hole was the node's own thesis turned back on the
+    # fix: absent read as not-an-operator-session rather than as
+    # never-recorded, one value carrying two facts. The recency read has always
+    # treated its own absence that way. Origin did not, so the two protectors
+    # applied opposite rules to the same silence.
+    #
+    # Reachable, not theoretical. `mint_adopted_entry` writes origin None
+    # beside a FRESH last_message_at, and adopt takes in both a session a human
+    # started by hand and a footnote orphan. For two hours the stamp protects
+    # the row. After that both protectors fell silent together and a
+    # hand-started session's worktree was deletable. The synthesized-row minter
+    # has the same shape. The marginal cost is small: a row only reaches here
+    # by carrying a parseable stamp already, so what this newly protects is
+    # exactly that dangerous set.
+    if row.origin is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis}, tail reads {truth}, but origin was never recorded, "
+            f"which is not evidence of a worker, and "
+            f"{REAP_PROTECTION_RULES['origin']}"
+        )
+
+    if recent_age_s is None:
+        return REAP_UNKNOWN, (
+            f"{reap_basis}, tail reads {truth}, but last_message_at is "
+            f"{'absent' if not row.last_message_at else 'unparseable'}, so "
+            f"recency is unproven and {REAP_PROTECTION_RULES['recency']}"
+        )
+
     return REAP_YES, (
         f"{reap_basis}, tail reads {truth}, quiet "
-        f"{_mins(now_s, facts.last_event_epoch)}m"
+        f"{_mins(now_s, facts.last_event_epoch)}m, last message "
+        f"{int(recent_age_s / 60)}m ago"
     )
+
+
+def _stamp_age_s(stamp: Optional[str], now_s: float) -> Optional[float]:
+    """Age in seconds of an ISO stamp, or None when it will not read.
+
+    One None for three causes - absent, not a string, unparseable - because
+    every one of them means the same thing to the caller: this stamp proved
+    nothing. Clamped at zero so a clock skewed into the future reads as
+    "just now" (a protector) rather than as a negative age that compares
+    below every window.
+    """
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, now_s - parsed.timestamp())
 
 
 def _mins(now_s: float, epoch: Optional[float]) -> Optional[int]:
@@ -988,6 +1160,15 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
             state=state,
             node=node,
             cwd=cwd,
+            # The two reap protectors, read off the SAME joined registry entry
+            # this loop already holds - they were always one line away, and
+            # discarding them is why every reap decision was made without
+            # knowing whether a human was sitting in the session (x-944f).
+            # `getattr` with a default, not attribute access: a row loaded by
+            # an older reader has no such attribute, and an AttributeError here
+            # would take the whole sweep down.
+            origin=getattr(match, "origin", None),
+            last_message_at=getattr(match, "last_message_at", None),
         ))
     if skipped_no_sid:
         warnings = [

@@ -2972,6 +2972,11 @@ fn create(
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        // footnote minted this row, so the answer to "did a human start this
+        // session by hand" is no, and saying so beats leaving an absence a
+        // later reader has to guess at.
+        origin: Some("spawn".to_string()),
+        spawn_trigger: None,
         legacy_claude_short_id: None,
     };
 
