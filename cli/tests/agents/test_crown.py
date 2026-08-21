@@ -1109,12 +1109,15 @@ def test_in_place_crown_refuses_a_second_live_holder_for_the_scope(
     assert [asdict(row) for row in load_registry()] == before
 
 
-def test_succession_by_an_agent_caller_still_refuses_on_the_live_holder_scan(
+def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """AC6-EDGE: grant_error's succession branch accepts an equal scope, but
-    the caller is itself a live holder of that scope, so the one-live-crown
-    scan still refuses - unchanged - naming its three ways out."""
+    """AC6-EDGE: grant_error's succession branch accepts an equal scope because
+    SPAWN succession is legal there. This verb only stamps the target, so it
+    must refuse - and the refusal has to name a remedy the caller can act on.
+    Falling through to the live-holder scan named the caller's OWN row as the
+    blocker and offered three remedies that all contradict the refusal: re-scope
+    yourself, reconcile yourself, or stop yourself."""
     from fno.agents.registry import load_registry
 
     caller = _entry(
@@ -1138,7 +1141,14 @@ def test_succession_by_an_agent_caller_still_refuses_on_the_live_holder_scan(
     result = _invoke_crown("worker", "--scope", "alpha")
 
     assert result.exit_code == 2
-    assert "already held" in result.output.lower()
+    out = result.output.lower()
+    assert "your own scope" in out
+    assert "fno agents spawn --crown" in out
+    # The remedies that contradict the refusal must not appear: every one of
+    # them tells the caller to act on its own live row.
+    assert "already held" not in out
+    assert "fno agents stop caller" not in out
+    assert "fno agents reconcile" not in out
     assert [asdict(row) for row in load_registry()] == before
 
 

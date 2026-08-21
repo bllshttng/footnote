@@ -102,14 +102,21 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
     conflict here and the one-live-crown guard at grant time can never
     disagree about what "same territory" means.
     """
-    crowned: list[tuple[Any, dict]] = []
+    # Joined on crown_scope, NOT on a full crown_reading. crown_reading gates on
+    # crown_label, which is None whenever crown_level is None, so a corrupted
+    # scope-without-level row would be skipped here while gather_court above
+    # deliberately surfaces it. The two halves of one read would then disagree:
+    # the row shows as a disagreement and its scope shows as unconflicted, so a
+    # caller gating on `conflicts` reads "no territorial overlap" while two live
+    # rows claim the same territory. A scope is a claim on territory whether or
+    # not a level was recorded beside it.
+    claims: list[tuple[Any, str]] = []
     for row in rows:
-        reading = crown_reading(row)
-        if reading is not None:
-            crowned.append((row, reading))
+        scope = getattr(row, "crown_scope", None)
+        if isinstance(scope, str) and scope.strip():
+            claims.append((row, scope))
     seen: list[tuple[str, list[str]]] = []
-    for row, reading in crowned:
-        scope = reading["scope"]
+    for row, scope in claims:
         for other_scope, holders in seen:
             if _same_territory(other_scope, scope):
                 holders.append(row.name)

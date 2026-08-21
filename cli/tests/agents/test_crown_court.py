@@ -386,6 +386,57 @@ def test_a_scope_with_no_level_is_surfaced_not_silently_dropped(
     assert court["summary"]["disagreements"] == 1
 
 
+def test_a_half_crown_still_counts_as_a_claim_on_its_territory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The two halves of one read must agree. gather_court surfaces a
+    scope-without-level row as a disagreement, so _conflicts must not skip it:
+    joining on crown_reading drops exactly those rows, and `conflicts` then
+    comes back empty while two live rows claim alpha. A caller gating on
+    conflicts would read "no territorial overlap" from a read that saw one."""
+    from fno.agents.court import gather_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [
+            _entry(
+                "king-a",
+                status="busy",
+                crown_level=1,
+                crown_scope="alpha",
+                crown_grantor="human",
+            ),
+            _entry("half-scope", status="busy", crown_level=None, crown_scope="alpha"),
+        ],
+        graph_entries=[],
+    )
+
+    court = gather_court()
+
+    assert court["conflicts"] == [
+        {"scope": "alpha", "holders": ["king-a", "half-scope"]}
+    ]
+
+
+def test_a_non_string_scope_never_reaches_the_conflict_join(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`fno agents court` promises to exit 0 on a read, so a corrupted row
+    carrying a non-string crown_scope must degrade rather than raise."""
+    from fno.agents.court import gather_court, render_court
+
+    _prepare(
+        monkeypatch,
+        tmp_path,
+        [_entry("bad-scope", status="busy", crown_level=None, crown_scope=5)],
+        graph_entries=[],
+    )
+
+    assert gather_court()["conflicts"] == []
+    assert "bad-scope" in render_court(as_json=False)
+
+
 def test_project_rungs_stay_determinate_when_the_graph_is_unreadable(
     tmp_path: Path, monkeypatch
 ) -> None:

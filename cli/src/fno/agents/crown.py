@@ -453,6 +453,23 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     if denial is not None:
         raise CrownPromotionError(denial)
     grantor = "human" if caller is None else caller.name
+    # `grant_error` blesses an equal scope because SPAWN succession is legal
+    # there: that path vacates the caller and stamps the heir in one write.
+    # This path only stamps the target, so letting it through would leave two
+    # live crowns over one scope - which the holder scan below then refuses,
+    # naming the caller's OWN row as the blocker and offering three remedies
+    # that all contradict the refusal (re-scope yourself, reconcile yourself,
+    # stop yourself). Refuse here instead, where the remedy is reachable.
+    if caller is not None and _same_territory(
+        getattr(caller, "crown_scope", None), scope
+    ):
+        raise CrownPromotionError(
+            f"refusing to crown {handle!r}: {scope!r} is your OWN scope, and "
+            "this verb only stamps the target, so it cannot hand a crown over. "
+            "Succession runs through `fno agents spawn --crown` instead, which "
+            "vacates you and stamps the heir in a single registry write, so the "
+            "scope is never doubly ruled and never briefly unruled."
+        )
     # The authority check above ran OUTSIDE the lock, so the grantor's own
     # crown can move between it and the stamp - a window that did not exist
     # while every agent caller was refused outright. Re-running grant_error
