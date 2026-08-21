@@ -1581,7 +1581,7 @@ PYEOF
     # the graph. The grep this replaced could not tell a real node from an id
     # merely referenced in some other node's blocked_by, so it stamped
     # graph_node_id for nodes that do not exist.
-    if [[ "$_NODE_OWNED" -eq 1 && -n "$_NODE_ID" ]]; then
+    if [[ -n "$_NODE_ID" ]]; then
       echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
     else
       echo "graph_node_id: null" >> "$STATE_FILE"

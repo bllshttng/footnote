@@ -656,6 +656,8 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
     manifest there does. Best-effort: any read/parse miss returns None and the
     re-dispatch is skipped (the swap still happened).
     """
+    from fno.graph.types import normalize_graph_node_id
+
     try:
         text = (Path(cwd) / ".fno" / "target-state.md").read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -666,7 +668,7 @@ def _node_id_from_worktree(cwd: str) -> Optional[str]:
         s = line.strip()
         if s.startswith("graph_node_id:"):
             val = s.split(":", 1)[1].strip().strip('"').strip("'")
-            return val or None
+            return normalize_graph_node_id(val)
     return None
 
 

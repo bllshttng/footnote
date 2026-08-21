@@ -14,6 +14,25 @@ from pydantic import BaseModel, Field, computed_field, field_validator, model_va
 from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 
 
+_UNRESOLVED_NODE_SENTINELS = frozenset({"", "null", "none", "nil"})
+
+
+def normalize_graph_node_id(value: object) -> Optional[str]:
+    """Return a real graph node id, or ``None`` for unresolved identity.
+
+    Target manifests and ledgers are written by more than one producer, so
+    readers must agree that empty values and case-insensitive null spellings
+    are no node. Quotes are accepted because the shell manifest uses quoted
+    scalar values in some release shapes.
+    """
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().strip('"').strip("'").strip()
+    if normalized.casefold() in _UNRESOLVED_NODE_SENTINELS:
+        return None
+    return normalized
+
+
 class Status(str, Enum):
     ready = "ready"
     design = "design"

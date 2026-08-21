@@ -2021,6 +2021,20 @@ def test_ledger_join_reads_the_singular_session_key_without_spreading_it(
     assert nodes == {"aaaa1111-0000": "x-old"}
 
 
+@pytest.mark.parametrize("raw", ["null", "NULL", "none", "None", "nil", "NIL", "", "'", '"'])
+def test_ledger_join_drops_unresolved_node_sentinels(monkeypatch, tmp_path, raw):
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"entries": [
+        {"graph_node_id": raw, "sessions": ["sentinel-session"]},
+        {"graph_node_id": "x-real", "sessions": ["real-session"]},
+    ]}))
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "ledger_json", lambda: ledger)
+    nodes = watchdog._ledger_nodes()
+    assert nodes == {"real-session": "x-real"}
+
+
 def test_row_state_survives_an_alias_rename_and_odd_casing():
     """A raw ``r["state"]`` read reads "" under a rename, and "" is in no lane
     set - the whole fleet would classify leave behind a fresh sweep file."""

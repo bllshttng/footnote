@@ -1368,6 +1368,7 @@ def _ledger_nodes() -> dict[str, str]:
     name-join trap wearing a second coat. A miss degrades to no node, which
     condemns nothing."""
     from fno import paths
+    from fno.graph.types import normalize_graph_node_id
 
     try:
         entries = json.loads(
@@ -1379,7 +1380,7 @@ def _ledger_nodes() -> dict[str, str]:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        node = str(e.get("graph_node_id") or "")
+        node = normalize_graph_node_id(e.get("graph_node_id"))
         if not node:
             continue
         # `sessions` is the plural spelling; older entries record a single
