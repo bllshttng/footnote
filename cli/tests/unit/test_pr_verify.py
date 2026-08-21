@@ -72,6 +72,11 @@ class FakeGH:
             return Result(0, self.toplevel + "\n", "")
         if cmd[:4] == ["git", "remote", "get-url", "origin"]:
             return Result(0, f"https://github.com/{self.repo}.git\n", "")
+        if (
+            cmd[:3] == ["gh", "api", "--jq"]
+            and cmd[-1] == "repos/{owner}/{repo}/pulls/42"
+        ):
+            return Result(0, "feature/x\towner/repo\towner/repo\n", "")
         if cmd[:3] == ["gh", "api", f"repos/{self.repo}/pulls/42"]:
             return Result(
                 0,

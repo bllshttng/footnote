@@ -43,7 +43,7 @@ class GraphqlPurpose(str, enum.Enum):
     help=(
         "Merge a PR via gh CLI with the fno-canonical guards (<pr_number>). "
         "Emits a JSON line {pr, outcome, reason, strategy[, cleanup]}; exit 0 merged, "
-        "1 failed, 2 skipped|held, 127 gh-missing."
+        "1 failed, 2 skipped|held, 3 merge-landed-cleanup-failed, 127 gh-missing."
     ),
 )
 def merge(ctx: typer.Context) -> None:
