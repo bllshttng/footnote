@@ -176,6 +176,39 @@ def test_recompute_persists_the_design_rung(tmp_path):
     assert got == {"x-i": "idea", "x-d": "design", "x-r": "ready", "x-p": "in_progress"}
 
 
+def test_recompute_rolls_container_status_up_from_real_child_edges(tmp_path):
+    from fno.graph.statuses import recompute_statuses
+
+    plan = tmp_path / "child.md"
+    plan.write_text("---\nstatus: ready\n---\n")
+    entries = [
+        {"id": "x-parent", "type": "feature", "plan_path": None},
+        {"id": "x-done", "parent": "x-parent", "completed_at": "2026-08-20T00:00:00Z"},
+        {"id": "x-review", "parent": "x-parent", "plan_path": str(plan), "pr_number": 7},
+        {"id": "x-open", "parent": "x-parent", "plan_path": str(plan)},
+    ]
+
+    recompute_statuses(entries)
+    by_id = {entry["id"]: entry for entry in entries}
+    assert by_id["x-parent"]["status"] == "in_progress"
+
+    by_id["x-review"]["completed_at"] = "2026-08-20T00:01:00Z"
+    by_id["x-open"]["completed_at"] = "2026-08-20T00:02:00Z"
+    recompute_statuses(entries)
+    assert by_id["x-parent"]["status"] == "done"
+
+
+def test_recompute_preserves_explicit_container_terminal_marker(tmp_path):
+    from fno.graph.statuses import recompute_statuses
+
+    entries = [
+        {"id": "x-parent", "deferred_at": "2026-08-20T00:00:00Z"},
+        {"id": "x-child", "parent": "x-parent", "completed_at": "2026-08-20T00:00:00Z"},
+    ]
+    recompute_statuses(entries)
+    assert entries[0]["status"] == "deferred"
+
+
 def test_legacy_claimed_status_migrates_on_read(tmp_path):
     """A row persisted before the rename still reads as the current vocabulary."""
     from fno.graph.store import _apply_graph_defaults
