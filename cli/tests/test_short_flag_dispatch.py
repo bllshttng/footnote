@@ -46,7 +46,7 @@ PHASE2_HELP_SURFACES: dict[str, list[str]] = {
     "config-accounts-add": ["config", "accounts", "add", "--help"],
     # gate-verify / gate-check removed: the `fno gate` sub-app was deleted by
     # the control-plane collapse wedge (ab-d0337fbc).
-    "event-emit": ["event", "emit", "--help"],
+    "event-emit": ["doctor", "event", "emit", "--help"],
     "done": ["done", "--help"],
     "carveout-add": ["carveout", "add", "--help"],
 }

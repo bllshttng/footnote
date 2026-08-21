@@ -108,7 +108,7 @@ fi
 #
 #    This catches a hard wrap and nothing else. The house rule is stricter: a
 #    paragraph is ONE physical line, so a newline after every period breaks it
-#    too, and this check passes such a draft. Rule 6 of `fno lint style` is what
+#    too, and this check passes such a draft. Rule 6 of `fno doctor lint style` is what
 #    refuses that shape. Both agree on the case here, so the checks compose.
 #
 #    Skip headings, list items, tables, code fences, image lines, blank lines,

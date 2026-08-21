@@ -28,7 +28,7 @@ body=$(with_timeout 3 fno inbox outstanding 2>/dev/null) || rc=$?
 # A non-zero exit is NOT silence: collapsing a failed read into an empty string
 # is the absence-as-success trap this verb exists to close. But exit 2 is
 # Typer's "no such command", which a DEPLOYED fno older than this feature
-# returns on EVERY session until someone runs `fno update`. Nagging forever is
+# returns on EVERY session until someone runs `fno doctor update`. Nagging forever is
 # noise, so the loud path is reserved for a real failure: a fired bound (124)
 # or an unreadable store (1).
 [[ $rc -eq 2 ]] && exit 0

@@ -150,7 +150,7 @@ When marking a task BLOCKED, scan remaining waves for dependent tasks:
 **Revision-round crumb (builder trail, best-effort).** A retried task IS a revision round, so drop ONE `builder_step` into `.fno/events.jsonl` at the retry boundary - not on the clean first pass (`task_started` + `task_done` already cover that). Emit when a previously-FAILED task resolves: retried-to-green -> `worked`, still failing -> `failed`, BLOCKED after 3 attempts -> `abandoned`.
 
 ```bash
-fno event emit --type builder_step \
+fno doctor event emit --type builder_step \
   -d '{"node_id":"<current node id>","tried":"<what the first attempt did>","found":"<why it failed>","fix":"<what changed on retry>","outcome":"worked|failed|abandoned"}' \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```

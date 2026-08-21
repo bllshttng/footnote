@@ -1,4 +1,4 @@
-"""Unit tests for fno update source-discovery logic.
+"""Unit tests for fno doctor update source-discovery logic.
 
 Covers the path-resolution surface only. The actual install (`os.execvp` into
 `uv tool install`) is a system-level effect and is not exercised here; it has
@@ -184,7 +184,7 @@ def test_target_in_progress_returns_true_on_oserror(
 ) -> None:
     """Fix 7: PermissionError reading target-state.md must return True (fail safe).
 
-    The guard's purpose is to prevent fno update during an active target loop.
+    The guard's purpose is to prevent fno doctor update during an active target loop.
     An unreadable state file must default to True (treat as IN_PROGRESS) so
     the guard doesn't silently open the gate on a filesystem error.
     """
@@ -1100,7 +1100,7 @@ def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
 ) -> None:
     """Marker fresh (agents bins current) but the mux binary ABSENT -> still
     install the mux and return 'fresh'. This is the dead-end fix: a fresh-marker
-    `fno update` must self-heal a stranded front door (the fno->fno-py rename
+    `fno doctor update` must self-heal a stranded front door (the fno->fno-py rename
     lands fno-py while the mux was never installed), not no-op."""
     source = tmp_path / "cli"
     source.mkdir()
@@ -1179,7 +1179,7 @@ def test_refresh_rust_bins_fresh_marker_stale_mux_reinstalls(
     """Fresh triad but the PRESENT mux self-reports an OLDER crates_rev -> reinstall
     just the mux. The mux install is best-effort, so a prior failed build can leave
     a stale `fno` beside a fresh triad; a presence-only heal would never repair it.
-    Now that the mux bakes its own rev, `fno update` sees the stale front door."""
+    Now that the mux bakes its own rev, `fno doctor update` sees the stale front door."""
     source = tmp_path / "cli"
     source.mkdir()
     (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -1342,7 +1342,7 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     # Patch shutil.which through the update module so _refresh_rust_bins sees it
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    result = runner.invoke(app, ["update", "--source", str(cli_src)])
+    result = runner.invoke(app, ["doctor", "update", "--source", str(cli_src)])
     assert result.exit_code == 0 or result.exit_code is None, result.output
 
     # rust before python
@@ -1453,7 +1453,7 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
     # Patch through the update module so _refresh_rust_bins sees it
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    runner.invoke(app, ["update", "--source", str(cli_src)])
+    runner.invoke(app, ["doctor", "update", "--source", str(cli_src)])
     assert execvp_called, "execvp must be called even when cargo fails"
 
 
@@ -1578,7 +1578,7 @@ def test_ac1_edge_no_rust_flag_skips_refresh(
     monkeypatch.setattr(update.os, "execvp", lambda prog, args: None)
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
 
-    runner.invoke(app, ["update", "--source", str(cli_src), "--no-rust"])
+    runner.invoke(app, ["doctor", "update", "--source", str(cli_src), "--no-rust"])
     assert tripwire_called == [], "--no-rust must prevent _refresh_rust_bins from being called"
 
 
@@ -1623,7 +1623,7 @@ def test_ac1_edge_dry_run_shows_both_would_run_lines(
     execvp_called = []
     monkeypatch.setattr(update.os, "execvp", lambda prog, args: execvp_called.append(prog))
 
-    result = runner.invoke(app, ["update", "--source", str(cli_src), "--dry-run"])
+    result = runner.invoke(app, ["doctor", "update", "--source", str(cli_src), "--dry-run"])
     output = result.output
     # Both Would-run lines should appear
     would_run_count = output.count("Would run:")
@@ -1649,7 +1649,7 @@ def test_ac1_edge_rust_and_no_rust_together_exits_2(
     cli_src = _make_fno_source(repo)
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
 
-    result = runner.invoke(app, ["update", "--source", str(cli_src), "--rust", "--no-rust"])
+    result = runner.invoke(app, ["doctor", "update", "--source", str(cli_src), "--rust", "--no-rust"])
     assert result.exit_code == 2
 
 
@@ -2465,7 +2465,7 @@ def test_update_readiness_never_empty_guidance_on_full_failure(monkeypatch, tmp_
 
 
 def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
-    """`fno update --check` prints the readiness payload and installs nothing."""
+    """`fno doctor update --check` prints the readiness payload and installs nothing."""
     src = _readiness_env(monkeypatch, tmp_path)
     monkeypatch.setattr(
         update,
@@ -2474,7 +2474,7 @@ def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
     )
 
     runner = CliRunner()
-    result = runner.invoke(app, ["update", "--check"])
+    result = runner.invoke(app, ["doctor", "update", "--check"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
@@ -2484,13 +2484,13 @@ def test_update_check_flag_prints_readiness_json(monkeypatch, tmp_path) -> None:
 
 def test_update_check_rejects_dry_run_combo() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["update", "--check", "--dry-run"])
+    result = runner.invoke(app, ["doctor", "update", "--check", "--dry-run"])
     assert result.exit_code != 0
 
 
 def test_update_check_rejects_force_combo() -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["update", "--check", "--force"])
+    result = runner.invoke(app, ["doctor", "update", "--check", "--force"])
     assert result.exit_code != 0
 
 

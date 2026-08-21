@@ -181,16 +181,14 @@ FOREIGN_BINARIES = {
 # One control per SHAPE, not one per site. Four shapes, each verified as a real
 # baselined leaf at a real call site:
 #   agents needs           the fno-agents prefix case (array is ["needs"])
-#   update                 single-token leaf (crates/fno/src/client.rs's
-#                          `.args(["update", "--check"])`; `notify` held this
-#                          slot until x-afa6 nested it under `inbox`, so every
-#                          live Rust call site became a two-token array)
+#   doctor                collapsed dispatcher credited from the event,
+#                         fanout, and update arrays
 #   do                    collapsed dispatcher credited from the delivery,
 #                         plan, and PR arrays; five independent sites keep the
 #                         control positive without treating actions as leaves
 RUST_ARGV_CONTROLS = {
     "agents needs": 1,
-    "update": 1,
+    "doctor": 3,
     "do": 5,
 }
 

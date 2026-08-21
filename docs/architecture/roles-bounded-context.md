@@ -97,7 +97,7 @@ An approval floor is a declarative minimum only; role resolution does not implem
 Run the bounded-role, inspection, and routing compatibility suites through the repository wrapper:
 
 ```bash
-fno test cli/tests/unit/roles/test_resolver.py cli/tests/unit/roles/test_roles_cli.py cli/tests/unit/agents/test_model_routing_roles.py cli/tests/unit/test_model_routing.py
+fno doctor test cli/tests/unit/roles/test_resolver.py cli/tests/unit/roles/test_roles_cli.py cli/tests/unit/agents/test_model_routing_roles.py cli/tests/unit/test_model_routing.py
 ```
 
-Run `fno lint menu-caps` to prove the hidden integration does not expand the curated CLI surface.
+Run `fno doctor lint menu-caps` to prove the hidden integration does not expand the curated CLI surface.

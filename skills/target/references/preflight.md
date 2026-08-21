@@ -23,7 +23,7 @@ Each check emits one line on stdout:
 ```
   ✓ working-tree-clean: clean working tree
   ✗ branch-state: on protected branch 'main' - create a feature branch before making changes
-  ⚠ codemap-fresh: codemap is 26h old (>24h) - consider refreshing with `fno codemap`
+  ⚠ codemap-fresh: codemap is 26h old (>24h) - consider refreshing with `fno doctor codemap`
   ? test-suite-green: opt-in not set (set PREFLIGHT_RUN_TESTS=1 or test_suite_check: true in config.toml)
 ```
 

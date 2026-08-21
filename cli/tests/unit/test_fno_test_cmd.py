@@ -1,4 +1,4 @@
-"""Tests for `fno test` (x-8b64 G).
+"""Tests for `fno doctor test` (x-8b64 G).
 
 The load-bearing behaviour: the verb returns pytest's *real* exit code (no pipe
 masking) and pins PYTHONPATH to the worktree source. We run a tiny generated
@@ -57,7 +57,7 @@ def _fake_run_capture(monkeypatch, tmp_path):
 
 
 def test_no_args_defaults_to_cli_tests(tmp_path, monkeypatch):
-    """codex P2: bare `fno test` must run THE suite (cli/tests), not collect
+    """codex P2: bare `fno doctor test` must run THE suite (cli/tests), not collect
     from cwd (which pulls in script-style tests/ that SystemExit at import)."""
     captured = _fake_run_capture(monkeypatch, tmp_path)
     assert test_cmd._run([]) == 0
@@ -183,7 +183,7 @@ def _fake_checkout_with_crates(tmp_path, monkeypatch, n=2):
 
 
 def test_rust_mode_runs_each_crate_quietly(tmp_path, monkeypatch, capsys):
-    """`fno test rust` runs cargo test -q per crates/*/Cargo.toml (no nextest)."""
+    """`fno doctor test rust` runs cargo test -q per crates/*/Cargo.toml (no nextest)."""
     cmds = []
 
     class _Proc:

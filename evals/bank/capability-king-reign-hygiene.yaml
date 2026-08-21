@@ -1,11 +1,11 @@
 # Grades a recorded king-for-a-day reign against the skill's own ordering rules.
-# Grade-only (no prompt): fno evals run skips the worker spawn and grades the
+# Grade-only (no prompt): fno doctor evals run skips the worker spawn and grades the
 # checked-in fixture directly. The fixture is a distilled, redacted event slice
 # of one real reign; the checks are ordering properties over it.
 #
 # TIER IS THE WHOLE ADVISORY-OR-BLOCKING KNOB. capability is advisory: only a
 # regression-tier task below 100% raises the exit-4 alarm. Promotion to blocking
-# is `fno evals graduate` (a reviewed edit) after the checks survive a second
+# is `fno doctor evals graduate` (a reviewed edit) after the checks survive a second
 # real reign. No new gate, config key, or tier is invented here.
 #
 # WHY ONLY FOUR CHECKS HAVE A DETECTOR (failure 6 gets none). Failure 6,

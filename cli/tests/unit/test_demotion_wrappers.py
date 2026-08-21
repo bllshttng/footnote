@@ -1,5 +1,5 @@
 """Unit smoke tests for the fno wrappers introduced in the consolidation pass:
-fno codemap, fno worktree.
+fno doctor codemap, fno worktree.
 
 These verify only the wiring (subcommand registers, --help renders, the
 canonical scripts get located, missing-script paths fail loudly). The heavy
@@ -37,7 +37,7 @@ def test_fno_top_level_lists_demoted_verbs() -> None:
     x-71b6 In-N-Out tiering hides these from the curated `fno --help`; the
     full-surface door lists them (they remain invocable either way).
     (`consolidation` was retired in x-71b6 - its audit re-homed to
-    `fno lint stale-skill-refs`.)
+    `fno doctor lint stale-skill-refs`.)
     """
     result = _run_fno("help", "--all")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -47,7 +47,7 @@ def test_fno_top_level_lists_demoted_verbs() -> None:
 
 
 def test_fno_codemap_help_renders() -> None:
-    result = _run_fno("codemap", "--help")
+    result = _run_fno("doctor", "codemap", "--help")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "codemap" in result.stdout.lower()
     assert "--tokens" in result.stdout
@@ -88,7 +88,7 @@ def test_codemap_engine_lives_inside_the_fno_package() -> None:
 
 
 def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) -> None:
-    """Regression: `fno codemap` used to work only inside the footnote checkout.
+    """Regression: `fno doctor codemap` used to work only inside the footnote checkout.
 
     ``FNO_REPO_ROOT`` points repo resolution at a foreign repo, which is exactly
     what the live failure looked like (running from another project). The engine
@@ -109,7 +109,7 @@ def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) ->
     subprocess.run(["git", "init", "-q"], cwd=foreign, check=True)
     (foreign / "mod.py").write_text("def hello():\n    return 1\n")
 
-    result = _run_fno("codemap", extra_env={"FNO_REPO_ROOT": str(foreign)})
+    result = _run_fno("doctor", "codemap", extra_env={"FNO_REPO_ROOT": str(foreign)})
     combined = result.stdout + result.stderr
     assert result.returncode != EXIT_NO_ENGINE, (
         "codemap resolved its engine from the analyzed repo instead of the fno "
@@ -211,7 +211,7 @@ def test_fno_codemap_rejects_json_plus_db_schema() -> None:
     than silently producing an unparseable file."""
     from fno.codemap_cli.cli import EXIT_USAGE
 
-    result = _run_fno("codemap", "--json", "--db-schema")
+    result = _run_fno("doctor", "codemap", "--json", "--db-schema")
     assert result.returncode == EXIT_USAGE, (
         f"expected rc={EXIT_USAGE} for --json + --db-schema, got {result.returncode}\n"
         f"stdout: {result.stdout[-400:]}\n"

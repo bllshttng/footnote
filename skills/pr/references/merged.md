@@ -262,7 +262,5 @@ rule), never as `backlog idea` nodes.
   `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
 - Design + locked decisions (original ritual):
   `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`.
-- Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog advance`,
-  `fno skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`,
-  `fno backlog capture add`, `fno carveout`, `fno agents spawn`.
+- Reused verbs: `fno backlog reconcile`, `fno retro run`, `fno backlog advance`, `fno doctor skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`, `fno backlog capture add`, `fno carveout`, `fno agents spawn`.
 - The cross-project message bus (different thing): `skills/mail/SKILL.md`.

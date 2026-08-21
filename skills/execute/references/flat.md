@@ -4,7 +4,7 @@ Lightweight executor for focused plans. Read the plan, make the changes, verify,
 
 ## 0. Structural Context (if available)
 
-Read `.fno/codemap.md` if it exists. Do NOT generate it - flat mode is lightweight and shouldn't add 3 seconds to every invocation. If the user ran `fno codemap`, `/blueprint`, or `/target` previously, the file will be there. Use it to understand which files are high-importance (top of the codemap output = highest PageRank) before making changes.
+If `.fno/codemap.md` exists, read it. Do NOT generate it. Flat mode is lightweight and must not add 3 seconds to every invocation. If the user previously ran `fno doctor codemap`, `/blueprint`, or `/target`, the file will be there. Use it to identify high-importance files before making changes. The top of the codemap has the highest PageRank.
 
 ## 1. Read Plan
 
@@ -119,7 +119,7 @@ python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
 Only when a change needed a **revision round** - its verify/test failed and you reworked it before it landed - drop ONE `builder_step` into `.fno/events.jsonl` so a resume or self-handoff successor sees what was tried and how it was fixed. A clean first-pass change emits nothing here: `task_started` + `task_done` already describe it fully. One crumb per reworked change, at the boundary - never per edit.
 
 ```bash
-fno event emit --type builder_step \
+fno doctor event emit --type builder_step \
   -d '{"node_id":"<current node id>","tried":"<the first approach>","found":"<why it failed verify>","fix":"<what made it pass>","outcome":"worked"}' \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```

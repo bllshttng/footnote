@@ -243,12 +243,12 @@ def test_crates_test_paths_move_from_runtime_to_tests(tmp_path):
     source.mkdir(parents=True)
     tests.mkdir(parents=True)
     (source / "lib.rs").write_text("ordinary runtime source\n")
-    (tests / "surface.rs").write_text("fno test\n")
+    (tests / "surface.rs").write_text("fno doctor test\n")
 
-    buckets = vc.sweep_buckets(tmp_path, {"test"})
+    buckets = vc.sweep_buckets(tmp_path, {"doctor"})
 
-    assert buckets["tests"]["test"] == 1
-    assert buckets["runtime"]["test"] == 0
+    assert buckets["tests"]["doctor"] == 1
+    assert buckets["runtime"]["doctor"] == 0
 
 
 def _broken_crates_test_split(tmp_path) -> Path:

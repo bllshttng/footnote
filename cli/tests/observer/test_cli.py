@@ -1,4 +1,4 @@
-"""CLI-wiring coverage for `fno observer` (x-57a5, Task 7).
+"""CLI-wiring coverage for `fno doctor observer` (x-57a5, Task 7).
 
 Sweep and replay are exercised with injected seams (fake corpus, fake gh, fake
 spawn, no real worktree) so no test touches the network, real ~/.fno do state, or

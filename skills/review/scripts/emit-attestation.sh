@@ -222,7 +222,7 @@ for _marker in CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SE
 done
 
 # Build the data object with jq so a reviewer/verdict value can never break the
-# JSON (codex peer review P2). fno event emit then validates envelope + required
+# JSON (codex peer review P2). fno doctor event emit then validates envelope + required
 # fields + the verdict enum before writing.
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
@@ -232,6 +232,6 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
   '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id,branch:$branch}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
-"${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
+"${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"
 
 echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} branch=${branch:-detached} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unset} provider=${provider:-unset}" >&2

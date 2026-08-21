@@ -2261,7 +2261,7 @@ pub async fn bind_supervisor_socket(
     // stale -- with one exception the lock cannot see. A daemon from a PREVIOUS
     // build holds this socket and knows nothing about the lockfile, so the lock
     // reads free while a live listener serves. Unlinking there recreates the
-    // exact defect this guard removes, once at every `fno update`.
+    // exact defect this guard removes, once at every `fno doctor update`.
     //
     // So keep a connect probe as a BELT on top of the lock, never instead of
     // it. It is only ever reached when no lock-aware daemon holds the

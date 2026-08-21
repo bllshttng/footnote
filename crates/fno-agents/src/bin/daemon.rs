@@ -15,7 +15,7 @@ use fno_agents::paths::AgentsHome;
 use std::time::Duration;
 
 fn main() {
-    // `version [--json]`: report the baked-in build rev so `fno update` can
+    // `version [--json]`: report the baked-in build rev so `fno doctor update` can
     // verify this bin is the SAME build as its triad siblings, not just present.
     // Execs cheaply and returns without touching a running daemon or the runtime.
     let args: Vec<String> = std::env::args().skip(1).collect();

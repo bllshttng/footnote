@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Daily throttle + background-detach helper for the eval-loop ignition:
-# `fno observer sweep` (the sole producer of skill_eval_run_complete events)
-# followed by `fno skill-diff tick` (the proposer that consumes them).
+# `fno doctor observer sweep` (the sole producer of skill_eval_run_complete events)
+# followed by `fno doctor skill-diff tick` (the proposer that consumes them).
 #
 # Sourced by hooks/eval-sweep-session-start.sh (SessionStart: fire-only).
 #
@@ -105,10 +105,10 @@ _eval_sweep_run_stages() {
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     _eval_sweep_trim_log "$log"
     printf '=== eval-sweep run %s pid=%s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >> "$log" 2>/dev/null || true
-    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint
-    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review
-    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint
-    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor observer sweep  --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor observer sweep  --skill review
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" doctor skill-diff tick --skill review
     [[ -n "$claim_key" ]] && "$fno_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }

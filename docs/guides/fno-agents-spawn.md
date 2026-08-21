@@ -183,4 +183,4 @@ Both runtimes produce byte-identical receipts and error messages for the shared 
 
 ## Rollout note
 
-The deployed `fno` and `~/.cargo/bin/fno-agents` are snapshots: until `fno update` and the cargo bins refresh run after this epic group merges, the old binaries still carry the create-on-ask behavior and reject `spawn -H claude`. `fno doctor` detects the skew.
+The deployed `fno` and `~/.cargo/bin/fno-agents` are snapshots. After this epic group merges, run `fno doctor update` and refresh the cargo bins. Until then, old binaries keep create-on-ask behavior and reject `spawn -H claude`. `fno doctor` detects the skew.

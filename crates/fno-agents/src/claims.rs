@@ -683,7 +683,7 @@ fn archive_claim(path: &Path, ts_ms: i64) -> std::io::Result<()> {
 
 /// Best-effort audit append to `<events_dir>/.fno/events.jsonl` using the
 /// SAME envelope the Python emitter writes: `{ts, type, source: "fno-loop",
-/// data}` — so an operator reading the log (or `fno event audit`) sees the
+/// data}` — so an operator reading the log (or `fno doctor event audit`) sees the
 /// identical record regardless of which implementation performed the
 /// operation. Deliberately NOT the crate's Branch-B `EventEmitter`: that
 /// envelope is kind-flat with a 500-byte payload cap, either of which would

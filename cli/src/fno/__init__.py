@@ -85,7 +85,7 @@ def _reinstall_hint(name: str) -> str:
 
     Because imports here happen at INVOCATION time, a subcommand's module is
     read off disk long after startup -- so ``uv tool install --reinstall``
-    (which ``fno update`` runs) replaces the package underneath a running
+    (which ``fno doctor update`` runs) replaces the package underneath a running
     process and every not-yet-imported subcommand fails for the length of the
     install.  Two very different things produce that same ModuleNotFoundError
     and they need opposite responses: a reinstall in flight (transient, retry)
@@ -101,7 +101,7 @@ def _reinstall_hint(name: str) -> str:
     return (
         f" ({name} is part of fno itself: either this package was being "
         "reinstalled underneath the running process, in which case retry, or "
-        "the install is stale, in which case run `fno update` then `fno doctor`)"
+        "the install is stale, in which case run `fno doctor update` then `fno doctor`)"
     )
 
 

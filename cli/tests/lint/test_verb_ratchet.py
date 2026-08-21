@@ -1,4 +1,4 @@
-"""Verb-surface ratchet tests - `fno lint verb-ratchet`.
+"""Verb-surface ratchet tests - `fno doctor lint verb-ratchet`.
 
 Covers the ratchet directions (AC2), the both-binaries invariant (AC3), the
 fail-closed Rust-front reach (AC4), and the conflict-message shape (AC9), plus

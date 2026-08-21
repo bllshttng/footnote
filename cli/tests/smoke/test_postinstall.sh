@@ -29,7 +29,7 @@ for needle in \
   "uv tool uninstall fno" \
   "__version__" \
   "binary-complete" \
-  "fno update --rust"; do
+  "fno doctor update --rust"; do
   grep -q "$needle" .claude-plugin/postinstall.sh \
     || { echo "FAIL: postinstall.sh missing US7 content: $needle"; exit 1; }
 done

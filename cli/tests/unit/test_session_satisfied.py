@@ -170,7 +170,7 @@ def test_validate_auto_complete_triggered_missing_session_id() -> None:
 
 
 def test_validate_rejects_unknown_session_satisfied_data_source() -> None:
-    """Shell emitters using `fno event emit --type session_satisfied --data ...`
+    """Shell emitters using `fno doctor event emit --type session_satisfied --data ...`
     route through validate() not the typed builder. The enum must be enforced
     at the validator so a typo at the shell-emitter site fails fast instead
     of landing a noise event in events.jsonl."""

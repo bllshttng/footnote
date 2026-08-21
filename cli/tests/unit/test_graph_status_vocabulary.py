@@ -10,7 +10,7 @@ This is the check the epic's census originally proposed solving with a
 schema-version stamp on graph.json. A stamp needs a writer change plus a version
 integer a human must remember to bump, which is the same discipline problem one
 level removed. Reading the vocabulary out of both sources and comparing them
-catches the same drift mechanically, on every `fno test`, with no runtime cost
+catches the same drift mechanically, on every `fno doctor test`, with no runtime cost
 and no new field on disk.
 
 Lives on the Python side deliberately: the edit that causes the drift is a

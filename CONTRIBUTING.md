@@ -73,7 +73,7 @@ Run these locally before pushing:
 - **Skill-bundle freshness.** Driver skills are self-contained; shared content is assembled at build time from `skill-bundles.yaml`. If you edit a file that is a bundle source (a shared script, a `references/` doc, or a subagent prompt), regenerate and verify:
   ```bash
   bash scripts/generate-skill-bundles.sh
-  fno bundle check          # must report "skill bundles fresh"
+  fno doctor bundle check          # must report "skill bundles fresh"
   ```
 - **Static checks** in `scripts/ci/`: `check-no-hardcoded-paths.sh`, `check-no-stale-skill-refs.sh`, `check-registry-schema-parity.sh`. Run the one that covers your area.
 

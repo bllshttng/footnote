@@ -1,6 +1,6 @@
 """Anti-drift guards for the unified config schema.
 
-Mirrors the repo's `fno bundle check` pattern: the model is the single source
+Mirrors the repo's `fno doctor bundle check` pattern: the model is the single source
 of truth, and these tests fail CI the moment a derived artifact drifts.
 
 Five guards:

@@ -50,10 +50,10 @@ Each finding gets a confidence score. Only issues scoring above 80% are reported
 ## Codemap (CLI verb)
 
 ```
-fno codemap                          # Map current project, writes .fno/codemap.md
-fno codemap --tokens 4000             # More detail (default: 2048)
-fno codemap --db-schema               # Append DB schema (Supabase/Drizzle/Prisma)
-fno codemap --orphans                 # List files with no inbound references
+fno doctor codemap                          # Map current project, writes .fno/codemap.md
+fno doctor codemap --tokens 4000             # More detail (default: 2048)
+fno doctor codemap --db-schema               # Append DB schema (Supabase/Drizzle/Prisma)
+fno doctor codemap --orphans                 # List files with no inbound references
 ```
 
 Runs AST analysis with PageRank to produce a weighted structural map of the most important symbols, module boundaries, and orphaned code. No LLM calls - just tree-sitter and math. The output file (`.fno/codemap.md`) is read by blueprint, target, operator, and sigma-review for structural context.

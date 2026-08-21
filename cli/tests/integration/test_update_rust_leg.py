@@ -1,9 +1,9 @@
-"""Integration-tier journey for the ``fno update`` rust-bins leg (ab-054fd162).
+"""Integration-tier journey for the ``fno doctor update`` rust-bins leg (ab-054fd162).
 
 The unit tier (tests/unit/test_update.py) covers every gating outcome with
 monkeypatched internals; sigma-review on PR #438 flagged that no
 integration-tier journey exercises the leg through the real CLI. This test
-runs ``fno update`` as a subprocess against a real git repo fixture, with
+runs ``fno doctor update`` as a subprocess against a real git repo fixture, with
 stub ``cargo``/``uv`` executables on PATH and an isolated HOME - so the
 stale-marker -> cargo install -> marker write -> installer-handoff chain
 (including the post-execvp installed-rev write) runs with no in-process
@@ -143,7 +143,7 @@ def _run_update(cli_src: Path, env: dict[str, str], cwd: Path) -> subprocess.Com
 
 
 def test_update_rust_leg_journey(tmp_path: Path) -> None:
-    """Journey: stale rust marker -> real ``fno update`` subprocess runs the
+    """Journey: stale rust marker -> real ``fno doctor update`` subprocess runs the
     stub cargo, converges the marker to the crates subtree rev, hands off to
     the stub installer (which chains the installed-rev write) -> a second
     run short-circuits as fresh without re-invoking cargo."""

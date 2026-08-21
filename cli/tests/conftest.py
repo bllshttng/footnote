@@ -212,7 +212,7 @@ def _hermetic_merge_hold_gate(monkeypatch):
 #
 # WHAT gets neutralised lives in fno/hermetic.py, deny-by-default over the whole
 # ambient surface, so this file no longer carries a hand-maintained list that
-# loses to the next var somebody adds. `fno test` applies the same function at
+# loses to the next var somebody adds. `fno doctor test` applies the same function at
 # `_child_env`, which covers the shell and cargo trees; this call is what covers
 # a developer running a bare `pytest cli/tests/...`.
 #

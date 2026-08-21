@@ -207,7 +207,7 @@ class _LazyStub(click.Group):
             module = importlib.import_module(module_path)
         except ImportError as exc:
             # Imports here happen at INVOCATION time, so `uv tool install
-            # --reinstall` (what `fno update` runs) can delete and rewrite this
+            # --reinstall` (what `fno doctor update` runs) can delete and rewrite this
             # package between process start and this line. On a box with several
             # launchd agents and live sessions, some `fno` process is nearly
             # always mid-flight during that window, so this is routine rather
@@ -240,7 +240,7 @@ class _LazyStub(click.Group):
                     # a different and more truthful cause (a genuinely missing
                     # third-party dependency, say). Reporting the original would
                     # bury that under an fno reinstall hint and send the operator
-                    # to `fno update` for a problem `fno update` cannot fix.
+                    # to `fno doctor update` for a problem `fno doctor update` cannot fix.
                     failure = retry_exc
                     module = None
             if module is None:

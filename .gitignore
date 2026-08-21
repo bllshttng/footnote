@@ -46,7 +46,7 @@ __pycache__/
 !.fno/settings.yaml.example
 !**/.fno/settings.yaml.example
 # The ambient-poison fixture is a synthetic .fno tree checked in on purpose: it
-# is what `fno test smoke --ambient dirty` feeds the runner, so it has to travel
+# is what `fno doctor test smoke --ambient dirty` feeds the runner, so it has to travel
 # with the repo rather than be reconstructed on each machine.
 !cli/tests/fixtures/ambient-poison/**/.fno/
 !cli/tests/fixtures/ambient-poison/**/.fno/**

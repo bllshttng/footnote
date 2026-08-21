@@ -38,7 +38,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 | Verb family | What it owns |
 |-------------|--------------|
-| `fno event emit\|audit` | events.jsonl writes + audit. |
+| `fno doctor event emit\|audit` | events.jsonl writes + audit. |
 | `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
 | `fno do pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
 | `fno do pr merge\|verify\|rebase` | PR ops with canonical guards. |

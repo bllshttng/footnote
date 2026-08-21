@@ -435,7 +435,7 @@ def _close_probe_runner_shellout(
         return (
             False,
             "close_probes declared but the fno-agents binary was not found "
-            "(set FNO_AGENTS_BIN or run `fno update --rust`); "
+            "(set FNO_AGENTS_BIN or run `fno doctor update --rust`); "
             "the gate cannot be evaluated",
         )
     cmd = [

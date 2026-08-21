@@ -349,7 +349,7 @@ def refresh_watcher(
     plist first so the daemon picks up the freshly-installed binary path, a
     fresh captured PATH, and a new mtime (so doctor's ``healthy-pending`` grace
     applies until the next tick instead of a transient false ``dead``). Called
-    by ``fno do pr watch refresh`` at the tail of ``fno update`` so an update
+    by ``fno do pr watch refresh`` at the tail of ``fno doctor update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
     """

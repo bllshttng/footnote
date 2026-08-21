@@ -25,5 +25,5 @@ if [[ $AGE_SECONDS -le $MAX_AGE_SECONDS ]]; then
     exit 0
 fi
 
-echo "codemap-fresh warn codemap is ${AGE_HOURS}h old (>24h) - consider refreshing with: fno codemap"
+echo "codemap-fresh warn codemap is ${AGE_HOURS}h old (>24h) - consider refreshing with: fno doctor codemap"
 exit 0

@@ -5,13 +5,13 @@
 # order (US7, ab-18563bcc):
 #
 #   1. `uv tool install fno` BY NAME - the published PyPI platform wheel, which
-#      is binary-complete in one step (no separate `fno update --rust`). Guarded
+#      is binary-complete in one step (no separate `fno doctor update --rust`). Guarded
 #      for name-collision safety (AC7-FR): we verify the installed package is
 #      OURS (its version matches this plugin's bundled cli/ source) and fall
 #      back to the source build on any mismatch, so the reserved 0.0.0
 #      placeholder or a squatted `fno` never runs in place of ours.
 #   2. `uv tool install` from the bundled cli/ source (Python-only; the Rust
-#      binaries then need a later `fno update --rust`) when the PyPI wheel is
+#      binaries then need a later `fno doctor update --rust`) when the PyPI wheel is
 #      unavailable, not yet published, or not ours (AC7-ERR).
 #   3. `pip install --user` from cli/ source.
 #   4. an actionable error if neither uv nor pip is present (AC7-EDGE, unchanged).
@@ -122,7 +122,7 @@ install_source_via_uv() {
   log "installing from $CLI_DIR via uv tool install (source build; Python-only)..."
   if uv_tool_install_retry "$CLI_DIR"; then
     log "installed Python-only fno from source. The Rust binaries are NOT included -"
-    log "run 'fno update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
+    log "run 'fno doctor update --rust' for the daemon-backed verbs (or install a published PyPI wheel)."
     log "restart your shell (or source your env) to pick up PATH."
     next_steps
     return 0
@@ -176,7 +176,7 @@ if command -v pip >/dev/null 2>&1 || command -v pip3 >/dev/null 2>&1; then
   PIP="$(command -v pip || command -v pip3)"
   log "uv unavailable; falling back to $PIP install --user from $CLI_DIR (Python-only)..."
   if "$PIP" install --user "$CLI_DIR"; then
-    log "installed Python-only fno via pip --user. Run 'fno update --rust' for the Rust binaries."
+    log "installed Python-only fno via pip --user. Run 'fno doctor update --rust' for the Rust binaries."
     log "ensure ~/.local/bin (or your user site-scripts dir) is on PATH."
     next_steps
     exit 0

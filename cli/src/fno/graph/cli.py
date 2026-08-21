@@ -4584,7 +4584,7 @@ def cmd_groom(
         raise typer.Exit(code=0 if groom_is_due((state, hours)) else 1)
 
     if refresh_agent:
-        # The tail of `fno update`, so it must never fail the update: a skipped
+        # The tail of `fno doctor update`, so it must never fail the update: a skipped
         # or failed refresh reports and exits 0.
         typer.echo(json.dumps(refresh_groom_agent(), indent=2))
         return

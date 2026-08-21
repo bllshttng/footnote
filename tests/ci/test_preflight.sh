@@ -120,7 +120,7 @@ if [[ $rc -eq 0 && "${PREFLIGHT_TEST_SIGNAL_LOCK:-0}" == "1" \
 fi
 exit "$rc"
 EOF
-# preflight calls `uv run --project cli fno-py test smoke [flags]`; stub uv to
+# preflight calls `uv run --project cli fno-py doctor test smoke [flags]`; stub uv to
 # behave like the retired smoke.sh stub (red iff POISON is checked out).
 # The changed packet is a distinct invocation (--changed) and must be stubbable
 # independently of the full run: several cases below turn one red while the

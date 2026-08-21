@@ -1008,7 +1008,7 @@ def test_tick_cmd_exits_0_and_logs_counts_on_drop(tmp_path, monkeypatch):
          "url": "https://x", "template": "hi", "field": "content"}]))
     monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=404))
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    res = CliRunner().invoke(app, ["status-fanout", "tick"], catch_exceptions=False)
+    res = CliRunner().invoke(app, ["doctor", "event", "fanout", "tick"], catch_exceptions=False)
     assert res.exit_code == 0
     assert "matched=1" in res.stdout and "dropped=1" in res.stdout
 

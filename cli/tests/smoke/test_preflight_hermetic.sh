@@ -78,7 +78,7 @@ PYEOF
 # The changed packet must run through run_hermetic like every other leg, and
 # with an EXPLICIT base/head. Local mode inside the preflight worktree would
 # read its preserved untracked caches (target/, cli/.venv) as changed paths.
-grep -Fq 'run_hermetic uv run --project cli fno-py test smoke --changed \' "$PF" \
+grep -Fq 'run_hermetic uv run --project cli fno-py doctor test smoke --changed \' "$PF" \
   || fail "changed packet does not run inside run_hermetic"
 grep -Fqe '--base "$CHANGED_BASE" --head "$CANDIDATE_SHA"' "$PF" \
   || fail "changed packet does not pin an explicit base/head"

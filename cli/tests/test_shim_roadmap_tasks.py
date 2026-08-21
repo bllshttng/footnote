@@ -35,7 +35,7 @@ def _find_system_python3() -> str:
     the kind of coincidence a path heuristic cannot see and an import probe
     does not care about.
     """
-    # Probe under the SAME env the shim will run with: `fno test` pins a
+    # Probe under the SAME env the shim will run with: `fno doctor test` pins a
     # worktree PYTHONPATH that makes fno importable from any interpreter, so a
     # probe that inherited it would find no fno-free python and fall back to
     # sys.executable. _run_shim drops the same key for the same reason.

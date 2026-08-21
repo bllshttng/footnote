@@ -25,7 +25,7 @@ def stub_fno(tmp_path):
     log = tmp_path / "emit.log"
     (bindir / "fno").write_text(
         "#!/usr/bin/env bash\n"
-        'if [[ "$1" == "event" && "$2" == "emit" ]]; then\n'
+        'if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then\n'
         '  while [[ $# -gt 0 ]]; do [[ "$1" == "-d" ]] && printf "%s\\n" "$2" >> "$FNO_EMIT_LOG"; shift; done\n'
         "fi\nexit 0\n"
     )

@@ -1,6 +1,6 @@
 # Research layer: retrieve + store + ship
 
-`fno do research "X"` is the research-pipeline counterpart to `fno do target`: where target runs a code task to a green PR, research runs a topic to a cited, eval-checkable brief. **Group 1** is the retrieve + store foundation (below). **Group 2** is ship + grade: the `doc` deliverable, the advisory research-verify profile, and the `fno evals grade` scorer ([jump](#group-2-ship--grade)).
+`fno do research "X"` is the research counterpart to `fno do target`. Target runs code to a green PR. Research turns a topic into a cited, eval-checkable brief. **Group 1** is the retrieve + store foundation (below). **Group 2** is ship + grade: the `doc` deliverable, advisory research verification, and the `fno doctor evals grade` scorer ([jump](#group-2-ship--grade)).
 
 ## The one retrieval path
 
@@ -76,7 +76,7 @@ By default `fno do research "X"` now ships, after retrieval, a `doc`:
 
 ### The eval: research's "CI green" (US5)
 
-`fno evals grade --brief <slug>.md --golden <discovery-*.md>` is the gate - **three mechanical assertions, no model in the loop** (`cli/src/fno/evals/research_grade.py`):
+`fno doctor evals grade --brief <slug>.md --golden <discovery-*.md>` is the gate - **three mechanical assertions, no model in the loop** (`cli/src/fno/evals/research_grade.py`):
 
 1. **Zero uncited claims** - every claim (a list item under a content section) cites a `[Sn]` that resolves to a URL present as a `sources.jsonl` row.
 2. **Zero dead URLs** - every sidecar row is `verified` after a self-fetch, or is a `web.archive.org` (Wayback) URL.
@@ -86,8 +86,8 @@ Green only if all three pass (exit 0 green / 1 red / 2 setup-error). The golden 
 
 ### The research-verify profile (US4, advisory)
 
-`/review research <brief.md>` runs a claim-shaped panel - fact-checker / citation-auditor / contradiction-finder / completeness-critic (`skills/review/references/research-verify.md`) - reusing the sigma panel machine with a swapped roster. It is **advisory**: it annotates the brief; the green/red verdict belongs to `fno evals grade` and this panel never changes it (mirroring sigma-is-advice / PR-CI-bot-is-the-code-gate).
+`/review research <brief.md>` runs a claim-shaped panel - fact-checker / citation-auditor / contradiction-finder / completeness-critic (`skills/review/references/research-verify.md`) - reusing the sigma panel machine with a swapped roster. It is **advisory** and annotates the brief. The green/red verdict belongs to `fno doctor evals grade`, and the panel never changes it.
 
 ### Scope note
 
-Group 2 implements the deliverable, eval, and verify profile as **Python + skill** concerns layered on the existing seams (config block, review router, `fno evals` namespace). The heavier "alias over `target` with a Rust `finalize.rs` deliverable-strategy registry" the design sketches is not required to satisfy the MVP acceptance criteria and is deferred.
+Group 2 implements the deliverable, eval, and verify profile as **Python + skill** concerns layered on the existing seams (config block, review router, `fno doctor evals` namespace). The heavier "alias over `target` with a Rust `finalize.rs` deliverable-strategy registry" the design sketches is not required to satisfy the MVP acceptance criteria and is deferred.

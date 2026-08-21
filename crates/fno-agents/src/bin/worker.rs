@@ -24,7 +24,7 @@ fn main() {
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
 
-    // `version [--json]`: report the baked-in build rev so `fno update` can
+    // `version [--json]`: report the baked-in build rev so `fno doctor update` can
     // verify this bin is the SAME build as its triad siblings. Checked BEFORE
     // the --stream gate so `version` is not rejected as "not --stream".
     if matches!(

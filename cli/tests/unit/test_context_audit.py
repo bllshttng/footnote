@@ -1310,7 +1310,7 @@ def test_helper_runs_under_a_bare_python_with_no_pythonpath(tmp_path: Path) -> N
     step no-opped in silence, collect then found no directory to lock, and no
     snapshot was ever emitted.
 
-    The suite hid this because ``fno test`` exports an ABSOLUTE worktree
+    The suite hid this because ``fno doctor test`` exports an ABSOLUTE worktree
     PYTHONPATH that the helper inherited. A relative one does not survive the
     hook's ``cwd`` change, and a real session may have none at all - so this
     strips it rather than trusting the runner's.

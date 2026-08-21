@@ -1,4 +1,4 @@
-"""The manual `fno event gate-escape` verb + the rebase stale-base nudge (x-91b5).
+"""The manual `fno doctor event gate-escape` verb + the rebase stale-base nudge (x-91b5).
 
 Covers AC1-ERR (fail-closed enum), AC2-HP (manual tag counts), AC2-INV (dedup),
 and AC1-UI (the rebase nudge is advisory-only - a note, never an event).

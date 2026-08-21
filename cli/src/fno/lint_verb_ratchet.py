@@ -1,7 +1,7 @@
 """Verb-surface ratchet: hold the REAL verb count down against a checked-in
 baseline.
 
-``fno lint menu-caps`` caps what ``fno --help`` ADVERTISES. It does not cap what
+``fno doctor lint menu-caps`` caps what ``fno --help`` ADVERTISES. It does not cap what
 EXISTS, so the real surface grew to hundreds of leaves while the menu stayed at
 9. This module is the missing counterweight: a checked-in baseline of every
 invocable leaf verb (``scripts/ci/verb-baseline.txt``) and a diff that fails when
@@ -239,7 +239,7 @@ def _assert_python_source_matches_repo() -> None:
             "so the surface enumerated here does not describe the baseline being "
             f"read or written.\n  imported: {pkg_dir}\n  expected: {expected}\n"
             "  A bare `fno` runs the INSTALLED package; the baseline belongs to the "
-            "checkout. Re-run as:  uv run --project cli fno-py lint verb-ratchet "
+            "checkout. Re-run as:  uv run --project cli fno-py doctor lint verb-ratchet "
             "[--update]\n  (Refusing rather than guessing: this silently emitted a "
             "byte-identical baseline plus a success line, which is how a new verb "
             "reached CI unbaselined.)"
@@ -376,7 +376,7 @@ def iter_python_leaves():
 def enumerate_python_leaves() -> list[str]:
     """Every leaf verb the fno-py registry exposes, visible and hidden.
 
-    Mirrors the introspection ``fno lint menu-caps`` uses but recurses to leaves
+    Mirrors the introspection ``fno doctor lint menu-caps`` uses but recurses to leaves
     instead of stopping at group names, and includes hidden commands. An entry
     whose module will not import is a HARD failure here, not the skip menu-caps
     does: a verb must not leave the baseline by breaking.
@@ -812,7 +812,7 @@ _HEADER = """\
 # is why it is written here rather than learned twice.
 #
 # To regenerate after an intentional change:
-#   uv run --project cli fno-py lint verb-ratchet --update
+#   uv run --project cli fno-py doctor lint verb-ratchet --update
 # then commit this file in that PR. Run it that way, not as a bare `fno`: a bare
 # `fno` enumerates the INSTALLED package while writing this checkout's file, and
 # a verb that exists only in source is missed. The lint refuses that combination
@@ -920,7 +920,7 @@ def check() -> CheckReport:
     if added_verbs:
         parts.append("  Added (in the code, not the baseline): " + ", ".join(added_verbs))
         parts.append("    A verb cannot be added silently. Regenerate with")
-        parts.append("    `uv run --project cli fno-py lint verb-ratchet --update`,")
+        parts.append("    `uv run --project cli fno-py doctor lint verb-ratchet --update`,")
         parts.append("    commit this file in the PR,")
         parts.append("    and add a PR-body line:  verb-exception: <rationale>")
     if added_flags:
@@ -928,13 +928,13 @@ def check() -> CheckReport:
             "  Added hidden options (in the code, not the baseline): " + ", ".join(added_flags)
         )
         parts.append("    A hidden option cannot be added silently. Regenerate with")
-        parts.append("    `uv run --project cli fno-py lint verb-ratchet --update`,")
+        parts.append("    `uv run --project cli fno-py doctor lint verb-ratchet --update`,")
         parts.append("    commit this file in the PR,")
         parts.append("    and add a PR-body line:  flag-exception: <rationale>")
     if removed_verbs:
         parts.append("  Removed (in the baseline, not the code): " + ", ".join(removed_verbs))
         parts.append(
-            "    Regenerate with `uv run --project cli fno-py lint verb-ratchet "
+            "    Regenerate with `uv run --project cli fno-py doctor lint verb-ratchet "
             "--update` and commit the baseline."
         )
     if removed_flags:
@@ -942,7 +942,7 @@ def check() -> CheckReport:
             "  Removed hidden options (in the baseline, not the code): " + ", ".join(removed_flags)
         )
         parts.append(
-            "    Regenerate with `uv run --project cli fno-py lint verb-ratchet "
+            "    Regenerate with `uv run --project cli fno-py doctor lint verb-ratchet "
             "--update` and commit the baseline."
         )
     parts.append("  If two PRs each add a verb or hidden option, both edit this file; the")

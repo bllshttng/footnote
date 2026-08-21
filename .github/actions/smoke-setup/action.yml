@@ -1,6 +1,6 @@
 name: smoke-setup
 description: >
-  Provision a runner for `fno test smoke`. Shared by the clean and dirty
+  Provision a runner for `fno doctor test smoke`. Shared by the clean and dirty
   ambient lanes so the two cannot drift on what a smoke run is given.
 
 # Why a composite action rather than two copies of these steps: the dirty lane
@@ -72,7 +72,7 @@ runs:
           ${{ runner.os }}-cargo-journey-
 
     - name: Build the Rust front (verb-surface ratchet)
-      # `fno lint verb-ratchet` covers BOTH binaries and fails closed when the
+      # `fno doctor lint verb-ratchet` covers BOTH binaries and fails closed when the
       # front is unreachable, so the smoke job has to supply it: the toolchain
       # above is provisioned for fno-agents, which is a separate crate with its
       # own target dir. Handed over by explicit path rather than added to PATH,

@@ -27,7 +27,7 @@ Two functions:
     ``pytest`` is covered too.
 
 ``poison(env, fixtures)``
-    What ``fno test smoke --ambient dirty`` feeds the RUNNER. ``_child_env``
+    What ``fno doctor test smoke --ambient dirty`` feeds the RUNNER. ``_child_env``
     then neutralises that poisoned parent to build the child env. If this
     inventory is complete the child is identical to the clean lane and the
     dirty lane is green; if a name is missing it survives into the child, a
@@ -414,7 +414,7 @@ def neutralise(
 # `git config --global` today, but breaking that is not worth the byte saved.
 _GIT_IDENTITY = """\
 [user]
-\tname = fno test
+\tname = fno doctor test
 \temail = fno-test@localhost
 [init]
 \tdefaultBranch = main

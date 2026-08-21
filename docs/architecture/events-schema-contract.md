@@ -267,7 +267,7 @@ Declared join pairs must use the same retention class. If either side is missing
 
 The minimum ephemeral horizon is 672 hours because `human_touch` and claim context feed the scoreboard's default 28-day window.
 
-`fno event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
+`fno doctor event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
 
 It also refuses the cross-project global daemon journal. That journal is shared by every project on the machine, so a single project's TTL policy must not rewrite it.
 
@@ -282,9 +282,9 @@ When a worktree journal is a symlink, collection resolves and rewrites its targe
 Collection also holds the canonical offer-cursor mutex, maps the consumed byte prefix onto the compacted journal, and publishes an inode-pinned pending mapping before replacement. The offer hook can then finish an interrupted cursor update without skipping a pending offer.
 
 ```bash
-fno event gc --dry-run
-fno event gc
-fno event gc --events /path/to/.fno/events.jsonl --ttl-hours 672
+fno doctor event gc --dry-run
+fno doctor event gc
+fno doctor event gc --events /path/to/.fno/events.jsonl --ttl-hours 672
 ```
 
 ### `mission_started` / `wave_advanced` / `mission_complete`
@@ -360,7 +360,7 @@ Both validators load the same YAML manifest and enforce the same
 shape. Run them against the parity corpus on every PR:
 
 ```bash
-fno test cli/tests/events/test_validator_parity.py
+fno doctor test cli/tests/events/test_validator_parity.py
 bash tests/events/test-bash-validator.sh
 cargo test --manifest-path crates/fno-agents/Cargo.toml verify_evidence::tests --lib
 ```

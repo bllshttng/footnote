@@ -867,7 +867,7 @@ def test_bounce_bootstrap_failure_is_reported(tmp_launch_agents):
 def test_bounce_bootstrap_retries_past_bootout_race(tmp_launch_agents):
     """`launchctl bootout` is async: a bootstrap fired too soon fails (rc=5)
     while the label is still settling. The bounce must retry and then succeed,
-    not report a spurious failure (the `fno update` pr-watch refresh rc=5)."""
+    not report a spurious failure (the `fno doctor update` pr-watch refresh rc=5)."""
     m = _install()
     calls: list[tuple] = []
     # bootstrap fails once (rc=5, label still present), then succeeds.

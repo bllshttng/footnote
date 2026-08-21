@@ -16,7 +16,7 @@ requires:
 | Type | Finish line (the mechanical "green") | What runs |
 |------|--------------------------------------|-----------|
 | `pr` | PR exists + CI green + required bot reviewed, no unaddressed blocking finding (`DonePRGreen`) | the `/pr` router (`create` / `check` / `merged`) |
-| `doc` (alias `artifact`) | brief written to `config.research.output_dir` + `fno evals grade` green (`DoneAdvisory`) | [doc.md](references/doc.md), in this same context |
+| `doc` (alias `artifact`) | brief written to `config.research.output_dir` + `fno doctor evals grade` green (`DoneAdvisory`) | [doc.md](references/doc.md), in this same context |
 
 ## The membership test (load-bearing)
 

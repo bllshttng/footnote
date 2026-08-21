@@ -453,7 +453,7 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(f"unknown status: {status!r} (allowed: {allowed_statuses})")
 
     # Enforce the data.source enum for session_satisfied + auto_complete_triggered
-    # at validate() time so shell callers using `fno event emit --type ... --data ...`
+    # at validate() time so shell callers using `fno doctor event emit --type ... --data ...`
     # (which routes through _build -> validate) can't silently land a typo. The
     # typed builders enforce the same enum at call time, but the schema-validator
     # is the chokepoint that catches all paths including the generic emit CLI.
@@ -758,7 +758,7 @@ def phase_0_decision(
     measurement-gated phases). Routes through ``_build`` so the canonical
     ``data`` envelope is used and the event passes schema validation.
 
-    As of ab-a1118224 the ``fno event emit`` CLI subcommand also routes
+    As of ab-a1118224 the ``fno doctor event emit`` CLI subcommand also routes
     through ``_build`` + ``append_event``, so generic callers can now use
     either path. This typed builder is preferred for code paths that
     construct the event in Python (it enforces the decision enum at build
@@ -836,7 +836,7 @@ def mail_escalation(
     overlay renders it squadless-live, so the nudge survives even when the OS
     notifier was missed or unavailable. The ``reason`` enum is enforced here at
     build time (same chokepoint rationale as the other enum-bearing events); the
-    generic ``fno event emit`` CLI reaches ``validate()`` too, where the same
+    generic ``fno doctor event emit`` CLI reaches ``validate()`` too, where the same
     enum is checked so a shell typo cannot land.
     """
     if reason not in MAIL_ESCALATION_REASONS:

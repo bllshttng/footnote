@@ -159,7 +159,26 @@ delivery	KEEP	delivery	7	single-leaf group
 dispatch capabilities	T1	dispatch capabilities	0
 dispatch one	T1	dispatch one	9
 dispatch resolve	T1	dispatch resolve	23
-doctor	KEEP	doctor	78	single-leaf group
+doctor bundle check	T1	doctor bundle check	8
+doctor bundle lint	T1	doctor bundle lint	1
+doctor codemap	T1	doctor codemap	18
+doctor evals grade	T1	doctor evals grade	11
+doctor evals graduate	T1	doctor evals graduate	2
+doctor evals report	T1	doctor evals report	1
+doctor evals run	T1	doctor evals run	3
+doctor event audit	T1	doctor event audit	5
+doctor event emit	T1	doctor event emit	37
+doctor event fanout tick	T1	doctor event fanout tick	0
+doctor event gate-escape	T1	doctor event gate-escape	2
+doctor event gc	T1	doctor event gc	4
+doctor event push-parent	T1	doctor event push-parent	2
+doctor lint	T1	doctor lint	39
+doctor observer replay	T1	doctor observer replay	2
+doctor observer sweep	T1	doctor observer sweep	4
+doctor skill-diff reconcile	T1	doctor skill-diff reconcile	1
+doctor skill-diff tick	T1	doctor skill-diff tick	4
+doctor test	T1	doctor test	107
+doctor update	T1	doctor update	109
 done	KEEP	done	48	single-leaf group
 evals grade	T1	evals grade	11
 evals graduate	T1	evals graduate	2

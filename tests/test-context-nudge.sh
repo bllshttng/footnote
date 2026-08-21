@@ -433,7 +433,7 @@ assert_absent   "gate: path -> no operator fallback"      "$OUT" 'ask your opera
 assert_contains "gate: path is not a landing" "$OUT" 'A path is not a landing'
 
 # unmeasurable: the check could not resolve at all, so the hook must claim NEITHER
-# verdict. This is the live case until the next `fno update`: the probe shells the
+# verdict. This is the live case until the next `fno doctor update`: the probe shells the
 # DEPLOYED fno-agents binary, and one too old to carry --probe answers
 # 'unmeasurable: probe-unavailable'.
 #

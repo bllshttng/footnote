@@ -47,10 +47,10 @@ from fno._lazy_group import make_lazy_group_cls
 # Tier discipline (x-71b6, "In-N-Out menu"): `fno --help` advertises a small
 # curated menu; everything else is hidden (invocable, just not listed). The
 # advertised set is `help`, `setup`, `backlog`, `agents`, `whoami`, `doctor`,
-# `test`, `config`, `update` (9). `help` / `cost` / `review` are eager inline
+# `config` (7). `help` / `cost` / `review` are eager inline
 # commands above; `cost` and `review` carry `hidden=True` on their decorators.
 # Everything hidden here is one `fno help --all` away. New verbs default to
-# hidden; promotion to the menu is a deliberate, lint-gated act (see fno lint).
+# hidden; promotion to the menu is a deliberate, lint-gated act (see fno doctor lint).
 LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     # Sub-apps (Typer instances) -----------------------------------------
     "do": (
@@ -229,7 +229,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "doctor": (
-        "fno.doctor:doctor_command",
+        "fno.doctor_cli:doctor_app",
         "Diagnose installed-vs-source fno skew (network-free).",
     ),
     "done": ("fno.done.cli:done_command", "Mark a backlog node as done.", {"hidden": True}),
@@ -246,8 +246,13 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "test": (
         "fno.test_cmd:test_command",
         "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code.",
+        {"hidden": True},
     ),
-    "update": ("fno.update:update_command", "Reinstall fno from its source directory."),
+    "update": (
+        "fno.update:update_command",
+        "Reinstall fno from its source directory.",
+        {"hidden": True},
+    ),
     "restart": (
         "fno.restart:restart_command",
         "Restart running fno processes (agents daemon; mux with --mux) onto fresh builds.",
@@ -275,6 +280,7 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "config": {"accounts", "get", "set"},
     "dispatch": set(),
     "do": set(),
+    "doctor": set(),
     "evals": set(),
     "event": {"emit"},
     "loops": {"resume-all"},
@@ -399,7 +405,7 @@ class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[m
     the registry at render time - lazy entries resolve to a hidden-aware stub
     with no module import, so `fno --help` stays fast and works from a bare
     install. The leaf count lives in scripts/ci/verb-baseline.txt (and the
-    `fno lint verb-ratchet` output) for anyone who wants the full surface.
+    `fno doctor lint verb-ratchet` output) for anyone who wants the full surface.
     """
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
@@ -549,7 +555,7 @@ command is about" and differs by family:
   fno backlog capture add               -p priority   (-s source, -w where)
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
   fno gate verify                       -p phase      (-s state, -x strict)
-  fno event emit                        -t type       (-d data, -s source)
+  fno doctor event emit                 -t type       (-d data, -s source)
   fno mail send                         -k kind       (-b body; --to-project long-only)
   fno done                              -p pr-number  (-l link, -m note)
   fno carveout add                      -k kind       (-p priority)

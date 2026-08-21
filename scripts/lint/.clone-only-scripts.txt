@@ -1,4 +1,4 @@
-# CLONE_ONLY_SCRIPTS - the allowlist for `fno lint shellout-drift` (US4, ab-acbde274).
+# CLONE_ONLY_SCRIPTS - the allowlist for `fno doctor lint shellout-drift` (US4, ab-acbde274).
 #
 # Every repo-root script that a `cli/src/fno/` verb still shells out to MUST be
 # listed here, and each entry's verb MUST degrade on a bare `pip install fno`
@@ -24,20 +24,20 @@
 # every plugin-script call site uses). A verb that roots a shell-out via a
 # private `git rev-parse` helper instead is invisible to the guard; the correct
 # fix is to re-root it on the shared resolver and add a degrade branch + an
-# allowlist entry below (as `fno lint flock-pattern` now does), not to leave it
+# allowlist entry below (as `fno doctor lint flock-pattern` now does), not to leave it
 # private and unlisted.
 
 # fno do target init - bootstraps the pipeline session manifest; only meaningful
 # when the plugin's skills + hooks are present.
 hooks/helpers/init-target-state.sh :: target init --input drift-probe
 
-# fno bundle {build,check,lint} - operate on the plugin's skills/ source tree.
+# fno doctor bundle {build,check,lint} - operate on the plugin's skills/ source tree.
 scripts/generate-skill-bundles.sh :: bundle
 scripts/lint/check-skill-bundles-fresh.sh :: bundle check
 scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 
 
-# fno lint flock-pattern - repository linting script remains clone-only and
+# fno doctor lint flock-pattern - repository linting script remains clone-only and
 # degrades with an actionable error when the script is unavailable.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
 
@@ -51,10 +51,10 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 # over the repo's worktree-lifecycle script.
 scripts/lib/worktree-lifecycle.sh :: worktree status
 
-# fno lint stale-skill-refs - the stale-skill-reference audit gate; operates on
+# fno doctor lint stale-skill-refs - the stale-skill-reference audit gate; operates on
 # the repo's skills/ source tree (re-homed from `fno consolidation audit`, x-71b6).
 scripts/ci/check-no-stale-skill-refs.sh :: lint stale-skill-refs
 
-# fno lint flock-pattern - lints the repo's own source for open-coded agent
+# fno doctor lint flock-pattern - lints the repo's own source for open-coded agent
 # flock + registry re-read patterns; only meaningful in a clone.
 scripts/lint-flock-pattern.sh :: lint flock-pattern

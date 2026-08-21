@@ -1107,7 +1107,7 @@ struct View {
     /// mutation guarded by `ConnectionsView::acting`.
     #[allow(clippy::type_complexity)]
     conn_action: Option<(Vec<String>, Vec<(String, String)>, bool)>,
-    /// The last `fno update --check` probe's outcome, or
+    /// The last `fno doctor update --check` probe's outcome, or
     /// `None` before the first one lands. `build_sideline_menu` reads this
     /// directly rather than waiting on a fresh probe, so the menu always
     /// opens instantly (Locked Decision 4).
@@ -2031,7 +2031,7 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
-/// The client's view of `fno update --check`'s payload - only
+/// The client's view of `fno doctor update --check`'s payload - only
 /// the fields the menu row and overlay render. `#[serde(default)]` on
 /// `changelog` tolerates an absent key rather than failing the whole parse;
 /// every other field is required, so a shape the Python resolver no longer
@@ -2047,7 +2047,7 @@ struct UpdateReadiness {
     degraded: Option<String>,
 }
 
-/// The result of one `fno update --check` probe: parsed
+/// The result of one `fno doctor update --check` probe: parsed
 /// readiness, or a degraded reason (missing binary, non-zero exit, timeout,
 /// unparseable JSON). Mirrors `connections_view::ReadOutcome` (Locked
 /// Decision 4) - the TUI computes nothing beyond folding this into rows.
@@ -2065,7 +2065,7 @@ enum UpdateOutcome {
 /// that worst case rather than racing it.
 const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 
-/// Run `fno update --check` off the UI loop and fold it into an
+/// Run `fno doctor update --check` off the UI loop and fold it into an
 /// [`UpdateOutcome`]. Mirrors `connections_view::read_json` exactly (Locked
 /// Decision 4): the event loop never blocks on this subprocess: a
 /// timeout, non-zero exit, or unparseable JSON all degrade rather than hang
@@ -2077,7 +2077,7 @@ const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(30_000);
 /// probe degrade (P1, codex on PR #881).
 async fn probe_update_readiness() -> UpdateOutcome {
     let fut = tokio::process::Command::new(crate::server::fno_bin())
-        .args(["update", "--check"])
+        .args(["doctor", "update", "--check"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -22556,7 +22556,7 @@ mod tests {
         assert!(!none_modal.popup.rows.is_empty());
     }
 
-    /// The client-side JSON contract with `fno update --check`'s
+    /// The client-side JSON contract with `fno doctor update --check`'s
     /// payload shape (`cli/src/fno/update.py::update_readiness`).
     #[test]
     fn update_readiness_deserializes_the_real_payload_shape() {

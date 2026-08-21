@@ -358,7 +358,7 @@ pub fn spawn_cap_would_emit(get: impl Fn(&str) -> Option<String>) -> bool {
 
 /// Auto-emit `gate_escape{reason:spawn-cap}` on an operator bypass of THIS gate
 /// (`FNO_SPAWN_GATE=0`) outside a test context (Locked Decision 2). Best-effort:
-/// shells the shared `fno event gate-escape` verb (which owns the dedup key +
+/// shells the shared `fno doctor event gate-escape` verb (which owns the dedup key +
 /// canonical-log resolution, one emit path) and ignores every failure so a
 /// spawn is never blocked by telemetry (AC1-FR). The verb, not this shell,
 /// computes the `(reason, session, day)` dedup bucket, so a Rust-emitted and a
@@ -369,6 +369,7 @@ fn maybe_emit_spawn_cap_escape() {
     }
     let _ = std::process::Command::new("fno")
         .args([
+            "doctor",
             "event",
             "gate-escape",
             "spawn-cap",

@@ -140,10 +140,10 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 ## Where the check runs
 
 - `fno mail send` rejects a body that breaks the rules.
-- Run `fno lint style --surface pr-body --stdin` to check a PR body by hand.
-- Run `fno lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
-- A PR comment has no chokepoint. Run `fno lint style --surface comment --stdin` yourself.
+- Run `fno doctor lint style --surface pr-body --stdin` to check a PR body by hand.
+- Run `fno doctor lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
+- A PR comment has no chokepoint. Run `fno doctor lint style --surface comment --stdin` yourself.
 
 The comment surface is honest about refusing nothing. A PR comment goes out through `gh pr comment`, which this repo never wraps. A surface that reads as a guard and blocks nothing is worse than no surface at all.
 
-The checker lives in `cli/src/fno/style.py`. Run it directly with `fno lint style`.
+The checker lives in `cli/src/fno/style.py`. Run it directly with `fno doctor lint style`.

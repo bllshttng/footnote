@@ -138,7 +138,7 @@ Maximum rework attempts per item: 2. After that, add it to the blocked list and 
 After the keep/revert/rework decision, append one `builder_step` to `.fno/events.jsonl` so a resume or self-handoff successor picks up from the attempt trail instead of repeating a failed approach. One crumb per iteration, at the boundary - never per tool call. Map the loop's own result: kept -> `worked`, reverted -> `failed`, blocked-after-rework -> `abandoned`.
 
 ```bash
-fno event emit --type builder_step \
+fno doctor event emit --type builder_step \
   -d '{"node_id":"<current node id>","tried":"<the fix attempted>","found":"<what detection/guard showed>","fix":"<the change made>","outcome":"worked|failed|abandoned"}' \
   || echo "warning: builder_step crumb not recorded (continuing)" >&2
 ```

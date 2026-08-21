@@ -77,7 +77,7 @@ Module load rather than a fixture because `fno.graph` freezes its path constants
 
 Neutralising alone cannot detect a test that reads ambient state, because afterwards there is none to read.
 
-`fno test smoke --ambient clean|dirty|both` (default `clean`).
+`fno doctor test smoke --ambient clean|dirty|both` (default `clean`).
 
 `dirty` poisons the **runner's** environment, and `_child_env` then neutralises that poisoned parent to build each child env.
 
@@ -109,11 +109,8 @@ A dirty-lane failure of the canary is never something to fix by pinning it.
 
 ## CI
 
-`smoke` is the merge gate. A separate `smoke-dirty` CI job used to rerun the full suite under synthetic ambient state beside it, advisory. Its full history (122 runs, 2026-08-11 to 2026-08-19) caught zero real ambient leaks. It was deleted rather than kept as a second 1500s+ full-suite run for no observed signal. The hermeticity fixture and `cli/tests/unit/test_ambient_canary.py` keep running inside `smoke` itself. `fno test smoke --ambient dirty` (see above) still exists for local verification and `tests/ci/test_hermetic_lanes.sh`. If a future ambient leak surfaces some other way, narrow a lane to the tests that can observe it rather than reviving the full-suite rerun.
+`smoke` is the merge gate. A separate `smoke-dirty` CI job used to rerun the full suite under synthetic ambient state beside it, advisory. Its full history (122 runs, 2026-08-11 to 2026-08-19) caught zero real ambient leaks. It was deleted rather than kept as a second 1500s+ full-suite run for no observed signal. The hermeticity fixture and `cli/tests/unit/test_ambient_canary.py` keep running inside `smoke` itself. `fno doctor test smoke --ambient dirty` (see above) still exists for local verification and `tests/ci/test_hermetic_lanes.sh`. If a future ambient leak surfaces some other way, narrow a lane to the tests that can observe it rather than reviving the full-suite rerun.
 
 ## The uncovered path
 
-Hermeticity is applied by the **runner**.
-`bash tests/whatever.sh` skips it, and that run reads your real `HOME`, config chain and carve-out ledger: a pass proves nothing about hermeticity, and a failure may be your machine.
-`tests/README.md` and `fno test smoke --help` both say so, at the two places someone stands when they do it.
-Closing it properly would mean a per-file header enforced by a lint across 131 shell harnesses; that has not been done.
+Hermeticity is applied by the **runner**. `bash tests/whatever.sh` skips it and reads your real `HOME`, config chain, and carve-out ledger. A pass proves nothing about hermeticity. A failure can come from your machine. When someone runs these paths, `tests/README.md` and `fno doctor test smoke --help` both state the limitation. Closing it properly requires a per-file header enforced across 131 shell harnesses. That has not been done.

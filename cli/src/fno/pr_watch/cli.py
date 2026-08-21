@@ -61,7 +61,7 @@ def _emit_event(
     """Append a canonical event envelope to events.jsonl.
 
     Uses fno.events._build + fno.events.append_event (the same path the
-    ``fno event emit`` CLI verb uses internally).  On failure, logs a warning
+    ``fno doctor event emit`` CLI verb uses internally).  On failure, logs a warning
     instead of silently passing so the failure is observable.
 
     When no explicit ``events_path`` is given, defaults to
@@ -821,7 +821,7 @@ def install(
 def refresh() -> None:
     """Re-render the plist onto the current binary and bounce the watcher.
 
-    Non-interactive, no confirm prompt: this is the tail of ``fno update`` (so
+    Non-interactive, no confirm prompt: this is the tail of ``fno doctor update`` (so
     an update leaves an enabled watcher running the freshly-installed binary),
     and is safe to run by hand. A no-op when ``pr_watch.enabled`` is false, so
     an install that does not use the watcher gets nothing. Never fails loud:

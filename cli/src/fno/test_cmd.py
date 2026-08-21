@@ -1,4 +1,4 @@
-"""`fno test [pytest-args...]` / `fno test rust [cargo-args...]` - run a suite
+"""`fno doctor test [pytest-args...]` / `fno doctor test rust [cargo-args...]` - run a suite
 honestly AND tersely.
 
 Footguns this verb encodes (tribal knowledge made runtime behavior):
@@ -7,7 +7,7 @@ Footguns this verb encodes (tribal knowledge made runtime behavior):
    from the main checkout), not the worktree's own source. We pin
    `PYTHONPATH=<repo>/cli/src` so a worktree tests what it changed.
 2. rtk rewrites a bare `pytest`/`cargo` into a wrapped run that has stalled for
-   12+ minutes with zero output. `fno test` spawns the runner directly and sets
+   12+ minutes with zero output. `fno doctor test` spawns the runner directly and sets
    `RTK_DISABLED=1` in the child env so nothing re-wraps it.
 3. `... | tail && echo OK` masks the real exit code (false green). We propagate
    the child's *actual* return code.
@@ -61,7 +61,7 @@ _SANDBOX: Optional[Path] = None
 
 
 def _sandbox() -> Path:
-    """One throwaway state root per `fno test` process, reaped at exit."""
+    """One throwaway state root per `fno doctor test` process, reaped at exit."""
     global _SANDBOX
     if _SANDBOX is None:
         _SANDBOX = Path(tempfile.mkdtemp(prefix="fno-test-sandbox-"))
@@ -151,7 +151,7 @@ def _child_env(root: Path) -> dict:
     if _AMBIENT_MODE == "dirty":
         parent = poison(os.environ, _poison_fixtures(root))
     env = neutralise(parent, _sandbox())
-    # A nested `fno test` can run inside an outer xdist worker. Its child is a
+    # A nested `fno doctor test` can run inside an outer xdist worker. Its child is a
     # fresh pytest controller, not that worker, so inherited transport markers
     # make pytest-xdist send session-finish over a closed channel and strand the
     # outer suite in teardown.
@@ -184,7 +184,7 @@ def _run_captured(cmds: Sequence[Sequence[str]], env: dict, log: Path) -> int:
             try:
                 proc = subprocess.run(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT)
             except OSError as exc:
-                sys.stderr.write(f"fno test: failed to run {cmd[0]}: {exc}\n")
+                sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
             if proc.returncode != 0:
                 rc = proc.returncode
@@ -235,7 +235,7 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
         except OSError as exc:
             # FileNotFoundError (missing) AND PermissionError (present but not
             # executable) are both OSError; either means we could not run it.
-            sys.stderr.write(f"fno test: failed to run interpreter {interp}: {exc}\n")
+            sys.stderr.write(f"fno doctor test: failed to run interpreter {interp}: {exc}\n")
             return 127
         return proc.returncode
     return _run_captured([cmd], env, _log_path(root))
@@ -260,7 +260,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
     else:
         manifests = sorted((root / "crates").glob("*/Cargo.toml"))
         if not manifests:
-            sys.stderr.write(f"fno test rust: no crates/*/Cargo.toml under {root}\n")
+            sys.stderr.write(f"fno doctor test rust: no crates/*/Cargo.toml under {root}\n")
             return 2
         cmds = [[*base, "--manifest-path", str(m), *cargo_args] for m in manifests]
 
@@ -271,7 +271,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
             try:
                 proc = subprocess.run(cmd, env=env)
             except OSError as exc:
-                sys.stderr.write(f"fno test: failed to run {cmd[0]}: {exc}\n")
+                sys.stderr.write(f"fno doctor test: failed to run {cmd[0]}: {exc}\n")
                 return 127
             if proc.returncode != 0:
                 return proc.returncode
@@ -280,7 +280,7 @@ def _run_rust(args: Sequence[str], stream: bool = False) -> int:
 
 
 # ---------------------------------------------------------------------------
-# fno test smoke - the one authoritative Python + shell smoke entry.
+# fno doctor test smoke - the one authoritative Python + shell smoke entry.
 #
 # Replaces the hand-edited scripts/ci/smoke.sh registry: the structural steps
 # below are the code-owned translation of that file's ~45 step() lines, and
@@ -440,12 +440,12 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash scripts/lint/no-cross-skill-runtime-calls.sh"),
     ("No unwrapped lib scripts", ".", "bash scripts/lint/no-unwrapped-lib-scripts.sh"),
     ("pin-skill generator self-test", ".", "bash tests/test-pin-skill.sh"),
-    ("Agent flock-pattern lint", "cli", "uv run fno-py lint flock-pattern"),
-    ("Provider stderr-merge lint", "cli", "uv run fno-py lint provider-stderr-merge"),
-    ("Repo-root shell-out drift guard (clone-only allowlist)", "cli", "uv run fno-py lint shellout-drift"),
-    ("Spawn-shape lint (single-line argv guard)", "cli", "uv run fno-py lint spawn-paths"),
-    ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py lint menu-caps"),
-    ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py lint verb-ratchet"),
+    ("Agent flock-pattern lint", "cli", "uv run fno-py doctor lint flock-pattern"),
+    ("Provider stderr-merge lint", "cli", "uv run fno-py doctor lint provider-stderr-merge"),
+    ("Repo-root shell-out drift guard (clone-only allowlist)", "cli", "uv run fno-py doctor lint shellout-drift"),
+    ("Spawn-shape lint (single-line argv guard)", "cli", "uv run fno-py doctor lint spawn-paths"),
+    ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py doctor lint menu-caps"),
+    ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py doctor lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
     ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
     ("Registry schema parity selftest", ".", "bash scripts/ci/check-registry-schema-parity.sh --selftest"),
@@ -669,7 +669,7 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 # right every time.
 #
 # A green-fast harness here is silent coverage loss no file edit surfaces.
-# `fno test --census-deferred` runs every entry bounded and exits non-zero the
+# `fno doctor test --census-deferred` runs every entry bounded and exits non-zero the
 # moment one passes inside the 60s tranche, so the set cannot re-accumulate green.
 #
 # Check an entry with the census, NOT with a bare `bash tests/foo.sh`. The census
@@ -827,7 +827,7 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Changed-surface packet (`fno test smoke --changed`).
+# Changed-surface packet (`fno doctor test smoke --changed`).
 #
 # Partial evidence, never full. The selector maps changed paths to a subset of
 # the same work the full runner owns; execution, step naming and exit semantics
@@ -1105,7 +1105,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     rc_head, head_sha = _git(root, "rev-parse", "HEAD")
     candidate = head_sha if rc_head == 0 else "unknown"
     print("smoke: mode=CHANGED SUBSET - partial evidence; the full "
-          "'fno test smoke' gate still decides merge readiness", flush=True)
+          "'fno doctor test smoke' gate still decides merge readiness", flush=True)
     if reason:
         # Overwrite any earlier receipt: leaving the previous run's green in
         # place would let a stale verdict outlive the candidate it described.
@@ -1202,7 +1202,7 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
           f"first_signal={signal:.1f}s", flush=True)
     if verdict == "green":
         print("smoke: CHANGED SUBSET green means the selected packet passed - run "
-              "'fno test smoke' full before the settle-green push", flush=True)
+              "'fno doctor test smoke' full before the settle-green push", flush=True)
 
     receipt.update(verdict=verdict, execution_seconds=round(exec_s, 3),
                    first_signal_seconds=round(signal, 3),
@@ -1280,7 +1280,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     environment. Running a shell test directly (`bash tests/foo.sh`) skips it,
     so that run reads your real HOME, config chain and carve-out ledger; a pass
     there is not evidence the test is hermetic, and a failure may be your
-    machine. `fno test smoke --only '<glob>'` runs the same step hermetically.
+    machine. `fno doctor test smoke --only '<glob>'` runs the same step hermetically.
     """
     root = _repo_root(Path.cwd()) or Path.cwd()
     if any(a in ("-h", "--help") for a in args):
@@ -1402,7 +1402,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
     if retry_fell_back:
         print("smoke: no usable failure record - falling back to FULL run", flush=True)
     if len(selected) != total:
-        print("smoke: SUBSET run - run 'fno test smoke' full before the settle-green push",
+        print("smoke: SUBSET run - run 'fno doctor test smoke' full before the settle-green push",
               flush=True)
 
     miss = _smoke_prereqs([steps[i][2] for i in selected])
@@ -1575,16 +1575,16 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     name="test",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Run the Python suite (default), or a sub-suite: `fno test rust ...` "
-        "(crates) or `fno test smoke [flags]` (the full CI smoke: structural "
-        "steps plus auto-discovered shell harnesses). `fno test "
+        "Run the Python suite (default), or a sub-suite: `fno doctor test rust ...` "
+        "(crates) or `fno doctor test smoke [flags]` (the full CI smoke: structural "
+        "steps plus auto-discovered shell harnesses). `fno doctor test "
         "--census-deferred` runs every _DISCOVERY_DEFERRED entry bounded and "
         "exits non-zero if any passes inside the 60s tranche, so the quarantine "
         "cannot silently hold working tests. The real exit code is "
         "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
         "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
         "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
-        "and masks the exit code. Bare `fno test` runs the Python suite in parallel "
+        "and masks the exit code. Bare `fno doctor test` runs the Python suite in parallel "
         "and captures to .fno/last-test.log (the transcript gets PASS or the failing tail); "
         "--stream restores full inherited-stdio output."
     ),

@@ -121,7 +121,7 @@ FIELD_META: dict[str, Meta] = {
     "post_merge.sync_command": Meta(
         "advanced",
         "Canonical-sync incantation run via `bash -lc` after a merge (e.g. "
-        "`git checkout main && git pull && fno update && fno restart`). Unset = off.",
+        "`git checkout main && git pull && fno doctor update && fno restart`). Unset = off.",
     ),
     "post_merge.sync_paths": Meta(
         "advanced",

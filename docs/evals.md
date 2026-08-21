@@ -1,4 +1,4 @@
-# Eval task bank (`fno evals`)
+# Eval task bank (`fno doctor evals`)
 
 A live-execution eval harness: give the pipeline a known task, run it, grade the result mechanically, and score how reliably it passes. Distinct from the observer (offline corpus replay) and skill-diff eval-after-merge (prompt-diff scoring) - this is live task execution with a pass/fail verdict.
 
@@ -9,7 +9,7 @@ A live-execution eval harness: give the pipeline a known task, run it, grade the
 - `capability` - a hill to climb: a hard task the pipeline currently fails. Failures are informational, not alarms.
 - `regression` - must stay ~100%: a task that used to pass and must keep passing (e.g. the CLI starts, a known-flaky suite is green). Any regression-tier task below 100% fires the **regression alarm**.
 
-A capability task that passes its last N consecutive full runs (default 3) becomes graduation-eligible; `fno evals graduate <id>` retags its YAML to `regression`. Graduation is a reviewed edit (the verb rewrites the file; a human ships the PR), never a silent runtime flip.
+A capability task that passes its last N consecutive full runs (default 3) becomes graduation-eligible. `fno doctor evals graduate <id>` retags its YAML to `regression`. Graduation is a reviewed edit: the verb rewrites the file, and a human ships the PR. It is never a silent runtime flip.
 
 **pass^k reliability.** `--repeat K` runs a task K times. The report shows `pass@1` (single-run success rate) and `pass^k` (every run passed) per task, plus a flake list (tasks that passed sometimes but not always). This turns "we re-run CI and it clears" folklore into a graded flake rate - the CI-flake regression tasks (e.g. the `loop_check` suite) are the first targets.
 
@@ -41,9 +41,9 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 
 | Command | What it does |
 |---|---|
-| `fno evals run [--task ID] [--tier T] [--repeat K] [--provider P]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). |
-| `fno evals report [--since N] [--graduate] [--json]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. |
-| `fno evals graduate <id>` | Retag a capability task's YAML to regression. |
+| `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). |
+| `fno doctor evals report [--since N] [--graduate] [--json]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. |
+| `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 
 Each run executes the task in a disposable worktree via the headless spawn substrate (`fno agents spawn --substrate headless` - never bare `claude -p`, keeping provider rotation and the spawn cap in play), then removes the worktree after grading. A bank task never runs in your working copy. History appends to `~/.fno/evals-history.jsonl` (override via `config.paths.evals_history`).
 
@@ -51,7 +51,7 @@ Each run executes the task in a disposable worktree via the headless spawn subst
 
 **Manual or explicitly scheduled - never auto-on-merge in v1.** Live execution spends real money (each run spawns a worker). Automation is a separate opt-in once the baseline cost per sweep is known. Run it:
 
-- **By hand** during development: `fno evals run --tier regression` before a risky change, or `--repeat 5` on a suspect flaky task.
+- **By hand** during development: `fno doctor evals run --tier regression` before a risky change, or `--repeat 5` on a suspect flaky task.
 - **On a schedule** you own (cron / `fno schedule`) for a periodic regression sweep.
 
 The report has two wired consumers from day one, so the harness is not a write-only artifact:

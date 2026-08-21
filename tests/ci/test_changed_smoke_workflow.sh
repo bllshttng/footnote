@@ -78,14 +78,14 @@ for forbidden, why in (
 # A bare `test smoke` with no subset flag in the changed job would be a second
 # full run wearing the partial job's label.
 bare_full = any(
-    "fno-py test smoke" in line and "--changed" not in line
+    "fno-py doctor test smoke" in line and "--changed" not in line
     for line in changed_run.splitlines()
 )
 check(not bare_full, "changed-smoke never runs an unlabelled full smoke",
       "changed-smoke runs a full smoke under the partial job's name")
 
 # --- the merge gate is unchanged and unsharded ------------------------------
-check("uv run --project cli fno-py test smoke" in smoke_run,
+check("uv run --project cli fno-py doctor test smoke" in smoke_run,
       "smoke keeps the canonical full runner invocation",
       "the full smoke command changed")
 # Every subset flag, not just --changed: swapping the gate to --only or

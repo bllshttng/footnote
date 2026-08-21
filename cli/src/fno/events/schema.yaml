@@ -3747,7 +3747,7 @@ event_types:
           description: "fail_count(before) - fail_count(after) on the top dimension; null until run_id_after lands. STRUCTURAL only on replay pairs (Review Amendment A1)."
 
   - name: gate_escape
-    description: "A human resolved what a gate should have (an oob-merge past an unmet required-bot gate, a spawn-cap bypass, a hand-rebase, a wedge unblock). The autonomy-debt counter (x-f894): retro ranks escapes by reason so the roadmap knows which reliability fix pays first. Telemetry fails OPEN - a failed emit never blocks the host op. Tier-1 (reconcile auto) emits reason=dead-bot; the manual catch-all is `fno event emit --type gate_escape --data '{\"reason\":\"other\",\"detail\":\"...\"}'`."
+    description: "A human resolved what a gate should have (an oob-merge past an unmet required-bot gate, a spawn-cap bypass, a hand-rebase, a wedge unblock). The autonomy-debt counter (x-f894): retro ranks escapes by reason so the roadmap knows which reliability fix pays first. Telemetry fails OPEN - a failed emit never blocks the host op. Tier-1 (reconcile auto) emits reason=dead-bot; the manual catch-all is `fno doctor event emit --type gate_escape --data '{\"reason\":\"other\",\"detail\":\"...\"}'`."
     sources: [backlog, target, daemon, hook, test]
     data:
       required: [reason]
@@ -4172,7 +4172,7 @@ event_types:
     consumers: [fno-agents loop-check, finalize handoff]
 
   - name: king_context_nudge
-    description: "Emitted by hooks/context-nudge.sh (Stop) when a crowned session ends a turn past king_used_pct_trigger. The arming proof the hook's predecessor (arm-handoff-precompact.sh, gated on a pid dead ~1s after init) could never produce: `fno event audit` answers whether the nudge ever fired in a real reign."
+    description: "Emitted by hooks/context-nudge.sh (Stop) when a crowned session ends a turn past king_used_pct_trigger. The arming proof the hook's predecessor (arm-handoff-precompact.sh, gated on a pid dead ~1s after init) could never produce: `fno doctor event audit` answers whether the nudge ever fired in a real reign."
     sources: [hook]
     data:
       required: [used_pct, trigger, crown_level, crown_scope]
@@ -4195,7 +4195,7 @@ event_types:
     consumers: [operator]
 
   - name: session_context_nudge
-    description: "Emitted by hooks/context-nudge.sh (Stop) when any non-crowned session ends a turn past used_pct_trigger (default 50). The every-session generalization of king_context_nudge: the probe already ran for every session at the old crown gate and was discarded, so this stops wasting that reading. `fno event audit` distinguishes a king nudge (king_context_nudge) from a general-session nudge."
+    description: "Emitted by hooks/context-nudge.sh (Stop) when any non-crowned session ends a turn past used_pct_trigger (default 50). The every-session generalization of king_context_nudge: the probe already ran for every session at the old crown gate and was discarded, so this stops wasting that reading. `fno doctor event audit` distinguishes a king nudge (king_context_nudge) from a general-session nudge."
     sources: [hook]
     data:
       required: [used_pct, trigger]

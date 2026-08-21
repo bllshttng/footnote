@@ -1,6 +1,6 @@
 # Completion Model (internals)
 
-The machinery behind the one paragraph in `SKILL.md`'s "Completion: what you do". You rarely need this; read it only when debugging why a `<promise>` did or did not terminate the loop. The actionable contract (promise early, merge per `config.auto_merge`, `fno test`, `fno do pr status`) lives in the skill body.
+This file explains the machinery behind `SKILL.md`'s "Completion: what you do" paragraph. Read it only to debug why a `<promise>` did or did not terminate the loop. The actionable contract (promise early, merge per `config.auto_merge`, `fno doctor test`, `fno do pr status`) lives in the skill body.
 
 ## The immutable manifest
 
@@ -60,7 +60,7 @@ To cancel: `touch .fno/.target-cancelled` (or invoke `/target cancel`). The shim
 
 ## Running tests / reading CI here (x-8b64)
 
-- **Run the Python suite with `fno test [paths...]`**, not a bare `pytest`. It pins `PYTHONPATH` to the worktree source (a bare `pytest` in a worktree imports the *canonical* `fno`), bypasses rtk (a bare `pytest`/`cargo` can stall for minutes under rtk), and returns pytest's **real exit code** (no `... | tail && echo OK`, which masks failures into a false green). For `cargo`, prefix the run with `RTK_DISABLED=1` to take the same scoped rtk bypass.
+- **Run the Python suite with `fno doctor test [paths...]`**, not bare `pytest`. It pins `PYTHONPATH` to the worktree source. A bare `pytest` in a worktree imports the canonical `fno`. It bypasses rtk, which can stall a bare `pytest` or `cargo` for minutes. It returns pytest's **real exit code**. A pipe into `tail` can mask failure as green. For `cargo`, set `RTK_DISABLED=1` for the same scoped bypass.
 - **Read a PR's CI verdict with `fno do pr status <n>`**, not hand-rolled `jq` over `statusCheckRollup` or `gh pr checks` (which disagrees with the rollup). It prints one JSON verdict (`green|red|pending|unknown`) and exits 0/1/2/3 accordingly; an in-progress check reads as pending, a PR with no checks reads as unknown - neither is a false red.
 
 ## What changed (ab-d0337fbc)

@@ -1,4 +1,4 @@
-"""Integration tests for `fno update` IN_PROGRESS guard.
+"""Integration tests for `fno doctor update` IN_PROGRESS guard.
 
 Task 4b.2 of plan 2026-05-14-path-config-impl.
 
@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 from fno.cli import app
 
 _REFUSED_MSG = (
-    "[fno update] refused: target-state.md shows status: IN_PROGRESS. "
+    "[fno doctor update] refused: target-state.md shows status: IN_PROGRESS. "
     "Updating mid-loop risks binary skew across subprocesses. "
     "Pass --force to override."
 )
@@ -98,7 +98,7 @@ def test_ac4b_hp_in_progress_blocks(tmp_path: Path) -> None:
         tmp_path,
         "---\nstatus: IN_PROGRESS\n---\n\nsome content\n",
     )
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 1
     assert _REFUSED_MSG in (result.output or "")
 
@@ -114,7 +114,7 @@ def test_ac4b_hp_complete_allows(tmp_path: Path) -> None:
         tmp_path,
         "---\nstatus: COMPLETE\n---\n\nsome content\n",
     )
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
     assert _REFUSED_MSG not in (result.output or "")
 
@@ -127,7 +127,7 @@ def test_ac4b_hp_complete_allows(tmp_path: Path) -> None:
 def test_ac4b_hp_missing_state_file_allows(tmp_path: Path) -> None:
     """Given no target-state.md exists, update exits 0."""
     # .fno dir doesn't exist at all
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
     assert _REFUSED_MSG not in (result.output or "")
 
@@ -143,7 +143,7 @@ def test_ac4b_edge_force_bypasses(tmp_path: Path) -> None:
         tmp_path,
         "---\nstatus: IN_PROGRESS\n---\n",
     )
-    result = runner.invoke(app, ["update", "--force"])
+    result = runner.invoke(app, ["doctor", "update", "--force"])
     assert result.exit_code == 0
     assert _REFUSED_MSG not in (result.output or "")
 
@@ -159,7 +159,7 @@ def test_ac4b_fr_malformed_state_file_lenient(tmp_path: Path) -> None:
         tmp_path,
         "status: IN_PROGRESS\nno frontmatter here\n",
     )
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     # Lenient: guard should NOT block; exit 0
     assert result.exit_code == 0
     assert _REFUSED_MSG not in (result.output or "")
@@ -183,7 +183,7 @@ def test_ac4b_edge_subdir_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     subdir.mkdir(parents=True)
     # FNO_REPO_ROOT still points to tmp_path (set by autouse), which is what
     # resolve_repo_root() returns. The guard should still find the state file.
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 1
     assert _REFUSED_MSG in (result.output or "")
 
@@ -215,7 +215,7 @@ def test_successful_update_chains_marker_write(
 
     monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
 
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
 
     # The installer is exec'd through the shell so the marker write can be
@@ -251,7 +251,7 @@ def test_update_without_source_rev_skips_marker_chain(
 
     monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
 
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
     # The marker-write chain (printf rev > tmp && mv) must be absent with no rev.
     joined = " ".join(captured.get("args") or [])
@@ -289,7 +289,7 @@ def test_update_without_source_rev_execs_retry_wrapped_install_when_no_refresh(
 
     monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
 
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
     assert captured["file"] == "/bin/sh"  # the retry wrapper needs the shell
     line = captured["args"][2]
@@ -323,7 +323,7 @@ def test_update_pip_fallback_is_not_wrapped_in_the_uv_retry(
 
     monkeypatch.setattr(update_mod.os, "execvp", _fake_execvp)
 
-    result = runner.invoke(app, ["update"])
+    result = runner.invoke(app, ["doctor", "update"])
     assert result.exit_code == 0
     assert captured["file"] != "/bin/sh", "pip must not go through the uv wrapper"
     assert "pip" in captured["args"]

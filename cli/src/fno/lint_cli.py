@@ -1,4 +1,4 @@
-"""Repository lint commands exposed through ``fno lint``."""
+"""Repository lint commands exposed through ``fno doctor lint``."""
 from __future__ import annotations
 
 import ast
@@ -14,7 +14,7 @@ import typer
 
 
 # Eight subcommands became one verb taking the check NAME as an argument, so
-# `fno lint verb-ratchet` still reads and types exactly the same while costing
+# `fno doctor lint verb-ratchet` still reads and types exactly the same while costing
 # one leaf instead of eight. Six of the eight only ever ran in CI, where a
 # distinct leaf per check bought nothing a dict key does not.
 #
@@ -164,7 +164,7 @@ def flock_pattern(dispatch_path: Optional[Path] = None) -> None:
     script = resolve_repo_root() / "scripts" / "lint-flock-pattern.sh"
     if not script.is_file():
         typer.echo(
-            "fno lint flock-pattern: this verb lints the repo's own source and "
+            "fno doctor lint flock-pattern: this verb lints the repo's own source and "
             "needs the footnote checkout's lint scripts, which a bare "
             "`pip install fno` does not ship. Run it from a clone (or install "
             "the plugin).",
@@ -864,7 +864,7 @@ def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
 
     Re-homed from the retired `fno consolidation audit` (x-71b6): a lint gate
-    wearing a command costume belongs under `fno lint`. Thin wrapper over the
+    wearing a command costume belongs under `fno doctor lint`. Thin wrapper over the
     source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
     matches it (0 clean, 1 stale references, 2 script error).
     """
@@ -963,7 +963,7 @@ def registry(as_json: bool = False) -> None:
                 f"(recorded: {', '.join(row['legs_recorded'])})"
             )
         typer.echo(
-            f"fno lint registry: {len(no_handle)} no handle recorded, "
+            f"fno doctor lint registry: {len(no_handle)} no handle recorded, "
             f"{len(unresolvable)} recorded but unresolvable, {ok_count} ok, "
             f"{total} total"
         )
@@ -1017,7 +1017,7 @@ def lint(
     fn_name = CHECKS.get(check)
     if fn_name is None:
         typer.echo(
-            f"fno lint: unknown check {check!r}. Known: {', '.join(sorted(CHECKS))}",
+            f"fno doctor lint: unknown check {check!r}. Known: {', '.join(sorted(CHECKS))}",
             err=True,
         )
         raise typer.Exit(code=2)

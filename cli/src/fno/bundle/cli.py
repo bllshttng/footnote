@@ -1,9 +1,9 @@
-"""fno bundle CLI - thin Typer wrappers around the canonical bundler scripts.
+"""fno doctor bundle CLI - thin Typer wrappers around the canonical bundler scripts.
 
 Surface:
-    fno bundle         -> bash scripts/generate-skill-bundles.sh
-    fno bundle check   -> bash scripts/lint/check-skill-bundles-fresh.sh
-    fno bundle lint    -> bash scripts/lint/no-cross-skill-runtime-calls.sh
+    fno doctor bundle         -> bash scripts/generate-skill-bundles.sh
+    fno doctor bundle check   -> bash scripts/lint/check-skill-bundles-fresh.sh
+    fno doctor bundle lint    -> bash scripts/lint/no-cross-skill-runtime-calls.sh
 
 Each invocation is a thin Typer wrapper that forwards to the canonical bash
 script. The bash scripts remain the single source of truth for bundling
@@ -59,7 +59,7 @@ def _forward(verb: str, extra_args: List[str]) -> int:
         # the install path, never a 127 or traceback. In a clone the script is
         # present and this branch never fires (AC3-HP, in-clone unchanged).
         typer.echo(
-            f"fno bundle {verb}: needs the footnote plugin (skill sources), which "
+            f"fno doctor bundle {verb}: needs the footnote plugin (skill sources), which "
             "a bare `pip install fno` does not ship - there is no skills/ tree "
             "to bundle.\n"
             "Install the plugin and run from its checkout:\n"
@@ -85,21 +85,21 @@ def _verdict(verb: str, rc: int) -> None:
     """Terminal verdict line (x-6a8e).
 
     The same code path that sets the exit code also emits a greppable last line
-    on stdout, so ``fno bundle <verb> | tail`` cannot mask a drift/lint failure
+    on stdout, so ``fno doctor bundle <verb> | tail`` cannot mask a drift/lint failure
     behind the pipe's exit code. An agent piping to bound output reads the
     verdict in the content; the exit code is no longer the only signal. Mirrors
-    the ``PASS``/``FAIL`` line ``fno test`` already prints.
+    the ``PASS``/``FAIL`` line ``fno doctor test`` already prints.
     """
     outcome = "PASS" if rc == 0 else "FAIL"
     suffix = "" if rc == 0 else f" (rc={rc})"
-    typer.echo(f"fno bundle {verb}: {outcome}{suffix}")
+    typer.echo(f"fno doctor bundle {verb}: {outcome}{suffix}")
 
 
 @bundle_app.callback()
 def _default(ctx: typer.Context) -> None:
     """When no subcommand is given, regenerate per-skill bundles from
     skill-bundles.yaml. Equivalent to ``bash scripts/generate-skill-bundles.sh``.
-    Extra args after ``fno bundle`` are forwarded to the script.
+    Extra args after ``fno doctor bundle`` are forwarded to the script.
     """
     if ctx.invoked_subcommand is not None:
         return

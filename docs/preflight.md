@@ -1,46 +1,29 @@
 # CI-parity preflight
 
-Preflight is an OPT-IN rehearsal of CI, never the gate. CI on the PR head decides the merge. A stock config (`config.preflight.required` absent or false) never runs this before a push. For a project that opts in, `scripts/ci/preflight.sh` runs CI's verdict locally before the push, so a local green means a green PR. It kills the push-wait-red-fix loop: each ~10-minute CI round used to surface one new failure. The default is false for two measured reasons. The rehearsal costs 22 to 47 minutes. It also cannot start under the 256-file-descriptor limit launchd hands every spawned worker. On 2026-08-19 six concurrent runs aged past an hour at load average 415 with zero completions. Three workers held green commits blocked only on this gate. On a stock config the pre-push obligation is `cargo fmt --check` for Rust changes plus the tests covering the diff's blast radius. `fno lint style` remains available for voluntary hand runs. Set `preflight.required = true` to restore the mandatory rehearsal per project.
+Preflight is an OPT-IN rehearsal of CI, never the gate. CI on the PR head decides the merge. A stock config (`config.preflight.required` absent or false) never runs this before a push. For a project that opts in, `scripts/ci/preflight.sh` runs CI's verdict locally before the push, so a local green means a green PR. It kills the push-wait-red-fix loop: each ~10-minute CI round used to surface one new failure. The default is false for two measured reasons. The rehearsal costs 22 to 47 minutes. It also cannot start under the 256-file-descriptor limit launchd hands every spawned worker. On 2026-08-19 six concurrent runs aged past an hour at load average 415 with zero completions. Three workers held green commits blocked only on this gate. On a stock config the pre-push obligation is `cargo fmt --check` for Rust changes plus the tests covering the diff's blast radius. `fno doctor lint style` remains available for voluntary hand runs. Set `preflight.required = true` to restore the mandatory rehearsal per project.
 
 This is a different thing from the environment preflight (`fno do target` Step 3g, `skills/target/scripts/preflight/`), which checks working-tree cleanliness, dependencies, and auth. This preflight is a deterministic test/lint runner. It runs no LLM review. Review stays at `config.review.*`.
 
 ## The two scripts
 
-### `fno test smoke` - the step registry
+### `fno doctor test smoke` - the step registry
 
-One ordered list of the cli-ci smoke job's test and lint steps, code-owned in
-`cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned
-shell harnesses. The workflow calls `uv run --project cli fno-py test smoke`
-(`fno test smoke` is the same runner locally), so there is no second copy of
-the list to drift. Environment provisioning (checkout, Python/uv setup, the
-Rust toolchain install, the cargo cache, the system PyYAML install) stays in
-the workflow yaml - those are CI-runner concerns and that divergence is
-deliberate. Everything a test needs at run time (the `uv sync` / `uv build`,
-the `fno-agents` debug build) lives in the runner.
+One ordered list of the cli-ci smoke job's test and lint steps is code-owned in `cli/src/fno/test_cmd.py` (`_STRUCTURAL_STEPS`) plus auto-discovered owned shell harnesses. The workflow calls `uv run --project cli fno-py doctor test smoke`. `fno doctor test smoke` is the same runner locally, so there is no second list to drift. Environment provisioning (checkout, Python/uv setup, the Rust toolchain install, the cargo cache, the system PyYAML install) stays in the workflow yaml. Those are CI-runner concerns, and that divergence is deliberate. Everything a test needs at run time (the `uv sync` / `uv build`, the `fno-agents` debug build) lives in the runner.
 
 Modes:
 
 | Invocation | Behavior |
 |---|---|
-| `fno test smoke` | Fail-fast. Exactly the pre-extraction CI semantics. |
-| `fno test smoke --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
-| `fno test smoke --only '<glob>'` | Run only steps whose name matches the shell glob. |
-| `fno test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
-| `fno test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
-| `fno test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
+| `fno doctor test smoke` | Fail-fast. Exactly the pre-extraction CI semantics. |
+| `fno doctor test smoke --keep-going` | Run every step, print a summary table, record failures, exit non-zero if any failed. |
+| `fno doctor test smoke --only '<glob>'` | Run only steps whose name matches the shell glob. |
+| `fno doctor test smoke --retry-failed` | Re-run only the steps recorded by the last `--keep-going` run; full run if the record is missing or corrupt. |
+| `fno doctor test smoke --list [--verbose]` | Print the registry (names; with `--verbose`, working dir + command) and exit. |
+| `fno doctor test smoke --changed [--base REV --head REV]` | Run only the work the changed paths map to. Explicitly partial: see below. |
 
-The three subset modes (`--changed`, `--only`, `--retry-failed`) are mutually
-exclusive and the runner refuses a combination rather than letting one silently
-win and mislabel the evidence.
+The three subset modes (`--changed`, `--only`, `--retry-failed`) are mutually exclusive. The runner refuses combinations instead of silently mislabeling evidence.
 
-Prerequisites (`uv`, `python3` with `yaml` importable, `cargo` when a selected
-step needs it) are asserted up front and named on failure with exit 2. The
-runner never installs anything at the system level - locally you install PyYAML
-once by hand. A subset run (`--only` / `--retry-failed`) labels itself in the
-header so a partial green can never be mistaken for a full green, and preflight
-records a `mode=FULL verdict=green` attestation only on a full, all-green run,
-so a subset pass can never mint or satisfy one; a run that executes zero steps
-exits non-zero rather than reading as green.
+Prerequisites are asserted up front and named on failure with exit 2. They include `uv`, `python3` with `yaml`, and `cargo` for selected steps. The runner never installs system packages. Install PyYAML once by hand for local runs. A subset run (`--only` / `--retry-failed`) labels itself, so a partial green cannot look full. Preflight records `mode=FULL verdict=green` only after a full, all-green run. A subset pass cannot mint or satisfy that attestation. A zero-step run exits non-zero instead of reading as green.
 
 ### `--changed` - the changed-surface packet
 
@@ -85,11 +68,7 @@ The workflow guard permits a sharded smoke job, but requires an aggregating job 
 
 ### `scripts/ci/preflight.sh` - the hermetic runner
 
-One command to run before pushing, on a project that opted in (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's
-**committed HEAD** inside a persistent, hermetic preflight worktree, then runs
-the changed packet, `fno-py test smoke --keep-going`, and the rust-ci legs
-(pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates,
-advisory `cargo audit`).
+One command runs before pushing on an opted-in project (`preflight.required = true`) or for a worker that chose the rehearsal. It validates the invoking checkout's **committed HEAD** inside a persistent, hermetic preflight worktree. It then runs the changed packet, `fno-py doctor test smoke --keep-going`, and the rust-ci legs. Those legs are pinned `cargo +1.94.1 fmt --check`, `cargo test --all-targets` for both crates, and advisory `cargo audit`.
 
 The changed packet goes first and stops the whole run on its own failure, so a
 broken nearest-neighbour test costs seconds rather than a full suite. It is
@@ -100,42 +79,14 @@ nothing or cannot trust its diff falls through to the full gate instead of
 reporting a verdict it did not earn, and `--retry-failed` skips it as a
 different subset mode. Only the full legs can mint `mode=FULL`.
 
-Why a separate worktree with a scrubbed environment: the canonical checkout's
-`.fno/config.toml` otherwise leaks into the config reader's candidate chain and
-produces local-only failures, which is what pushes agents toward selective
-`-k` subset runs that then miss CI-only failures. The runner resets a dedicated
-worktree to your HEAD and runs it with an environment that mirrors a fresh CI
-checkout: a temp `HOME` (no `~/.fno`, `~/.claude`, or `~/.gitconfig`), `FNO_*`
-scrubbed, the ambient `HARNESS_SESSION_MARKERS` unset, `FNO_NO_CANONICAL_CONFIG=1`
-exported, a worktree-pinned `PYTHONPATH`, and the pytest spawn-leak guard. Cache
-directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`) are deliberately
-re-exported so builds stay warm; the worktree's `target/` and `cli/.venv`
-persist across runs. Hermeticity comes from environment isolation plus a hard
-reset, not from disposing the worktree.
+Why use a separate worktree with a scrubbed environment? Otherwise, canonical `.fno/config.toml` leaks into the candidate chain and produces local-only failures. Those failures push agents toward selective `-k` runs that miss CI-only failures. The runner resets a dedicated worktree to your HEAD. It uses a temporary `HOME`, scrubs `FNO_*`, and unsets ambient harness markers. It also exports `FNO_NO_CANONICAL_CONFIG=1`, pins `PYTHONPATH`, and enables the pytest spawn-leak guard. Cache directories (`CARGO_HOME`, `RUSTUP_HOME`, `UV_CACHE_DIR`) are re-exported to keep builds warm. The worktree's `target/` and `cli/.venv` persist across runs. Hermeticity comes from environment isolation plus a hard reset, not worktree disposal.
 
 **Two ambient leaks a bare `FNO_*` scrub misses, and how they are sealed.** A
 temp `HOME` cannot hide either, because both travel through channels other than
 `HOME`/`cwd`. Both are sealed by preflight-internal seams set only by
 `run_hermetic`, so default and real-worktree behavior is byte-for-byte unchanged:
 
-1. **Ambient harness identity.** Preflight always runs inside a live harness, so
-   `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `CODEX_SESSION_ID` /
-   `GEMINI_SESSION_ID` are set and `resolve_self_model()` would resolve the real
-   session's model instead of the `"unknown"` floor a fresh CI checkout produces.
-   `run_hermetic` unsets every `HARNESS_SESSION_MARKERS` **and**
-   `LEGACY_HARNESS_SESSION_MARKERS` name (derived from the Python tuples that are
-   the single source of truth, fail-closed to a hardcoded literal list with a
-   warning if the fetch errors).
-   Both tuples are read, not just the canonical one: `CLAUDE_SESSION_ID` lives
-   only in the legacy tuple, and `current_session_id()` / `current_session_ids()`
-   both read it, so a canonical-only scrub leaves a live claude session
-   resolvable inside the run whose whole purpose is to look like a fresh
-   checkout. `cli/tests/smoke/test_preflight_hermetic.sh` fails when the
-   derivation drops the legacy tuple or when the fallback literal goes stale,
-   which is the only thing keeping a last-resort copy honest: the fallback runs
-   only when Python cannot, so its gap is invisible wherever anyone is watching.
-   The pytest suite seals the same leak independently in `cli/tests/conftest.py`,
-   because a bare `pytest` skips preflight entirely.
+1. **Ambient harness identity.** Preflight runs inside a live harness. Its canonical and legacy session markers can resolve the real model instead of the fresh-CI `"unknown"` floor. `run_hermetic` unsets every name from both marker tuples before starting tests. The Python tuples are authoritative and fall back to a hardcoded list with a warning. Both are required because `CLAUDE_SESSION_ID` exists only in the legacy tuple and remains readable through the current-session helpers. If derivation drops that tuple or fallback drifts, `cli/tests/smoke/test_preflight_hermetic.sh` fails. The pytest suite seals the same leak independently in `cli/tests/conftest.py`, because a bare `pytest` skips preflight entirely.
 
 2. **The canonical config candidate chain.** A worktree reaches the canonical
    checkout's `.fno/config.toml` through the shared git-common-dir, leaking
@@ -187,7 +138,7 @@ On a stock config the pre-push obligation is the focused checks below, each taki
 - `cargo fmt --check` for rust changes.
 - The tests covering the diff's blast radius.
 
-`fno lint style` remains available for voluntary hand runs. For Markdown, run `fno lint style --surface markdown --files <changed .md> --diff-base origin/main`. It is not part of the stock pre-push or CI gate.
+`fno doctor lint style` remains available for voluntary hand runs. For Markdown, run `fno doctor lint style --surface markdown --files <changed .md> --diff-base origin/main`. It is not part of the stock pre-push or CI gate.
 
 On a project that set `preflight.required = true` (see `skills/target/references/ship-phase.md`):
 
@@ -206,10 +157,10 @@ The runner guard is an existence check (`[[ -x scripts/ci/preflight.sh ]]`). It 
 scripts/ci/preflight.sh                 # full run; reuses a matching attestation if one exists
 scripts/ci/preflight.sh --force         # ignore the cached attestation, run every suite
 scripts/ci/preflight.sh --retry-failed  # fast: only the legs that failed last run
-fno test smoke --keep-going             # non-hermetic, in your working tree
-fno test smoke --changed                # earliest signal: only what your diff maps to
-fno test smoke --changed --list         # what it would run, and what it could not map
-fno test smoke --list                   # what CI actually runs
+fno doctor test smoke --keep-going             # non-hermetic, in your working tree
+fno doctor test smoke --changed                # earliest signal: only what your diff maps to
+fno doctor test smoke --changed --list         # what it would run, and what it could not map
+fno doctor test smoke --list                   # what CI actually runs
 ```
 
-`fno test smoke --keep-going` in your working tree is the fast, non-hermetic option for checking before you commit, the same registry minus the worktree isolation. Preflight refuses a dirty tree on purpose. That direct smoke run is how you check uncommitted work.
+`fno doctor test smoke --keep-going` in your working tree is the fast, non-hermetic option for checking before you commit, the same registry minus the worktree isolation. Preflight refuses a dirty tree on purpose. That direct smoke run is how you check uncommitted work.

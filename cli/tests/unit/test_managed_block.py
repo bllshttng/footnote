@@ -6,7 +6,7 @@ Covers the plan's acceptance criteria:
   AC2-EDGE  a first-time decline is durable (no re-prompt, no file touched)
   US8       fno doctor flags a stale block version (advisory)
 
-Run: fno test -- -k managed_block
+Run: fno doctor test -- -k managed_block
 """
 from __future__ import annotations
 

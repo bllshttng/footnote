@@ -1,8 +1,8 @@
 # ship doc
 
-Ship a research **doc** deliverable to its finish line: a cited brief written to `config.research.output_dir`, with a mechanical green from `fno evals grade`. This is the second ship type that earns the `/ship` umbrella - it has a definable green, the same way `pr` does.
+Ship a research **doc** deliverable to its finish line: a cited brief written to `config.research.output_dir`, with a mechanical green from `fno doctor evals grade`. This is the second ship type that earns the `/ship` umbrella - it has a definable green, the same way `pr` does.
 
-The green for a doc is the three model-free assertions `fno evals grade` makes: (a) zero uncited claims, (b) zero dead source URLs, (c) at least one golden checklist item satisfied per section. No model sits in this gate; the research-verify panel is advisory and never changes the verdict.
+`fno doctor evals grade` makes three model-free assertions for a doc. It requires zero uncited claims and zero dead source URLs. It also requires one golden checklist item per section. No model sits in this gate. The research-verify panel is advisory and never changes the verdict.
 
 **Delivery is mandatory.** "Ship" means the brief lands in `config.research.output_dir`. This mode always delivers there before it reports anything - it never grades or reports GREEN against a brief that was not shipped to `output_dir`. `--no-deliver` (a `fno do research` flag that writes only the local research cache) is therefore rejected here: it would let `/ship doc` report a finish line that does not exist.
 
@@ -48,7 +48,7 @@ fno do research "<topic>" [other allowed flags]
 If `--golden <path>` was given, set `GOLDEN` to that path and run:
 
 ```bash
-fno evals grade --brief "$BRIEF" --golden "$GOLDEN" [--sidecar "$SIDECAR"]
+fno doctor evals grade --brief "$BRIEF" --golden "$GOLDEN" [--sidecar "$SIDECAR"]
 ```
 
 Report the verdict by exit code:

@@ -460,7 +460,7 @@ fn emit_run_summary(
 }
 
 /// Push leg for run_summary (x-dbaf): notify the parent handle. run_summary
-/// emits natively above, so the push shells the Python resolver (`fno event
+/// emits natively above, so the push shells the Python resolver (`fno doctor event
 /// push-parent`) rather than reimplementing registry lookup + mail in Rust.
 /// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
 /// events.jsonl line already landed independently (AC1-FR). `fno` (not a bare
@@ -468,6 +468,7 @@ fn emit_run_summary(
 fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
     let mut cmd = Command::new("fno");
     cmd.args([
+        "doctor",
         "event",
         "push-parent",
         "--type",

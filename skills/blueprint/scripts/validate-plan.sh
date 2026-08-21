@@ -70,7 +70,7 @@ _plan_rung() {
     fi
     set -o pipefail
     if [[ -z "$_out" ]]; then
-        printf "!no fno CLI could answer 'plan rung' (installed fno may predate it; run 'fno update' or 'fno doctor --fix')"
+        printf "!no fno CLI could answer 'plan rung' (installed fno may predate it; run 'fno doctor update' or 'fno doctor --fix')"
         return 0
     fi
     printf '%s' "$_out"
@@ -183,7 +183,7 @@ _semantic_validate() {
         return 2
     fi
     if ! fno do plan validate --help 2>&1 | grep -q -- '--execution'; then
-        echo "installed fno predates semantic plan validation; run 'fno update' or 'fno doctor --fix'" >&2
+        echo "installed fno predates semantic plan validation; run 'fno doctor update' or 'fno doctor --fix'" >&2
         return 2
     fi
     fno do plan validate "$PLAN_DIR" --execution

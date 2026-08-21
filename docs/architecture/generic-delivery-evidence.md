@@ -121,7 +121,7 @@ Tests pin pass-versus-continue behavior and the exact `DonePRGreen` and `DoneAdv
 ## Verification
 
 ```bash
-fno test cli/tests/unit/delivery cli/tests/unit/test_plan_company_contract.py cli/tests/events/test_validator_parity.py cli/tests/events/test_schema_manifest.py cli/tests/test_plan_schema_drift.py
+fno doctor test cli/tests/unit/delivery cli/tests/unit/test_plan_company_contract.py cli/tests/events/test_validator_parity.py cli/tests/events/test_schema_manifest.py cli/tests/test_plan_schema_drift.py
 cargo test --manifest-path crates/fno-agents/Cargo.toml generic_completion
 cargo test --manifest-path crates/fno-agents/Cargo.toml --test finalize_e2e
 ```

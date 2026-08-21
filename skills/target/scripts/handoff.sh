@@ -118,7 +118,7 @@ case "$USED_PCT_TRIGGER" in ''|*[!0-9]*) USED_PCT_TRIGGER="50" ;; esac
 # ---------------------------------------------------------------------------
 # Helper: emit an event to events.jsonl
 # Accepts: emit_event <type> <json-data>
-# fno event emit is the PRIMARY writer (validates kind, takes the file lock).
+# fno doctor event emit is the PRIMARY writer (validates kind, takes the file lock).
 # The bounded shell append is the FALLBACK only when fno exits nonzero
 # (stale binary, unknown kind, daemon unavailable).
 # The preflight at step 1 guarantees fno can emit `delegated`, so in the
@@ -133,9 +133,9 @@ _emit_event() {
   # fno is primary; the bounded shell helper is fallback only when fno fails.
   # Always pass --source target so the envelope is correct even when
   # target-state.md has already been archived (step 4 happens before step 8).
-  if ! fno event emit --type "$etype" --data "$edata" --events "$EVENTS_FILE" \
+  if ! fno doctor event emit --type "$etype" --data "$edata" --events "$EVENTS_FILE" \
        --source target >/dev/null 2>&1; then
-    echo "handoff: WARN: fno event emit failed for type '$etype'; using bounded shell fallback" >&2
+    echo "handoff: WARN: fno doctor event emit failed for type '$etype'; using bounded shell fallback" >&2
     local line
     line=$(printf '{"ts":"%s","type":"%s","source":"target","data":%s}' "$ts" "$etype" "$edata")
     if ! declare -F _append_bounded_event >/dev/null 2>&1 \
@@ -331,7 +331,7 @@ if [ "$_RUNG_EC" -ne 0 ]; then
     # than this verb exits 2 the same way a usage error does, so name the
     # likely cause - a bare "rung 'unknown'" would send the operator hunting
     # through the plan for a problem that is in their PATH.
-    echo "parked $NODE_ID reason=\"'fno do plan rung' did not answer; installed fno may predate it - run 'fno update' or 'fno doctor --fix'\""
+    echo "parked $NODE_ID reason=\"'fno do plan rung' did not answer; installed fno may predate it - run 'fno doctor update' or 'fno doctor --fix'\""
   else
     echo "parked $NODE_ID reason=\"plan rung '$_RUNG' is not dispatchable\""
   fi
@@ -435,7 +435,7 @@ fi
 # Emit-capability preflight: emit `delegated` kind against a throwaway temp file
 _TEMP_EVENTS="$(mktemp)"
 _PREFLIGHT_OK=1
-if ! fno event emit --type "delegated" \
+if ! fno doctor event emit --type "delegated" \
       --data "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"preflight\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN}" \
       --events "$_TEMP_EVENTS" >/dev/null 2>&1; then
   _PREFLIGHT_OK=0
@@ -443,7 +443,7 @@ fi
 rm -f "$_TEMP_EVENTS"
 
 if [ "$_PREFLIGHT_OK" -eq 0 ]; then
-  echo "parked $NODE_ID reason=\"emit preflight failed for 'delegated' kind; stale installed fno? run: fno update\""
+  echo "parked $NODE_ID reason=\"emit preflight failed for 'delegated' kind; stale installed fno? run: fno doctor update\""
   exit "$_EXIT_PARKED"
 fi
 

@@ -95,7 +95,7 @@ With legacy `--post`, it posts under a configured peer identity and satisfies th
 
 Load [research-verify.md](references/research-verify.md) and execute it in full, in this context. That reference is the canonical research-verify process: it dispatches four claim-shaped reviewers (fact-checker / citation-auditor / contradiction-finder / completeness-critic) over a `doc` deliverable (the brief + its `sources.jsonl` sidecar) via the **Task/Agent tool**, never by invoking another skill at runtime.
 
-The research-verify panel is **advisory**: the green/red verdict on a research brief is mechanical and belongs to `fno evals grade` (zero uncited claims, zero dead URLs, ≥1 golden checklist item per section). This panel annotates the brief; it never blocks, flips, or substitutes for the eval.
+The research-verify panel is **advisory**: the green/red verdict on a research brief is mechanical and belongs to `fno doctor evals grade` (zero uncited claims, zero dead URLs, ≥1 golden checklist item per section). This panel annotates the brief; it never blocks, flips, or substitutes for the eval.
 
 ## Step 5: declare mode (self-cert attestation, the escape hatch)
 

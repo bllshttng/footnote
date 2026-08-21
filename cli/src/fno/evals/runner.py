@@ -138,7 +138,7 @@ def _make_disposable_worktree(repo_root: Path, ref: str, tag: str) -> Path:
 
 def _remove_worktree(repo_root: Path, path: Path) -> None:
     # Best-effort: a failed removal must never mask the run's verdict. The next
-    # `fno evals run` sweeps orphans (see sweep_orphans).
+    # `fno doctor evals run` sweeps orphans (see sweep_orphans).
     subprocess.run(
         ["git", "worktree", "remove", "--force", str(path)],
         cwd=str(repo_root), capture_output=True, text=True,

@@ -84,7 +84,7 @@ jobs:
       - name: Real Codex 0.145 plugin boundary
         env:
           FNO_REAL_CODEX_PLUGIN_TEST: "1"
-        run: cli/.venv/bin/fno-py test -q cli/tests/integration/test_codex_plugin_real_boundary.py
+        run: cli/.venv/bin/fno-py doctor test -q cli/tests/integration/test_codex_plugin_real_boundary.py
 
   # Early, explicitly partial feedback. It runs BESIDE the canonical smoke job,
   # never in front of it: no `needs:` edge in either direction, so both start at
@@ -127,7 +127,7 @@ jobs:
           CHANGED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set +e
-          uv run --project cli fno-py test smoke --changed \
+          uv run --project cli fno-py doctor test smoke --changed \
             --base "$CHANGED_BASE" --head "$CHANGED_HEAD"
           rc=$?
           set -e
@@ -170,7 +170,7 @@ jobs:
         uses: ./.github/actions/smoke-setup
 
       - name: Smoke (test + lint registry)
-        # The test/lint steps live in the code-owned `fno test smoke` runner
+        # The test/lint steps live in the code-owned `fno doctor test smoke` runner
         # (cli/src/fno/test_cmd.py) so "run what CI runs" is one command and
         # local/CI parity is structural. Default (no flag) = fail-fast, the
         # pre-extraction semantics; ::group:: markers keep per-step folding in
@@ -185,7 +185,7 @@ jobs:
         run: |
           start=$SECONDS
           trap 'printf "smoke-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
-          uv run --project cli fno-py test smoke
+          uv run --project cli fno-py doctor test smoke
 
       # Static dead-import guard (x-ac5f): a module move down a layer can leave
       # test-only callers on the old `from fno.agents import moved` path that

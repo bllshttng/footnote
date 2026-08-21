@@ -3,7 +3,7 @@
 # (no runner ever read skills/<name>/evals). The skill-local convention is
 # deleted in this change; this bank task is where its assertions now live.
 #
-# Prompt-bearing, so `fno evals run` spawns a live headless worker for it. It is
+# Prompt-bearing, so `fno doctor evals run` spawns a live headless worker for it. It is
 # deliberately NOT wired into CI: it is a manual, budgeted invocation. Five of
 # the seven requirements are behavioural and only a live run judges them; the two
 # mechanically checkable ones (terminal-state, no-dispatch) are the grade.

@@ -3,7 +3,7 @@ name: deferred-census
 # Puts a clock on _DISCOVERY_DEFERRED (cli/src/fno/test_cmd.py).
 #
 # The quarantine list has no expiry of its own: a line goes in during a hurry
-# and nothing makes it come out. `fno test --census-deferred` is the mechanism
+# and nothing makes it come out. `fno doctor test --census-deferred` is the mechanism
 # built to catch that - it runs every held entry bounded and exits non-zero the
 # moment one passes - and until this workflow existed it was a flag a human had
 # to remember to type. Ten entries were sitting green when it was first run by
@@ -73,7 +73,7 @@ jobs:
         # delete its line from _DISCOVERY_DEFERRED (discovery then covers it
         # by shebang). Three entries are known macOS-green / Linux-red and are
         # expected to stay red HERE - see the comment above the set.
-        run: uv run --project cli fno-py test --census-deferred
+        run: uv run --project cli fno-py doctor test --census-deferred
 
       - name: Explain a red census
         if: failure()

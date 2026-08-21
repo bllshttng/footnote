@@ -39,9 +39,15 @@ class Move(NamedTuple):
 
 VERB_MOVES: dict[str, Move] = {
     "approvals": Move(kind="deprecated", to="inbox approvals"),
+    "bundle": Move(kind="deprecated", to="doctor bundle"),
+    "codemap": Move(kind="deprecated", to="doctor codemap"),
     "delivery": Move(kind="deprecated", to="do delivery"),
+    "evals": Move(kind="deprecated", to="doctor evals"),
+    "event": Move(kind="deprecated", to="doctor event"),
+    "lint": Move(kind="deprecated", to="doctor lint"),
     "loops": Move(kind="deprecated", to="do loops"),
     "notify": Move(kind="deprecated", to="inbox notify"),
+    "observer": Move(kind="deprecated", to="doctor observer"),
     "outstanding": Move(kind="deprecated", to="inbox outstanding"),
     "phase": Move(kind="deprecated", to="do phase"),
     "plan": Move(kind="deprecated", to="do plan"),
@@ -55,9 +61,13 @@ VERB_MOVES: dict[str, Move] = {
     "resume": Move(kind="deprecated", to="do resume"),
     "review": Move(kind="deprecated", to="do review"),
     "state": Move(kind="deprecated", to="do state"),
+    "status-fanout": Move(kind="deprecated", to="doctor event fanout"),
     "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
+    "skill-diff": Move(kind="deprecated", to="doctor skill-diff"),
     "target": Move(kind="deprecated", to="do target"),
+    "test": Move(kind="deprecated", to="doctor test"),
     "think": Move(kind="deprecated", to="do think"),
+    "update": Move(kind="deprecated", to="doctor update"),
 }
 
 

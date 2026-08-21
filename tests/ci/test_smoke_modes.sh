@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/ci/test_smoke_modes.sh
 #
-# Exercises `fno test smoke`'s mode machinery (keep-going, failure record,
+# Exercises `fno doctor test smoke`'s mode machinery (keep-going, failure record,
 # --retry-failed, --only, subset labelling) against a tiny hermetic registry
 # via the SMOKE_REGISTRY_FILE / SMOKE_FAILURE_RECORD test seams, so the real
 # ~57 structural steps (and their uv/cargo prerequisites) never run.
@@ -9,7 +9,7 @@
 # Covers AC1-EDGE (keep-going harvests all failures), AC1-UI (summary + header),
 # AC2-FR (subset labelled), AC3-ERR (corrupt/missing record -> full run).
 #
-# The runner is `fno-py test smoke` (the deployed console script, on PATH inside
+# The runner is `fno-py doctor test smoke` (the deployed console script, on PATH inside
 # a smoke run via cli/.venv/bin; falls back to `uv run --project cli fno-py` for
 # a standalone local run).
 
@@ -41,7 +41,7 @@ if [[ -x "$VENVED" ]]; then
 else
     # Absolute --project: the changed-mode cases below run from a throwaway repo,
     # where a relative `cli` would not resolve.
-    RUNNER=(uv run --project "$REPO_ROOT/cli" fno-py test smoke)
+    RUNNER=(uv run --project "$REPO_ROOT/cli" fno-py doctor test smoke)
 fi
 
 FAILS=0

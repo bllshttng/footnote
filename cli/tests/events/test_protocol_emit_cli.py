@@ -1,4 +1,4 @@
-"""Tests for `fno event emit` on the a2a status-breakpoint family (x-dbaf, US2).
+"""Tests for `fno doctor event emit` on the a2a status-breakpoint family (x-dbaf, US2).
 
 Covers the emit-path auto-stamping: envelope coordinates from flags with
 manifest fallback, identity omitted for a non-session (bare-shell) producer,

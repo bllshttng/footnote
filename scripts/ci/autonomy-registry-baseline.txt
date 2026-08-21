@@ -16,7 +16,7 @@ cli/src/fno/backlog/advance.py::_spawn_worker  # advance / dispatch_lanes / epic
 cli/src/fno/backlog/groom.py::_spawn_groom_worker  # groom (config.groom.enabled)
 cli/src/fno/cli.py::  # NOT a spawn site: LAZY_SUBCOMMANDS declares "agents" as a command group
 cli/src/fno/evals/runner.py::_default_spawn  # evals runner (config.evals.enabled)
-cli/src/fno/observer/cli.py::_default_spawn  # NOT autonomous: explicit `fno observer replay` operator command
+cli/src/fno/observer/cli.py::_default_spawn  # NOT autonomous: explicit `fno doctor observer replay` operator command
 cli/src/fno/pr/_ritual.py::_spawn_judgment  # post-merge ritual (config.post_merge.enabled)
 cli/src/fno/pr_watch/_dispatch.py::fire_skill  # pr_watch headless PR poll (config.pr_watch.enabled)
 cli/src/fno/provenance/spawn_think.py::_spawn_think_worker  # spawn_think (config.think_spawn.enabled)
