@@ -1729,9 +1729,64 @@ pub(crate) fn fno_bin() -> PathBuf {
 }
 
 /// How long one `fno config get` may take before it is killed and read as
-/// absent. Bounded because both callers run synchronously on a startup path
-/// with nothing downstream to rescue a wedged read.
+/// absent. Bounded because the sync callers run on a startup path with nothing
+/// downstream to rescue a wedged read.
 const CONFIG_READ_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Read one config key from inside the runtime: same contract as
+/// [`config_get`], but cancellable.
+///
+/// The sync reader must NOT be used from an async task. `spawn_blocking` cannot
+/// be cancelled, so a config read in flight when the server is asked to shut
+/// down holds the process past the SIGTERM grace and `mux kill-server`
+/// escalates to SIGKILL - a healthy server reported as an unclean death.
+/// `kill_on_drop` plus a timeout makes the child die with the future instead.
+async fn config_get_async(key: &str) -> Option<String> {
+    let fut = tokio::process::Command::new(fno_bin())
+        .args(["config", "get", key])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(CONFIG_READ_TIMEOUT, fut).await {
+        Ok(Ok(o)) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        _ => None,
+    }
+}
+
+/// Resolve the backlog board's project scope without leaving the runtime.
+///
+/// The ladder itself stays in `backlog_view::resolve_board_scope`, which is
+/// pure and takes a synchronous fetcher. Rather than restate which key it wants
+/// next (the branch that decides between a workspace block and `project.id`),
+/// run it against a map and let it TELL us what it missed: each pass records
+/// the first absent key, that key is fetched, and the pass repeats. The ladder
+/// reads at most two keys, so the bound is a backstop, not a loop.
+async fn resolve_board_scope_in_runtime() -> (backlog_view::BoardScope, String) {
+    use std::cell::RefCell;
+
+    let cache: RefCell<HashMap<String, Option<String>>> = RefCell::new(HashMap::new());
+    for _ in 0..4 {
+        let missed: RefCell<Option<String>> = RefCell::new(None);
+        let out = backlog_view::resolve_board_scope(|key| {
+            if let Some(hit) = cache.borrow().get(key) {
+                return hit.clone();
+            }
+            if missed.borrow().is_none() {
+                *missed.borrow_mut() = Some(key.to_string());
+            }
+            None
+        });
+        let Some(key) = missed.into_inner() else {
+            return out;
+        };
+        let value = config_get_async(&key).await;
+        cache.borrow_mut().insert(key, value);
+    }
+    // Unreachable while the ladder reads a bounded key set; resolving with an
+    // empty cache narrows rather than widens, which is the safe direction.
+    backlog_view::resolve_board_scope(|_| None)
+}
 
 /// Read one config key through `fno config get <key>`, bounded and fail-open:
 /// any spawn error, non-zero exit, or overrun reads as `None` (absent), never
@@ -9603,15 +9658,7 @@ async fn serve(
             // tick: it is a subprocess, and a scope that changed under a live
             // board would make the card set unexplainable. Changing it means
             // `fno mux kill-server`, which `fno mux doctor` says out loud.
-            let (scope, why) =
-                tokio::task::spawn_blocking(|| backlog_view::resolve_board_scope(config_get))
-                    .await
-                    .unwrap_or_else(|_| {
-                        (
-                            backlog_view::BoardScope::Projects(std::collections::HashSet::new()),
-                            "board scope resolution panicked; showing unscoped cards only".into(),
-                        )
-                    });
+            let (scope, why) = resolve_board_scope_in_runtime().await;
             eprintln!("fno mux: backlog board scope: {why}");
             let mut state = backlog_view::ReaderState::with_scope(scope);
             // The last-good claim sweep (x-54fa): `None` until the first

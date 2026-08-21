@@ -1681,9 +1681,13 @@ def test_successor_claim_holder_generated_form(monkeypatch):
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     monkeypatch.setattr("fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: 4242)
+    # The holder infix is stamped on a claim, so it resolves through the owned
+    # path rather than raw precedence.
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: SimpleNamespace(harness="claude", session_id=None),
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(
+            harness="claude", session_id=None, disposition="single", markers_present=()
+        ),
     )
     h = target_cli._successor_claim_holder()
     assert h.startswith("target-session:") and "-cl4242-" in h
