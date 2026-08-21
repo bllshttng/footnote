@@ -238,7 +238,15 @@ _wt_all_orphans() {
 }
 
 _cargo_target_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+    local value=""
+    value="$(stat -f %m "$1" 2>/dev/null)" || value=""
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    value="$(stat -c %Y "$1" 2>/dev/null)" || value=""
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s\n' "$value"
 }
 
 _cargo_target_bytes() {

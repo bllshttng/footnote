@@ -343,6 +343,18 @@ EOF
 #!/usr/bin/env bash
 printf '1001 holder\n1010 holder\n1094 holder\n2000 holder\n'
 EOF
+    cat > "$STUBDIR/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-f" ]]; then
+    printf 'File: fake\nType: fake\nBlocks: 1\nFree: 1\nFiles: 1\nFree files: 1\n'
+    exit 0
+fi
+if [[ "$1" == "-c" ]]; then
+    printf '1700000000\n'
+    exit 0
+fi
+exit 1
+EOF
     cat > "$STUBDIR/git" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "worktree list --porcelain" ]]; then
@@ -351,7 +363,7 @@ if [[ "$*" == "worktree list --porcelain" ]]; then
 fi
 exit 1
 EOF
-    chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps" "$STUBDIR/git"
+    chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps" "$STUBDIR/stat" "$STUBDIR/git"
     export COUNTFILE WORKTREE_LIST WT_ROOT
     _wt_live() { return 1; }
     PATH="$STUBDIR:$PATH" _cargo_target_inventory "$INVENTORY"
