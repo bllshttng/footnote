@@ -141,6 +141,30 @@ def test_gate_token_branch_refuses_a_live_hold_and_lifts_an_expired_one(monkeypa
     assert dispatch._delivery_policy_refusal(HANDLE) is None
 
 
+def test_the_gate_finds_a_clock_filed_under_the_canonical_handle(monkeypatch):
+    """The key every WRITER uses, on a row where it is none of the other three.
+
+    A codex row's short_id is a daemon worker key and its harness_session_id is
+    the full id, so neither is the first-eight the clock sits under. Reading
+    only those three looked correct on claude, where the handle IS the short_id,
+    and left a codex hold unexpirable.
+    """
+    codex = SimpleNamespace(
+        name="worker-migration",
+        short_id="daemon-worker-key",
+        harness_session_id="abcd1234-0b3f-4c5a-9e88-2ad4f0c81b97",
+        delivery_policy="bus-only",
+    )
+    monkeypatch.setattr(dispatch, "load_registry", lambda: [codex])
+
+    hold_mod.arm(HANDLE, 5)  # HANDLE is that session id's first eight
+    assert dispatch._delivery_policy_refusal(codex) == dispatch.BUS_ONLY_POLICY
+
+    _expire(HANDLE)
+    assert dispatch._delivery_policy_refusal(codex) is None
+    assert dispatch._delivery_policy_refusal(HANDLE) is None
+
+
 def test_gate_leaves_a_clockless_bus_only_row_refusing_on_both_branches(monkeypatch):
     """The x-e21e guarantee, unchanged for every row busy mode never touched."""
     monkeypatch.setattr(dispatch, "load_registry", lambda: [_entry()])

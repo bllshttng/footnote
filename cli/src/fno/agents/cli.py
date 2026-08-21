@@ -3248,10 +3248,10 @@ def cmd_register(
             f"{entry.origin!r}.\n"
         )
 
-    # x-481e: a hand-stamped policy carries a clock that says "no expiry".
-    # Busy mode's self-heal lifts a bus-only flag that has NO readable clock,
-    # so without this write a deliberate permanent stamp would be lifted by the
-    # very safety property that protects a timed hold.
+    # x-481e: record a clock saying "no expiry" beside a hand-stamped policy.
+    # Not for enforcement - an absent clock already never lapses. This is what
+    # lets the DND column on `fno agents list` say "held" for this row instead
+    # of leaving the operator to guess from a blank cell.
     if delivery_policy is not None:
         from fno.mail import hold as _hold
 

@@ -6048,12 +6048,17 @@ BUS_ONLY_POLICY = "bus-only"
 def _hold_lapsed_for(entry) -> bool:
     """True when ``entry``'s ``bus-only`` flag no longer holds mail (x-481e).
 
-    Busy mode arms the flag with a clock (``fno.mail.hold``). This reads the
-    clock for whichever address form the row carries. A row with no clock on
-    any form is not a busy-mode hold at all - it is a policy stamped by
-    ``fno agents register --delivery-policy bus-only``, which has no clock by
-    construction - so it never lapses and the refusal stands exactly as it did
-    before this function existed. Only a timed hold can expire here.
+    Busy mode arms the flag with a clock (``fno.mail.hold``). A row with no
+    clock under any of its addresses is not a busy-mode hold at all - it is a
+    policy stamped by ``fno agents register --delivery-policy bus-only``, which
+    has no clock by construction - so it never lapses and the refusal stands
+    exactly as it did before this function existed. Only a timed hold expires.
+
+    The address list comes from ``hold.addresses``, the same rule the writers
+    use, rather than a second copy here. A copy that omitted the canonical
+    handle looked correct on claude, where the handle IS the ``short_id``, and
+    made this check unable to find a codex hold at all: every writer keys by the
+    first-eight, and none of that row's other addresses is the first-eight.
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     already holding the registry lock; the stale flag is tidied by the release
@@ -6062,12 +6067,8 @@ def _hold_lapsed_for(entry) -> bool:
     try:
         from fno.mail import hold as _hold
 
-        for form in (
-            getattr(entry, "name", None),
-            getattr(entry, "short_id", None),
-            getattr(entry, "harness_session_id", None),
-        ):
-            if form and _hold.read(form) is not None:
+        for form in _hold.addresses(entry):
+            if _hold.read(form) is not None:
                 return _hold.lapsed(form)
     except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
         return False

@@ -287,17 +287,34 @@ def bounce_reason(recipient: str) -> Optional[str]:
     )
 
 
-def _addresses(entry) -> tuple:
-    """Every token that addresses ``entry``. One matching rule, used twice."""
-    return tuple(
-        token
-        for token in (
-            getattr(entry, "name", None),
-            getattr(entry, "short_id", None),
-            getattr(entry, "harness_session_id", None),
-        )
-        if token
-    )
+def addresses(entry) -> tuple:
+    """Every token a hold clock for ``entry`` could be filed under.
+
+    ONE matching rule, shared by the resolver, the policy write, and the
+    delivery gate's expiry check. The canonical handle is in here because every
+    WRITER keys by it: ``fno mail hold`` arms at ``canonical_handle(session_id)``
+    and the release and the turn-boundary tidy read the same key. For a claude
+    row that also happens to be ``short_id``, which is how the omission stayed
+    invisible. A codex ``short_id`` is a daemon worker key and its
+    ``harness_session_id`` is the full id, so neither is the first-eight the
+    clock sits under, and a gate reading only those three looked for a codex
+    hold in a place nothing ever writes.
+    """
+    from fno.harness_identity import canonical_handle
+
+    session_id = getattr(entry, "harness_session_id", None)
+    tokens = [
+        getattr(entry, "name", None),
+        getattr(entry, "short_id", None),
+        session_id,
+    ]
+    if session_id:
+        try:
+            tokens.append(canonical_handle(session_id))
+        except Exception:  # noqa: BLE001 - a malformed id contributes no address
+            pass
+    seen: set = set()
+    return tuple(t for t in tokens if t and not (t in seen or seen.add(t)))
 
 
 def resolve_entry(handle: str):
@@ -316,7 +333,7 @@ def resolve_entry(handle: str):
     except Exception:  # noqa: BLE001 - a registry hiccup is a missed lane, not a crash
         return None
     for entry in entries:
-        if handle in _addresses(entry):
+        if handle in addresses(entry):
             return entry
     return None
 
@@ -335,7 +352,7 @@ def set_policy(handle: str, policy: Optional[str]) -> bool:
 
     def _updater(entries):
         for entry in entries:
-            if _addresses(entry) and handle in _addresses(entry):
+            if handle in addresses(entry):
                 entry.delivery_policy = policy
                 found[0] = True
                 break
