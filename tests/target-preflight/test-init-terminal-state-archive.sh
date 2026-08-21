@@ -90,10 +90,10 @@ make_fno_stub() {
     mkdir -p "$dir"
     cat > "$dir/fno" <<'STUB'
 #!/usr/bin/env bash
-if [[ "$1" == "claim" && "$2" == "status" ]]; then
-    case "$3" in
-        *live*) printf '{"key": "%s", "state": "live"}\n' "$3" ;;
-        *)      printf '{"key": "%s", "state": "free"}\n' "$3" ;;
+if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "status" ]]; then
+    case "$4" in
+        *live*) printf '{"key": "%s", "state": "live"}\n' "$4" ;;
+        *)      printf '{"key": "%s", "state": "free"}\n' "$4" ;;
     esac
     exit 0
 fi

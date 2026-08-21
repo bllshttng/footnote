@@ -68,11 +68,11 @@ setup_claim_backend() {  # $1 = the key that should read live
 if [ "\$1" = "context" ] && [ -n "$FNO_PYTHON" ]; then
   exec "$FNO_PYTHON" -m fno.cli "\$@"
 fi
-[ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
-if [ "\$3" = "$live_key" ]; then
-  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"
+[ "\$1" = "agents" ] && [ "\$2" = "claim" ] && [ "\$3" = "status" ] || exit 1
+if [ "\$4" = "$live_key" ]; then
+  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$4"
 else
-  printf '{"key": "%s", "state": "free"}\\n' "\$3"
+  printf '{"key": "%s", "state": "free"}\\n' "\$4"
 fi
 STUB
   chmod +x "$TMP/bin/fno"

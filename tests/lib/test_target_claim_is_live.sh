@@ -53,11 +53,11 @@ setup_claim_backend() {  # $1 = the key that should read live
 #!/usr/bin/env bash
 # Minimal stand-in for \`fno agents claim status <key> -J\`. Any key other than the one
 # live fixture reads free, which is what a never-acquired claim really returns.
-[ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
-if [ "\$3" = "$live_key" ]; then
-  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"
+[ "\$1" = "agents" ] && [ "\$2" = "claim" ] && [ "\$3" = "status" ] || exit 1
+if [ "\$4" = "$live_key" ]; then
+  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$4"
 else
-  printf '{"key": "%s", "state": "free"}\\n' "\$3"
+  printf '{"key": "%s", "state": "free"}\\n' "\$4"
 fi
 STUB
   chmod +x "$TMP/bin/fno"

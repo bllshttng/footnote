@@ -95,7 +95,7 @@ if [[ "\$1" == "target" ]]; then
   echo "deprecated target root reached" >&2
   exit 2
 fi
-if [[ "\$1" == "claim" && "\$2" == "release" ]]; then
+if [[ "\$1" == "agents" && "\$2" == "claim" && "\$3" == "release" ]]; then
   # Record the full argv so a scenario can assert the KEY and HOLDER, not just
   # that some release happened - a release naming the wrong holder is a no-op
   # that would otherwise read as success.
@@ -109,7 +109,7 @@ if [[ "\$1" == "claim" && "\$2" == "release" ]]; then
   fi
   exit ${_rel_rc}
 fi
-if [[ "\$1" == "claim" && "\$2" == "acquire" ]]; then
+if [[ "\$1" == "agents" && "\$2" == "claim" && "\$3" == "acquire" ]]; then
   exit 0
 fi
 exit 0
