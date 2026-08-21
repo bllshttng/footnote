@@ -89,6 +89,14 @@ run_advisory() {
     set -e
 }
 
+run_advisory_default() {
+    cd "$TMP/repo"
+    set +e
+    OUT=$(bash "$ADVISORY_SCRIPT" --base "$BASE_BRANCH" 2>&1)
+    RC=$?
+    set -e
+}
+
 write_fixture_manifest
 
 # ── T01: control-plane change, no architecture doc ───────────────────────────
@@ -179,5 +187,14 @@ set -e
 [[ "$RC" -eq 0 ]] || fail "T09 bare --base must exit 0 (advisory), got $RC: $OUT"
 grep -q "requires an argument" <<< "$OUT" || fail "T09 expected --base guard notice: $OUT"
 pass "T09 bare --base -> clean exit 0 (no shift crash)"
+
+# ── T10: source-repo default resolves the packaged scope ───────────────────
+build_repo
+printf 'a\nchanged\n' > "$TMP/repo/hooks/check.sh"
+git -C "$TMP/repo" commit -q -am "touch hook with default scope"
+run_advisory_default
+[[ "$RC" -eq 0 ]] || fail "T10 expected rc=0, got $RC"
+grep -q "ADVISORY" <<< "$OUT" || fail "T10 packaged default should trigger advisory: $OUT"
+pass "T10 packaged default scope -> advisory"
 
 printf '[doc-coloc] ALL PASS\n'

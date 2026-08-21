@@ -1,12 +1,9 @@
-# loc-ratchet-manifest.yaml
-#
-# Historical filename retained for compatibility. This is the shared
-# control-plane scope for blast-radius routing and advisory doc colocation.
+# Packaged control-plane scope for blast-radius routing and advisory doc colocation.
 #
 # Include-entry semantics (all entries are relative to the repo root):
 #   trailing /  = directory prefix: any file whose path starts with this prefix
 #   trailing *  = path-prefix glob: any file whose path starts with the part before *
-#   otherwise   = exact file match
+#   otherwise   = exact path match
 #
 # Extension whitelist: only files whose extension (after final dot) appears in
 #   the `extensions:` list are counted. Everything else is ignored even if the
@@ -18,7 +15,6 @@
 #     file is excluded when its path contains /tests/ or starts with tests/
 #   Otherwise (e.g. test_*, *_test.*): basename rule -
 #     file is excluded when its basename matches the pattern as a bash case glob
-#
 
 include:
   - hooks/

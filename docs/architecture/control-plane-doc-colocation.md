@@ -2,14 +2,14 @@
 
 A staleness defense: when a PR changes control-plane code, the docs that describe that control plane should travel in the same diff. Docs that drift away from the code they describe rot silently. This check is the nudge that keeps them together.
 
-It is advisory: it warns and never blocks. The control-plane path set remains in the historically named `loc-ratchet-manifest.yaml` because the blast-radius router also consumes that file.
+It is advisory: it warns and never blocks. The control-plane path set is packaged beside the blast-radius router, which owns the runtime consumer; this script reads the same file as an advisory consumer.
 
 ## What it does
 
 On every PR, [`scripts/ci/control-plane-doc-colocation.sh`](../../scripts/ci/control-plane-doc-colocation.sh):
 
 1. Computes the changed-file set as `git diff --name-only <merge-base> HEAD`, with the base resolved from `BASE_REF` (GitHub Actions sets it from `github.base_ref`) or an explicit `--base <ref>`.
-2. Reads the control-plane `include:` and `exclude:` lists from [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml). Manifest patterns exclude test files without a duplicated list.
+2. Reads the control-plane `include:` and `exclude:` lists from [`cli/src/fno/target/control_plane_scope.yaml`](../../cli/src/fno/target/control_plane_scope.yaml). Scope patterns exclude test files without a duplicated list.
 3. Checks whether any changed file lives under `docs/architecture/`.
 4. If control-plane code changed **and** no `docs/architecture/` file did, it emits a `::warning` annotation plus a GitHub step-summary entry listing the control-plane files. Otherwise it prints `PASS`.
 

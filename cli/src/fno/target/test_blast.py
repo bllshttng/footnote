@@ -19,7 +19,7 @@ from fno.target_cli import target_app
 
 runner = CliRunner()
 
-# A minimal loc-ratchet manifest fixture (the include semantics are what matter).
+# A minimal control-plane scope fixture (the include semantics are what matter).
 _MANIFEST = """\
 # comment
 include:
@@ -37,13 +37,28 @@ exclude:
 
 @pytest.fixture()
 def manifest(tmp_path: Path) -> str:
-    p = tmp_path / "loc-ratchet-manifest.yaml"
+    p = tmp_path / "control-plane-scope.yaml"
     p.write_text(_MANIFEST, encoding="utf-8")
     return str(p)
 
 
 def _cfg(**kw) -> BlastConfig:
     return BlastConfig(**kw)
+
+
+# --------------------------- packaged scope ------------------------------- #
+def test_default_manifest_path_is_packaged_beside_the_loader():
+    expected = Path(blast.__file__).with_name("control_plane_scope.yaml")
+
+    assert blast.default_manifest_path() == str(expected)
+    assert expected.is_file()
+
+
+def test_default_manifest_classifies_control_plane_paths():
+    out = blast.classify(["scripts/lib/config.sh"], _cfg())
+
+    assert out["verdict"] == blast.HIGH
+    assert out["matched_paths"] == ["scripts/lib/config.sh"]
 
 
 # --------------------------- verdict basics ------------------------------- #

@@ -12,11 +12,11 @@ Inside `fno do target init` (`cli/src/fno/target_cli.py`), after size resolution
 
 ## The classifier (deterministic)
 
-`fno do target blast-check <plan>` (classifier in `cli/src/fno/target/blast.py`, off the LOC-ratchet path) prints `{verdict, matched_paths, reason}` (`--quiet` -> bare token). It reads the plan's `## File Ownership Map` and classifies the touched surface against a blast map with two glob dialects:
+`fno do target blast-check <plan>` (classifier in `cli/src/fno/target/blast.py`) prints `{verdict, matched_paths, reason}` (`--quiet` -> bare token). It reads the plan's `## File Ownership Map` and classifies the touched surface against a blast map with two glob dialects:
 
 | Map part | Source | Dialect |
 |---|---|---|
-| In-repo control-plane | include entries of `scripts/ci/loc-ratchet-manifest.yaml` (reused, one source of truth) | prefix (`hooks/`) / star (`crates/fno-agents/src/loop*`) / exact |
+| In-repo control-plane | packaged `cli/src/fno/target/control_plane_scope.yaml` (shared with advisory doc colocation) | prefix (`hooks/`) / star (`crates/fno-agents/src/loop*`) / exact |
 | General (any repo) | a locked category list: auth, migrations + `*.sql`, infra + secrets, billing | `**`-recursive glob (leading-`**/` matches zero dirs) |
 | Per-project extension | `config.target.blast.high_blast_globs` | `**`-recursive glob |
 
@@ -43,7 +43,7 @@ Plan **and** node inputs (a File Ownership Map exists). `fno do target init` res
 |---|---|---|
 | `enabled` | `false` | Whole-feature opt-in. A malformed block fails safe to disabled. |
 | `downgrade` | `true` | When false, only the high-blast floor applies (safety-only). |
-| `reuse_loc_manifest` | `true` | Include the loc-ratchet control-plane globs in the map. |
+| `reuse_loc_manifest` | `true` | Legacy key spelling; include the packaged control-plane scope in the map. |
 | `high_blast_globs` | `[]` | Per-project extension of the general list; a single bad glob is skipped, not raised. |
 
 ## Files
@@ -54,11 +54,11 @@ Plan **and** node inputs (a File Ownership Map exists). `fno do target init` res
 | `cli/src/fno/target_cli.py` | `blast-check` verb + `_modulate_size` + init modulation + node resolution |
 | `cli/src/fno/config/__init__.py` | `config.target.blast` schema (`BlastConfig`) |
 | `skills/target/references/init-state.md` | Step 1c-blast operator documentation |
-| `scripts/ci/loc-ratchet-manifest.yaml` | read-only blast-map source (not modified) |
+| `cli/src/fno/target/control_plane_scope.yaml` | packaged blast-map source shared with advisory doc colocation |
 
 ## Rejected alternatives
 
 - **LLM blast read at entry** - non-deterministic; footnote prefers gates over judgment for routing. Possible later as an escalate-only add-on (may raise to high, never lower).
 - **Lightweight-by-default, upgrade for high-blast** - bigger token savings but fail-open: anything the classifier misses ships under-ceremonied.
-- **A new blast-map config from scratch** - duplicates and drifts from the loc-ratchet-manifest curation; reuse keeps one source of truth.
+- **A second blast-map config** - duplicates and drifts from the packaged control-plane scope; reuse keeps one source of truth.
 - **A schema-validated `blast_decision` event instead of (or alongside) the stderr announce** - the announce is the whole record, deliberately. `target_cli.py` emits no events at all today, so the first one is not just a call site: it needs an entry in `cli/src/fno/events/schema.yaml`, the shared cross-language name registry, under a name that appears in exactly ONE language. `scripts/check-event-schema-parity.sh` asserts global *uniqueness*, failing on any name present in both the Python types and the Rust `event_kinds` - so a Python-emitted `blast_decision` must NOT also be added to Rust, and adding it there is a guaranteed collision, not the parity the name suggests. The cost is real but bounded, and the reason to skip it is the other end: there is no consumer. The router ships `enabled = false`, and whether footnote does telemetry/analytics at all is still an open decision, so the event's fields would be guessed against a reader that does not exist. Revisit when an aggregate consumer is real and can say what it needs; the announce string is not a stable contract and should not be parsed in the meantime.
