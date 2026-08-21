@@ -249,8 +249,15 @@ def build_board(
     # start from the CLAIM and look the node up, which is the opposite
     # direction from every other queue here.
     stalled: list[dict] = []
+    from fno.graph.statuses import TERMINAL_RUNGS
+
     for node in inputs.claimed_nodes.rows():
         if node.get("priority") not in KING_PRIORITIES:
+            continue
+        # A terminal node's claim is a leak the closure release or the
+        # node-aware reaper owns, not a wedged worker. Reporting it here sent
+        # the king at done work (x-94f8's stalled_holder queue).
+        if node.get("status") in TERMINAL_RUNGS:
             continue
         claim = claim_by_node.get(str(node.get("id")))
         if claim is None or claim.get("state") in _DEAD_CLAIM_STATES:

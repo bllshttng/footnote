@@ -819,6 +819,34 @@ def _curation_key(entry: dict) -> tuple:
     )
 
 
+def release_node_claim_at_closure(node_id: str, *, rung: str) -> None:
+    """Drop the ``node:<id>`` claim a closure just made moot (x-94f8).
+
+    Holder-agnostic: the closer (reconcile, king, daemon, a human) is usually
+    not the worker that holds the claim, and a claim on a closed node protects
+    nothing. Both claims roots are checked because node claims moved to the
+    global root late (ab-fcf9cec5); a legacy claim may still sit repo-local.
+    Best-effort and loud: a release failure is a named stderr line, never a
+    failed graph mutation - closure outranks release, and the reaper's
+    node-aware settlement is the backstop.
+    """
+    from fno.claims.core import claim_path, force_release_claim
+    from fno.claims.io import claims_root_for, dedup_claims_roots
+
+    key = f"node:{node_id}"
+    try:
+        for raw_root, _dir in dedup_claims_roots([claims_root_for(key), None]):
+            path = claim_path(key, root=raw_root)
+            if not path.exists():
+                continue
+            force_release_claim(key, reason=f"node closed ({rung})", root=raw_root)
+    except Exception as exc:  # noqa: BLE001 - closure must not fail on this
+        print(
+            f"node closure: claim release failed for {key}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     """Locked read-modify-write for graph entries. Recomputes statuses after mutation."""
     # Import here to avoid circular imports
@@ -908,6 +936,32 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
                 continue
             if _curation_key(entry) != _pre_curation[entry_id]:
                 entry["touched_at"] = _now_iso
+        # Node closure releases the node claim (x-94f8). A transition into a
+        # terminal rung during THIS mutation is the one moment every closure
+        # path shares - `backlog done`, `fno done`, reconcile, the epic sweep,
+        # and GraphTracker.close all persist through here, and the Rust daemon
+        # shells out to `fno backlog done` - so the release lives here rather
+        # than on any one caller, where the other N-1 paths would keep leaking.
+        from fno.graph.statuses import TERMINAL_RUNGS
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str):
+                continue
+            pre_rung = _status_normalized.get(entry_id)
+            rung = entry.get("status")
+            if rung not in TERMINAL_RUNGS or pre_rung in TERMINAL_RUNGS:
+                # Not terminal now, new this mutation (no claim can predate
+                # the node), or already terminal before it (no transition).
+                continue
+            # The lock mirror dies with the claim. session_id is NOT touched:
+            # on a done node it is work/cost provenance, not a lock
+            # (_normalize_lock_fields keeps it for exactly that reason).
+            entry["locked_by"] = None
+            entry["claimed_at"] = None
+            release_node_claim_at_closure(entry_id, rung=rung)
         # Status-forward key order + fresh children index. Runs after
         # recompute_statuses so status (top-level and inside child summaries)
         # is already current.

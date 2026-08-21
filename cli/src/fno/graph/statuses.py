@@ -29,6 +29,13 @@ VALID_STATUSES: frozenset[str] = frozenset(
 # the system speaks (idea -> design -> ready -> in_progress -> in_review -> done).
 STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 
+# The rungs past which a node can never again be dispatched. `done` (work
+# shipped) and `superseded` (replaced) are terminal; every other rung is a
+# state a node can return from. One spelling shared by the store's
+# closure-release hook, the tracker backends' closed set, and the reaper's
+# node settlement, so they cannot drift (x-94f8).
+TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
+
 # Sentinel prefix used by the pre-feature workaround that overloaded
 # ``completed_at`` to encode deferral. Detected once in ``recompute_statuses``
 # and migrated to the dedicated ``deferred_at`` field, after which the prefix

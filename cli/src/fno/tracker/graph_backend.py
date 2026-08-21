@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
+from fno.graph.statuses import TERMINAL_RUNGS as _CLOSED_RUNGS
 from fno.graph.store import locked_mutate_graph, read_graph
 from fno.graph.types import _derive_status
 from fno.paths import graph_json
@@ -26,8 +27,8 @@ def _ts_now() -> str:
 # A node is closed from the tracker's perspective once footnote itself regards
 # it as terminal. ``done`` (work shipped) and ``superseded`` (replaced by
 # another node) are the two terminal rungs; every other rung is still open and
-# may be dispatched.
-_CLOSED_RUNGS = frozenset({"done", "superseded"})
+# may be dispatched. Imported from the status authority (statuses.TERMINAL_RUNGS)
+# so the closure vocabulary has one spelling everywhere (x-94f8).
 
 
 class GraphTracker:

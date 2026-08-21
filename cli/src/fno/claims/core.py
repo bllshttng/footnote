@@ -1319,8 +1319,19 @@ def sweep_verdict(
     *,
     now: Optional[int] = None,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    node_settlement: Optional[Callable[..., Optional[bool]]] = None,
 ) -> tuple[bool, str]:
     """Can this claim be archived, and if not, which bucket says why?
+
+    ``node_settlement`` runs FIRST on a ``node:`` claim and answers the
+    question a pid cannot: is the claim's own node still the holder's
+    workplace? A node that closed under the claim, or a holder whose roster
+    row resolves to a DIFFERENT node, is positive evidence of abandonment -
+    measured on the live 2026-08-21 specimen where a session that finished
+    one node and moved to the next kept a LIVE claim on the dead one for 16
+    hours, because "holder alive" was the only question asked (x-94f8).
+    ``True`` settles (reapable); anything else falls through to liveness,
+    which stays the authority for every unsettled shape.
 
     :func:`fno.claims.staleness.classify_for_sweep` plus the roster probe on the
     one case a pid cannot settle: a ``node:`` claim reading SUSPECT, whose
@@ -1336,6 +1347,15 @@ def sweep_verdict(
     ``"suspect_unprobed"`` (the probe could not run). The last two are kept
     apart deliberately: one is a measurement and the other is its absence.
     """
+    if node_settlement is not None and claim.key.startswith("node:"):
+        # A settlement instrument that raises answers nothing; a broken probe
+        # must never become a verdict. The CLI-built settlement never raises
+        # by contract - this is the belt under it.
+        try:
+            if node_settlement(claim, now=now) is True:
+                return True, ""
+        except Exception:  # noqa: BLE001 - unknown keeps
+            pass
     provably_dead, bucket = classify_for_sweep(claim, now)
     if provably_dead or bucket != "suspect":
         return provably_dead, bucket
@@ -1366,6 +1386,7 @@ def reap_dead_claims(
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
+    node_settlement: Optional[Callable[..., Optional[bool]]] = None,
 ) -> dict[str, Any]:
     """Archive every provably-dead claim across one or more claims roots.
 
@@ -1450,7 +1471,12 @@ def reap_dead_claims(
     }
 
     def _sweep_verdict(claim: Claim) -> tuple[bool, str]:
-        return sweep_verdict(claim, now=ts, abandonment_probe=abandonment_probe)
+        return sweep_verdict(
+            claim,
+            now=ts,
+            abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement,
+        )
 
     corrupted = 0
     vanished = 0
@@ -1461,6 +1487,9 @@ def reap_dead_claims(
     # means "gone from the store").
     contended = 0
     reap_failed: list[tuple[str, str]] = []
+    # Node ids whose claims this run archived (confirmed re-reads only), for
+    # the lock-mirror clear after the loop.
+    settled_nodes: list[str] = []
 
     def _read_or_bucket(entry: Path) -> Optional[Claim]:
         """Read one claim file for the sweep, or bucket why it can't be read.
@@ -1575,6 +1604,8 @@ def reap_dead_claims(
                             root=root_label,
                             age_ms=max(0, ts - fresh.acquired_at),
                         )
+                        if fresh.key.startswith("node:"):
+                            settled_nodes.append(fresh.key[len("node:") :])
                     elif not entry.exists():
                         # archive_claim's idempotent short-circuit: the
                         # source was already fully cleared (a concurrent
@@ -1599,6 +1630,16 @@ def reap_dead_claims(
             # Not provably dead. Bucket the reason for the report.
             kept[bucket] += 1
 
+    # The graph lock mirror for reaped node claims, cleared OUTSIDE the
+    # per-key recovery mutex (after the sweep loop) so the process's only
+    # lock ordering stays graph-then-claims (x-94f8). Without this, a reaped
+    # worker's node keeps `locked_by` until LOCK_TTL_HOURS staleness clears
+    # it lazily, reading `claimed` - held out of dispatch - for hours after
+    # the reap. Dry runs never write, so they never reach this either.
+    lock_mirror_cleared = 0
+    if apply and settled_nodes:
+        lock_mirror_cleared = _clear_lock_mirror_for_reaped(settled_nodes)
+
     summary: dict[str, Any] = {
         "scanned": scanned,
         "reaped": reaped,
@@ -1613,11 +1654,45 @@ def reap_dead_claims(
         "contended": contended,
         "reap_failed": reap_failed,
         "apply": apply,
+        "lock_mirror_cleared": lock_mirror_cleared,
         "roots": [str(d) for d in use_dirs],
     }
     if apply:
         emit_claim_reap_swept(summary)
     return summary
+
+
+def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
+    """Clear ``locked_by``/``claimed_at`` on nodes whose claims were reaped.
+
+    Best-effort: a graph failure is a named stderr line and never fails the
+    sweep - the claim file is already gone, which is the load-bearing half.
+    Unconditional across done nodes too: a node closed before the closure
+    hook shipped keeps a mirror nothing else ever clears (statuses.py only
+    clears stale locks on non-terminal rungs). Returns how many entries were
+    touched.
+    """
+    import sys
+
+    from fno.graph.store import locked_mutate_graph
+    from fno.paths import graph_json
+
+    wanted = set(node_ids)
+    cleared: list[str] = []
+
+    def _clear(entries: list[dict]) -> list[dict]:
+        for e in entries:
+            if isinstance(e, dict) and e.get("id") in wanted:
+                e["locked_by"] = None
+                e["claimed_at"] = None
+                cleared.append(str(e.get("id")))
+        return entries
+
+    try:
+        locked_mutate_graph(graph_json(), _clear)
+    except Exception as exc:  # noqa: BLE001 - mirror hygiene never fails the sweep
+        print(f"claim reap: lock-mirror clear failed: {exc}", file=sys.stderr)
+    return len(cleared)
 
 
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:

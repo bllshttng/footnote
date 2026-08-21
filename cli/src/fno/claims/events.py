@@ -169,7 +169,7 @@ def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
         "scanned", "reaped", "would_reap", "kept_live", "kept_suspect",
         "kept_suspect_alive", "kept_suspect_unprobed",
         "kept_offhost", "corrupted", "vanished", "contended", "reap_failed",
-        "apply", "roots",
+        "apply", "lock_mirror_cleared", "roots",
     }
     extra_keys = summary.keys() - known_keys
     if extra_keys:
