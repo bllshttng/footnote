@@ -2020,3 +2020,65 @@ def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
     assert doctor._plugin_cache_report()["status"] == "unknown"
+
+
+# --- x-2486: the stale-cache line must name a command that can perform the fix ---
+#
+# `fno update` was measured against this artifact: 15m07s, exit 0,
+# installed_plugins.json byte-identical. update.py names ~/.claude/plugins only
+# as a SOURCE to install FROM. The registry belongs to claude, which mints its
+# own gitCommitSha, so the verb that can refresh it is `claude plugin update`.
+# These assert the RELATIONSHIP (the prescribed verb owns the artifact), not the
+# sentence: a string-only test re-encodes the same guess it is meant to catch.
+
+
+def test_stale_plugin_cache_prescribes_the_verb_that_owns_the_artifact(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = {
+        "status": "fresh",
+        "rust_stale": False,
+        "missing_verbs": [],
+        "python_stale": False,
+        "plugin_cache": {
+            "status": "stale",
+            "sha": "a8f3c5537ed55b3ce0926fec21a3f35021078539",
+            "installed_at": "2026-08-13T04:48:50.501Z",
+        },
+    }
+    rust = {"binary": "/cargo/bin/fno-agents", "revision": "abc", "binary_rev": "abc"}
+    doctor._emit_human(result, Path("/src"), rust, err=False, cargo_present=True)
+    line = next(
+        ln for ln in capsys.readouterr().out.splitlines() if "plugin cache" in ln
+    )
+    # The prescribed verb owns installed_plugins.json.
+    assert "claude plugin update" in line
+    # And the retired prescription is named as NOT the fix, because it shipped
+    # for long enough that a reader has already run it.
+    assert "does NOT" in line
+    assert "restart" in line
+
+
+def test_fresh_plugin_cache_prescribes_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = {
+        "status": "fresh",
+        "rust_stale": False,
+        "missing_verbs": [],
+        "python_stale": False,
+        "plugin_cache": {"status": "fresh", "sha": "abc", "installed_at": "x"},
+    }
+    rust = {"binary": "/cargo/bin/fno-agents", "revision": "abc", "binary_rev": "abc"}
+    doctor._emit_human(result, Path("/src"), rust, err=False, cargo_present=True)
+    line = next(
+        ln for ln in capsys.readouterr().out.splitlines() if "plugin cache" in ln
+    )
+    assert "claude plugin update" not in line
+    assert "fno doctor update" not in line
+
+
+# The second prescription site (the silent-switch cause line) is already covered
+# by test_doctor_silent_switch.py::test_armed_unknown_manifests_name_stale_plugin_cache_as_cause,
+# which owns the armed-manifest fixture this branch needs. Asserting it here too
+# would be a second implementation of one check.
