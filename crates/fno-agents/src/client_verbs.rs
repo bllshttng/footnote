@@ -1762,7 +1762,9 @@ fn persist_manifest_identity(
     id: &ManifestIdentity,
     home: &AgentsHome,
 ) -> Result<Value, AdoptError> {
-    let entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
+    let mut entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
+    entry.last_message_at =
+        crate::claude_adopt::transcript_activity(id.canonical_session_id()).map(|(stamp, _)| stamp);
     upsert_synthesized_row(&home.registry_json(), entry.clone())
         .map_err(|error| AdoptError::Io(error.to_string()))?;
     serde_json::to_value(&entry).map_err(|error| AdoptError::Io(error.to_string()))
@@ -2804,6 +2806,28 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
             if let Some(fid) = fno_id {
                 if !fid.is_empty() {
                     eprintln!("fno agents adopt: fno_id={fid}");
+                }
+            }
+            if source != AdoptSource::Registry {
+                match row.get("last_message_at").and_then(Value::as_str) {
+                    Some(stamp) => {
+                        let age = chrono::DateTime::parse_from_rfc3339(stamp)
+                            .ok()
+                            .and_then(|at| {
+                                let seconds =
+                                    (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                                        .num_seconds();
+                                (seconds >= 0).then_some(seconds as u64)
+                            });
+                        if let Some(age) = age {
+                            eprintln!(
+                                "adopted {name} (short_id={short})\n  last_activity_age_s={age} (from transcript mtime, read before the row write)"
+                            );
+                        }
+                    }
+                    None => eprintln!(
+                        "adopted {name} (short_id={short})\n  transcript unreadable; last_message_at=null"
+                    ),
                 }
             }
             0

@@ -35,6 +35,20 @@ pub fn adopted_name(short_id: &str) -> String {
     format!("cc-{short_id}")
 }
 
+/// Read the transcript's last filesystem activity before publishing an adopt
+/// row. A missing or unreadable transcript is unknown, never "now".
+pub fn transcript_activity(session_id: &str) -> Option<(String, u64)> {
+    let path = crate::claude_drive::find_transcript(session_id)?;
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .ok()?
+        .as_secs();
+    let stamp = chrono::DateTime::<chrono::Utc>::from(modified)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    Some((stamp, age))
+}
+
 /// Build the registry row for an adopted held session. Pure (the `now` stamp is
 /// injected) so the row shape is asserted without a clock or a live spawn.
 /// `host_mode = "attached"` distinguishes it from a footnote-spawned interactive
@@ -194,7 +208,8 @@ pub fn adopt(
         ClaimOutcome::Acquired | ClaimOutcome::Unavailable(_) => {}
     }
 
-    let entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
+    let mut entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
+    entry.last_message_at = transcript_activity(&worker.session_id).map(|(stamp, _)| stamp);
     upsert_adopted_row(registry_path, entry.clone()).map_err(AdoptError::Registry)?;
     Ok(entry)
 }
@@ -241,6 +256,11 @@ mod tests {
     fn holder_and_name_formats() {
         assert_eq!(pty_claim_holder("a1b2c3d4"), "pty:a1b2c3d4");
         assert_eq!(adopted_name("a1b2c3d4"), "cc-a1b2c3d4");
+    }
+
+    #[test]
+    fn transcript_activity_does_not_fabricate_missing_files() {
+        assert_eq!(transcript_activity("not-a-session"), None);
     }
 
     #[test]
