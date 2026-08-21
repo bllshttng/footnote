@@ -46,7 +46,11 @@ from fno.agents.dispatch import (
     validate_spawn_name,
 )
 from fno.agents.harness_map import DispatchResolveError, normalize_command
-from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
+from fno.agents.writable_dirs import (
+    ADD_DIR_PROVIDERS,
+    add_dir_tokens,
+    worker_writable_dirs,
+)
 from fno.agents.lock import hold_agent_lock
 from fno.agents.model_routing import DEFAULT_SECONDARY_MODEL
 from fno.agents.registry import (
@@ -122,6 +126,9 @@ class MuxSpawnResult:
     # signal rather than a formatting detail.
     bound: Optional[bool] = None
     pane_alive: Optional[bool] = None
+    # Whether the computed writable set reaches the live global claim store.
+    # None means this harness has no additive --add-dir cell to probe.
+    claim_store_writable: Optional[bool] = None
     # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
     # set when bound.
     unbound_reason: Optional[str] = None
@@ -144,6 +151,21 @@ class MuxSpawnResult:
     seed: Optional[str] = None
     seed_source: Optional[str] = None
     fno_id: Optional[str] = None
+
+
+def _claim_store_writable(
+    provider: str, computed_dirs: Sequence[str]
+) -> Optional[bool]:
+    """Return whether this spawn's computed grant reaches the live claim store."""
+    if provider not in ADD_DIR_PROVIDERS:
+        return None
+    from fno.claims.io import claims_dir, global_claims_root
+
+    target = claims_dir(global_claims_root()).resolve()
+    return any(
+        target == root or target.is_relative_to(root)
+        for root in (Path(directory).expanduser().resolve() for directory in computed_dirs)
+    )
 
 
 def _fno_bin() -> str:
@@ -1101,6 +1123,7 @@ def build_pane_argv(
     deny_tools: Optional[str] = None,
     name: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
+    computed_dirs: Optional[Sequence[str]] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -1147,7 +1170,9 @@ def build_pane_argv(
         # the claude/codex/agy arms below cannot disagree about which spawn gets
         # the grant. Without it a bounded worker cannot write ~/.fno/claims, so
         # it holds no claim and the graph reads free while it works.
-        computed_dirs=worker_writable_dirs(cwd),
+        computed_dirs=(
+            worker_writable_dirs(cwd) if computed_dirs is None else computed_dirs
+        ),
         agent=agent,
         tools=tools,
         deny_tools=deny_tools,
@@ -1759,7 +1784,15 @@ def _reap_spawned_pane(
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
 ) -> tuple[bool, str]:
-    """Attempt exact pane cleanup and return confirmed status plus failure detail."""
+    """Kill the pane and return whether the CHILD is confirmed gone.
+
+    The pid is read before the kill because the mux cannot report it afterwards,
+    and its incarnation token guards against a recycled pid.
+    """
+    from fno.agents.spawn_gate import _process_start_time
+
+    child_pid = _lookup_child_pid(session, pane_id, runner)
+    start_before = _process_start_time(child_pid) if child_pid is not None else None
     try:
         cleanup = _run_mux(
             ["mux", "pane", "kill", "--session", session, str(pane_id)],
@@ -1767,9 +1800,19 @@ def _reap_spawned_pane(
         )
     except DispatchAskError as exc:
         return False, str(exc)
-    if cleanup.returncode == 0:
-        return True, ""
-    return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+    if cleanup.returncode != 0:
+        return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+    if child_pid is None:
+        return False, (
+            f"pane {pane_id} kill returned 0 but its child pid was never resolved, "
+            "so the process is unconfirmed"
+        )
+    if _process_start_time(child_pid) == start_before and start_before is not None:
+        return False, (
+            f"pane {pane_id} kill returned 0 but child pid {child_pid} is still "
+            "running; the worker survived teardown"
+        )
+    return True, ""
 
 
 def _lookup_child_pid(
@@ -2941,6 +2984,8 @@ def dispatch_spawn_pane(
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     if provider == "agy":
         _ensure_agy_folder_trusted(cwd)
+    computed_writable_dirs = worker_writable_dirs(cwd)
+    claim_store_writable = _claim_store_writable(provider, computed_writable_dirs)
     argv = build_pane_argv(
         provider,
         message,
@@ -2956,6 +3001,7 @@ def dispatch_spawn_pane(
         deny_tools=deny_tools,
         name=name,
         passthrough=passthrough,
+        computed_dirs=computed_writable_dirs,
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
@@ -3868,6 +3914,7 @@ def dispatch_spawn_pane(
                 # `spawning` forever.
                 reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
                 if reaped:
+                    row_removed = False
                     try:
                         update_registry(
                             lambda rows: [
@@ -3875,12 +3922,19 @@ def dispatch_spawn_pane(
                             ],
                             path=registry_path,
                         )
+                        row_removed = True
                     except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-                        pass
+                        row_removed = False
+                    if row_removed:
+                        cleanup_detail = "pane reaped, registry row removed"
+                    else:
+                        cleanup_detail = (
+                            "pane reaped, but registry row removal failed; a "
+                            f"`spawning` row for {name!r} may linger"
+                        )
                     raise DispatchAskError(
                         f"agent {name!r} required {provider} session binding "
-                        f"({unbound_reason}); pane {pane_id} reaped, "
-                        "no registry row written. Diagnose the lane with "
+                        f"({unbound_reason}); {cleanup_detail}. Diagnose the lane with "
                         "'fno doctor --codex-bind'; spawn with --substrate "
                         "headless meanwhile (headless owns its own session "
                         "and is unaffected)",
@@ -3924,6 +3978,7 @@ def dispatch_spawn_pane(
         status=row_status,
         bound=bound_val,
         pane_alive=pane_alive,
+        claim_store_writable=claim_store_writable,
         unbound_reason=_resolve_unbound_reason(bound_val, unbound_reason, provider),
         log_path=death_log_path,
         effective_message=effective_message,
