@@ -102,6 +102,48 @@ def test_resolve_self_identity_refuses_unproven_mixed_harnesses(monkeypatch):
     assert "CODEX_THREAD_ID" in self_stamp.identity_ambiguity_message(identity)
 
 
+def test_ambiguity_message_names_the_strip_set(monkeypatch):
+    """x-b57a: the refusal tells a poisoned session exactly which env vars to
+    strip, per family, built from the same list the scrub reads (runtime text
+    that cannot drift from behavior). The verified workaround for a claude
+    session carrying seven CODEX_* vars: strip the foreign family, keep your
+    own, retry."""
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    for name in (
+        "CODEX_CI",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "CODEX_SESSION_ID",
+        "CODEX_SHELL",
+        "CODEX_THREAD_ID",
+        "CODEX_COMPANION_SESSION_ID",
+        "CODEX_COMPANION_TRANSCRIPT_PATH",
+        "CLAUDE_CODE_SESSION_ID",
+    ):
+        monkeypatch.setenv(name, "poisoned")
+    identity = self_stamp.resolve_self_identity()
+    assert identity.disposition == "ambiguous"
+
+    message = self_stamp.identity_ambiguity_message(identity)
+    claude_line = next(ln for ln in message.splitlines() if "claude session" in ln)
+    for flag in (
+        "-u CODEX_CI",
+        "-u CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+        "-u CODEX_SESSION_ID",
+        "-u CODEX_SHELL",
+        "-u CODEX_THREAD_ID",
+        "-u CODEX_COMPANION_SESSION_ID",
+        "-u CODEX_COMPANION_TRANSCRIPT_PATH",
+    ):
+        assert flag in claude_line, f"{flag} missing from the claude strip line"
+    assert "-u CLAUDE_CODE_SESSION_ID" not in claude_line
+    codex_line = next(ln for ln in message.splitlines() if "codex session" in ln)
+    assert "-u CLAUDE_CODE_SESSION_ID" in codex_line
+    assert "-u CODEX_THREAD_ID" not in codex_line
+
+
 def test_ac2_edge_no_ambient_identity_floors(monkeypatch):
     for var in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
                 "GEMINI_SESSION_ID"):
@@ -247,3 +289,24 @@ def test_model_floors_unknown_when_transcript_absent(tmp_path, monkeypatch):
         "deadbeef-0000-0000-0000-000000000000",
     )
     assert self_stamp.resolve_self_model() == "unknown"
+
+
+def test_ambiguity_message_omits_strip_section_when_no_foreign_family(monkeypatch):
+    """A single-family ambiguous disposition (a proven harness carrying two
+    distinct ids, or a contradicted only marker) has no foreign family to
+    strip: the refusal must end at the resolve-with line, not print the
+    'or strip ... and retry:' header over an empty command."""
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV, OwnedHarnessIdentity
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    identity = OwnedHarnessIdentity(
+        None,
+        None,
+        (("CODEX_THREAD_ID", "codex", "aaa"), ("CODEX_SESSION_ID", "codex", "bbb")),
+        "ambiguous",
+    )
+    message = self_stamp.identity_ambiguity_message(identity)
+    assert "or strip" not in message
+    assert "keeping your own harness's markers" not in message
+    assert message.rstrip("\n").endswith("'*aaa*'")

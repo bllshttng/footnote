@@ -422,34 +422,23 @@ def headless_create(
     # route precedence as every other seam (x-8552), belt-and-suspenders with
     # --settings. Without either overlay, inherit the parent env untouched.
     spawn_env: Optional[dict[str, str]] = None
-    # Identity is scrubbed whenever the parent carries a marker: a one-shot
-    # `claude -p` otherwise inherits CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID
-    # and the child resolves as the wrong harness - a claude reviewer spawned
-    # from a codex parent would stamp the parent's thread id (the attestation
-    # lane this node builds). The child re-mints its own, so the scrub
-    # is lossless; identity-only, never routing/auth. Constructing the env only
-    # when an overlay or a marker is present preserves the no-overlay "inherit
-    # parent byte-identical" path and its test.
+    # Identity scrubbing is NOT done here: worker_environment() below is the
+    # floor every adapter's child env crosses (x-b57a), so an adapter cannot
+    # decline it and the next adapter cannot miss it. The env is constructed
+    # only when an overlay or an incoherent model env demands one; a coherent,
+    # overlay-free call still passes None and inherits byte-identically (there
+    # is a test on that) - the floor's scrub is a no-op on a marker-free env,
+    # and the caller-side comparison constructs the scrubbed env when a marker
+    # was present.
     from fno.agents.model_routing import (
         incoherent_model_env,
         overlay_restores_model_env,
         scrub_incoherent_model_env_and_notify,
     )
-    from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
-    # An incoherent parent env forces an explicit child env too: passing None
-    # would hand the poison to the child verbatim.
     _incoherent = incoherent_model_env()
-    # A coherent, overlay-free, marker-free call still passes None and
-    # inherits byte-identically (there is a test on that).
-    if (
-        account_env
-        or route_env
-        or any(m in os.environ for m in AMBIENT_IDENTITY_ENV)
-        or _incoherent
-    ):
+    if account_env or route_env or _incoherent:
         spawn_env = dict(os.environ)
-        scrub_ambient_identity(spawn_env)
         # Strip before the overlay below so a real route still wins.
         scrub_incoherent_model_env_and_notify(
             spawn_env,
@@ -608,16 +597,13 @@ def bg_create(
     # be set retroactively. The nested-attribution path handles missing
     # SESSION gracefully via caller_kind=nested_agent + from_session_id=None.
     spawn_env = dict(os.environ)
-    # A spawned child inherits its parent's ROUTE (account/model below) but
-    # never its parent's IDENTITY. An ambient marker riding through this seam is
-    # how a claude reviewer spawned from a codex parent comes to carry a foreign
-    # CODEX_THREAD_ID and stamp the parent's session - the attestation lane this
-    # node builds would then classify a genuinely independent reviewer
-    # as SelfAttested. The child re-mints its own marker, so the scrub is
+    # Identity scrubbing happens in worker_environment() below, the floor every
+    # adapter's child env crosses (x-b57a): a spawned child inherits its
+    # parent's ROUTE (account/model below) but never its parent's IDENTITY - a
+    # claude reviewer spawned from a codex parent carrying a foreign
+    # CODEX_THREAD_ID would stamp the parent's session and read as
+    # SelfAttested. The child re-mints its own marker, so the floor's scrub is
     # lossless; identity-only, never routing/auth (separate lists).
-    from fno.harness_identity import scrub_ambient_identity
-
-    scrub_ambient_identity(spawn_env)
     # An inherited model env naming a foreign vendor's model with no base URL
     # (the daemon-carrier shape) errors the whole tier at spawn. Strip first,
     # compose the account/route overlay after, so a real route still re-supplies

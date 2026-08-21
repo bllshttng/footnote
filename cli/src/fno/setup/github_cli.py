@@ -84,6 +84,20 @@ def ensure_proxy(
 def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     inherited_delegate = base.get("FNO_REAL_GH")
     env = dict(base)
+    # The identity scrub lives HERE, at the floor every adapter's child env
+    # already crosses, not in each adapter: a per-adapter scrub is one the
+    # next adapter declines to call (x-b57a - claude's adapter scrubbed,
+    # codex's never did, so a codex worker inherited its claude parent's
+    # CLAUDE_CODE_SESSION_ID and stamped harness="claude-code" on every mail).
+    # Before the no-gh early return: identity is not conditional on gh
+    # presence. A spawned child inherits its parent's ROUTE but never its
+    # parent's IDENTITY; each harness re-mints its own, so the scrub is
+    # lossless. The pane (argv) substrate cannot cross this floor and strips
+    # via ambient_identity_env_unset_args() - the same
+    # AMBIENT_IDENTITY_ENV, so the shapes cannot drift.
+    from fno.harness_identity import scrub_ambient_identity
+
+    scrub_ambient_identity(env)
     # Dropped once, before any return: a worker inherits the marker from a
     # delegated gh, never earns it, and would have its first gh call refused.
     env.pop(PROXY_DEPTH_ENV, None)
