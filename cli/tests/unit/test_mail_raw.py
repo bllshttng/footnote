@@ -86,6 +86,22 @@ def _seed_codex_app_server(mailbox, monkeypatch):
     return entry
 
 
+def _raw_payload_at_word_cap() -> str:
+    sentences: list[str] = []
+    for sentence_index in range(4):
+        tokens = [f"w{sentence_index}_{word_index}" for word_index in range(20)]
+        if sentence_index == 0:
+            tokens[0] = "/review"
+        tokens[-1] += "."
+        sentences.append(" ".join(tokens))
+    payload = " ".join(sentences)
+    from fno import style
+
+    assert style.word_count(payload) == 80
+    assert style.check(payload, surface="mail") == []
+    return payload
+
+
 def test_raw_refuses_payload_without_leading_slash(mailbox, monkeypatch, capsys):
     from fno.mail.cli import _raw_send
 
@@ -847,9 +863,52 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "/code-review <level> --comment --fix", self_ok=False)
     assert exc.value.exit_code == 0
-    assert capsys.readouterr().out.strip() == "injected"
+    receipt = capsys.readouterr().out.strip()
+    assert receipt == "injected"
     assert injected == [(SID_CLAUDE, "/code-review <level> --comment --fix", None)]
     assert not durable, "AC18: --raw never writes durable on any transport result"
+    from fno import style
+    from fno.bus.log import iter_messages
+
+    rows = list(iter_messages(warn=False))
+    assert len(rows) == 1
+    assert rows[0].id.startswith("msg-")
+    assert rows[0].delivery == "hosted"
+    assert rows[0].body == "/code-review <level> --comment --fix"
+    assert rows[0].word_count == style.word_count(rows[0].body)
+
+
+def test_raw_check_writes_nothing_and_does_not_reserve(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail import budget
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.mail_inject_probe",
+        lambda _session_id: (True, "injectable"),
+    )
+    payload = _raw_payload_at_word_cap()
+
+    with pytest.raises(typer.Exit) as checked:
+        _raw_send("claudepeer", payload, self_ok=False, check=True)
+    assert checked.value.exit_code == 0
+    assert capsys.readouterr().out.startswith("injectable:")
+
+    with pytest.raises(typer.Exit) as sent:
+        _raw_send("claudepeer", payload, self_ok=False)
+    assert sent.value.exit_code == 0
+    receipt = capsys.readouterr().out
+    assert receipt.strip() == "injected"
+    from fno.bus.log import iter_messages
+
+    rows = list(iter_messages(warn=False))
+    assert len(rows) == 1
+    ledger = budget._ledger_path(f"{rows[0].from_} -> {rows[0].to}")
+    state = json.loads(ledger.read_text())
+    assert len(state["entries"]) == 1
+    assert state["entries"][0]["words"] == 80
 
 
 def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):

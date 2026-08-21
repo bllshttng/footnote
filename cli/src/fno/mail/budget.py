@@ -1,10 +1,8 @@
 """Rolling word budget for one canonical sender-recipient pair.
 
-Rule 7 caps ONE message at 80 masked words. Three 79-word sends pass it and
-deliver 237 words, so the per-message cap alone does not bound a burst. Ruling
-``d-0ac789e6`` sets the rolling policy: 80 masked words per canonical pair in a
-sliding 10-minute window, and any inbound message from that recipient back to
-that sender resets the sender's running total to zero.
+Rule 7 caps one message at 80 masked words. The rolling policy caps each
+canonical pair at 80 words over 10 minutes. Any inbound message from the
+recipient back to the sender resets the running total.
 
 Time catches an unanswered burst. The inbound reset is what separates evasion
 from a real conversation, and it is proven by an addressed bus envelope from
@@ -27,8 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Ruling d-0ac789e6. Both are fixed policy, not configuration: a per-project
-# override would let the noisiest fleet raise its own cap.
+# Both values are fixed policy, not configuration. A per-project override would
+# let the noisiest fleet raise its own cap.
 CAP = 80
 WINDOW_SECONDS = 600
 
@@ -98,14 +96,14 @@ def _ledger_path(pair: str) -> Path:
     return paths.bus_dir() / "word-budget" / f"{digest}.json"
 
 
-def _acquire(path: Path):
+def _acquire(path: Path, pair: str):
     from fno.inbox.store import _acquire_lock
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         return _acquire_lock(path, timeout=10.0)
     except TimeoutError as exc:
-        raise BudgetUnavailable("unknown", f"lock contended: {exc}", path) from exc
+        raise BudgetUnavailable(pair, f"lock contended: {exc}", path) from exc
 
 
 def _release(lock_dir) -> None:
@@ -156,9 +154,11 @@ def last_inbound(sender: str, recipient: str, *, since: float) -> Optional[tuple
     """
     from fno.bus.log import iter_messages
 
+    if sender == recipient:
+        return None
     newest: Optional[tuple[str, float]] = None
     for env in iter_messages(warn=False):
-        if env.from_ != recipient or env.to != sender:
+        if env.kind != "send" or env.from_ != recipient or env.to != sender:
             continue
         ts = _parse_ts(env.ts)
         if ts is None or ts < since:
@@ -199,7 +199,7 @@ def reserve(
     now = time.time()
     floor = now - WINDOW_SECONDS
 
-    lock = _acquire(path)
+    lock = _acquire(path, pair)
     try:
         entries = [e for e in _load(path, pair) if e["ts"] >= floor]
         reset_by = None
@@ -239,7 +239,7 @@ def release(reservation: Reservation) -> None:
     """
     path = _ledger_path(reservation.pair)
     try:
-        lock = _acquire(path)
+        lock = _acquire(path, reservation.pair)
     except BudgetUnavailable:
         return
     try:

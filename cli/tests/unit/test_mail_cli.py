@@ -85,6 +85,80 @@ def test_send_then_unread_then_ack(runner, mailbox):
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
+def _passing_mail_body(word_total: int) -> str:
+    sentences: list[str] = []
+    remaining = word_total
+    sentence_index = 0
+    while remaining:
+        size = min(20, remaining)
+        tokens = [f"w{sentence_index}_{index}" for index in range(size)]
+        tokens[-1] += "."
+        sentences.append(" ".join(tokens))
+        sentence_index += 1
+        remaining -= size
+    body = " ".join(sentences)
+    from fno import style
+
+    assert style.word_count(body) == word_total
+    assert style.check(body, surface="mail") == []
+    return body
+
+
+def test_project_kind_send_refuses_the_second_79_word_body(runner, mailbox):
+    body = _passing_mail_body(79)
+    args = [
+        "mail", "send", "--to-project", "web", "--kind", "fyi",
+        "--from-name", "etl", "--body", body,
+    ]
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert "queued (durable)" in first.stdout
+    assert second.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+
+
+def test_project_anycast_send_refuses_the_second_79_word_body(runner, mailbox):
+    body = _passing_mail_body(79)
+    args = [
+        "mail", "send", "--to-project", "web", body,
+        "--from-name", "etl",
+    ]
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert "queued (durable) for project web" in first.stdout
+    assert second.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+
+
+def test_thread_reply_refuses_the_second_79_word_body(runner, mailbox):
+    from fno.inbox.store import write_new_thread
+
+    inbound = write_new_thread(
+        recipient="web",
+        sender="etl",
+        kind="fyi",
+        body="seed",
+    )
+    body = _passing_mail_body(79)
+    args = [
+        "mail", "reply", "--to", inbound.thread_id,
+        "--from", "web", "--body", body,
+    ]
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in second.stderr
+
+
 def test_ack_refuses_hosted_audit_without_skipping_durable_mail(runner, mailbox):
     from fno.bus.cursor import read_cursor, scan_unread
     from fno.bus.log import Envelope, append

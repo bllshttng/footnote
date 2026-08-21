@@ -45,6 +45,8 @@ The cap counts words after the same masking pass as rules 1 to 6. Code, paths, f
 
 Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reason, or pass `--style-exception`. The refusal is written to stderr, so it is not charged the mail cap.
 
+The send boundary also caps each canonical sender-recipient pair at 80 masked words in a rolling 10-minute window. Any inbound `send` from that recipient resets the pair to zero; self-sends and non-send audit or migration rows do not reset it. A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send but still records and reserves the real word count. A refused attempt does not reserve words.
+
 ## Relay concision starts before refusal
 
 Footnote injects a relay compression contract at SessionStart and after context compaction. It covers agent-authored mail, replies, and mux pane sends. Agents think fully, then transmit only outcome, reason, and next action. Findings move to a node or doc and the relay carries its link.

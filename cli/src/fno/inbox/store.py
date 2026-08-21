@@ -727,6 +727,8 @@ def post_inbox_message(
     persist_to_memory: bool = False,
     reply_to: Optional[str] = None,
     refs: Optional[dict[str, str]] = None,
+    msg_id: Optional[str] = None,
+    word_count: Optional[int] = None,
 ) -> PostResult:
     """Post a project-addressed inbox message (the durable write path).
 
@@ -747,7 +749,13 @@ def post_inbox_message(
     if reply_to:
         existing = find_thread_by_msg_id(recipient, reply_to)
         if existing is not None:
-            new_id = append_to_thread(existing.path, sender, body)
+            new_id = append_to_thread(
+                existing.path,
+                sender,
+                body,
+                msg_id=msg_id,
+                word_count=word_count,
+            )
             return PostResult(
                 msg_id=new_id, thread_path=existing.path, appended=True, orphan=False
             )
@@ -756,10 +764,12 @@ def post_inbox_message(
         # old inbox-send orphan-reply path).
         handle = write_new_thread(
             recipient, sender, kind, body,
+            msg_id=msg_id,
             replies_to=reply_to,
             persist_to_memory=persist_to_memory,
             refs=refs,
             owner=DurableOwner.INBOX_DRAIN.value,
+            word_count=word_count,
         )
         return PostResult(
             msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=True
@@ -767,9 +777,11 @@ def post_inbox_message(
 
     handle = write_new_thread(
         recipient, sender, kind, body,
+        msg_id=msg_id,
         persist_to_memory=persist_to_memory,
         refs=refs,
         owner=DurableOwner.INBOX_DRAIN.value,
+        word_count=word_count,
     )
     return PostResult(
         msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=False
@@ -915,6 +927,7 @@ def append_to_thread(
     *,
     msg_id: Optional[str] = None,
     timestamp: Optional[datetime] = None,
+    word_count: Optional[int] = None,
 ) -> str:
     """Append a message block to an existing thread file. Returns new msg-id."""
     if not thread_path.exists():
@@ -948,6 +961,7 @@ def append_to_thread(
         timestamp=timestamp,
         in_reply_to=existing.thread_id,
         render_path=thread_path,
+        word_count=word_count,
     )
 
     # Best-effort: update the derived markdown render under the per-path lock.

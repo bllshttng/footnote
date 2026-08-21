@@ -10,6 +10,7 @@ import json
 import time
 
 import pytest
+import typer
 
 from fno import style
 from fno.mail import budget
@@ -74,6 +75,131 @@ def test_burst_of_three_79_word_sends_is_refused():
     assert exc2.value.running == 79, "a refused attempt is never charged"
 
 
+def test_name_lane_refuses_the_second_send_before_transport(
+    monkeypatch,
+    capsys,
+):
+    from fno.agents.discover import DiscoveredSession
+    from fno.bus.log import iter_messages
+    from fno.mail import cli
+
+    recipient = DiscoveredSession(
+        session_id="11111111-2222-3333-4444-555566667777",
+        short_id="11111111",
+        handle="11111111",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status=None,
+        agent="codex",
+        truth_state="working",
+    )
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda _sid, body, **_kwargs: (attempts.append(body), False)[1],
+    )
+    body = words(79)
+
+    cli._name_lane_send(body, from_name="sender", resolved=recipient)
+    assert "queued (durable)" in capsys.readouterr().out
+
+    with pytest.raises(typer.Exit) as raised:
+        cli._name_lane_send(body, from_name="sender", resolved=recipient)
+
+    assert raised.value.exit_code == 1
+    refusal = capsys.readouterr().err
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in refusal
+    assert len(attempts) == 1
+    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
+    assert len(rows) == 1
+    assert rows[0].word_count == 79
+
+
+def test_registered_dispatch_refuses_the_second_send(
+    monkeypatch,
+    tmp_path,
+):
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import iter_messages
+
+    registry = tmp_path / "agents.json"
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
+    write_registry(
+        [
+            AgentEntry(
+                name="worker",
+                harness="claude",
+                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="aaaaaaaa",
+                cwd=str(tmp_path),
+                log_path="",
+                status="idle",
+            )
+        ],
+        registry,
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state",
+        lambda _entry: "sleeping",
+    )
+    body = words(79)
+
+    first = dispatch_send(
+        "worker", body, provider=None, cwd=tmp_path, from_name="sender"
+    )
+    assert first.delivery == "durable"
+
+    with pytest.raises(DispatchAskError) as raised:
+        dispatch_send(
+            "worker", body, provider=None, cwd=tmp_path, from_name="sender"
+        )
+
+    assert raised.value.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in str(
+        raised.value
+    )
+    rows = [row for row in iter_messages(warn=False) if row.kind == "send"]
+    assert len(rows) == 1
+    assert rows[0].word_count == 79
+
+
+def test_job_lane_refuses_the_second_send(monkeypatch, capsys):
+    from fno.mail import cli
+    from fno.mail.job_address import JobHolder
+
+    job = JobHolder(
+        node_id="work-1234",
+        address="node:work-1234",
+        state="live",
+        session_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        harness="claude",
+    )
+    monkeypatch.setattr(
+        "fno.mail.job_address.resolve_job_address", lambda _token: job
+    )
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda _sid, body, **_kwargs: (attempts.append(body), False)[1],
+    )
+    body = words(79)
+
+    cli._job_lane_send(body, "node:work-1234", from_name="sender")
+    assert "queued (durable)" in capsys.readouterr().out
+
+    with pytest.raises(typer.Exit) as raised:
+        cli._job_lane_send(body, "node:work-1234", from_name="sender")
+
+    assert raised.value.exit_code == 1
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in (
+        capsys.readouterr().err
+    )
+    assert len(attempts) == 1
+
+
 def test_exactly_the_cap_is_allowed():
     send("a", "b", 80, "msg-cap")
     with pytest.raises(budget.BudgetRefused):
@@ -134,6 +260,40 @@ def test_reset_requires_the_exact_pair():
     time.sleep(1.1)
     with pytest.raises(budget.BudgetRefused):
         send("a", "b", 79, "msg-out2")
+
+
+def test_self_send_does_not_reset_its_own_pair():
+    send("a", "a", 79, "msg-self-one")
+    time.sleep(1.1)
+    _inbound("a", "a", "msg-self-loop")
+    time.sleep(1.1)
+
+    with pytest.raises(budget.BudgetRefused) as raised:
+        send("a", "a", 79, "msg-self-two")
+
+    assert raised.value.running == 79
+
+
+def test_non_send_reverse_row_does_not_reset_the_pair():
+    from fno.bus.log import Envelope, append
+
+    send("a", "b", 79, "msg-out-one")
+    time.sleep(1.1)
+    append(
+        Envelope.new(
+            id="msg-migration",
+            from_="b",
+            to="a",
+            kind="migration",
+            body="migrated",
+        )
+    )
+    time.sleep(1.1)
+
+    with pytest.raises(budget.BudgetRefused) as raised:
+        send("a", "b", 79, "msg-out-two")
+
+    assert raised.value.running == 79
 
 
 # --- AC2-CONCURRENCY: two sends cannot both pass stale history -------------

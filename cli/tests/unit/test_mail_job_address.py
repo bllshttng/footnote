@@ -362,7 +362,15 @@ def test_reply_to_node_message_routes_to_sender(runner, isolated, monkeypatch):
 
     captured: list[str] = []
 
-    def _capture(body, *, from_project, target, to_msg, require_resolution=False):
+    def _capture(
+        body,
+        *,
+        from_project,
+        target,
+        to_msg,
+        require_resolution=False,
+        style_exception=None,
+    ):
         captured.append(target)
         print(f"replied to {target}")
         return None
