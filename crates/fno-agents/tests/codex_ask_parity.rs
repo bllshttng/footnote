@@ -28,6 +28,10 @@ use std::process::Command;
 static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Path to `cli/src` so Python can import the `fno` package.
+/// The PATH used when no repo venv exists. The capability probe and every
+/// fallback subprocess share it, so they cannot resolve different python3s.
+const TEST_PATH: &str = "/usr/bin:/bin:/usr/local/bin";
+
 fn pythonpath() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/src")
 }
@@ -41,13 +45,48 @@ fn python_executable() -> PathBuf {
     }
 }
 
-fn python_available() -> bool {
+/// Whether the Python these tests actually invoke can RUN the flow.
+///
+/// Probes what the flow needs, not merely what imports. `codex.create` reaches
+/// `harness_map`, which imports `tomllib` at CALL time, and tomllib is stdlib
+/// only from 3.11. A top-level `import fno.agents.harnesses.codex` succeeds on
+/// 3.9 and tells you nothing about that, so this guard used to report a capable
+/// environment and then watch every test fail inside it.
+/// `None` when the test interpreter can run the flow, else WHY it cannot.
+///
+/// Returns the probe's own stderr rather than a fixed sentence, so the skip
+/// line names the real cause. The generic "not available" it used to print
+/// described a missing package, while the actual blocker can be a fallback
+/// Python without `tomllib`. A skip whose stated reason is not the reason is
+/// its own small lie.
+fn python_skip_reason() -> Option<String> {
     let probe = Command::new(python_executable())
         .arg("-c")
-        .arg("import fno.agents.harnesses.codex")
+        .arg("import tomllib; import fno.agents.harnesses.codex")
         .env("PYTHONPATH", pythonpath())
+        // Absolute venv paths ignore PATH. The fallback `python3` resolves
+        // through the same PATH as every test subprocess.
+        .env("PATH", TEST_PATH)
         .output();
-    matches!(probe, Ok(o) if o.status.success())
+    match probe {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => {
+            // The LAST line, which is the exception. A Python traceback leads
+            // with "Traceback (most recent call last):" and buries the cause at
+            // the bottom, so quoting from the top reports a header instead of a
+            // reason - the same trap as reading a log's head for its verdict.
+            let err = String::from_utf8_lossy(&o.stderr);
+            let cause = err
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("python3 exited nonzero with no stderr")
+                .trim()
+                .to_string();
+            Some(cause)
+        }
+        Err(e) => Some(format!("could not run python3: {e}")),
+    }
 }
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -198,6 +237,17 @@ except c.CodexInvocationError as e:
     let out = cmd.output().expect("run python3");
     let exit_code = out.status.code().unwrap_or(1);
     let last_msg = String::from_utf8_lossy(&out.stdout).to_string();
+    // On a nonzero exit, fold stderr into the returned string. `cmd.output()`
+    // captures the Python traceback that EXPLAINS the exit, and discarding it
+    // left every failure here reading `left: 1, right: 0` with no cause. The
+    // diagnostic was in hand and the instrument threw it away.
+    if exit_code != 0 {
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        return (
+            exit_code,
+            format!("{last_msg}\n--- python stderr ---\n{err}"),
+        );
+    }
     (exit_code, last_msg)
 }
 
@@ -303,8 +353,8 @@ fn rust_codex_resume(
 
 #[test]
 fn parity_create_happy_path() {
-    if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
+    if let Some(why) = python_skip_reason() {
+        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
         return;
     }
 
@@ -328,7 +378,7 @@ fn parity_create_happy_path() {
     let (rs_exit, rs_reply) =
         rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
-    assert_eq!(py_exit, 0, "Python create exit: {}", py_exit);
+    assert_eq!(py_exit, 0, "Python create exit: {}\n{}", py_exit, py_reply);
     assert_eq!(rs_exit, 0, "Rust create exit: {}", rs_exit);
     assert_eq!(
         py_reply, rs_reply,
@@ -344,8 +394,8 @@ fn parity_create_happy_path() {
 
 #[test]
 fn parity_resume_happy_path() {
-    if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
+    if let Some(why) = python_skip_reason() {
+        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
         return;
     }
 
@@ -384,7 +434,7 @@ fn parity_resume_happy_path() {
         &extra,
     );
 
-    assert_eq!(py_exit, 0, "Python resume exit: {}", py_exit);
+    assert_eq!(py_exit, 0, "Python resume exit: {}\n{}", py_exit, py_reply);
     assert_eq!(rs_exit, 0, "Rust resume exit: {}", rs_exit);
     assert_eq!(
         py_reply, rs_reply,
@@ -400,8 +450,8 @@ fn parity_resume_happy_path() {
 
 #[test]
 fn parity_no_jsonl_nonzero_exit() {
-    if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
+    if let Some(why) = python_skip_reason() {
+        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
         return;
     }
 
@@ -439,8 +489,8 @@ fn parity_no_jsonl_nonzero_exit() {
 
 #[test]
 fn parity_soft_error_promotion() {
-    if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
+    if let Some(why) = python_skip_reason() {
+        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
         return;
     }
 
@@ -465,7 +515,11 @@ fn parity_soft_error_promotion() {
     let (rs_exit, rs_reply) =
         rust_codex_create(&cwd, "hello", "fno", false, &rs_out, 10, &bin_dir, &extra);
 
-    assert_eq!(py_exit, 0, "Python soft-error exit: {}", py_exit);
+    assert_eq!(
+        py_exit, 0,
+        "Python soft-error exit: {}\n{}",
+        py_exit, py_reply
+    );
     assert_eq!(rs_exit, 0, "Rust soft-error exit: {}", rs_exit);
     assert_eq!(
         py_reply, rs_reply,
@@ -484,8 +538,8 @@ fn parity_soft_error_promotion() {
 
 #[test]
 fn parity_inject_from_name() {
-    if !python_available() {
-        eprintln!("SKIP: python3 with fno.agents.harnesses.codex not available");
+    if let Some(why) = python_skip_reason() {
+        eprintln!("SKIP: the test interpreter cannot run this flow: {why}");
         return;
     }
 
@@ -506,10 +560,11 @@ sys.stdout.write(inject_from_name(prompt, from_name))
     ];
 
     for (prompt, from_name) in cases {
-        let py_out = Command::new("python3")
+        let py_out = Command::new(python_executable())
             .arg("-c")
             .arg(code)
             .env("PYTHONPATH", pythonpath())
+            .env("PATH", TEST_PATH)
             .env("PROMPT", prompt)
             .env("FROM_NAME", from_name)
             .output()
