@@ -20,11 +20,76 @@ written alone, which Locked Decision 4 bans as a hosted verdict.
 demote to, so it keeps reporting on bytes written.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 import fno.agents.dispatch as dispatch
+
+
+def _reap_runner(child_pid=42):
+    def run(argv, **_kwargs):
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"pane_id": 3, "child_pid": child_pid}]),
+                stderr="",
+            )
+        if argv[1:4] == ["mux", "pane", "kill"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    return run
+
+
+def test_reap_refuses_to_confirm_a_surviving_child(monkeypatch):
+    from fno.agents import mux_spawn, spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", lambda _pid: 7)
+
+    reaped, detail = mux_spawn._reap_spawned_pane("main", 3, _reap_runner())
+
+    assert reaped is False
+    assert "child pid 42 is still running" in detail
+
+
+def test_reap_confirms_a_child_that_disappeared(monkeypatch):
+    from fno.agents import mux_spawn, spawn_gate
+
+    tokens = iter([7, None])
+    monkeypatch.setattr(spawn_gate, "_process_start_time", lambda _pid: next(tokens))
+
+    assert mux_spawn._reap_spawned_pane("main", 3, _reap_runner()) == (True, "")
+
+
+def test_reap_refuses_to_confirm_without_a_child_pid():
+    from fno.agents import mux_spawn
+
+    def run(argv, **_kwargs):
+        if argv[1:4] == ["mux", "pane", "ls"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"pane_id": 3}]),
+                stderr="",
+            )
+        if argv[1:4] == ["mux", "pane", "kill"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(argv)
+
+    reaped, detail = mux_spawn._reap_spawned_pane("main", 3, run)
+
+    assert reaped is False
+    assert "child pid was never resolved" in detail
+
+
+def test_reap_accepts_a_recycled_pid_as_confirmed_death(monkeypatch):
+    from fno.agents import mux_spawn, spawn_gate
+
+    tokens = iter([7, 8])
+    monkeypatch.setattr(spawn_gate, "_process_start_time", lambda _pid: next(tokens))
+
+    assert mux_spawn._reap_spawned_pane("main", 3, _reap_runner()) == (True, "")
 
 
 def _entry(session_id="me-session", harness="claude"):

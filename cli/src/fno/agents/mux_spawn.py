@@ -1759,7 +1759,15 @@ def _reap_spawned_pane(
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
 ) -> tuple[bool, str]:
-    """Attempt exact pane cleanup and return confirmed status plus failure detail."""
+    """Kill the pane and return whether the CHILD is confirmed gone.
+
+    The pid is read before the kill because the mux cannot report it afterwards,
+    and its incarnation token guards against a recycled pid.
+    """
+    from fno.agents.spawn_gate import _process_start_time
+
+    child_pid = _lookup_child_pid(session, pane_id, runner)
+    start_before = _process_start_time(child_pid) if child_pid is not None else None
     try:
         cleanup = _run_mux(
             ["mux", "pane", "kill", "--session", session, str(pane_id)],
@@ -1767,9 +1775,19 @@ def _reap_spawned_pane(
         )
     except DispatchAskError as exc:
         return False, str(exc)
-    if cleanup.returncode == 0:
-        return True, ""
-    return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+    if cleanup.returncode != 0:
+        return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+    if child_pid is None:
+        return False, (
+            f"pane {pane_id} kill returned 0 but its child pid was never resolved, "
+            "so the process is unconfirmed"
+        )
+    if _process_start_time(child_pid) == start_before and start_before is not None:
+        return False, (
+            f"pane {pane_id} kill returned 0 but child pid {child_pid} is still "
+            "running; the worker survived teardown"
+        )
+    return True, ""
 
 
 def _lookup_child_pid(
@@ -2956,6 +2974,7 @@ def dispatch_spawn_pane(
         deny_tools=deny_tools,
         name=name,
         passthrough=passthrough,
+        computed_dirs=computed_writable_dirs,
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
@@ -3868,6 +3887,7 @@ def dispatch_spawn_pane(
                 # `spawning` forever.
                 reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
                 if reaped:
+                    row_removed = False
                     try:
                         update_registry(
                             lambda rows: [
