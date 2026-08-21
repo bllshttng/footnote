@@ -1,6 +1,6 @@
 # House style for agent-authored text
 
-Agent text is re-read by every recipient on every turn. It must read once. A machine checks six rules at the tool boundary. The same rules run on mail, PR bodies, comments, and changed markdown.
+Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on mail, PR bodies, comments, and changed markdown. Rule 7 runs on mail only.
 
 ## The house style
 
@@ -29,7 +29,7 @@ A worker who reads both rules without this section picks one and drops the other
 
 ## What the checker enforces
 
-The house style above is the standard a person writes to. The list below is the part a machine can decide, so the two lists are different things and both count six. The checker is the floor, never the whole style. A draft that passes it can still bury the point, and no gate catches that.
+The house style above is the standard a person writes to. The list below is the part a machine can decide, so the two lists are different things and both count seven. The checker is the floor, never the whole style. A draft that passes it can still bury the point, and no gate catches that.
 
 1. A list-item sentence is 20 words or fewer. Every other sentence is 25 words or fewer.
 2. No semicolon. Write two sentences.
@@ -37,6 +37,13 @@ The house style above is the standard a person writes to. The list below is the 
 4. No contractions. Write "do not", not "don't".
 5. If a sentence carries "if" or "when", that word starts the sentence.
 6. A paragraph is one physical line. A newline starts the next block.
+7. Mail prose is 80 masked words or fewer. This rule does not run on PR bodies, comments, or changed markdown.
+
+## Rule 7 caps mail prose
+
+The cap counts words after the same masking pass as rules 1 to 6. Code, paths, flags, and fenced blocks do not count. A pasted 200-line log therefore counts near zero and passes. The cap targets prose, not the full message size.
+
+Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reason, or pass `--style-exception`. The refusal is written to stderr, so it is not charged the mail cap.
 
 ## Rule 6 reverses the sentence-per-line convention
 

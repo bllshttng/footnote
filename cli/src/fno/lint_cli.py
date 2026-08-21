@@ -380,7 +380,7 @@ def style(
     surface: str = typer.Option(
         "mail",
         "--surface",
-        help="Where the text is read: mail, pr-body, markdown, or comment. The six rules apply the same everywhere.",
+        help="Where the text is read: mail, pr-body, markdown, or comment. Mail also carries an 80-word message cap.",
     ),
     stdin: bool = typer.Option(
         False,
@@ -399,13 +399,14 @@ def style(
         "A whole-file gate is unlandable because existing prose already breaks the rules.",
     ),
 ) -> None:
-    """Check text against the six style rules in docs/style-rules.md.
+    """Check text against the seven style rules in docs/style-rules.md.
 
     A list-item sentence is 20 words or fewer, and every other sentence is 25
     or fewer. No semicolon. No "should", "would", "may", "might", or "could".
     No contractions. If a sentence carries "if" or "when", that word starts the
     sentence. A paragraph is one physical line, so a newline starts the next
     block. Code, paths, flags, and quoted output do not count.
+    Mail prose is capped at 80 masked words. Other surfaces do not use this cap.
 
     Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
     this gate. That second 2 fires when git and this verb disagree about how

@@ -1,6 +1,6 @@
 """Style checker for agent-authored text.
 
-Six rules, checked at the tool boundary. ``docs/style-rules.md`` is the
+Seven rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
 state, no network. ``fno mail send`` and the hand-run ``fno lint style``
 surfaces route through :func:`check`.
@@ -24,10 +24,12 @@ RULE_NAMES = {
     4: "contraction",
     5: "condition",
     6: "wrap",
+    7: "wordcap",
 }
 
 LIST_ITEM_CAP = 20
 PARAGRAPH_CAP = 25
+MESSAGE_WORD_CAP = 80
 
 # Rule 3. Matched lowercase, whole-word. "may" is lowercase-only so the month
 # "May" never fires; the other four carry no capitalized homonym in prose.
@@ -169,14 +171,21 @@ def has_exception(text: str) -> str | None:
 def check(text: str, *, surface: str = "mail") -> list[Violation]:
     """Return every violation found in ``text``.
 
-    ``surface`` is carried for forward compatibility (a future rule can scope by
-    surface); the six rules apply identically everywhere today. The text is
-    masked whole, then each line is split into its sentences: a paragraph is one
-    physical line and carries as many sentences as it needs, and rule 6 is what
-    holds that shape.
+    Rule 7 is the first surface-scoped rule. Mail carries the 80-word prose cap;
+    PR bodies, comments, and changed markdown do not, because they are not read
+    mid-turn. The text is masked whole, then each line is split into its
+    sentences: a paragraph is one physical line and carries as many sentences
+    as it needs, and rule 6 is what holds that shape.
+
+    The message cap stays here rather than in ``_run``. ``check_lines`` uses
+    ``_run`` for added-lines markdown checks, where a whole-body count would
+    charge a file's total against one added line. Masking also means a pasted log
+    can count near zero words; the cap covers prose, not a log dump.
     """
-    del surface  # reserved; no rule scopes by surface yet
-    return _run(text, None)
+    violations = _run(text, None)
+    if surface == "mail":
+        violations.extend(_check_message_length(text))
+    return violations
 
 
 def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
@@ -278,7 +287,7 @@ _EXCERPT_CAP = 12
 def format_violations(violations: list[Violation]) -> str:
     """Render violations as a self-teaching, rule-compliant refusal message.
 
-    The message itself passes the six rules: every banned word it names is
+    The message itself passes rules 1 to 6: every banned word it names is
     double-quoted, and the masking pass replaces quoted spans with one token
     before any rule runs, so a gate that violates its own rule never ships.
     Rule 6 is why the lines are joined by a BLANK line rather than a newline.
@@ -302,6 +311,15 @@ def format_violations(violations: list[Violation]) -> str:
         for violation in by_rule[rule]:
             excerpt = _excerpt(violation.sentence)
             lines.append(f'rule {rule} ({name}): {violation.detail} "{excerpt}"')
+    if 7 in by_rule:
+        lines.extend(
+            [
+                "use one of these two shapes.",
+                "Status: Doing X. Here is why. Done at Y.",
+                "Approval: Problem X. Options Y or Z. I recommend Z because A. Your call?",
+                "Put findings on the node and link it.",
+            ]
+        )
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
     lines.append('run "fno lint style --stdin" to check a rewrite before you send it.')
     return "\n\n".join(lines)
@@ -388,6 +406,23 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
     return out
 
 
+def _check_message_length(text: str) -> list[Violation]:
+    masked = _mask(text)
+    words = masked.split()
+    count = len(words)
+    if count <= MESSAGE_WORD_CAP:
+        return []
+    first_line = masked.splitlines()[0].strip() if masked.splitlines() else ""
+    return [
+        Violation(
+            7,
+            0,
+            first_line,
+            f"this message runs {count} words. The cap is {MESSAGE_WORD_CAP} words.",
+        )
+    ]
+
+
 def _condition_keyword(sentence: str) -> str | None:
     """Return the first non-initial if/when, or None if it leads the sentence."""
     body = _LIST_MARKER_RE.sub("", sentence).lstrip()
@@ -466,7 +501,7 @@ def _mask(text: str) -> str:
             # span, so prose trailing the comment is still checked.
         # A leading-pipe table row is unambiguous, so it is removed outright as
         # it always has been. A PIPELESS row is deliberately NOT handled here.
-        # Blanking removes a line from all six rules, and the only thing a
+        # Blanking removes a line from rules 1 to 6, and the only thing a
         # pipeless row ever needed was an exemption from rule 6. Two earlier
         # attempts blanked it and each opened a rule-evasion hole, because a
         # pipeless row is shaped exactly like a sentence carrying a pipe. That
