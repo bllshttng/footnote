@@ -115,11 +115,28 @@ def test_peek_mux_pane_worker_read_when_live_resolver_misses(tmp_path):
     )
     assert rc == 0
     text = out.getvalue()
-    assert "mux pane=33" in text
+    assert "mux pane=mux-sess:33" in text
     assert "acting now" in text
     # The misdirecting "did you mean" suggestions must NOT appear for a peer
     # peek can in fact observe.
     assert "did you mean" not in err.getvalue()
+
+
+def test_peek_mux_pane_ref_without_session_prints_bare_id(tmp_path):
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x-5f43",
+        lines=5,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("", 33, "worker-x-5f43"),
+        mux_reader=lambda sess, pane, n: (0, "hello\n"),
+    )
+    assert rc == 0
+    assert "mux pane=33" in out.getvalue()
+    assert "mux pane=:33" not in out.getvalue()
 
 
 def test_peek_mux_pane_refusal_names_working_surface(tmp_path):

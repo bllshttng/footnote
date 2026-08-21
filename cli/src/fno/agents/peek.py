@@ -756,10 +756,11 @@ def _try_mux_pane(
             + "\n"
         )
     else:
+        pane_ref = f"{session}:{pane_id}" if session else str(pane_id)
         out.write(
-            f"peer {handle}: mux pane={pane_id} session={session}\n{text}"
+            f"peer {handle}: mux pane={pane_ref}\n{text}"
             if text.endswith("\n")
-            else f"peer {handle}: mux pane={pane_id} session={session}\n{text}\n"
+            else f"peer {handle}: mux pane={pane_ref}\n{text}\n"
         )
     return EXIT_OK
 
