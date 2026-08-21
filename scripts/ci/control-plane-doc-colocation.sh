@@ -9,8 +9,8 @@
 # Uses a merge-base diff against BASE_REF, but:
 #   - It is ADVISORY: it always exits 0. The signal is a ::warning annotation
 #     plus a GitHub step-summary line, surfaced by a continue-on-error job.
-#   - The control-plane path set is read from scripts/ci/loc-ratchet-manifest.yaml
-#     so this nudge and blast-radius routing share one definition.
+#   - The control-plane path set is read from the packaged scope beside the
+#     blast router, so this nudge and runtime routing share one definition.
 #
 # Base ref resolution:
 #   --base <ref>  overrides; otherwise BASE_REF env -> "origin/$BASE_REF".
@@ -20,7 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST="${LOC_RATCHET_MANIFEST:-${SCRIPT_DIR}/loc-ratchet-manifest.yaml}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+MANIFEST="${LOC_RATCHET_MANIFEST:-${REPO_ROOT}/cli/src/fno/target/control_plane_scope.yaml}"
 DOC_PREFIX="docs/architecture/"
 
 # ── Args ────────────────────────────────────────────────────────────────────
@@ -69,10 +70,10 @@ CHANGED=$(git diff --name-only "$MB" HEAD 2>/dev/null) \
 
 [[ -n "$CHANGED" ]] || { echo "PASS: no changed files."; exit 0; }
 
-# ── Manifest path sets: include:/exclude: blocks from the loc-ratchet manifest ─
+# ── Manifest path sets: include:/exclude: blocks from the packaged scope ─────
 # Reuse the manifest as the SINGLE source of truth for BOTH the control-plane
 # path set AND the exclusions, so this nudge and blast routing cannot drift on
-# either. Match semantics (loc-ratchet-manifest.yaml header):
+# either. Match semantics (control_plane_scope.yaml header):
 #   include:  trailing "/" -> dir prefix; trailing "*" -> path-prefix glob;
 #             otherwise -> exact file match.
 #   exclude:  leading "**/" stripped; trailing "/**" -> path-segment rule;

@@ -7,10 +7,10 @@ map and returns ``{"verdict": "high"|"low"|"unknown", "matched_paths": [...],
 
 The blast map has two parts, each with its own glob dialect:
 
-* **In-footnote-repo control-plane** - the include entries of
-  ``scripts/ci/loc-ratchet-manifest.yaml`` (reused so the blast map tracks the
-  LOC-ratchet curation, one source of truth). Manifest entries use the
-  ratchet's own prefix/star/exact semantics, NOT recursive globs:
+* **In-footnote-repo control-plane** - the include entries of the packaged
+  ``control_plane_scope.yaml`` beside this module (shared with advisory doc
+  colocation, one source of truth). Scope entries use the same
+  prefix/star/exact semantics, NOT recursive globs:
   trailing ``/`` = directory prefix, trailing ``*`` = path-prefix glob,
   otherwise an exact path.
 * **General (any repo)** - a small, high-precision default list plus the
@@ -56,7 +56,7 @@ GENERAL_HIGH_BLAST_GLOBS: tuple[str, ...] = (
     "**/payment*/**",
 )
 
-_LOC_MANIFEST_RELPATH = "scripts/ci/loc-ratchet-manifest.yaml"
+_CONTROL_PLANE_SCOPE_FILE = "control_plane_scope.yaml"
 
 
 # --------------------------------------------------------------------------- #
@@ -194,18 +194,16 @@ def _load_manifest_globs(manifest_path: str | os.PathLike[str] | None) -> list[s
 
 
 def default_manifest_path() -> str | None:
-    """Best-effort resolve scripts/ci/loc-ratchet-manifest.yaml from the plugin.
+    """Best-effort resolve the packaged control-plane scope beside this module.
 
-    The manifest is footnote-specific; for another target repo it is read from
-    the footnote plugin install. Returns None when it cannot be located (the
-    classifier then leans on the general globs alone).
+    The scope is footnote-specific package data, independent of the target
+    repository's layout. Returns None when it cannot be located (the classifier
+    then leans on the general globs alone).
     """
     try:
-        from fno.paths import resolve_plugin_script
-
-        candidate = resolve_plugin_script(_LOC_MANIFEST_RELPATH)
-        return str(candidate) if candidate and Path(candidate).is_file() else None
-    except Exception:
+        candidate = Path(__file__).with_name(_CONTROL_PLANE_SCOPE_FILE)
+        return str(candidate) if candidate.is_file() else None
+    except OSError:
         return None
 
 

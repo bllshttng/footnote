@@ -1268,8 +1268,8 @@ class BlastConfig(BaseModel):
       enabled          - whole-feature opt-in.
       downgrade        - when False, only the high-blast floor applies
                          (safety-only mode; no token-saving downgrades).
-      reuse_loc_manifest - include the loc-ratchet control-plane globs
-                         (scripts/ci/loc-ratchet-manifest.yaml) in the map.
+      reuse_loc_manifest - legacy key spelling; include the packaged
+                         control-plane scope in the map.
       high_blast_globs - per-project extension of the general default list.
     """
 
