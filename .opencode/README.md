@@ -11,7 +11,7 @@ for task delegation, identity, and agent registration.
 | `plugins/fno.ts` | The plugin. opencode auto-scans `.opencode/plugins/*.ts` and loads it directly — no build step. |
 | `fno-orchestrator.md` | The orchestrator system prompt injected at session start. |
 | `agents/{explore,oracle,librarian}.md` | Three native opencode agents, auto-loaded from `.opencode/agents/`. |
-| `skills/` | Symlink farm: `<name> -> ../../skills/<name>` for every shipped skill. opencode scans `.opencode/skills/`, never the repo-root `skills/`, so these tracked links are what makes footnote's skills discoverable on a fresh clone (and in any worktree - the links are relative). `scripts/ci/check-opencode-surface.sh` fails when a skill ships without its link. |
+| `skills/` | Symlink farm: `<name> -> ../../skills/<name>` for every shipped skill. opencode scans `.opencode/skills/`, never the repo-root `skills/`, so these tracked links are what makes footnote's skills discoverable on a fresh clone (and in any worktree - the links are relative). |
 | `commands/{target,think,review,fix,pr}.md` | The five advertised verbs as opencode slash commands (`/target "add OAuth login"`). Each stub loads the matching skill and passes `$ARGUMENTS` through. `/target` is also what the stop-hook bridge's `/target --resume` re-drive resolves against. |
 | `tests/fno.test.ts` | `bun test` unit coverage for the pure helpers + task tool. |
 
@@ -71,7 +71,6 @@ provider registry actually has it, and otherwise falls back silently. A
 
 ```bash
 cd .opencode && bun install && bun test
-bash scripts/ci/check-opencode-surface.sh   # skills farm + command verbs
 ```
 
 Note for Windows: the farm relies on git-tracked symlinks, which need WSL2
