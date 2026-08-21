@@ -413,19 +413,20 @@ def review_coverage_for_gate(
     <why>"``, so a gate can say "retry after the quota reset" instead of a
     bare "nobody reviewed this".
     """
-    data = latest_review_coverage(pr_number, cwd)
+    raw = latest_review_coverage(pr_number, cwd)
     note = ""
-    ev_head = (data or {}).get("head_sha")
-    mismatch = bool(head and data and ev_head and head != ev_head)
+    data = _shape_review_coverage(raw, head, cwd) if raw is not None else None
+    ev_head = (raw or {}).get("head_sha")
+    mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
-    if data is None or mismatch or unusable:
+    if raw is None or mismatch or unusable:
         ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
         if ran:
             fresh = latest_review_coverage(pr_number, cwd)
             if fresh is not None:
-                data = fresh
+                data = _shape_review_coverage(fresh, head, cwd)
                 note = "recomputed"
-                if why and fresh.get("coverage") == "unknown":
+                if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
             else:
                 note = "recompute produced no row"
@@ -513,6 +514,34 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
     ]
 
 
+def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) -> dict:
+    """Shape one event and invalidate any unproven covered verdict."""
+    shaped = dict(data)
+    verdicts = _verdicts_with_current_freshness(data, head, cwd)
+    shaped["verdicts"] = verdicts
+    shaped["stale_verdicts"] = _stale_verdicts(verdicts)
+    if data.get("coverage") != "covered":
+        return shaped
+
+    reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
+    valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
+    if not reviewed or len(valid) != len(reviewed):
+        shaped["coverage"] = "uncovered"
+        shaped["reviewed_count"] = len(valid)
+        shaped["self_attested_count"] = sum(
+            v.get("attestation_origin") == "self_attested" for v in valid
+        )
+    return shaped
+
+
+def review_coverage_for_head(
+    pr_number: int, cwd: Optional[str], head: Optional[str]
+) -> Optional[dict]:
+    """Latest event shaped against the current head, without recomputing it."""
+    data = latest_review_coverage(pr_number, cwd)
+    return _shape_review_coverage(data, head, cwd) if data is not None else None
+
+
 def read_review_coverage(
     pr_number: int,
     cwd: Optional[str] = None,
@@ -539,28 +568,23 @@ def read_review_coverage(
         if recompute:
             latest, note = review_coverage_for_gate(pr_number, cwd, head)
         else:
-            latest, note = latest_review_coverage(pr_number, cwd), ""
+            latest, note = review_coverage_for_head(pr_number, cwd, head), ""
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
     if latest is None:
         return dict(_UNKNOWN_COVERAGE)
-    verdicts = _verdicts_with_current_freshness(latest, head, cwd)
-    stale_verdicts = _stale_verdicts(verdicts)
-    coverage = latest.get("coverage", "unknown")
-    if coverage == "covered" and stale_verdicts:
-        coverage = "uncovered"
     shaped = {
-        "coverage": coverage,
+        "coverage": latest.get("coverage", "unknown"),
         "reviewed_count": latest.get("reviewed_count"),
         "self_attested_count": latest.get("self_attested_count"),
         "head_sha": latest.get("head_sha"),
-        "stale_verdicts": stale_verdicts,
+        "stale_verdicts": latest.get("stale_verdicts", []),
     }
     # The raw verdict list rides along when present (older events carry none):
     # the local-pass conjunct scans it, and dropping it here made `fno pr
     # status` refuse forever on a row `fno pr merge` accepted (round 3, PR 917).
     if latest.get("verdicts") is not None:
-        shaped["verdicts"] = verdicts
+        shaped["verdicts"] = latest["verdicts"]
     if note:
         shaped["recompute"] = note
     return shaped

@@ -8,7 +8,6 @@ and the stdout-vs-stderr routing the bash used.
 from __future__ import annotations
 
 import json
-from pathlib import Path as _Path
 
 import pytest
 
@@ -2212,7 +2211,19 @@ def _global_events_at(monkeypatch, root):
 
 
 def _write_coverage(events_path, pr, *, repo=None, ts="2026-08-08T02:35:30Z", count=1):
-    data = {"pr": pr, "coverage": "covered", "reviewed_count": count, "head_sha": "a3f4b413b"}
+    data = {
+        "pr": pr,
+        "coverage": "covered",
+        "reviewed_count": count,
+        "head_sha": "a3f4b413b",
+        "verdicts": [{
+            "name": "code-review",
+            "producer": "local_attestation",
+            "verdict": "reviewed",
+            "reviewed_sha": "a3f4b413b",
+            "freshness": "fresh",
+        }],
+    }
     if repo is not None:
         data["repo"] = repo
     events_path.parent.mkdir(parents=True, exist_ok=True)

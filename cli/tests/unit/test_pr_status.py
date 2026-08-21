@@ -1191,7 +1191,7 @@ def test_closed_pr_skips_the_probes_and_the_coverage_conjunct(monkeypatch, capsy
 
 def test_read_review_coverage_from_events(tmp_path):
     """x-0eaf: read_review_coverage consumes the latest review_coverage event
-    for the PR from the project events log; no event -> unknown (fail-open)."""
+    for the PR from the project events log; missing verdict proof fails closed."""
     import json
 
     from fno.pr._reviews import read_review_coverage
@@ -1206,14 +1206,12 @@ def test_read_review_coverage_from_events(tmp_path):
         encoding="utf-8",
     )
     assert read_review_coverage(7, cwd=str(tmp_path)) == {
-        "coverage": "covered",
-        "reviewed_count": 1,
-        # x-5b99: the covered head is surfaced so a reader can check WHICH
-        # commit was covered. An event from an older loop-check carries no
-        # per-verdict freshness, so nothing reads as stale - additive.
-        "self_attested_count": None,
+        "coverage": "uncovered",
+        "reviewed_count": 0,
+        "self_attested_count": 0,
         "head_sha": "a",
         "stale_verdicts": [],
+        "verdicts": [],
     }
     # A different PR -> no event -> unknown sentinel.
     assert read_review_coverage(99, cwd=str(tmp_path)) == {
@@ -1383,6 +1381,33 @@ def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
     assert got["coverage"] != "covered"
     assert got["verdicts"][0]["freshness"] == "stale"
     assert got["stale_verdicts"][0]["reviewed_sha"] == head
+
+
+def test_read_review_coverage_preserves_ancestor_review(tmp_path):
+    from fno.pr._reviews import read_review_coverage
+
+    reviewed_sha = _commit_reviewed_history(tmp_path)
+    (tmp_path / "later.txt").write_text("later\n", encoding="utf-8")
+    _git(tmp_path, "add", "later.txt")
+    _git(tmp_path, "commit", "-qm", "later history")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    _review_coverage_event(
+        tmp_path,
+        1005,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "fresh",
+        },
+    )
+
+    got = read_review_coverage(1005, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "covered"
+    assert got["verdicts"][0]["freshness"] == "fresh"
+    assert got["stale_verdicts"] == []
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
@@ -1699,13 +1724,19 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
                 "ts": "2026-08-14T03:00:00Z",
                 "type": "review_coverage",
                 "data": {"pr": pr_number, "coverage": "covered",
-                         "reviewed_count": 1, "head_sha": "abc"},
+                         "reviewed_count": 1, "head_sha": "abc",
+                         "verdicts": [{"name": "code-review",
+                                       "producer": "local_attestation",
+                                       "verdict": "reviewed",
+                                       "reviewed_sha": "abc",
+                                       "freshness": "fresh"}]},
             }) + "\n",
             encoding="utf-8",
         )
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
+    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.

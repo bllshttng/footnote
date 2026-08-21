@@ -165,9 +165,9 @@ def coverage_verdict(
         cov, recompute_note = _merge._review_coverage_for_pr(pr_number, repo, head)
     else:
         try:
-            from fno.pr._reviews import latest_review_coverage
+            from fno.pr._reviews import review_coverage_for_head
 
-            cov = latest_review_coverage(pr_number, repo)
+            cov = review_coverage_for_head(pr_number, repo, head)
         except Exception as exc:  # noqa: BLE001 - instrument failure, not absence
             return UNANSWERED, "", "", f"events read raised: {exc}"
         recompute_note = ""

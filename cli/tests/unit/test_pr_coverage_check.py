@@ -45,6 +45,7 @@ def _seed_row(tmp_path, *, coverage, count, head, verdicts=None, pr=42):
 def live_head(monkeypatch):
     """Both surfaces see the same live PR head and the real events read."""
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
     # Route the merge path through the REAL read (the `enabled` fixture's
     # covered stub would bypass it): the only seams are the head and the verb.
     monkeypatch.setattr(
@@ -121,7 +122,19 @@ def test_covered_row_passes_both_surfaces(
     enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
 ):
     monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
-    _seed_row(tmp_path, coverage="covered", count=2, head=HEAD)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head=HEAD,
+        verdicts=[{
+            "name": "code-review",
+            "producer": "local_attestation",
+            "verdict": "reviewed",
+            "reviewed_sha": HEAD,
+            "freshness": "fresh",
+        }],
+    )
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     capsys.readouterr()
     assert rc == 0
@@ -129,6 +142,47 @@ def test_covered_row_passes_both_surfaces(
     monkeypatch.setattr(_merge, "run", fake)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
     assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_rebased_out_verdict_refuses_both_surfaces(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head=HEAD,
+        verdicts=[
+            {
+                "name": "code-review",
+                "producer": "local_attestation",
+                "verdict": "reviewed",
+                "reviewed_sha": "rewritten-out",
+                "freshness": "fresh",
+            }
+        ],
+    )
+    fake = FakeRun(toplevel=str(tmp_path))
+    merge_line = _merge_refusal(capsys, tmp_path, fake)
+    assert "uncovered" in merge_line
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert verb_line == merge_line
+
+
+def test_covered_row_without_verdict_proof_refuses_both_surfaces(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(tmp_path, coverage="covered", count=1, head=HEAD, verdicts=[])
+    fake = FakeRun(toplevel=str(tmp_path))
+    merge_line = _merge_refusal(capsys, tmp_path, fake)
+    assert "uncovered" in merge_line
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert verb_line == merge_line
 
 
 # ---- the absence pins: refusal, never a shrug ----

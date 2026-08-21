@@ -10,8 +10,6 @@ cli/tests/conftest.py keeps the verb seam inert; each test here re-pins it.
 """
 import json
 
-import pytest
-
 from fno.pr import _merge, _reviews
 from fno.pr._proc import Result
 
@@ -30,6 +28,14 @@ def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=
         data = {"pr": pr_number, "coverage": coverage, "head_sha": head}
         if coverage in ("covered", "uncovered"):
             data["reviewed_count"] = count
+        if coverage == "covered":
+            data["verdicts"] = [{
+                "name": "code-review",
+                "producer": "local_attestation",
+                "verdict": "reviewed",
+                "reviewed_sha": head,
+                "freshness": "fresh",
+            }]
         with open(events, "a", encoding="utf-8") as fh:
             fh.write(
                 json.dumps(
@@ -40,6 +46,7 @@ def _stub_recompute(monkeypatch, tmp_path, *, coverage, count, head, calls, why=
         return True, why
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake)
+    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
     # Route the gate through the REAL read (the `enabled` fixture's covered
     # stub would bypass the recompute entirely): the only seam is the verb.
     monkeypatch.setattr(
