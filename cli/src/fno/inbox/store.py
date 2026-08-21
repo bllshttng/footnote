@@ -622,6 +622,7 @@ def _append_to_bus(
     to_kind: Optional[str] = None,
     owner: Optional[str] = None,
     ttl_at: Optional[datetime] = None,
+    word_count: Optional[int] = None,
 ) -> None:
     """Append a versioned envelope to the canonical bus log (the durable write).
 
@@ -662,6 +663,7 @@ def _append_to_bus(
             from_session=from_session,
             from_model=from_model,
             to_kind=to_kind,
+            word_count=word_count,
         )
     )
 
@@ -792,6 +794,7 @@ def write_new_thread(
     to_kind: Optional[str] = None,
     owner: Optional[str] = None,
     ttl_at: Optional[datetime] = None,
+    word_count: Optional[int] = None,
 ) -> ThreadHandle:
     """Create a new thread file. Returns the resulting handle.
 
@@ -890,6 +893,7 @@ def write_new_thread(
             to_kind=to_kind,
             owner=owner,
             ttl_at=ttl_at,
+            word_count=word_count,
         )
     except Exception:
         try:

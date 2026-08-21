@@ -407,10 +407,19 @@ def _check_sentence(sentence: str, index: int, is_list: bool) -> list[Violation]
     return out
 
 
+def word_count(text: str) -> int:
+    """Masked prose word count for one string. Pure: no clock, no history.
+
+    Rule 7, the bus writer, and the rolling send budget all count through this
+    one function. A second implementation would let a per-message refusal and a
+    rolling total disagree about the same body.
+    """
+    return len(_mask(text).split())
+
+
 def _check_message_length(text: str) -> list[Violation]:
     masked = _mask(text)
-    words = masked.split()
-    count = len(words)
+    count = word_count(text)
     if count <= MESSAGE_WORD_CAP:
         return []
     first_line = masked.splitlines()[0].strip() if masked.splitlines() else ""

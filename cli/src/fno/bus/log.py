@@ -105,6 +105,11 @@ class Envelope:
     from_session: Optional[str] = None
     from_model: Optional[str] = None
     to_kind: Optional[str] = None
+    # Send-time masked prose count (x-3700). Additive: a row written before this
+    # field existed reads back as None and never acquires a fabricated count.
+    # The send lane supplies it so the row, Rule 7, and the rolling budget all
+    # carry the count of the SAME string -- the raw body, not the wire wrapper.
+    word_count: Optional[int] = None
 
     @classmethod
     def new(
@@ -126,6 +131,7 @@ class Envelope:
         from_session: Optional[str] = None,
         from_model: Optional[str] = None,
         to_kind: Optional[str] = None,
+        word_count: Optional[int] = None,
     ) -> "Envelope":
         mid = id or new_msg_id()
         return cls(
@@ -145,6 +151,7 @@ class Envelope:
             from_session=from_session,
             from_model=from_model,
             to_kind=to_kind,
+            word_count=word_count,
         )
 
 
@@ -162,7 +169,7 @@ def _now_iso() -> str:
 _ALWAYS = ("v", "id", "ts", "thread", "from", "to", "kind")
 _OPTIONAL = (
     "provider_from", "provider_to", "request_id", "in_reply_to", "delivery",
-    "from_session", "from_model", "to_kind", "meta",
+    "from_session", "from_model", "to_kind", "word_count", "meta",
 )
 
 
@@ -197,6 +204,10 @@ def to_json_line(env: Envelope) -> str:
         obj["from_model"] = env.from_model
     if env.to_kind:
         obj["to_kind"] = env.to_kind
+    # `is not None`, not truthiness: a genuine zero-word body (a pasted log
+    # masks to nothing) must serialize as 0, not vanish and read back as legacy.
+    if env.word_count is not None:
+        obj["word_count"] = env.word_count
     if env.meta:
         obj["meta"] = env.meta
     obj["body"] = env.body
@@ -230,6 +241,7 @@ def from_json_line(line: str) -> Envelope:
         from_session=obj.get("from_session"),
         from_model=obj.get("from_model"),
         to_kind=obj.get("to_kind"),
+        word_count=_wc if isinstance((_wc := obj.get("word_count")), int) else None,
     )
 
 
@@ -435,6 +447,7 @@ def record_hosted_delivery(
     from_session: Optional[str] = None,
     from_model: Optional[str] = None,
     to_kind: Optional[str] = None,
+    word_count: Optional[int] = None,
 ) -> Envelope:
     """Append one audit-only record after confirmed hosted delivery."""
     env = Envelope.new(
@@ -452,6 +465,7 @@ def record_hosted_delivery(
         from_session=from_session,
         from_model=from_model,
         to_kind=to_kind,
+        word_count=word_count,
     )
     append(env)
     return env
