@@ -747,6 +747,13 @@ def test_a_resume_route_without_a_provider_never_took_the_reservation(
     assert claim_status("dispatch:x-abcd", root=tmp_path)["state"] == "free"
 
 
+#: The `provider` field on both spawn results carries the HARNESS axis, not a
+#: model provider: `cmd_spawn` renders it as the receipt's "harness" key. Bind
+#: the value to a harness-named constant so these fixtures name the axis the
+#: value belongs to rather than restating the field's misnomer.
+_FIXTURE_HARNESS = "claude"
+
+
 def _stub_headless_dispatch(monkeypatch, kind="created"):
     from fno.agents import dispatch as dispatch_mod
 
@@ -756,7 +763,7 @@ def _stub_headless_dispatch(monkeypatch, kind="created"):
     R.kind = kind
     R.name = "w1"
     R.short_id = "abcd1234"
-    R.provider = "claude"
+    R.provider = _FIXTURE_HARNESS
     R.reply = "done" if kind == "reply" else None
     monkeypatch.setattr(dispatch_mod, "dispatch_spawn", lambda **kw: R())
 
@@ -826,7 +833,7 @@ def test_a_pane_spawn_still_holds_the_reservation_for_its_worker(
         "dispatch_spawn_pane",
         lambda **kw: MuxSpawnResult(
             name="w1",
-            provider="claude",
+            provider=_FIXTURE_HARNESS,
             session="s0",
             pane_id=1,
             child_pid=None,
