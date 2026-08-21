@@ -87,6 +87,10 @@ inbox board
 inbox notify
 inbox outstanding ask
 inbox outstanding clear
+inbox outstanding mine add
+inbox outstanding mine done
+inbox outstanding mine drop
+inbox outstanding mine link
 inbox outstanding reindex
 king board
 king escalate
@@ -102,6 +106,10 @@ notify
 observer
 outstanding ask
 outstanding clear
+outstanding mine add
+outstanding mine done
+outstanding mine drop
+outstanding mine link
 outstanding reindex
 paths
 phase
