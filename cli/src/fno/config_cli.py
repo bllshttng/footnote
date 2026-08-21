@@ -816,12 +816,68 @@ def set_cmd(
         # Scope + path printed once (AC2-UI).
         typer.echo(f"({results[0].scope}: {results[0].path})")
 
+    _check_overridden_writes(results)
+
     # x-e106: setting pr_watch.enabled couples to the launchd agent so enabled
     # means running. Loud on failure, never reverts config (doctor is the guard).
     for r in results:
         if r.key.endswith("pr_watch.enabled"):
             _couple_pr_watch(bool(r.value))
             break
+
+
+def _check_overridden_writes(results: list) -> None:
+    """Warn on stderr when a write succeeded on disk but a higher-precedence
+    configuration layer overrides it (x-389d).
+
+    Receipt defect fix: local-over-global precedence is correct and stays, but
+    `fno config set` must not silently report success on a write that is inert in
+    the current project context. Stays silent when the write takes effect or when
+    no higher layer overrides it.
+    """
+    import sys
+
+    from pydantic import BaseModel
+
+    from fno.config import load_settings, resolve_source
+
+    load_settings.cache_clear()
+    root = load_settings()
+
+    def _traverse(dotted: str) -> tuple[bool, object]:
+        node: object = root
+        for part in dotted.split("."):
+            if isinstance(node, BaseModel) and part in type(node).model_fields:
+                node = getattr(node, part)
+            elif isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                return (False, None)
+        return (True, node)
+
+    for r in results:
+        source = resolve_source(r.key)
+        if source is None:
+            continue
+        decider, _ = source
+        try:
+            is_same_file = decider.resolve() == r.path.resolve()
+        except OSError:
+            is_same_file = decider == r.path
+        if not is_same_file:
+            ok, node = _traverse(r.key)
+            if not ok and r.key.startswith("config."):
+                ok, node = _traverse(r.key[len("config.") :])
+            if not ok and not r.key.startswith("config."):
+                ok, node = _traverse(f"config.{r.key}")
+            effective_value = node if ok else None
+            if effective_value != r.value:
+                target_flag = "--local" if r.scope == "global" else "--global"
+                typer.echo(
+                    f"warn: {r.key} set in {r.path}, but {decider} overrides it "
+                    f"(value in effect: {effective_value}). Target the winning file with {target_flag}.",
+                    file=sys.stderr,
+                )
 
 
 def _couple_pr_watch(enabled: bool) -> None:
