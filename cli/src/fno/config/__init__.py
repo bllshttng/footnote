@@ -3113,6 +3113,16 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    # Which projects the backlog board renders (x-20f1). The graph is ONE store
+    # tagged by project, so an unscoped board shows every project's work to
+    # someone sitting in one checkout. `repo` (the default) scopes to this
+    # checkout's `project.id`, which resolves through git and so answers the
+    # same for every worktree layout; `all` is the historical board;
+    # `workspace:<name>` takes the project set `work.workspaces.<name>` already
+    # declares rather than inventing a second place to list projects. Read
+    # straight from config by the Rust mux server (same split-brain as
+    # attach_digest), which REFUSES to widen when the scope cannot resolve.
+    board_scope: str = "repo"
     # The prefix key, as a spec the Rust client parses (`C-a`, `Ctrl-a`, `^a`, or
     # a bare printable char). None keeps the built-in Ctrl-b.
     prefix: Optional[str] = None

@@ -1483,7 +1483,28 @@ fn gather_checks() -> Vec<Check> {
     ));
     checks.push(clipboard_check(crate::clipboard::available_tool()));
     checks.push(squad_store_check());
+    checks.push(board_scope_check());
     checks
+}
+
+/// What the backlog board is scoped to, resolved the same way the mux server
+/// resolves it at birth (x-20f1). Read-only and advisory: a refusal is a `warn`
+/// because an unscoped-only board is a deliberate narrowing, not a fault - but
+/// it must be VISIBLE, since a board correctly scoped to a quiet project and a
+/// board that could not resolve one look identical from the outside.
+fn board_scope_check() -> Check {
+    let (scope, why) = crate::backlog_view::resolve_board_scope(crate::server::config_get);
+    let refused = matches!(
+        &scope,
+        crate::backlog_view::BoardScope::Projects(s) if s.is_empty()
+    );
+    Check {
+        name: "backlog board scope".into(),
+        verdict: if refused { Verdict::Warn } else { Verdict::Ok },
+        detail: why,
+        remedy: refused
+            .then(|| "set config.project.id in this repo, or config.mux.board_scope=all".into()),
+    }
 }
 
 /// Render every check and return the exit code: `EXIT_ERROR` iff any check

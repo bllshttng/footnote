@@ -129,13 +129,172 @@ fn priority_rank(p: &str) -> u8 {
     }
 }
 
+/// Which projects the board renders (x-20f1).
+///
+/// `All` is the historical behavior: every actionable card in the graph. The
+/// graph is ONE store tagged by project, so a person working in one checkout
+/// read every other project's work too, every time they looked at the board.
+///
+/// `Projects` keeps only cards whose `project` is in the set. Unscoped cards
+/// (null / empty / whitespace `project`) are ALWAYS kept: a node with no
+/// project is not another project's work, so hiding it would make work
+/// disappear rather than filter it.
+///
+/// An EMPTY set is the refusal, not a bug. When the selector cannot resolve a
+/// project - a cwd outside any repo, an unreadable workspace - the board
+/// narrows to the unscoped lane rather than widening back to everything.
+/// Widening on failure turns "I could not tell" into "here is all of it",
+/// which is the exact complaint this scope answers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BoardScope {
+    /// The historical whole-graph board, and the `Default` so a reader built
+    /// without a resolved scope never silently hides work.
+    #[default]
+    All,
+    Projects(HashSet<String>),
+}
+
+impl BoardScope {
+    /// Whether a card carrying `project` (already trimmed; `None` = unscoped)
+    /// belongs on this board.
+    fn keeps(&self, project: Option<&str>) -> bool {
+        match (self, project) {
+            (BoardScope::All, _) => true,
+            (_, None) => true,
+            (BoardScope::Projects(set), Some(p)) => set.contains(p),
+        }
+    }
+
+    /// One line naming the scope, for the server log and `fno mux doctor`.
+    pub fn describe(&self) -> String {
+        match self {
+            BoardScope::All => "all projects".to_string(),
+            BoardScope::Projects(set) if set.is_empty() => {
+                "unscoped cards only (no project resolved; refusing to widen)".to_string()
+            }
+            BoardScope::Projects(set) => {
+                let mut names: Vec<&str> = set.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                format!("{} + unscoped", names.join(", "))
+            }
+        }
+    }
+}
+
+/// Parse the `FNO_BOARD_SCOPE` wire value: `all`, or a comma-separated project
+/// list (an empty list is the refusal above). Pure, so the resolution ladder
+/// and the parse are testable apart.
+pub fn parse_board_scope(raw: &str) -> BoardScope {
+    if raw.trim() == "all" {
+        return BoardScope::All;
+    }
+    BoardScope::Projects(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Project names declared by `work.workspaces.<name>`, read from the JSON
+/// block `fno config get` prints for it. `None` when the block is missing or
+/// names nothing - the caller REFUSES on `None` rather than falling back to
+/// every project.
+pub fn workspace_projects(json: &str) -> Option<HashSet<String>> {
+    let doc: serde_json::Value = serde_json::from_str(json).ok()?;
+    let names: HashSet<String> = doc
+        .get("projects")?
+        .as_array()?
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Resolve the board scope once, at server start.
+///
+/// Ladder, first hit wins:
+///   1. `FNO_BOARD_SCOPE` (the test hatch, and what a spawner latches).
+///   2. `config.mux.board_scope`:
+///      - `all`               -> every project
+///      - `workspace:<name>`  -> the projects `work.workspaces.<name>` declares
+///      - `repo` / unset      -> the current repo's `config.project.id`
+///   3. Anything that fails to resolve -> an empty set (unscoped lane only).
+///
+/// `config.project.id` resolves through git, so every worktree layout of a
+/// checkout answers with the same project and no path table is needed here.
+///
+/// Returns the scope plus a one-line reason the caller logs. The reason is the
+/// whole point on the refusal path: a board that quietly went empty and a board
+/// correctly scoped to a project with no ready work look identical.
+pub fn resolve_board_scope(config_get: impl Fn(&str) -> Option<String>) -> (BoardScope, String) {
+    if let Ok(v) = std::env::var("FNO_BOARD_SCOPE") {
+        if !v.trim().is_empty() {
+            let scope = parse_board_scope(&v);
+            let d = scope.describe();
+            return (scope, format!("FNO_BOARD_SCOPE={}: {d}", v.trim()));
+        }
+    }
+    let setting = config_get("mux.board_scope").unwrap_or_default();
+    let setting = setting.trim();
+    if setting == "all" {
+        return (BoardScope::All, "mux.board_scope=all: all projects".into());
+    }
+    if let Some(name) = setting.strip_prefix("workspace:") {
+        let name = name.trim();
+        let key = format!("work.workspaces.{name}");
+        return match config_get(&key).as_deref().and_then(workspace_projects) {
+            Some(set) => {
+                let scope = BoardScope::Projects(set);
+                let d = scope.describe();
+                (scope, format!("mux.board_scope=workspace:{name}: {d}"))
+            }
+            None => (
+                BoardScope::Projects(HashSet::new()),
+                format!(
+                    "mux.board_scope=workspace:{name}: {key} names no project; \
+                     showing unscoped cards only rather than every project"
+                ),
+            ),
+        };
+    }
+    if !setting.is_empty() && setting != "repo" {
+        return (
+            BoardScope::Projects(HashSet::new()),
+            format!(
+                "mux.board_scope={setting:?} is not one of repo|all|workspace:<name>; \
+                 showing unscoped cards only rather than every project"
+            ),
+        );
+    }
+    match config_get("project.id") {
+        Some(p) if !p.trim().is_empty() => {
+            let p = p.trim().to_string();
+            (
+                BoardScope::Projects(HashSet::from([p.clone()])),
+                format!("repo project {p}: {p} + unscoped"),
+            )
+        }
+        _ => (
+            BoardScope::Projects(HashSet::new()),
+            "no config.project.id here; showing unscoped cards only rather than every \
+             project (set project.id, or mux.board_scope=all)"
+                .into(),
+        ),
+    }
+}
+
 /// Derive the board-ordered card set from raw graph JSON. Pure so the ordering
 /// and classification are unit-testable without a file. `None` on a malformed
 /// document (the caller keeps its last-good cards). The order mirrors the board
 /// (`docs/architecture/backlog-board-ordering.md`): project lane (unscoped
 /// last), rank band (ranked before unranked, ascending), priority, created_at.
 pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
-    derive_queue(raw, None).map(|q| q.cards)
+    derive_queue(raw, None, &BoardScope::All).map(|q| q.cards)
 }
 
 /// The card set plus the UNCAPPED per-lane counts it was cut from (x-1d91).
@@ -278,7 +437,15 @@ impl Queue {
 /// HERE, not applied to the finished card list, so a claim reaches the lane
 /// counts too - those are computed over every queue node, and a card past the
 /// render cap would otherwise be counted in the wrong lane.
-pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option<Queue> {
+///
+/// `scope` filters by project BEFORE the lane counts and the render cap, not
+/// after: a cap applied to every project's cards and then filtered would starve
+/// this project's board of anything past the 40th card in the global order.
+pub fn derive_queue(
+    raw: &str,
+    live: Option<&HashMap<String, String>>,
+    scope: &BoardScope,
+) -> Option<Queue> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let entries = doc
         .get("entries")
@@ -324,6 +491,9 @@ pub fn derive_queue(raw: &str, live: Option<&HashMap<String, String>>) -> Option
             .map(str::trim)
             .filter(|p| !p.is_empty());
         let unscoped = project.is_none();
+        if !scope.keeps(project) {
+            continue;
+        }
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
         // The board's column authority (x-1d91). DERIVED, never read: no node
@@ -677,9 +847,22 @@ pub struct ReaderState {
     /// Consecutive ticks whose read failed while the file was still there. Feeds
     /// [`Queue::stale`]; reset by any read that lands.
     read_failures: u32,
+    /// Which projects this board renders (x-20f1). Fixed for the reader's life:
+    /// the server resolves it once at birth, so a card set never changes shape
+    /// under a live board for a reason the operator cannot see.
+    scope: BoardScope,
 }
 
 impl ReaderState {
+    /// A reader scoped to `scope`. `ReaderState::default()` keeps
+    /// [`BoardScope::All`], the historical whole-graph board.
+    pub fn with_scope(scope: BoardScope) -> Self {
+        Self {
+            scope,
+            ..Self::default()
+        }
+    }
+
     /// The stamp of the currently-cached document (mtime+len gate: the caller
     /// skips the file read when this matches a fresh stat).
     pub fn cached_stamp(&self) -> Option<(std::time::SystemTime, u64)> {
@@ -746,7 +929,7 @@ impl ReaderState {
         // forever with no stale marker - the reader cannot derive current state
         // either way, which is exactly what the marker is for.
         let mut queue = match &self.cached_raw {
-            Some(raw) => match derive_queue(raw, live) {
+            Some(raw) => match derive_queue(raw, live, &self.scope) {
                 Some(q) => {
                     if fresh_read {
                         self.read_failures = 0;
@@ -800,6 +983,176 @@ mod tests {
         format!(r#"{{"entries": [{nodes}]}}"#)
     }
 
+    /// The graph as five projects' work plus one unscoped node, the shape the
+    /// operator actually reads (x-20f1).
+    fn multi_project_graph() -> String {
+        graph(
+            r#"{"id":"x-fno","slug":"f","priority":"p1","status":"ready","project":"fno"},
+               {"id":"x-etl","slug":"e","priority":"p1","status":"ready","project":"etl"},
+               {"id":"x-web","slug":"w","priority":"p1","status":"ready","project":"web"},
+               {"id":"x-pad","slug":"p","priority":"p1","status":"ready","project":"   "},
+               {"id":"x-non","slug":"n","priority":"p1","status":"ready"}"#,
+        )
+    }
+
+    fn scoped_ids(scope: &BoardScope) -> Vec<String> {
+        derive_queue(&multi_project_graph(), None, scope)
+            .unwrap()
+            .cards
+            .into_iter()
+            .map(|c| c.id)
+            .collect()
+    }
+
+    #[test]
+    fn board_scope_keeps_one_project_and_never_hides_the_unscoped_lane() {
+        // AC1-HP: scoped to fno, only fno's card and the unscoped lane render.
+        // AC1-EDGE: `project` absent AND `project` whitespace both count as
+        // unscoped and survive every scope - a node with no project is not
+        // another project's work, so filtering must never make it disappear.
+        let scope = BoardScope::Projects(HashSet::from(["fno".to_string()]));
+        let mut ids = scoped_ids(&scope);
+        ids.sort();
+        assert_eq!(ids, vec!["x-fno", "x-non", "x-pad"]);
+    }
+
+    #[test]
+    fn board_scope_all_is_the_historical_whole_graph_board() {
+        assert_eq!(scoped_ids(&BoardScope::All).len(), 5);
+        assert_eq!(scoped_ids(&BoardScope::default()).len(), 5);
+    }
+
+    #[test]
+    fn an_unresolvable_scope_narrows_to_unscoped_rather_than_widening() {
+        // The refusal: an empty project set shows the unscoped lane only. The
+        // failure this exists to prevent is the opposite one - a selector that
+        // could not resolve falling back to every project's work.
+        let mut ids = scoped_ids(&BoardScope::Projects(HashSet::new()));
+        ids.sort();
+        assert_eq!(ids, vec!["x-non", "x-pad"]);
+    }
+
+    #[test]
+    fn board_scope_filters_before_the_render_cap() {
+        // A cap applied to the GLOBAL order and filtered afterwards would starve
+        // a scoped board: here 60 foreign cards sort ahead of the one this
+        // project cares about, so a post-cap filter renders nothing at all.
+        let mut nodes: Vec<String> = (0..60)
+            .map(|i| {
+                format!(
+                    r#"{{"id":"x-e{i:02}","slug":"e","priority":"p0","status":"ready","project":"etl"}}"#
+                )
+            })
+            .collect();
+        nodes.push(
+            r#"{"id":"x-mine","slug":"m","priority":"p3","status":"ready","project":"fno"}"#
+                .to_string(),
+        );
+        let raw = graph(&nodes.join(","));
+        let scope = BoardScope::Projects(HashSet::from(["fno".to_string()]));
+        let cards = derive_queue(&raw, None, &scope).unwrap().cards;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "x-mine");
+    }
+
+    #[test]
+    fn board_scope_lane_counts_are_scoped_too() {
+        // The lane counts are computed over every QUEUE node, uncapped, so a
+        // filter applied only to the card list would leave the mini-kanban
+        // counting five projects' work under a one-project board.
+        let scope = BoardScope::Projects(HashSet::from(["fno".to_string()]));
+        let q = derive_queue(&multi_project_graph(), None, &scope).unwrap();
+        assert_eq!(q.total(), 3);
+    }
+
+    #[test]
+    fn parse_board_scope_reads_the_wire_value() {
+        assert_eq!(parse_board_scope("all"), BoardScope::All);
+        assert_eq!(parse_board_scope("  all "), BoardScope::All);
+        assert_eq!(
+            parse_board_scope("fno, etl ,"),
+            BoardScope::Projects(HashSet::from(["fno".to_string(), "etl".to_string()]))
+        );
+        // The refusal spelling: nothing to keep, so nothing but the unscoped
+        // lane renders.
+        assert_eq!(parse_board_scope(""), BoardScope::Projects(HashSet::new()));
+    }
+
+    #[test]
+    fn workspace_projects_reads_the_config_block_or_refuses() {
+        let json = r#"{"projects":[{"name":"web"},{"name":" etl "},{"name":""}]}"#;
+        assert_eq!(
+            workspace_projects(json),
+            Some(HashSet::from(["web".to_string(), "etl".to_string()]))
+        );
+        // Every miss is `None`, and every `None` is a refusal upstream - never
+        // a fall-back to all projects.
+        assert_eq!(workspace_projects("{}"), None);
+        assert_eq!(workspace_projects(r#"{"projects":[]}"#), None);
+        assert_eq!(workspace_projects(r#"{"projects":[{"name":"  "}]}"#), None);
+        assert_eq!(workspace_projects("not json"), None);
+    }
+
+    #[test]
+    fn resolve_board_scope_defaults_to_the_repo_project() {
+        let (scope, why) = resolve_board_scope(|k| match k {
+            "mux.board_scope" => Some("repo\n".into()),
+            "project.id" => Some("fno\n".into()),
+            _ => None,
+        });
+        assert_eq!(
+            scope,
+            BoardScope::Projects(HashSet::from(["fno".to_string()]))
+        );
+        assert!(why.contains("fno"), "{why}");
+    }
+
+    #[test]
+    fn resolve_board_scope_expands_a_workspace_and_refuses_an_empty_one() {
+        let ws = r#"{"projects":[{"name":"web"},{"name":"etl"},{"name":"fno"}]}"#;
+        let (scope, _) = resolve_board_scope(|k| match k {
+            "mux.board_scope" => Some("workspace:main".into()),
+            "work.workspaces.main" => Some(ws.into()),
+            _ => None,
+        });
+        assert_eq!(
+            scope,
+            BoardScope::Projects(HashSet::from([
+                "web".to_string(),
+                "etl".to_string(),
+                "fno".to_string()
+            ]))
+        );
+        // An unreadable / absent workspace REFUSES. The whole point: a config
+        // typo must not silently restore the five-project board.
+        let (scope, why) = resolve_board_scope(|k| match k {
+            "mux.board_scope" => Some("workspace:typo".into()),
+            _ => None,
+        });
+        assert_eq!(scope, BoardScope::Projects(HashSet::new()));
+        assert!(why.contains("work.workspaces.typo"), "{why}");
+    }
+
+    #[test]
+    fn resolve_board_scope_refuses_rather_than_widening() {
+        // No project.id resolves (a cwd outside any repo): narrow, and SAY so.
+        let (scope, why) = resolve_board_scope(|_| None);
+        assert_eq!(scope, BoardScope::Projects(HashSet::new()));
+        assert!(why.contains("project.id"), "{why}");
+        // An out-of-vocabulary setting is a refusal too, not a coerce-to-all.
+        let (scope, why) =
+            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "everything".to_string()));
+        assert_eq!(scope, BoardScope::Projects(HashSet::new()));
+        assert!(why.contains("repo|all|workspace:<name>"), "{why}");
+    }
+
+    #[test]
+    fn resolve_board_scope_honors_all() {
+        let (scope, _) =
+            resolve_board_scope(|k| (k == "mux.board_scope").then(|| "all".to_string()));
+        assert_eq!(scope, BoardScope::All);
+    }
+
     #[test]
     fn external_backend_selected_follows_the_python_resolution() {
         // Same resolution as fno.tracker.active_backend_name: unset -> graph,
@@ -841,7 +1194,7 @@ mod tests {
                 {"id":"EXT-9","status":"done","completed_at":"closed"}
             ]
         }"#;
-        let queue = derive_queue(raw, None).unwrap();
+        let queue = derive_queue(raw, None, &BoardScope::All).unwrap();
         let ids: Vec<_> = queue.cards.iter().map(|c| c.id.as_str()).collect();
         // EXT-2 sorts after EXT-1 on created_at; the tombstone and the
         // in-review row never render as cards.
@@ -1103,9 +1456,14 @@ mod tests {
             r#"{"id":"x-a","slug":"a","priority":"p3","status":"ready"},
                {"id":"x-b","slug":"b","priority":"p3","status":"ready"}"#,
         );
-        let cold = derive_queue(&raw, None).unwrap();
+        let cold = derive_queue(&raw, None, &BoardScope::All).unwrap();
         assert_eq!(cold.lanes, vec![("Later".to_string(), 2)]);
-        let hot = derive_queue(&raw, Some(&live(&[("x-a", "target-session:abc")]))).unwrap();
+        let hot = derive_queue(
+            &raw,
+            Some(&live(&[("x-a", "target-session:abc")])),
+            &BoardScope::All,
+        )
+        .unwrap();
         assert_eq!(
             hot.lanes,
             vec![("Now".to_string(), 1), ("Later".to_string(), 1)],
@@ -1213,7 +1571,7 @@ mod tests {
                {"id":"x-n","slug":"n","priority":"p1","status":"ready"},
                {"id":"x-x","slug":"x","priority":"p2","status":"ready"}"#,
         );
-        let names: Vec<String> = derive_queue(&raw, None)
+        let names: Vec<String> = derive_queue(&raw, None, &BoardScope::All)
             .unwrap()
             .lanes
             .into_iter()
@@ -1231,7 +1589,7 @@ mod tests {
             r#"{"id":"x-road","slug":"r","type":"roadmap","priority":"p1","status":"ready"},
                {"id":"x-real","slug":"n","priority":"p1","status":"ready"}"#,
         );
-        let q = derive_queue(&raw, None).unwrap();
+        let q = derive_queue(&raw, None, &BoardScope::All).unwrap();
         let ids: Vec<&str> = q.cards.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["x-real"], "the roadmap row is off the board");
         assert_eq!(q.total(), 1, "and is not counted in any lane");
@@ -1248,7 +1606,7 @@ mod tests {
         let nodes: Vec<String> = (0..CARD_CAP + 7)
             .map(|i| format!(r#"{{"id":"x-{i}","slug":"s{i}","priority":"p2","status":"ready"}}"#))
             .collect();
-        let q = derive_queue(&graph(&nodes.join(",")), None).unwrap();
+        let q = derive_queue(&graph(&nodes.join(",")), None, &BoardScope::All).unwrap();
         assert_eq!(q.cards.len(), CARD_CAP, "the wire frame stays bounded");
         assert_eq!(q.total(), CARD_CAP + 7, "but the count is the whole board");
     }
@@ -1375,6 +1733,7 @@ mod tests {
                 ("x-blk", "dispatch-node:1"),
                 ("x-ghost", "nobody"),
             ])),
+            &BoardScope::All,
         )
         .unwrap()
         .cards;
