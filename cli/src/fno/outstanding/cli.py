@@ -17,6 +17,7 @@ import typer
 
 from fno.king.lane import read_lane
 from fno.outstanding.core import OutstandingError, collect, render
+from fno.outstanding.mine import mine_app
 
 outstanding_app = typer.Typer(
     help=(
@@ -26,6 +27,7 @@ outstanding_app = typer.Typer(
         "next turn, `clear` closes it once answered."
     ),
 )
+outstanding_app.add_typer(mine_app, name="mine")
 
 
 def _storage_root() -> Path:

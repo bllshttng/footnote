@@ -87,6 +87,7 @@ inbox board
 inbox notify
 inbox outstanding ask
 inbox outstanding clear
+inbox outstanding mine do
 inbox outstanding reindex
 king board
 king escalate
@@ -102,6 +103,7 @@ notify
 observer
 outstanding ask
 outstanding clear
+outstanding mine do
 outstanding reindex
 paths
 phase
