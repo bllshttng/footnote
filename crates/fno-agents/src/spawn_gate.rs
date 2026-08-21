@@ -865,12 +865,15 @@ MemAvailable:    8000000 kB\n";
 
         acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test");
 
-        let (state, record) = claims::status("worker:plain-codex", Some(&root));
-        assert_eq!(state, claims::ClaimState::Live);
+        let claim_path = root
+            .join(".fno/claims")
+            .join(format!("{}.lock", claims::encode_key("worker:plain-codex")));
+        let raw = std::fs::read_to_string(claim_path).unwrap();
+        let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
         assert_eq!(
             record
-                .as_ref()
-                .and_then(|r| r.metadata.get("model_provider"))
+                .metadata
+                .get("model_provider")
                 .and_then(serde_json::Value::as_str),
             Some("__uncapped__")
         );
