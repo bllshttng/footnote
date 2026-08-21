@@ -499,7 +499,7 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
     fallback when the owned values are absent. Shared by the acquire and
     release stamps so they always agree on the row key - release must fill the
     row acquire opened, not open a second one."""
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     ident = resolve_self_identity()
     harness = (getattr(claim, "harness", None) or ident.harness or "").strip()

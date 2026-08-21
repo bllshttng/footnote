@@ -668,7 +668,7 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
 
     from fno.graph.store import append_session_record
 
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     ident = resolve_self_identity()
     harness = (ident.harness or "").strip()
@@ -718,7 +718,7 @@ def _stamp_blueprint_on_plan_link(node_id: str) -> None:
 
     from fno.graph.store import append_session_record
 
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     ident = resolve_self_identity()
     harness = (ident.harness or "").strip()
@@ -818,7 +818,7 @@ def _session_provenance(
     """
     cwd = running_cwd if running_cwd is not None else os.getcwd()
 
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     identity = resolve_self_identity()
     session = identity.session_id
@@ -5543,7 +5543,7 @@ def cmd_session_add(
                 "added": False,
             }))
 
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     ident = resolve_self_identity()
     eff_harness = (harness or ident.harness or "").strip()
