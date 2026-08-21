@@ -68,7 +68,6 @@ def _drained(monkeypatch):
         harness = "claude"
         session_id = "abcd1234"
         disposition = "single"
-        disposition = "single"
 
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity", lambda: _Ident()
