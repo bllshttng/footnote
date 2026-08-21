@@ -24,8 +24,13 @@ def test_canonical_plan_level_entry():
 
 
 def test_canonical_bullet_entry():
+    body = "- **Executor routing**: plan-level `executor: tdd` (cli-flag)."
+    assert parse_locked_executor(_doc(body)) == "tdd"
+
+
+def test_do_alias_normalizes_to_tdd():
     body = "- **Executor routing**: plan-level `executor: do` (cli-flag)."
-    assert parse_locked_executor(_doc(body)) == "do"
+    assert parse_locked_executor(_doc(body)) == "tdd"
 
 
 def test_canonical_mixed_entry_is_mixed():
@@ -36,7 +41,7 @@ def test_canonical_mixed_entry_is_mixed():
     expensive of the two mistakes.
     """
     body = (
-        "5. **Executor routing**: plan-level `executor: do` with per-task overrides\n"
+        "5. **Executor routing**: plan-level `executor: tdd` with per-task overrides\n"
         "   `executor: impeccable` on tasks touching `**/*.tsx`, `components/**` (auto-detected).\n"
         "   Rationale: design has a frontend page and a backend migration."
     )
@@ -54,8 +59,8 @@ def test_bare_executor_entry_parses():
     a doc written this way lost its lock silently and fell through to surface
     inference.
     """
-    body = "5. **Executor: `do` (archer / TDD).** Backend-only Python + config, no UI surface."
-    assert parse_locked_executor(_doc(body)) == "do"
+    body = "5. **Executor: `tdd` (archer / TDD).** Backend-only Python + config, no UI surface."
+    assert parse_locked_executor(_doc(body)) == "tdd"
 
 
 def test_bare_executor_entry_bold_key_form():
@@ -81,8 +86,8 @@ def test_unknown_value_emits_empty():
 
 def test_last_entry_wins_across_separate_entries():
     """Two separate entries: most-recent intent wins (not ``mixed``)."""
-    body = "1. **Executor: impeccable**\n\n2. **Executor: `do`**"
-    assert parse_locked_executor(_doc(body)) == "do"
+    body = "1. **Executor: impeccable**\n\n2. **Executor: `tdd`**"
+    assert parse_locked_executor(_doc(body)) == "tdd"
 
 
 def test_no_locked_decisions_section():
@@ -114,15 +119,15 @@ def test_decision_history_prose_keeps_the_stated_choice():
     doc = (
         "## Locked Decisions\n\n"
         "5. **Executor routing**: changed from `executor: impeccable` "
-        "to `executor: do` after review.\n"
+        "to `executor: tdd` after review.\n"
     )
-    assert parse_locked_executor(doc) == "do"
+    assert parse_locked_executor(doc) == "tdd"
 
 
 def test_documented_override_shape_still_resolves_mixed():
     doc = (
         "## Locked Decisions\n\n"
-        "5. **Executor routing**: plan-level `executor: do` with per-task "
+        "5. **Executor routing**: plan-level `executor: tdd` with per-task "
         "overrides `executor: impeccable` on tasks touching `**/*.tsx`.\n"
     )
     assert parse_locked_executor(doc) == "mixed"

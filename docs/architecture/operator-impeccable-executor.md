@@ -156,7 +156,7 @@ Project-local settings (`.fno/config.toml`) under
 |-----|---------|--------|
 | `critique_threshold` | `35` | Score gate (out of 40). Loop exits SUCCESS at or above this. |
 | `max_iterations_per_task` | `8` | Per-task ceiling. Loop exits FAILED at this iteration. |
-| `auto_route_frontend` | `true` | When false, surface inference is disabled; tasks without explicit executor default to `do`. |
+| `auto_route_frontend` | `true` | When false, surface inference is disabled; tasks without explicit executor default to `tdd`. |
 
 The `auto_route_frontend` falsey gate accepts the common YAML spellings
 (`false`, `False`, `FALSE`, `0`, `no`, `No`) since YAML readers stringify

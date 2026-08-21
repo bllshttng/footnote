@@ -236,7 +236,7 @@ case "$TASK_EXECUTOR" in
 esac
 ```
 
-The resolver fail-closes to `do` (archer) on any unknown executor name,
+The resolver fail-closes to `tdd` (archer) on any unknown executor name,
 so a typo in plan frontmatter cannot silently route to the wrong subagent.
 See [executor-resolution.md](executor-resolution.md)
 for the full chain, the locked surface inference list, override paths,

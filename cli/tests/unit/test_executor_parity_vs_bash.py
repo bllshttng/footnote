@@ -212,7 +212,7 @@ _LOCKED_FIXTURES: list[tuple[str, str]] = [
         "   Rationale: frontend-only feature.\n",
         "impeccable",
     ),
-    ("## Locked Decisions\n\n1. **Executor routing**: plan-level `executor: do` (cli-flag).\n", "do"),
+    ("## Locked Decisions\n\n1. **Executor routing**: plan-level `executor: do` (cli-flag).\n", "tdd"),
     ("## Locked Decisions\n\n1. **Executor routing**: plan-level `executor: mixed` with per-task overrides.\n", "mixed"),
     # no entry -> empty
     ("## Locked Decisions\n\n1. **Auth model**: cookie-based.\n2. **State machine**: redux.\n", ""),
@@ -220,7 +220,7 @@ _LOCKED_FIXTURES: list[tuple[str, str]] = [
     ("", ""),
     # formatting variation
     ("## Locked Decisions\n\n1. **Executor Routing:** plan-level `executor: impeccable`\n", "impeccable"),
-    ("## Locked Decisions\n\n1. Executor routing: plan-level `executor: do`\n", "do"),
+    ("## Locked Decisions\n\n1. Executor routing: plan-level `executor: do`\n", "tdd"),
     ("## Locked Decisions\n\n1. **Executor routing**:    plan-level    `executor:   impeccable`   (auto-detected).\n", "impeccable"),
     # tab-only blank line between entries (must flush the buffer)
     (
@@ -260,7 +260,7 @@ _LOCKED_FIXTURES: list[tuple[str, str]] = [
         "1. **Executor routing**: plan-level `executor: do`\n\n"
         "## Architecture\n\n"
         "We also discuss `executor: impeccable` here in prose.\n",
-        "do",
+        "tdd",
     ),
     # multi-line continuation buffer
     (
@@ -289,10 +289,12 @@ def test_locked_python_matches_expected(doc: str, expected: str) -> None:
 
 @pytest.mark.parametrize("doc,expected", _LOCKED_FIXTURES)
 def test_locked_parity_vs_bash(doc: str, expected: str, parse_script) -> None:
-    """Byte-for-byte: the deleted bash parser and the Python CLI agree."""
+    """The renamed Python enum preserves the deleted parser's routing."""
     if parse_script is None:
         pytest.skip("bash parse-locked-executor.sh unavailable from git history")
     bash_out = _run_bash(parse_script, doc)
+    if bash_out == "do\n":
+        bash_out = "tdd\n"
     py = subprocess.run(
         [sys.executable, "-m", "fno.executor._locked"],
         input=doc,

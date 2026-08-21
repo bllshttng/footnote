@@ -263,7 +263,7 @@ status: ready
 kind: quick-plan
 created: <YYYY-MM-DD>      # required; the consolidation gate reads it
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
-# executor: do             # transcribed from a Locked Decision, if any
+# executor: tdd            # transcribed from a Locked Decision, if any
 consolidation:             # step 2d, exactly one outcome (see 2d above)
   outcome: proceed_alone
   proceed_alone_against: []

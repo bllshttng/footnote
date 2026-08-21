@@ -12,7 +12,7 @@
 # plan resolves to `impeccable` on the inline path too.
 #
 # Usage:
-#   resolve-plan-executor.sh path/to/plan.md   # -> do | impeccable
+#   resolve-plan-executor.sh path/to/plan.md   # -> tdd | impeccable
 #   cat plan.md | resolve-plan-executor.sh     # via stdin
 
 set -uo pipefail
@@ -47,6 +47,10 @@ else
     exit 2
 fi
 
+# Python's splitlines() discards CR in CRLF input. Normalize the Bash copy to
+# the same bytes before extracting directives and file headings.
+plan_content="${plan_content//$'\r'/}"
+
 # Plan-level explicit executor (frontmatter or a top-level `executor:` line).
 # A plan that declares its own executor wins over surface inference, exactly
 # like the operator path's plan tier.
@@ -66,7 +70,7 @@ plan_exec="$(printf '%s\n' "$plan_content" \
 # noise. Comma- or newline-separated.
 plan_files="$(printf '%s\n' "$plan_content" \
     | grep -iE '^[[:space:]]*\*{0,2}files?:?\*{0,2}[[:space:]]' \
-    | sed -E 's/^[[:space:]]*\*{0,2}[Ff]ile[s]?:?\*{0,2}[[:space:]]*//' \
+    | sed -E 's/^[[:space:]]*\*{0,2}[Ff][Ii][Ll][Ee][Ss]?:?\*{0,2}[[:space:]]*//' \
     | tr ',' '\n' \
     | tr -d '`"][' \
     | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
@@ -92,13 +96,18 @@ if [[ -f "$RESOLVER" ]]; then
     TASK_EXEC="" PLAN_EXEC="$plan_exec" TASK_FILES="$plan_files" \
         bash "$RESOLVER" 2>/dev/null
 elif [[ -n "$plan_exec" ]]; then
-    # Normalize the same way resolve-executor.sh would (tdd -> do; unknown
-    # falls closed to do).
+    # Normalize the same way resolve-executor.sh would (do -> tdd; unknown
+    # falls closed to tdd).
     case "$plan_exec" in
         impeccable) echo "impeccable" ;;
-        do|tdd)     echo "do" ;;
-        *)          echo "do" ;;
+        do|tdd)     echo "tdd" ;;
+        *)          echo "tdd" ;;
     esac
 else
-    printf '%s\n' "$plan_files" | python3 -m fno.executor._surface 2>/dev/null || echo "do"
+    inferred="$(printf '%s\n' "$plan_files" | python3 -m fno.executor._surface 2>/dev/null)"
+    case "$inferred" in
+        impeccable) echo "impeccable" ;;
+        do|tdd|"")  echo "tdd" ;;
+        *)          echo "tdd" ;;
+    esac
 fi

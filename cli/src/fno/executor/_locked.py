@@ -6,9 +6,10 @@ the one definition of the locked-decision parser.
 
 Reads design-doc text. Emits one of:
     ''            no lock recorded (or unknown value rejected)
-    'do'          plan-level executor: do
+    'tdd'         plan-level executor: tdd
+    'do'          one-release alias for tdd
     'impeccable'  plan-level executor: impeccable
-    'mixed'       plan-level executor: do with per-task impeccable overrides
+    'mixed'       plan-level executor: tdd with per-task impeccable overrides
 
 Multiple entries: take the LAST match (per plan failure modes - if a user
 edited /think's output and added a second entry, the most-recent intent
@@ -29,14 +30,18 @@ Tolerant of formatting variations:
     Provenance suffix (auto-detected) / (user-confirmed) / (cli-flag) - optional
 
 CLI:
-    cat design.md | python3 -m fno.executor._locked   # -> '' | do | impeccable | mixed
+    cat design.md | python3 -m fno.executor._locked   # -> '' | tdd | impeccable | mixed
 """
 from __future__ import annotations
 
 import re
 import sys
 
-_CANONICAL = ("do", "impeccable", "mixed")
+_CANONICAL = ("tdd", "impeccable", "mixed")
+
+
+def _normalize_executor(value: str) -> str:
+    return "tdd" if value == "do" else value
 
 # Mirrors awk's `tolower($0) ~ /^##[[:space:]]+locked[[:space:]]+decisions/`.
 _LOCKED_HEADING_RE = re.compile(r"^##[ \t]+locked[ \t]+decisions")
@@ -108,7 +113,7 @@ def _extract_value(block: str) -> str:
     """Resolve one entry's ``executor:<value>`` to a canonical value, or ''.
 
     ``block`` is a SINGLE buffered entry. The documented mixed shape - "plan-level
-    ``executor: do`` with per-task overrides ``executor: impeccable``" - resolves
+    ``executor: tdd`` with per-task overrides ``executor: impeccable``" - resolves
     to ``mixed``, because taking the last value there would return ``impeccable``
     and route the whole plan through the frontend pipeline, the more expensive of
     the two mistakes.
@@ -131,7 +136,10 @@ def _extract_value(block: str) -> str:
     matches = _EXECUTOR_KV_RE.findall(block)
     if not matches:
         return ""
-    values = [_EXECUTOR_PREFIX_RE.sub("", m).lower() for m in matches]
+    values = [
+        _normalize_executor(_EXECUTOR_PREFIX_RE.sub("", m).lower())
+        for m in matches
+    ]
     if (
         len({v for v in values if v in _CANONICAL}) > 1
         and _OVERRIDE_SHAPE_RE.search(block) is not None
@@ -156,7 +164,8 @@ def _is_entry_head(line: str) -> bool:
 def parse_locked_executor(text: str) -> str:
     """Parse the locked executor decision from design-doc ``text``.
 
-    Returns '' | 'do' | 'impeccable' | 'mixed'.
+    Returns '' | 'tdd' | 'impeccable' | 'mixed'. ``do`` input is normalized
+    to ``tdd`` for one compatibility release.
     """
     if not text:
         return ""
