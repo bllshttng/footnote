@@ -1,4 +1,4 @@
-"""Read the seven queues that decide whether a king still has work.
+"""Read the nine queues that decide whether a king still has work.
 
 Three properties are load-bearing and each has a test that fails loudly when it
 breaks.
@@ -10,8 +10,9 @@ already records; a king that hands you the commands is checkable.
 
 **A queue only a human can shrink is reported and never counted.** Counting one
 would hold the loop open until a person answered, which is idle-forever with a
-report attached. ``operator_question`` and ``unreachable_worker`` therefore
-report their real counts with ``actionable: false`` and a note naming why.
+report attached. ``operator_question``, ``carveout_pending``,
+``capture_pending``, and ``unreachable_worker`` therefore report their real
+counts with ``actionable: false`` and a note naming why.
 
 **Staffed is an activity reading, never a status word.** The roster's status
 vocabulary collapses four real states into three words: a worker consuming
@@ -118,6 +119,26 @@ class BoardInputs:
     #: fetch time, never through `_run_json` - there is no verb behind it.
     lane: SourceRead
     warnings: list[str] = field(default_factory=list)
+
+
+def _as_dict(value: Any) -> dict:
+    """The nested-shape half of the degrade-not-crash promise.
+
+    The top-level payload is already type-checked, but the board shells out
+    through a PATH-resolved ``fno``, so a stale deployed CLI can answer with an
+    older stream shape (a list where a dict belongs, string counts). A
+    structural surprise in ONE stream must degrade that stream, never raise
+    out of ``build_board`` - an exception here kills all nine queues instead
+    of the designed one-unreadable-queue exit.
+    """
+    return value if isinstance(value, dict) else {}
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _holder_is_active(activity: Optional[dict]) -> bool:
@@ -285,22 +306,25 @@ def build_board(
         for r in (outstanding_payload.get("questions") or [])
     ]
 
-    carveout_stream = outstanding_payload.get("carveouts") or {}
+    carveout_stream = outstanding_payload.get("carveouts")
+    carveout_stream = carveout_stream if isinstance(carveout_stream, dict) else {}
     carveout_rows = [
-        {"kind": kind, "n": n}
-        for kind, n in sorted(carveout_stream.get("by_kind", {}).items())
+        {"kind": kind, "n": _as_int(n)}
+        for kind, n in sorted(_as_dict(carveout_stream.get("by_kind")).items())
     ]
-    carveout_root = ((outstanding_payload.get("roots") or {}).get("carveouts") or {}).get("root")
+    roots = outstanding_payload.get("roots")
+    carveout_root = _as_dict(_as_dict(roots).get("carveouts")).get("root")
 
-    capture_stream = outstanding_payload.get("captures") or {}
-    capture_by_project = dict(capture_stream.get("by_project") or {})
+    capture_stream = outstanding_payload.get("captures")
+    capture_stream = capture_stream if isinstance(capture_stream, dict) else {}
+    capture_by_project = _as_dict(capture_stream.get("by_project"))
     # Per-project COUNTS, never the rows themselves: a hundreds-row stream
     # cannot be listed, and the cut is stated as a row so the loop and the
     # human render both see it.
     capture_rows = [
-        {"project": project, "n": n}
+        {"project": project, "n": _as_int(n)}
         for project, n in sorted(
-            capture_by_project.items(), key=lambda kv: (-kv[1], kv[0])
+            capture_by_project.items(), key=lambda kv: (-_as_int(kv[1]), kv[0])
         )[:_CAPTURE_PROJECT_CAP]
     ]
     elided = len(capture_by_project) - len(capture_rows)
@@ -379,7 +403,7 @@ def build_board(
                 "report-only: the sweep is a human verb"
                 + (f"; root {carveout_root}" if carveout_root else "")
             ),
-            count=int(carveout_stream.get("total") or 0),
+            count=_as_int(carveout_stream.get("total")),
         ),
         _queue(
             "capture_pending",
@@ -388,7 +412,7 @@ def build_board(
             capture_rows,
             actionable=False,
             note="report-only: per-project counts only; the rows cannot be listed",
-            count=int(capture_stream.get("total") or 0),
+            count=_as_int(capture_stream.get("total")),
         ),
         _queue(
             "unreachable_worker",

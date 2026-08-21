@@ -13,7 +13,7 @@ for each way it cannot happen.
 from __future__ import annotations
 
 import subprocess
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 #: Bypass reason for the mail style gate. The body carries the operator's
 #: verbatim answer, and the style gate judges authored relay prose; quoted
@@ -67,11 +67,27 @@ def deliver_answer(
 ) -> str:
     """Return the posture line for one answered close. Never raises.
 
-    ``question`` is a ``core.Question`` (duck-typed: ``id``, ``question``,
-    ``asker``). The asker handle is the delivery address stamped at ask time;
-    rows without one (king escalations predating the stamp) get a stated
-    posture naming where the answer is recoverable instead of a silent drop.
+    ``clear`` calls this once per closed id OUTSIDE its own try/except, so the
+    never-raises contract is load-bearing: one unexpected resolver exception
+    here would abort a multi-id clear mid-loop with some ids closed and no
+    count printed. Every failure, expected or not, is a stated line.
     """
+    try:
+        return _deliver_answer(question, answer, decision_id)
+    except Exception as exc:  # noqa: BLE001 - the close is durable; say what broke
+        qid = getattr(question, "id", "?")
+        did = decision_id or "the decision record"
+        return (
+            f"outstanding: {qid} answered; delivery failed ({exc}). "
+            f"Decision {did}; recover it via: fno backlog decisions"
+        )
+
+
+def _deliver_answer(
+    question: Any,
+    answer: str,
+    decision_id: "str | None",
+) -> str:
     qid = question.id
     did = decision_id or "the decision record"
     asker = getattr(question, "asker", None)
@@ -81,7 +97,13 @@ def deliver_answer(
             f"nobody to wake. Decision {did}; recover it via: fno backlog decisions"
         )
 
-    session, ambiguous = _resolve_asker(asker)
+    # Resolve by the FULL session id first, falling back to the 8-char handle.
+    # Codex ids are time-prefixed so their first-8 collides across same-window
+    # sessions; the full id was in hand at ask time (it is the question's own
+    # session_id) and is unique by construction, so the collision case only
+    # exists for rows stamped before this ordering.
+    token = getattr(question, "session_id", None) or asker
+    session, ambiguous = _resolve_asker(token)
     if ambiguous:
         return (
             f"outstanding: {qid} answered; asker {asker} is ambiguous across "
@@ -94,10 +116,7 @@ def deliver_answer(
             f"nobody to wake. Decision {did}; recover it via: fno backlog decisions"
         )
 
-    # Address by the FULL session id: the 8-char handle collides across
-    # same-window codex sessions, and mail queued under the wrong key is
-    # mail no drain ever reads.
-    full_id = getattr(session, "session_id", None) or asker
+    full_id = getattr(session, "session_id", None) or token
     body = f'Answer to your question {qid} "{question.question}": {answer}.'
     argv = [
         *_fno_argv(),
@@ -115,8 +134,9 @@ def deliver_answer(
             f'Retry: fno mail send {full_id} "<the answer>" '
             f'--style-exception "operator answer verbatim"'
         )
+    # Lead with the bus's own evidence, never a verdict word of ours: exit 0
+    # covers both "delivered (hosted)" and "queued (durable)", and a durable
+    # park under a session nobody resumes is NOT delivered no matter what the
+    # prefix claimed. The evidence line names which happened.
     evidence = f": {detail}" if detail else ""
-    return (
-        f"outstanding: {qid} answered; delivered to {asker} by mail{evidence} "
-        f"(decision {did})"
-    )
+    return f"outstanding: {qid} answered; mail to {asker}{evidence} (decision {did})"

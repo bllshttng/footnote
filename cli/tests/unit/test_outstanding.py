@@ -1620,9 +1620,64 @@ def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPa
     assert "coordination lane" in flat, "the answer must travel verbatim"
     assert "q-ab12cd34" in flat, "the asker must learn WHICH question was answered"
     assert "--style-exception" in flat, "operator prose is data, not authored relay"
-    assert "delivered to 89abcdef" in line
+    assert "mail to 89abcdef" in line
     assert "delivered (hosted)" in line, "quote the bus's own evidence, never just exit 0"
     assert "d-1a2b" in line
+
+
+def test_delivery_resolves_by_the_full_session_id_before_the_short_handle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Codex ids collide on first-8; the full id was in hand at ask time."""
+    from fno.outstanding import deliver as deliver_mod
+
+    seen: list[str] = []
+
+    class _Full:
+        session_id = "89abcdef-full-session-id"
+
+    def fake_resolve(token):
+        seen.append(token)
+        return (_Full(), [])
+
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", fake_resolve)
+    monkeypatch.setattr(
+        deliver_mod, "_mail_send", lambda argv: (0, "msg-1 delivered (hosted)")
+    )
+
+    q = Question(
+        id="q-0000000a",
+        ts="2026-08-21T00:00:00Z",
+        question="which?",
+        session_id="89abcdef-full-session-id",
+        asker="89abcdef",
+    )
+    line = deliver_mod.deliver_answer(q, "go", "d-1")
+
+    assert seen == ["89abcdef-full-session-id"], (
+        "the full id is unique by construction; the 8-char handle is the fallback"
+    )
+    assert "mail to 89abcdef" in line
+
+
+def test_an_unexpected_resolver_failure_is_a_stated_line_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """clear calls this outside its own try/except, once per id; one resolver
+    explosion must not abort a multi-id clear after some ids already closed."""
+    from fno.outstanding import deliver as deliver_mod
+
+    def boom(_token):
+        raise RuntimeError("store exploded")
+
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", boom)
+
+    q = Question(id="q-0000000b", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "go", "d-2")
+
+    assert "delivery failed" in line
+    assert "store exploded" in line
+    assert "fno backlog decisions" in line, "the answer stays recoverable"
 
 
 def test_no_asker_gets_a_stated_posture_not_a_silent_drop(monkeypatch: pytest.MonkeyPatch):
@@ -1706,7 +1761,7 @@ def test_clear_with_answer_prints_the_delivery_posture(
 
     assert cleared.exit_code == 0, cleared.output
     assert sent, "clear must deliver when the asker resolves"
-    assert "delivered to 89abcdef" in cleared.output
+    assert "mail to 89abcdef" in cleared.output
 
 
 def test_clear_with_answer_names_an_undeliverable_posture(

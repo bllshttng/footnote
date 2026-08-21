@@ -644,3 +644,25 @@ def test_all_four_streams_are_visible_from_one_board_read():
     assert _queue(board, "operator_question")["count"] == 0
     assert _queue(board, "carveout_pending")["count"] == 2
     assert _queue(board, "capture_pending")["count"] == 3
+
+
+def test_a_nested_shape_change_degrades_that_stream_not_the_whole_board():
+    """The board shells out through a PATH-resolved fno; a stale deployed CLI
+    can answer an older stream shape. The promise is degrade, never crash."""
+    inputs = _empty_inputs(
+        outstanding=_ok(
+            {
+                "questions": [],
+                "carveouts": ["not", "a", "dict"],
+                "captures": {"total": "many", "by_project": {"a": "x", "b": 2}},
+                "roots": None,
+            }
+        )
+    )
+    board = build_board(inputs)
+
+    assert _queue(board, "carveout_pending")["count"] == 0
+    cap = _queue(board, "capture_pending")
+    assert cap["count"] == 0, '"many" is not a count; zero, not a crash'
+    assert {"project": "b", "n": 2} in cap["rows"]
+    assert {"project": "a", "n": 0} in cap["rows"], "junk counts render as 0"
