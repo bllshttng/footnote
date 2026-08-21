@@ -293,12 +293,25 @@ fi
 # references TARGET. Both surfaces matter: lsof catches editors and shells
 # with cwd inside the worktree; pgrep -f catches background processes that
 # may have changed directory after launch.
-# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd: uv hardlinks the same
-# venv `.so` inodes into every worktree, so a daemon mmapping one shows up under
-# every worktree's path with bare `+D`. Anchoring on cwd drops those phantoms.
+# Enumerate cwd descriptors without a path operand, then match TARGET with a
+# path-segment boundary. This preserves cwd-only semantics without recursively
+# walking every file below the worktree.
 PIDS=""
+CWD_SNAPSHOT_OK=0
 if command -v lsof >/dev/null 2>&1; then
-  PIDS="$(lsof -a -d cwd +D "$TARGET" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u || true)"
+  CWD_ROWS=""
+  if CWD_ROWS="$(lsof -a -d cwd -Fpn 2>/dev/null)"; then
+    CWD_SNAPSHOT_OK=1
+    TARGET_PHYSICAL="$(cd "$TARGET" 2>/dev/null && pwd -P)" || TARGET_PHYSICAL="$TARGET"
+    PIDS="$(printf '%s\n' "$CWD_ROWS" | awk -v root="$TARGET_PHYSICAL" -v logical="$TARGET" '
+      /^p[0-9]+$/ { pid = substr($0, 2); next }
+      /^n/ && pid != "" {
+        cwd = substr($0, 2)
+        if (cwd == root || index(cwd, root "/") == 1 ||
+            cwd == logical || index(cwd, logical "/") == 1) print pid
+      }
+    ' | sort -u)"
+  fi
 fi
 # `pgrep -f` matches its pattern as an extended regex against the full
 # cmdline. Pass TARGET unescaped and any `.`/`+`/`[` in the path matches
@@ -337,6 +350,11 @@ while IFS= read -r pid; do
   ALL_PIDS+="$pid"$'\n'
 done < <(printf '%s\n%s\n' "$PIDS" "$PIDS_F" | grep -v '^$' | sort -u)
 ALL_PIDS="$(printf '%s' "$ALL_PIDS" | grep -v '^$' | sort -u || true)"
+
+if [[ "$CWD_SNAPSHOT_OK" -ne 1 ]]; then
+  echo "archive-worktree: cwd process snapshot unavailable; refusing to treat $TARGET as idle" >&2
+  exit 2
+fi
 
 if [[ -n "$ALL_PIDS" ]]; then
   echo "    Processes rooted in $TARGET:" >&2

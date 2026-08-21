@@ -94,14 +94,35 @@ _wt_permanent() {
 # references it. Mirrors archive-worktree.sh's enumeration (escaped regex so
 # path metachars are literal); drops our own PID and our own tooling.
 #
-# `lsof -a -d cwd +D` (NOT bare `+D`) keys on the cwd fd so uv-hardlinked venv
-# `.so` files mmapped by long-lived daemons - the same inode under every
-# worktree - never count as "rooted here". The pgrep lane still catches bg
-# processes carrying the path in argv.
+# The shared lsof snapshot contains cwd descriptors only, so uv-hardlinked venv
+# `.so` files mmapped by long-lived daemons never count as rooted here. The
+# pgrep lane still catches background processes carrying the path in argv.
+_WT_CWD_SNAPSHOT=""
+_WT_CWD_SNAPSHOT_OK=0
+
+_wt_refresh_cwd_snapshot() {
+    local raw=""
+    _WT_CWD_SNAPSHOT=""
+    _WT_CWD_SNAPSHOT_OK=0
+    command -v lsof >/dev/null 2>&1 || return 1
+    raw="$(lsof -a -d cwd -Fpn 2>/dev/null)" || return 1
+    _WT_CWD_SNAPSHOT="$(printf '%s\n' "$raw" | awk '
+        /^p[0-9]+$/ { pid = substr($0, 2); next }
+        /^n/ && pid != "" { print pid "\t" substr($0, 2) }
+    ')"
+    _WT_CWD_SNAPSHOT_OK=1
+}
+
 _wt_pids() {
-    local wt="$1" pids="" pids_f="" re candidates
-    if command -v lsof >/dev/null 2>&1; then
-        pids="$(lsof -a -d cwd +D "$wt" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)"
+    local wt="$1" root pids="" pids_f="" re candidates filtered snapshot_rc=0
+    root="$(cd "$wt" 2>/dev/null && pwd -P)" || root="$wt"
+    if [[ "${_WT_CWD_SNAPSHOT_OK:-0}" -eq 1 ]]; then
+        pids="$(printf '%s\n' "${_WT_CWD_SNAPSHOT:-}" | awk -F '\t' -v root="$root" -v logical="$wt" '
+            $2 == root || index($2, root "/") == 1 ||
+            $2 == logical || index($2, logical "/") == 1 { print $1 }
+        ' | sort -u)"
+    else
+        snapshot_rc=2
     fi
     re="$(printf '%s' "$wt" | sed -e 's/[][\\.^$*+?(){}|/]/\\&/g')"
     pids_f="$(pgrep -f -- "$re" 2>/dev/null || true)"
@@ -111,7 +132,9 @@ _wt_pids() {
     # `|| true`: a mid-pipeline `grep -v` with no match exits 1, which pipefail
     # would surface as the function's status even though the pids printed fine.
     candidates="$(printf '%s\n%s\n' "$pids" "$pids_f" | grep -v "^$$\$" | grep -v '^$' | sort -u || true)"
-    [[ -z "$candidates" ]] && return 0
+    if [[ -z "$candidates" ]]; then
+        return "$snapshot_rc"
+    fi
     # One process-table snapshot for the whole candidate set, not one `ps`
     # subprocess per pid: a concurrent sweep's own argv carries every
     # worktree path (see the lock comment above), so candidates scale with
@@ -119,7 +142,7 @@ _wt_pids() {
     # N sweeps x 49 worktrees x N matches.
     # The marker keeps awk's first input non-empty and positively identifies a
     # completed snapshot; otherwise an empty ps makes the candidates FNR==NR.
-    awk '
+    filtered="$(awk '
         BEGIN { snapshot_marker = "__FNO_PS_SNAPSHOT_COMPLETE__" }
         FNR==NR {
             line = $0
@@ -144,7 +167,9 @@ _wt_pids() {
             if (cmd ~ /archive-worktree\.sh/ || cmd ~ /worktree-lifecycle\.sh/) next
             print pid
         }
-    ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates")
+    ' <(ps -Ao pid=,command= 2>/dev/null; printf '%s\n' '__FNO_PS_SNAPSHOT_COMPLETE__') <(printf '%s\n' "$candidates"))"
+    printf '%s\n' "$filtered"
+    return "$snapshot_rc"
 }
 
 # Print bg-job ids (~/.claude/jobs/<id>/) safe to retire: state in
@@ -213,7 +238,15 @@ _wt_all_orphans() {
 }
 
 _cargo_target_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+    local value=""
+    value="$(stat -f %m "$1" 2>/dev/null)" || value=""
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    value="$(stat -c %Y "$1" 2>/dev/null)" || value=""
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s\n' "$value"
 }
 
 _cargo_target_bytes() {
@@ -224,8 +257,9 @@ _cargo_target_bytes() {
 }
 
 _cargo_target_inventory() {
-    local output="$1" wt target bytes mtime protection pids
+    local output="$1" wt target bytes mtime protection pids pids_rc
     : > "$output"
+    _wt_refresh_cwd_snapshot || true
     while IFS= read -r wt; do
         [[ -d "$wt" ]] || continue
         protection="-"
@@ -233,7 +267,12 @@ _cargo_target_inventory() {
             protection="live-session"
         else
             pids="$(_wt_pids "$wt")"
-            [[ -n "$pids" ]] && protection="processes:$(printf '%s\n' "$pids" | grep -c .)"
+            pids_rc=$?
+            if [[ "$pids_rc" -ne 0 ]]; then
+                protection="process-snapshot-unreadable"
+            elif [[ -n "$pids" ]]; then
+                protection="processes:$(printf '%s\n' "$pids" | grep -c .)"
+            fi
         fi
         shopt -s nullglob
         for target in "$wt/target" "$wt"/crates/*/target; do
@@ -331,6 +370,7 @@ _cargo_target_cleanup() {
     fi
 
     mode="apply"
+    _wt_refresh_cwd_snapshot || true
     while IFS=$'\t' read -r mtime bytes wt target reason; do
         [[ -n "$target" ]] || continue
         if ! _cargo_target_registered "$wt" || ! _cargo_target_path_is_owned "$wt" "$target"; then
@@ -343,6 +383,12 @@ _cargo_target_cleanup() {
             continue
         fi
         pids="$(_wt_pids "$wt")"
+        pids_rc=$?
+        if [[ "$pids_rc" -ne 0 ]]; then
+            printf 'cargo-target protected bytes=%s reason=process-snapshot-unreadable path=%s\n' "$bytes" "$target"
+            protected=$((protected + 1))
+            continue
+        fi
         if [[ -n "$pids" ]]; then
             printf 'cargo-target protected bytes=%s reason=process-recheck path=%s\n' "$bytes" "$target"
             protected=$((protected + 1))
@@ -519,6 +565,7 @@ case "${1:-status}" in
             N_TOTAL=0; N_REAP=0; N_FAIL=0
             N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0
 
+            _wt_refresh_cwd_snapshot || true
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
                 [[ "$wt" == "$MAIN_DIR" ]] && continue
@@ -599,6 +646,10 @@ case "${1:-status}" in
                 # 4. rooted processes
                 YES=""
                 pids="$(_wt_pids "$wt")"
+                pids_rc=$?
+                if [[ "$pids_rc" -ne 0 ]]; then
+                    printf '%-18s %-34s %s\n' "kept (process-snapshot-unreadable)" "$branch" "$wt"; N_PROC=$((N_PROC + 1)); continue
+                fi
                 if [[ -n "$pids" ]]; then
                     if [[ -z "$KILL_ORPHANS" ]]; then
                         printf '%-18s %-34s %s\n' "kept (processes: $(printf '%s\n' "$pids" | grep -c .))" "$branch" "$wt"; N_PROC=$((N_PROC + 1)); continue
@@ -656,6 +707,7 @@ case "${1:-status}" in
 
         REMOVED=0
 
+        _wt_refresh_cwd_snapshot || true
         while IFS= read -r wt; do
             # Skip main repo
             [[ "$wt" == "$MAIN_DIR" ]] && continue
@@ -722,6 +774,16 @@ case "${1:-status}" in
                         fi
                         continue
                     fi
+                fi
+                pids="$(_wt_pids "$wt")"
+                pids_rc=$?
+                if [[ "$pids_rc" -ne 0 ]]; then
+                    echo "  SKIP: $wt (process snapshot unreadable)"
+                    continue
+                fi
+                if [[ -n "$pids" ]]; then
+                    echo "  SKIP: $wt (processes: $(printf '%s\n' "$pids" | grep -c .))"
+                    continue
                 fi
                 if [[ -n "$DRY_RUN" ]]; then
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
