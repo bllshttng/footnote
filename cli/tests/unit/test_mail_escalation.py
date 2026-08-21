@@ -405,14 +405,14 @@ def test_store_healing_never_changes_an_origin_a_row_already_has(mailbox):
     mail escalation. Write-once refuses both.
 
     A row that never made a claim is a different case. Nothing is lost by giving
-    it the only claim anyone has made, and `_row_spawned` reads `None` and
+    it the only claim anyone has made, and the retire lane reads `None` and
     `adopted` identically, so filling one cannot change a lane verdict.
     """
     from fno.agents.registry import register_existing_session, load_registry
 
     sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
     register_existing_session(
-        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="spawned"
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="spawn"
     )
     register_existing_session(
         provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
@@ -422,7 +422,7 @@ def test_store_healing_never_changes_an_origin_a_row_already_has(mailbox):
     )
 
     row = next(r for r in load_registry() if r.harness_session_id == sid)
-    assert row.origin == "spawned", "a heal must not exempt a spawned worker from the lane"
+    assert row.origin == "spawn", "a heal must not exempt a spawned worker from the lane"
 
 
 def test_a_genuinely_new_adoption_still_carries_the_marker(mailbox):

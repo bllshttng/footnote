@@ -1999,7 +1999,6 @@ done
                 cwd: "/tmp".into(),
                 project_root: String::new(),
                 session_id: None,
-                origin: None,
                 spawn_trigger: None,
                 legacy_claude_short_id: None,
                 claude_session_uuid: Some("uuid-x".into()),

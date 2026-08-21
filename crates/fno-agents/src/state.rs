@@ -2155,13 +2155,16 @@ mod tests {
 
     #[test]
     fn origin_survives_a_daemon_read_modify_write() {
-        // Python stamps this at row birth and the watchdog's retire lane reads
-        // it to answer "did footnote make this row?". The daemon touches the
-        // same rows, so dropping it on write-back turns every marked worker
-        // back into UNKNOWN - and unknown never retires, so the lane goes
-        // silently unsatisfiable rather than visibly broken. Measured before
-        // this mirror existed: zero of thirty-six live rows carried an origin,
-        // including operator rows the SessionStart hook had stamped.
+        // v16 (x-944f): Python stamps this at row birth, and BOTH watchdog
+        // lanes read it - reap as a PROTECTOR (an operator session is never
+        // reaped) and retire to answer "did footnote make this row?". The
+        // daemon touches the same rows, so dropping it on write-back left the
+        // protector unreachable and turned every marked worker back into
+        // UNKNOWN, which never retires: the lane goes silently unsatisfiable
+        // rather than visibly broken. Measured before this mirror existed:
+        // 0 of 37 live rows carried an origin, operator rows the SessionStart
+        // hook had stamped included. Same passthrough shape as
+        // delivery_policy (v14).
         let mut reg = Registry::default();
         reg.entries.push(sample_entry("leader"));
         let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
@@ -2211,38 +2214,6 @@ mod tests {
         assert_eq!(
             back["agents"][0]["delivery_policy"], "bus-only",
             "the daemon must re-emit a Python-stamped delivery policy, not drop it"
-        );
-    }
-
-    #[test]
-    fn origin_survives_a_daemon_read_modify_write() {
-        // v16 (x-944f): Python stamps `origin` at both register paths and the
-        // reap lane reads it as a PROTECTOR - an operator session is never
-        // reaped. Rust did not model the field, so every daemon write dropped
-        // it and the protector was unreachable: 0 of 37 live rows carried the
-        // key. This is the passthrough assertion that closes it, in the same
-        // shape as delivery_policy (v14).
-        let mut reg = Registry::default();
-        reg.entries.push(sample_entry("hand-started"));
-        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
-
-        // (a) An unstamped row OMITS the key rather than serializing null, so
-        // Python's AgentEntry(**row) reads it as never-recorded.
-        assert!(wire["agents"][0].get("origin").is_none());
-
-        // (b) A pre-v16 row (key absent) reads as never-recorded, not corrupt.
-        let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(reg.entries[0].origin, None);
-
-        // (c) The daemon must re-emit a Python-stamped origin, not drop it.
-        //     This is the assertion that was false before x-944f.
-        wire["agents"][0]["origin"] = serde_json::Value::from("operator");
-        let reg: Registry = serde_json::from_value(wire).unwrap();
-        assert_eq!(reg.entries[0].origin.as_deref(), Some("operator"));
-        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
-        assert_eq!(
-            back["agents"][0]["origin"], "operator",
-            "the daemon must re-emit a Python-stamped origin, not drop it"
         );
     }
 

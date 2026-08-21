@@ -1977,13 +1977,13 @@ def test_origin_is_write_once_and_a_refresh_never_changes_it(tmp_path, monkeypat
             origin=origin,
         )
 
-    assert register("spawned").origin == "spawned"
-    assert register("operator").origin == "spawned", (
+    assert register("spawn").origin == "spawn"
+    assert register("operator").origin == "spawn", (
         "a refresh must not move a worker into the attended lane"
     )
-    assert register("adopted").origin == "spawned"
-    assert register(None).origin == "spawned"
-    assert [e.origin for e in load_registry()] == ["spawned"]
+    assert register("adopted").origin == "spawn"
+    assert register(None).origin == "spawn"
+    assert [e.origin for e in load_registry()] == ["spawn"]
 
 
 def test_a_refresh_fills_an_origin_the_row_never_had(tmp_path, monkeypatch):

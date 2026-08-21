@@ -1220,7 +1220,7 @@ def test_a_decorated_question_still_holds_the_row():
     ):
         text = f"Plan delivered.\n{closing}\n{FINISHED_TAIL}"
         assert watchdog._question_pending(_facts(text, age_min=20)) is True, closing
-        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
         [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
         assert v.verdict != watchdog.RETIRE, closing
 
@@ -1248,7 +1248,7 @@ def test_a_quoted_promise_never_retires_and_a_real_one_still_does():
         "real then quote": (f"{promise}\n```\n{promise}\n```", True),
     }
     for name, (text, should_retire) in cases.items():
-        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", True)
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
         [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
         retired = v.verdict == watchdog.RETIRE
         assert retired is should_retire, f"{name}: retired={retired}"
