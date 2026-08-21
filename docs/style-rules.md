@@ -127,8 +127,8 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 ## Where the check runs
 
 - `fno mail send` rejects a body that breaks the rules.
-- A PR body that breaks the rules fails CI.
-- Changed markdown under `docs/`, `skills/`, and `agents/` fails CI on the added lines.
+- Run `fno lint style --surface pr-body --stdin` to check a PR body by hand.
+- Run `fno lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
 - A PR comment has no chokepoint. Run `fno lint style --surface comment --stdin` yourself.
 
 The comment surface is honest about refusing nothing. A PR comment goes out through `gh pr comment`, which this repo never wraps. A surface that reads as a guard and blocks nothing is worse than no surface at all.

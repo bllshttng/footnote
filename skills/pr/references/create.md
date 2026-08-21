@@ -250,7 +250,7 @@ gh pr create \
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
-**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as step 4.5. A mismatch here means the body `gh pr create` actually wrote differs from what was composed, e.g. a body-length or style gate rewrote it. Merge-time binding then misses a claim silently.
+**Verify the trailer round-tripped.** Best-effort, non-fatal, same posture as step 4.5. A mismatch here means the body `gh pr create` actually wrote differs from what was composed. Merge-time binding then misses a claim silently.
 
 ```bash
 if [[ -n "${CLOSURE_TRAILER:-}" && -n "${PR_NUMBER:-}" ]]; then
@@ -358,4 +358,3 @@ gh pr view --json number,url
 - **Meaningful descriptions** - Derived from actual changes made
 - **Reference Linear tickets** - Extract from commits if present (only when `config.linear.enabled`)
 - **Output PR number clearly** - Needed for `/pr check`
-

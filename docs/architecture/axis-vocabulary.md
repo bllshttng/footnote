@@ -1,9 +1,6 @@
 # Axis vocabulary: harness, provider, model, effort, account
 
-This document is the single source for footnote's axis definitions.
-The code, the spawn/register receipts, the process environment, the config, and the skills all conform to the table below.
-These definitions guide implementation and review; no CI vocabulary ratchet enforces them.
-When a reviewer and an agent disagree about an ambiguous site, this document resolves it the same way for both.
+This document is the single source for footnote's axis definitions. The code, receipts, environment, config, and skills conform to the table below. These definitions guide implementation and review. No CI vocabulary ratchet enforces them. When a reviewer and an agent disagree about an ambiguous site, this document resolves it for both.
 
 ## The five axes
 
@@ -51,9 +48,7 @@ The provider-to-harness mapping is fixed:
 A receipt that renames a `provider` key to `harness` and then emits a second `provider` field still reading `claude` has fixed nothing.
 The defect is the value under the name, not the name alone.
 
-**Review rule.** Treat only a harness value bound to a provider-named identifier as a defect.
-`anthropic` under `provider` is correct; `claude` under `provider` is the defect.
-Calling the legal case a defect obscures the distinction this vocabulary exists to preserve.
+**Review rule.** Treat only a harness value bound to a provider-named identifier as a defect. `anthropic` under `provider` is correct. `claude` under `provider` is the defect. Calling the legal case a defect obscures the distinction this vocabulary exists to preserve.
 
 **Name rule.** A directory named for one axis must not hold another axis's implementation.
 This is the rule the first two cannot reach.
@@ -122,7 +117,7 @@ An unset effort resolves to `max`. fno spawns most workers without one, so a mec
 `gemini` names a harness, a provider, and a model family.
 The axis can never be inferred from a value, so no mechanical rename can be trusted: every site is read for intent.
 
-Document ambiguous bindings at the site when the axis is not evident from the surrounding type or field name.
+When the surrounding type or field name does not reveal the axis, document the ambiguous binding at the site.
 
 ## Recognized and unrecognized harness values
 
@@ -152,6 +147,4 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 
 ## Prior attempts
 
-Four prior passes each fixed one surface and survived the conflation: renaming `fno providers` to accounts (superseded), the config managed-CLI entries (done), the `fno whoami` line (done), and the on-disk registry field (done).
-The on-disk registry field pass is the instructive failure: it resolved the collision by deleting the provider field and declaring harness the sole identity axis, which removed the ability to express a real axis rather than disambiguating it.
-This cutover instead keeps the word `provider` and restores its one correct meaning across the product surfaces listed above.
+Four prior passes each fixed one surface, yet the conflation survived. They renamed `fno providers` to accounts and updated the managed-CLI config. They also changed the `fno whoami` line and on-disk registry field. The registry pass shows the failure clearly. It deleted the provider field and made harness the sole identity axis. That removed a real axis instead of disambiguating it. This cutover keeps the word `provider` and restores its correct meaning across the product surfaces above.

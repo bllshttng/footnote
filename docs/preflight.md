@@ -1,6 +1,6 @@
 # CI-parity preflight
 
-Preflight is an OPT-IN rehearsal of CI, never the gate. CI on the PR head decides the merge. A stock config (`config.preflight.required` absent or false) never runs this before a push. For a project that opts in, `scripts/ci/preflight.sh` runs CI's verdict locally before the push, so a local green means a green PR. It kills the push-wait-red-fix loop: each ~10-minute CI round used to surface one new failure. The default is false for two measured reasons. The rehearsal costs 22 to 47 minutes. It also cannot start under the 256-file-descriptor limit launchd hands every spawned worker. On 2026-08-19 six concurrent runs aged past an hour at load average 415 with zero completions. Three workers held green commits blocked only on this gate. On a stock config the pre-push obligation is the focused checks. They are `cargo fmt --check` for rust changes, markdown style lint for changed `.md`, PR-body length, and the blast-radius tests. CI re-runs all of it. Set `preflight.required = true` to restore the mandatory rehearsal per project.
+Preflight is an OPT-IN rehearsal of CI, never the gate. CI on the PR head decides the merge. A stock config (`config.preflight.required` absent or false) never runs this before a push. For a project that opts in, `scripts/ci/preflight.sh` runs CI's verdict locally before the push, so a local green means a green PR. It kills the push-wait-red-fix loop: each ~10-minute CI round used to surface one new failure. The default is false for two measured reasons. The rehearsal costs 22 to 47 minutes. It also cannot start under the 256-file-descriptor limit launchd hands every spawned worker. On 2026-08-19 six concurrent runs aged past an hour at load average 415 with zero completions. Three workers held green commits blocked only on this gate. On a stock config the pre-push obligation is `cargo fmt --check` for Rust changes plus the tests covering the diff's blast radius. `fno lint style` remains available for voluntary hand runs. Set `preflight.required = true` to restore the mandatory rehearsal per project.
 
 This is a different thing from the environment preflight (`fno target` Step 3g, `skills/target/scripts/preflight/`), which checks working-tree cleanliness, dependencies, and auth. This preflight is a deterministic test/lint runner. It runs no LLM review. Review stays at `config.review.*`.
 
@@ -187,7 +187,7 @@ On a stock config the pre-push obligation is the focused checks below, each taki
 - `cargo fmt --check` for rust changes.
 - The tests covering the diff's blast radius.
 
-`fno lint style` remains available for voluntary hand runs. For Markdown, run `fno lint style --surface markdown --files <changed .md> --diff-base origin/main`; it is not part of the stock pre-push or CI gate.
+`fno lint style` remains available for voluntary hand runs. For Markdown, run `fno lint style --surface markdown --files <changed .md> --diff-base origin/main`. It is not part of the stock pre-push or CI gate.
 
 On a project that set `preflight.required = true` (see `skills/target/references/ship-phase.md`):
 

@@ -9,7 +9,7 @@ It is advisory: it warns and never blocks. The control-plane path set remains in
 On every PR, [`scripts/ci/control-plane-doc-colocation.sh`](../../scripts/ci/control-plane-doc-colocation.sh):
 
 1. Computes the changed-file set as `git diff --name-only <merge-base> HEAD`, with the base resolved from `BASE_REF` (GitHub Actions sets it from `github.base_ref`) or an explicit `--base <ref>`.
-2. Classifies each changed file as control-plane or not using the `include:` and `exclude:` lists in [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml), so test files (`**/tests/**`, `test_*`, `*_test.*`) are excluded without a hardcoded list that could drift.
+2. Reads the control-plane `include:` and `exclude:` lists from [`scripts/ci/loc-ratchet-manifest.yaml`](../../scripts/ci/loc-ratchet-manifest.yaml). Manifest patterns exclude test files without a duplicated list.
 3. Checks whether any changed file lives under `docs/architecture/`.
 4. If control-plane code changed **and** no `docs/architecture/` file did, it emits a `::warning` annotation plus a GitHub step-summary entry listing the control-plane files. Otherwise it prints `PASS`.
 
@@ -17,7 +17,7 @@ The script **always exits 0**. The signal is the annotation, not a red check.
 
 ## Why one path list
 
-Reading both the control-plane path set (`include:`) and the exclusions (`exclude:`) from `loc-ratchet-manifest.yaml` avoids duplicating the blast-radius router's definition of "control plane." Add a path to the manifest once, and both consumers pick it up. The current include set:
+The manifest supplies the control-plane paths and exclusions. The blast-radius router consumes the same lists. Add a path once, and both consumers pick it up. The current include set:
 
 - `hooks/`
 - `scripts/lib/`
@@ -34,7 +34,7 @@ Two layers keep this out of the merge gate:
 - The "Check control-plane doc colocation" step, in [`.github/workflows/guards.yml`](../../.github/workflows/guards.yml)'s `guards-pr` job, sets `continue-on-error: true`. The run succeeds regardless of branch protection.
 - The script exits 0 on every path, including the warning path. Any error it would otherwise raise (no base ref, missing manifest, failed diff) degrades to a soft no-op notice rather than a failure.
 
-There is intentionally no exception ledger. A warning you disagree with is simply ignored; the goal is a reminder, not a checkpoint.
+There is intentionally no exception ledger. A warning you disagree with is simply ignored. The goal is a reminder, not a checkpoint.
 
 ## Acting on a warning
 

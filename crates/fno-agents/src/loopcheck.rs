@@ -3093,10 +3093,9 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 }
 
 /// The commit-status context the merge ruleset requires. One const for
-/// both emitter call sites and the standalone verb arm; the Python publisher,
-/// the refresher workflow, and the post-merge audit pin the same name from
-/// their own surfaces, and a context string that splits in two is a green
-/// marker on nothing.
+/// both emitter call sites and the standalone verb arm; the Python publisher
+/// and refresher workflow pin the same name from their own surfaces, and a
+/// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
@@ -3118,7 +3117,7 @@ fn is_code_review_reviewer(name: &str) -> bool {
 /// (not merely the local HEAD), and - when `code-review` is a configured
 /// reviewer - a head-pinned local pass from it. The two must agree, because
 /// this status is exactly what lets a merge through where `fno pr merge`
-/// already looked; the post-merge audit on main is what catches a drift.
+/// already looked.
 ///
 /// Skipped entirely when no review lane is configured: a stock install has no
 /// ruleset requiring the context, and a permanent failure status there would
@@ -7978,8 +7977,7 @@ fn run_done(
     // PR head the row is compared against - not merely the local HEAD. Only
     // an OPEN PR: read_pr_info short-circuits a MERGED PR to the
     // Covered(0) sentinel, and publishing that as failure would flip the
-    // latest status on the merged head red and fail the post-merge audit for
-    // a merge that passed the gate.
+    // latest status on a merged head red after the merge passed the gate.
     if matches!(info.state, PrState::Open) {
         publish_coverage_status(
             gh_bin,
