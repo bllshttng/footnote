@@ -52,17 +52,54 @@ def test_does_not_bind_resolve_harness_identity_at_module_scope():
     assert not hasattr(reply_resolve, "resolve_harness_identity")
 
 
+SID = "bbbb2222-1111-4222-8333-444444444444"  # canonical handle: bbbb2222
+
+
 def test_to_requirement_rejects_a_forwarded_envelope():
     # A forward quotes the original envelope verbatim, so the id IS present in a
     # session the message was never sent to. Matching on the id alone reads that
     # quote as a receipt and answers in the wrong session.
     text = '<fno_mail from="aaaa1111" to="cccc3333" id="msg-fwd"> quoted'
-    assert sender_from_transcript_text(text, "msg-fwd", to="bbbb2222") is None
+    assert sender_from_transcript_text(text, "msg-fwd", session_id=SID) is None
 
 
 def test_to_requirement_accepts_the_envelope_addressed_here():
     text = '<fno_mail from="aaaa1111" to="bbbb2222" id="msg-fwd"> mine'
-    assert sender_from_transcript_text(text, "msg-fwd", to="bbbb2222") == "aaaa1111"
+    assert sender_from_transcript_text(text, "msg-fwd", session_id=SID) == "aaaa1111"
+
+
+def test_an_envelope_with_no_recipient_attribute_still_resolves():
+    # `to` is optional in the renderer, and envelopes predating the attribute
+    # are still in live transcripts this resolver reads. Requiring it refused
+    # the exact shape the verb exists to answer, and broke a green test.
+    text = '<fno_mail from="aaaa1111" id="msg-bare"> no recipient attribute'
+    assert sender_from_transcript_text(text, "msg-bare", session_id=SID) == "aaaa1111"
+
+
+def test_a_job_address_is_not_read_as_a_foreign_session():
+    # `to="node:<id>"` names work, not a session, so it carries no evidence
+    # either way. Treating it as "addressed elsewhere" drops a live lane that
+    # writes no durable record and has nowhere else to resolve from.
+    text = '<fno_mail from="aaaa1111" to="node:x-1234" id="msg-job"> job'
+    assert sender_from_transcript_text(text, "msg-job", session_id=SID) == "aaaa1111"
+
+
+def test_a_full_session_id_recipient_matches_this_session():
+    # A send to a full session id stamps the full id, and codex addressing is
+    # often the full id in practice. Equality against the canonical handle
+    # dropped it; tier matching admits it.
+    text = f'<fno_mail from="aaaa1111" to="{SID}" id="msg-full"> full id'
+    assert sender_from_transcript_text(text, "msg-full", session_id=SID) == "aaaa1111"
+
+
+def test_reply_to_is_not_read_as_the_recipient():
+    # An unanchored to="..." also matched reply_to="...", which is a false
+    # ACCEPT rather than a fail-closed miss: a tag addressed nowhere near this
+    # session resolved as a receipt for it.
+    text = '<fno_mail from="aaaa1111" reply_to="bbbb2222" id="msg-rt"> x'
+    assert sender_from_transcript_text(text, "msg-rt", session_id=SID) == "aaaa1111"
+    foreign = '<fno_mail from="aaaa1111" reply_to="bbbb2222" to="cccc3333" id="msg-rt2"> x'
+    assert sender_from_transcript_text(foreign, "msg-rt2", session_id=SID) is None
 
 
 def test_resolve_live_sender_picks_the_store_holding_the_receipt(tmp_path, monkeypatch):

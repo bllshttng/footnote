@@ -17,13 +17,41 @@ from typing import Optional
 # are pulled independently within the tag).
 _OPEN_TAG_RE = re.compile(r"<fno_mail\b[^>]*>")
 _FROM_RE = re.compile(r'from="([^"]+)"')
-_TO_RE = re.compile(r'to="([^"]+)"')
+_TO_RE = re.compile(r'\bto="([^"]+)"')
 # Capture the id attribute of a <fno_mail ...> open tag (W2 dedup-at-drain).
 _ID_RE = re.compile(r'<fno_mail\b[^>]*\bid="([^"]+)"')
 
 
+def _addressed_here(tag: str, session_id: str) -> bool:
+    """Whether ``tag``'s recipient attribute names the session ``session_id``.
+
+    True when the tag carries no USABLE session address, because an absent
+    address cannot exclude a store. Three real shapes have none: ``to`` is
+    optional in the renderer (stamped only when set), envelopes written before
+    the attribute existed are still sitting in live transcripts this resolver
+    reads, and a job address (``to="node:<id>"``) names work rather than a
+    session. Refusing those refuses the exact shape the verb exists to answer.
+
+    A present session address is matched by TIER, not by string equality
+    against the canonical handle: a send to a full session id stamps the full
+    id, and codex addressing is often the full id in practice, so an equality
+    check drops a lane that writes no durable record and has nowhere else to
+    resolve from.
+    """
+    from fno.harness_identity import session_handle_tier
+
+    m = _TO_RE.search(tag)
+    if m is None:
+        return True
+    token = m.group(1)
+    if ":" in token:
+        # Scheme-qualified (`node:<id>`): an address, but not a session one.
+        return True
+    return session_handle_tier(token, session_id) is not None
+
+
 def sender_from_transcript_text(
-    text: str, msg_id: str, *, to: Optional[str] = None
+    text: str, msg_id: str, *, session_id: Optional[str] = None
 ) -> Optional[str]:
     """Return the ``from`` handle of the ``<fno_mail ... id="<msg_id>" ...>`` open
     tag in ``text``, or ``None`` if no such envelope is present.
@@ -32,12 +60,14 @@ def sender_from_transcript_text(
     escaped (``from=\\"X\\"``); normalize ``\\"`` to ``"`` before matching so a
     raw or a JSON-escaped transcript both resolve.
 
-    ``to`` turns the match from a MENTION into a RECEIPT: only an envelope
-    addressed to that handle counts. An envelope quoted verbatim in a forward
-    carries the original ``to=``, so without this a forwarded copy resolves in
-    whichever session happens to hold the quote. Callers searching more than one
-    candidate store must pass it; the default keeps a single-store search
-    unchanged.
+    ``session_id`` turns the match from a MENTION into a RECEIPT: an envelope
+    whose recipient attribute names a DIFFERENT session no longer counts. A
+    forward quotes the envelope verbatim, carrying the original ``to=``, so
+    without this a forwarded copy resolves in whichever session holds the quote.
+    An envelope carrying no usable session address still counts, since absence
+    of an address is not evidence against this store (see ``_addressed_here``).
+    Callers searching more than one candidate store must pass it; the default
+    keeps a single-store search unchanged.
     """
     normalized = text.replace('\\"', '"')
     needle = f'id="{msg_id}"'
@@ -45,10 +75,8 @@ def sender_from_transcript_text(
         s = tag.group(0)
         if needle not in s:
             continue
-        if to is not None:
-            m_to = _TO_RE.search(s)
-            if m_to is None or m_to.group(1) != to:
-                continue
+        if session_id is not None and not _addressed_here(s, session_id):
+            continue
         m = _FROM_RE.search(s)
         if m:
             return m.group(1)
@@ -121,8 +149,6 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     ``None`` on any miss (no marker, unreadable store, id absent) so the caller
     falls through to its existing not-on-bus error path.
     """
-    from fno.harness_identity import canonical_handle
-
     for harness, session_id in _candidate_stores():
         path = _transcript_path(harness, session_id)
         if path is None:
@@ -131,9 +157,7 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        sender = sender_from_transcript_text(
-            text, msg_id, to=canonical_handle(session_id)
-        )
+        sender = sender_from_transcript_text(text, msg_id, session_id=session_id)
         if sender is not None:
             return sender
     return None
@@ -152,6 +176,11 @@ def present_mail_ids() -> Optional[set[str]]:
     drop. An empty set means "read it; nothing matched," which is a safe
     print-everything because the transcript genuinely carries none of these ids.
     """
+    # Still routes through the single-store pick `resolve_live_sender` no longer
+    # uses: with no msg_id there is no receipt to prove a candidate with, so the
+    # fix below does not transfer. On a leaked identity this reads the wrong
+    # store and the dedup no-ops, which reprints rather than drops - the safe
+    # direction, but a guard on one of two paths. Needs its own answer.
     text = _read_own_transcript_text()
     if text is None:
         return None
