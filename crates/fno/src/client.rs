@@ -858,6 +858,25 @@ struct View {
     /// x/d/add press cannot race the first write.
     mine_action: Option<crate::needs_overlay::MineMutation>,
     mine_acting: bool,
+    /// (x-f730 task 2.3) Open operator questions, folded independently
+    /// (`fno inbox outstanding --json`, the richer x-7979 record - asker,
+    /// options, resolved liveness) from both the MINE lane and the bare
+    /// events leg. Rendered as its own row kind, ranked ahead of the rest of
+    /// THEY NEED YOU.
+    questions_fold: Option<Vec<crate::needs_overlay::QuestionItem>>,
+    /// The questions command failed/timed out; same degrade contract as
+    /// `mine_degraded`/`needs_degraded`.
+    questions_degraded: bool,
+    /// (x-f730 task 2.3) The free-text answer buffer for a no-options
+    /// question: `Some((question_id, text))` while open, `None` when closed.
+    /// Same keyboard-ownership contract as `mine_adding`.
+    question_answering: Option<(String, String)>,
+    /// (x-f730 task 2.3) A queued question answer, mirroring
+    /// `mine_action`/`mine_acting` exactly (its own single-flight guard - a
+    /// question answer and a MINE write are independent, so one in flight
+    /// never blocks the other).
+    question_action: Option<(String, String)>,
+    question_acting: bool,
     /// (x-feec) Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
     /// deep stdin handler.
@@ -2182,6 +2201,11 @@ impl View {
             mine_adding: None,
             mine_action: None,
             mine_acting: false,
+            questions_fold: None,
+            questions_degraded: false,
+            question_answering: None,
+            question_action: None,
+            question_acting: false,
             needs_want: false,
             needs_inflight: false,
             needs_gen: 0,
@@ -2364,7 +2388,8 @@ impl View {
                     "review_wedged" => NeedKind::ReviewWedged,
                     "budget_stop" => NeedKind::BudgetStop,
                     "mail_question" => NeedKind::MailQuestion,
-                    "operator_question" | "carveout_stale" | "stale_claims" => NeedKind::Decision,
+                    "operator_question" => NeedKind::Question,
+                    "carveout_stale" | "stale_claims" => NeedKind::Decision,
                     _ => continue,
                 };
                 match self.join_fold_row(item) {
@@ -2413,12 +2438,15 @@ impl View {
     /// `needs_queue()` filtered for the operator panel: a `MailQuestion` row is
     /// agent-to-agent mail traffic (`acme-web -> fno-peer: ...`), real signal
     /// for a live badge/sprite but not a question addressed to the operator.
-    /// The panel drops it here; `needs_queue()` itself is untouched so badges
-    /// and `fno-agents needs --json` still see it.
+    /// A `Question` row is the bare `operator_question` event - the panel
+    /// renders the richer, separately-folded [`crate::needs_overlay::QuestionItem`]
+    /// leg instead (asker/options/liveness), so rendering both would show the
+    /// same open question twice. Both are dropped here; `needs_queue()` itself
+    /// is untouched so badges and `fno-agents needs --json` still see them.
     fn needs_operator_queue(&self) -> Vec<NeedRow> {
         self.needs_queue()
             .into_iter()
-            .filter(|r| r.kind != NeedKind::MailQuestion)
+            .filter(|r| !matches!(r.kind, NeedKind::MailQuestion | NeedKind::Question))
             .collect()
     }
 
@@ -2457,10 +2485,24 @@ impl View {
             .map(NeedsOverlayRow::Mine)
             .collect();
 
+        // Questions lead the NEED section (x-f730 task 2.3): a real operator
+        // question, with an asker to answer back to, outranks a bare
+        // carveout/claims pile. Ranked by the record's own `rank` (x-7979
+        // already orders these); an unranked row sorts last within the group
+        // rather than floating to the front on a missing field.
+        let mut questions: Vec<crate::needs_overlay::QuestionItem> =
+            self.questions_fold.clone().unwrap_or_default();
+        questions.sort_by_key(|q| q.rank.unwrap_or(u32::MAX));
         let need = self.needs_operator_queue();
-        let need_total = need.len();
-        let need_shown = need.len().min(NEEDS_CAP);
-        rows.extend(need.into_iter().take(NEEDS_CAP).map(NeedsOverlayRow::Need));
+        let need_total = questions.len() + need.len();
+        let need_shown = need_total.min(NEEDS_CAP);
+        rows.extend(
+            questions
+                .into_iter()
+                .map(NeedsOverlayRow::Question)
+                .chain(need.into_iter().map(NeedsOverlayRow::Need))
+                .take(NEEDS_CAP),
+        );
 
         NeedsProjection {
             rows,
@@ -2471,12 +2513,15 @@ impl View {
         }
     }
 
-    /// The overlay footer state: a failed fold degrades loudly (AC2-ERR), an
-    /// unfetched fold reads as still folding, else it has landed.
+    /// The THEY NEED YOU footer state: a failed fold degrades loudly
+    /// (AC2-ERR), an unfetched fold reads as still folding, else it has
+    /// landed. The lane is fed by two independent legs (events, questions);
+    /// either one failing degrades the whole lane - a bare "half of what
+    /// should be here loaded" is not worth rendering as a clean "as of now".
     fn needs_footer(&self) -> NeedsFooter {
-        if self.needs_degraded {
+        if self.needs_degraded || self.questions_degraded {
             NeedsFooter::Degraded
-        } else if self.needs_fold.is_none() {
+        } else if self.needs_fold.is_none() || self.questions_fold.is_none() {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
@@ -2504,6 +2549,18 @@ impl View {
         match result {
             Ok(()) => self.needs_want = true,
             Err(msg) => self.set_notice(format!("mine: {msg}")),
+        }
+    }
+
+    /// (x-f730 task 2.3) Same contract as [`Self::apply_mine_action_result`]
+    /// for a question answer: success re-folds so the row leaves the queue on
+    /// the next fold (AC1-HP), a failure shows the reason and leaves the
+    /// question open (AC3-ERR).
+    fn apply_question_action_result(&mut self, result: Result<(), String>) {
+        self.question_acting = false;
+        match result {
+            Ok(()) => self.needs_want = true,
+            Err(msg) => self.set_notice(format!("outstanding: {msg}")),
         }
     }
 
@@ -8058,16 +8115,23 @@ fn is_idle_row(a: &AgentRow) -> bool {
 /// badge row carries no ts, so it degenerates to name order within its band -
 /// leg-1 and leg-2 never share a band, so the two orderings never mix). Same
 /// declaration-order `Ord` trick as [`PaneState`]. `Decision` (x-e3be) is fed
-/// by three `needs.rs` fold arms - `operator_question` (a live open question,
-/// `fno inbox outstanding ask`), `carveout_stale` (an aged unharvested carve-out
-/// pile), `stale_claims` (an aged orphaned `node:` claim pile) - all read from
-/// durable on-disk state rather than a recent event, so none of them are
-/// windowed by the fold's 24h `since` bound.
+/// by two `needs.rs` fold arms - `carveout_stale` (an aged unharvested
+/// carve-out pile), `stale_claims` (an aged orphaned `node:` claim pile) -
+/// read from durable on-disk state rather than a recent event, so neither is
+/// windowed by the fold's 24h `since` bound. `Question` (x-f730) is the third
+/// arm, `operator_question`; it is split out from `Decision` because the
+/// overlay renders it from a richer, separately-folded leg
+/// ([`crate::needs_overlay::QuestionItem`]) instead - `Question` on a
+/// `NeedRow` exists only so a blocked worker's roster badge still reflects an
+/// open question; `View::needs_operator_queue` filters `Question` out of the
+/// overlay for exactly that reason (the richer row replaces it there).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum NeedKind {
-    /// Leads the order: an open operator decision (a question awaiting an
-    /// answer, or a pile of carve-outs/claims gone stale) outranks everything
+    /// Leads the order: an open operator question outranks everything
     /// downstream of it, including a mail-blocked worker.
+    Question,
+    /// An aged carve-out/claims pile gone stale - a decision with no asker to
+    /// answer back to, so it stays a plain `NeedRow` even in the overlay.
     Decision,
     // A human-addressed mail escalation (question, or a live-miss to an
     // operator-attended recipient). Sits above the worker blocked-states: a
@@ -8084,7 +8148,7 @@ enum NeedKind {
 /// vocabulary where they overlap (blocked `▲`, done `✓`).
 fn need_glyph(k: NeedKind) -> char {
     match k {
-        NeedKind::Decision => '⁉',
+        NeedKind::Question | NeedKind::Decision => '⁉',
         NeedKind::MailQuestion => '✉',
         NeedKind::BlockedAnswerable | NeedKind::BlockedFocusOnly => '▲',
         NeedKind::ReviewWedged => '⏳',
@@ -8128,6 +8192,7 @@ impl NeedRow {
 #[derive(Clone)]
 enum NeedsOverlayRow {
     Mine(crate::needs_overlay::MineItem),
+    Question(crate::needs_overlay::QuestionItem),
     Need(NeedRow),
 }
 
@@ -8135,6 +8200,7 @@ impl NeedsOverlayRow {
     fn label(&self) -> &str {
         match self {
             Self::Mine(item) => &item.text,
+            Self::Question(q) => q.ask.as_deref().unwrap_or(&q.question),
             Self::Need(row) => &row.name,
         }
     }
@@ -8142,6 +8208,7 @@ impl NeedsOverlayRow {
     fn id(&self) -> NeedsOverlayId {
         match self {
             Self::Mine(item) => NeedsOverlayId::Mine(item.n),
+            Self::Question(q) => NeedsOverlayId::Question(q.id.clone()),
             Self::Need(row) => {
                 let (kind, key) = row.id();
                 NeedsOverlayId::Need(kind, key)
@@ -8152,7 +8219,17 @@ impl NeedsOverlayRow {
     fn need(&self) -> Option<&NeedRow> {
         match self {
             Self::Need(row) => Some(row),
-            Self::Mine(_) => None,
+            Self::Mine(_) | Self::Question(_) => None,
+        }
+    }
+
+    /// The rich question payload, when this row is one - `answer_keys`' digit
+    /// and Enter arms read this rather than `.need()` (a question is not a
+    /// `NeedRow`; it has no pane, an asker instead).
+    fn question(&self) -> Option<&crate::needs_overlay::QuestionItem> {
+        match self {
+            Self::Question(q) => Some(q),
+            Self::Mine(_) | Self::Need(_) => None,
         }
     }
 }
@@ -8160,6 +8237,7 @@ impl NeedsOverlayRow {
 #[derive(Clone, PartialEq, Eq)]
 enum NeedsOverlayId {
     Mine(usize),
+    Question(String),
     Need(NeedKind, String),
 }
 
@@ -8511,43 +8589,82 @@ fn needs_overlay_lines(
         lines.push(pad_to("   nothing needs you", ANSWER_OVERLAY_W));
     } else {
         for (i, row) in need_rows.iter().enumerate() {
-            let NeedsOverlayRow::Need(r) = row else {
-                continue;
-            };
             let idx = projection.mine_shown + i;
             let marker = if idx == sel { '▸' } else { ' ' };
-            let tag = match r.kind {
-                NeedKind::BlockedFocusOnly => "  ⚠ focus",
-                _ => "",
-            };
-            lines.push(pad_to(
-                &format!(
-                    " {marker} {} {}  {}{tag}",
-                    need_glyph(r.kind),
-                    r.name,
-                    r.reason
-                ),
-                ANSWER_OVERLAY_W,
-            ));
+            match row {
+                NeedsOverlayRow::Question(q) => {
+                    // Render `ask` as the headline (falls back to the prose
+                    // question when the asker gave no one-liner); the prose
+                    // itself appears only when selected, below.
+                    let stale = if q.live == Some(false) { "  STALE" } else { "" };
+                    lines.push(pad_to(
+                        &format!(
+                            " {marker} {} {}{stale}",
+                            need_glyph(NeedKind::Question),
+                            q.ask.as_deref().unwrap_or(&q.question)
+                        ),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
+                NeedsOverlayRow::Need(r) => {
+                    let tag = match r.kind {
+                        NeedKind::BlockedFocusOnly => "  ⚠ focus",
+                        _ => "",
+                    };
+                    lines.push(pad_to(
+                        &format!(
+                            " {marker} {} {}  {}{tag}",
+                            need_glyph(r.kind),
+                            r.name,
+                            r.reason
+                        ),
+                        ANSWER_OVERLAY_W,
+                    ));
+                }
+                NeedsOverlayRow::Mine(_) => {}
+            }
         }
         let selected_need = sel
             .checked_sub(projection.mine_shown)
             .and_then(|i| need_rows.get(i));
-        if let Some(NeedsOverlayRow::Need(r)) = selected_need {
-            if let Some(ans) = r.answerable.as_ref() {
-                if !ans.prompt.is_empty() {
+        match selected_need {
+            Some(NeedsOverlayRow::Need(r)) => {
+                if let Some(ans) = r.answerable.as_ref() {
+                    if !ans.prompt.is_empty() {
+                        lines.push(pad_to(
+                            &format!("   {}", ans.prompt.replace('\n', " ")),
+                            ANSWER_OVERLAY_W,
+                        ));
+                    }
+                    for o in &ans.options {
+                        lines.push(pad_to(
+                            &format!("     {}. {}", o.idx, o.label),
+                            ANSWER_OVERLAY_W,
+                        ));
+                    }
+                }
+            }
+            Some(NeedsOverlayRow::Question(q)) => {
+                // The prose beneath the headline - only when `ask` was used
+                // as the headline above; if there was no `ask`, the headline
+                // already IS the question and repeating it would be noise.
+                if q.ask.is_some() && !q.question.is_empty() {
                     lines.push(pad_to(
-                        &format!("   {}", ans.prompt.replace('\n', " ")),
+                        &format!("   {}", q.question.replace('\n', " ")),
                         ANSWER_OVERLAY_W,
                     ));
                 }
-                for o in &ans.options {
+                for (i, opt) in q.options.iter().enumerate() {
+                    lines.push(pad_to(&format!("     {}. {opt}", i + 1), ANSWER_OVERLAY_W));
+                }
+                if q.live == Some(false) {
                     lines.push(pad_to(
-                        &format!("     {}. {}", o.idx, o.label),
+                        "   the answer is recorded but reaches no session",
                         ANSWER_OVERLAY_W,
                     ));
                 }
             }
+            _ => {}
         }
     }
     let need_footer_line = match need_footer {
@@ -8593,7 +8710,8 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
     }
     match need {
         Some(
-            NeedKind::Decision
+            NeedKind::Question
+            | NeedKind::Decision
             | NeedKind::MailQuestion
             | NeedKind::BlockedAnswerable
             | NeedKind::BlockedFocusOnly
@@ -9506,6 +9624,13 @@ async fn attach_and_run(
     let (mine_act_tx, mut mine_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
+    // x-f730 task 2.3: a queued question answer, same shape and independence
+    // as the MINE mutation channel above - its own single-flight
+    // (`question_acting`) so an answer and a MINE write never block each
+    // other.
+    let (question_act_tx, mut question_act_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
+
     // x-b2bf: the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
     let (yard_tx, mut yard_rx) =
@@ -9593,6 +9718,16 @@ async fn attach_and_run(
             let tx = mine_act_tx.clone();
             tokio::spawn(async move {
                 let result = crate::needs_overlay::mine_mutate(mutation).await;
+                let _ = tx.send(result);
+            });
+        }
+        // x-f730 task 2.3: kick a queued question answer off the UI loop.
+        // `question_acting` is set by the stdin handler at enqueue time,
+        // same discipline as the MINE mutation above.
+        if let Some((qid, answer)) = view.question_action.take() {
+            let tx = question_act_tx.clone();
+            tokio::spawn(async move {
+                let result = crate::needs_overlay::answer_question(&qid, &answer).await;
                 let _ = tx.send(result);
             });
         }
@@ -9980,6 +10115,16 @@ async fn attach_and_run(
                             view.mine_degraded = true;
                         }
                     }
+                    match outcome.questions {
+                        Some(items) => {
+                            view.questions_fold = Some(items);
+                            view.questions_degraded = false;
+                        }
+                        None => {
+                            view.questions_fold = Some(Vec::new());
+                            view.questions_degraded = true;
+                        }
+                    }
                     view.reanchor_answers(prev);
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
@@ -9993,6 +10138,13 @@ async fn attach_and_run(
             Some(result) = mine_act_rx.recv() => {
                 // x-f730 task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(result) = question_act_rx.recv() => {
+                // x-f730 task 2.3: a queued question answer finished.
+                view.apply_question_action_result(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -10918,16 +11070,20 @@ async fn dispatch_event(
                 .is_some_and(|t| t.elapsed() < NEEDS_CACHE_TTL);
             if fresh {
                 // Re-open within the cache TTL: reuse the last fold instantly
-                // (Perspective B - mashing prefix+a never re-shells). MINE
-                // shares the same cache window - both legs fold together.
+                // (Perspective B - mashing prefix+a never re-shells). MINE and
+                // questions share the same cache window - all three legs fold
+                // together.
                 view.needs_degraded = false;
                 view.mine_degraded = false;
+                view.questions_degraded = false;
             } else {
                 // Stale/first open: live-only until the refresh lands.
                 view.needs_fold = None;
                 view.needs_degraded = false;
                 view.mine_fold = None;
                 view.mine_degraded = false;
+                view.questions_fold = None;
+                view.questions_degraded = false;
                 view.needs_want = true;
             }
         }
@@ -14178,20 +14334,24 @@ async fn rename_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE in as
-/// a first, editable lane): a digit answers the selected answerable NEED row
-/// (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned keystroke, fingerprint
-/// fail-closed, focus unchanged), `n`/`N` (and j/k/arrows) cycle across BOTH
-/// lanes, Enter routes per kind (goto its pane/attach, else a focus-manually
-/// notice for a squadless live row or a MINE row), q/Esc closes. `x` toggles
-/// and `d` drops the selected MINE row; `a` opens a text entry (typed below
-/// the MINE lane) that appends a new unticked item on Enter, Esc cancels it.
-/// Every MINE key only ever queues `View::mine_action` for the run loop to
-/// shell out (single-flight via `mine_acting`) - the file is the one writer,
-/// so the render updates only once the mutation lands and re-folds, never
-/// optimistically. The projection is read once per chunk from the same
-/// [`View::needs_projection`] the overlay draws, so the cursor and the
-/// rendered rows never diverge. An empty overlay (the "nothing needs you"
+/// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE and
+/// live questions in as editable/answerable lanes): a digit answers the
+/// selected answerable NEED row (unchanged [`ClientMsg::PaneAnswer`] -
+/// daemon-pinned keystroke, fingerprint fail-closed, focus unchanged) OR,
+/// when the row is a question with options, closes it via `outstanding
+/// clear --answer <option>`. `n`/`N` (and j/k/arrows) cycle across every
+/// lane, Enter routes per kind (goto its pane/attach; opens a free-text
+/// answer entry for a no-options question; else a focus-manually notice for
+/// a squadless live row or a MINE row), q/Esc closes. `x` toggles and `d`
+/// drops the selected MINE row; `a` opens a text entry (typed below the MINE
+/// lane) that appends a new unticked item on Enter, Esc cancels it. Every
+/// MINE/question mutation only ever queues `View::mine_action` /
+/// `View::question_action` for the run loop to shell out (each its own
+/// single-flight, via `mine_acting`/`question_acting`) - the file/record is
+/// the one writer, so the render updates only once the mutation lands and
+/// re-folds, never optimistically. The projection is read once per chunk
+/// from the same [`View::needs_projection`] the overlay draws, so the cursor
+/// and the rendered rows never diverge. An empty overlay (the "nothing needs you"
 /// state) closes on ANY key except `a` (AC4-EDGE - but the operator must be
 /// able to add their first item to an empty lane). Closing bumps the
 /// generation token so an in-flight fold result is discarded (AC6-FR).
@@ -14230,6 +14390,29 @@ async fn answer_keys(
                     }
                 }
                 0x1b => view.mine_adding = None,
+                0x7f | 0x08 => {
+                    buf.pop();
+                }
+                0x20..=0x7e => buf.push(k as char),
+                _ => {}
+            }
+            continue;
+        }
+        // Same keyboard-ownership contract for the free-text question answer
+        // (x-f730 task 2.3): opened by Enter on a no-options question, so it
+        // is checked right alongside `mine_adding`.
+        if let Some((qid, buf)) = view.question_answering.as_mut() {
+            match k {
+                b'\r' | b'\n' => {
+                    let text = std::mem::take(buf).trim().to_string();
+                    let qid = qid.clone();
+                    view.question_answering = None;
+                    if !text.is_empty() && !view.question_acting {
+                        view.question_action = Some((qid, text));
+                        view.question_acting = true;
+                    }
+                }
+                0x1b => view.question_answering = None,
                 0x7f | 0x08 => {
                     buf.pop();
                 }
@@ -14281,8 +14464,25 @@ async fn answer_keys(
                 }
             }
             b'0'..=b'9' => {
-                // A MINE row has no `NeedRow` to answer - `.need()` is None and
-                // this always beeps, same as a non-answerable NEED row.
+                // A question with options answers first (x-f730 task 2.3):
+                // the digit picks `options[n-1]`, closed via `outstanding
+                // clear --answer`. A no-options question falls through to
+                // the BEL below - Enter is its answer path. A MINE row has
+                // no `NeedRow` to answer either - `.need()` is None and this
+                // always beeps too, same as a non-answerable NEED row.
+                if let Some(q) = projection.rows[cur].question() {
+                    let n = (k - b'0') as usize;
+                    match n.checked_sub(1).and_then(|i| q.options.get(i)) {
+                        Some(opt) if !view.question_acting => {
+                            view.question_action = Some((q.id.clone(), opt.clone()));
+                            view.question_acting = true;
+                        }
+                        _ => {
+                            let _ = raw_out(b"\x07");
+                        }
+                    }
+                    continue;
+                }
                 let picked = projection.rows[cur].need().and_then(|sel| {
                     sel.answerable
                         .as_ref()
@@ -14321,6 +14521,17 @@ async fn answer_keys(
                 }
             }
             b'\r' | b'\n' => {
+                // A no-options question (x-f730 task 2.3): Enter opens the
+                // free-text answer entry, typed below the row like the MINE
+                // add box. A with-options question stays digit-only here -
+                // Enter on it falls through to the goto arm below, which
+                // (having no pane) shows the same notice a MINE row does.
+                if let Some(q) = projection.rows[cur].question() {
+                    if q.options.is_empty() {
+                        view.question_answering = Some((q.id.clone(), String::new()));
+                        continue;
+                    }
+                }
                 // Goto the row's target (x-653d): SelectSquad/SelectTab only when
                 // they change the view, then FocusPane; a paneless watch-only row
                 // attaches; a squadless live fold row - or a MINE row, which
@@ -27063,6 +27274,23 @@ mod tests {
         }
     }
 
+    fn question_item(
+        id: &str,
+        options: &[&str],
+        live: Option<bool>,
+    ) -> crate::needs_overlay::QuestionItem {
+        crate::needs_overlay::QuestionItem {
+            id: id.into(),
+            question: format!("prose for {id}"),
+            ask: Some(format!("ask for {id}")),
+            asker: Some("fno-peer".into()),
+            node: None,
+            options: options.iter().map(|s| s.to_string()).collect(),
+            live,
+            rank: None,
+        }
+    }
+
     // (x-6851 US3) AC3-HP: a squad-matched agent whose cwd is FOREIGN to the
     // squad's project gets a dim, inert Sub row carrying the foreign cwd_base
     // alone (no branch); the selector skips it; and line 1 carries no
@@ -27281,14 +27509,14 @@ mod tests {
             mine_item(2, "first open", false),
             mine_item(3, "second open", false),
         ]);
-        v.needs_fold = Some(vec![fold_item("operator_question", "question", true)]);
+        v.needs_fold = Some(vec![fold_item("carveout_stale", "pile", true)]);
 
         let projection = v.needs_projection();
         assert_eq!(projection.rows.len(), 4);
         assert_eq!(projection.rows[0].label(), "first open");
         assert_eq!(projection.rows[1].label(), "second open");
         assert_eq!(projection.rows[2].label(), "first done");
-        assert_eq!(projection.rows[3].label(), "question");
+        assert_eq!(projection.rows[3].label(), "pile");
         let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
         let mine = lines.iter().position(|l| l.contains("MINE")).unwrap();
         let they = lines
@@ -27305,7 +27533,7 @@ mod tests {
         v.mine_fold = Some(Vec::new());
         v.needs_fold = Some(
             (0..11)
-                .map(|i| fold_item("operator_question", &format!("question-{i:02}"), true))
+                .map(|i| fold_item("carveout_stale", &format!("pile-{i:02}"), true))
                 .collect(),
         );
         let projection = v.needs_projection();
@@ -27316,38 +27544,44 @@ mod tests {
     }
 
     #[test]
-    fn mine_failure_is_visible_while_operator_question_remains() {
+    fn mine_failure_is_visible_while_needs_lane_remains() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(Vec::new());
         v.mine_degraded = true;
-        v.needs_fold = Some(vec![fold_item("operator_question", "question", true)]);
+        v.needs_fold = Some(vec![fold_item("carveout_stale", "pile", true)]);
         let projection = v.needs_projection();
         let lines = needs_overlay_lines(&projection, 0, NeedsFooter::Degraded, NeedsFooter::AsOf);
         assert!(lines.iter().any(|l| l.contains("MINE unavailable")));
-        assert!(lines.iter().any(|l| l.contains("question")));
+        assert!(lines.iter().any(|l| l.contains("pile")));
     }
 
     #[test]
-    fn operator_overlay_filters_mail_traffic_but_keeps_operator_question() {
+    fn operator_overlay_filters_mail_traffic_and_bare_question_events_keeps_decision_piles() {
         let mut v = view_with_agents(vec![]);
         v.needs_fold = Some(vec![
             fold_item("mail_question", "mail-q", true),
             fold_item("mail_delivery_miss", "mail-miss", true),
+            // operator_question is dropped here too (x-f730): the overlay
+            // renders it from the richer QuestionItem leg instead, never
+            // this bare event - see needs_operator_queue's doc comment.
             fold_item("operator_question", "operator-q", true),
+            fold_item("carveout_stale", "pile", true),
         ]);
-        // needs_queue() itself still carries mail_question (a live badge still
-        // needs it - see mail_question_fold_item_renders_squadless_not_dropped);
-        // the operator PANEL's own accessor is what filters it.
+        // needs_queue() itself still carries mail_question and Question (a
+        // live badge still needs both - see
+        // mail_question_fold_item_renders_squadless_not_dropped and
+        // operator_question_folds_to_question_and_sorts_first); the operator
+        // PANEL's own accessor is what filters them.
         let q = v.needs_operator_queue();
         assert_eq!(q.len(), 1);
-        assert_eq!(q[0].name, "operator-q");
+        assert_eq!(q[0].name, "pile");
     }
 
     #[test]
     fn rendered_cursor_indexes_the_same_projection_row() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(vec![mine_item(1, "mine-one", false)]);
-        v.needs_fold = Some(vec![fold_item("operator_question", "operator-q", true)]);
+        v.needs_fold = Some(vec![fold_item("carveout_stale", "pile", true)]);
         let projection = v.needs_projection();
         let selected = 1;
         let lines =
@@ -27395,7 +27629,7 @@ mod tests {
     async fn answer_keys_x_and_d_on_need_row_are_inert() {
         let mut v = view_with_agents(vec![]);
         v.mine_fold = Some(Vec::new());
-        v.needs_fold = Some(vec![fold_item("operator_question", "q", true)]);
+        v.needs_fold = Some(vec![fold_item("carveout_stale", "pile", true)]);
         v.answers = Some(0);
         let mut buf: Vec<u8> = Vec::new();
         answer_keys(&mut v, b"x", &mut buf).await.unwrap();
@@ -27488,6 +27722,116 @@ mod tests {
         );
     }
 
+    // x-f730 task 2.3 AC1-HP: a digit on a question with options queues the
+    // matching option text against the question id, single-flight set, no
+    // stray keystroke to any pane.
+    #[tokio::test]
+    async fn answer_keys_digit_on_question_with_options_queues_answer() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(vec![question_item("q-1", &["oauth", "apikey"], Some(true))]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"2", &mut buf).await.unwrap();
+        assert_eq!(
+            v.question_action,
+            Some(("q-1".to_string(), "apikey".to_string()))
+        );
+        assert!(v.question_acting);
+        assert!(
+            buf.is_empty(),
+            "a question answer never sends a pane keystroke"
+        );
+    }
+
+    // Refolding after the answer is what actually drops the row - proven
+    // directly against apply_question_action_result, mirroring the MINE
+    // pair above.
+    #[test]
+    fn apply_question_action_result_success_requests_refold() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_want = false;
+        v.apply_question_action_result(Ok(()));
+        assert!(!v.question_acting);
+        assert!(v.needs_want, "success re-folds so the row leaves on refold");
+    }
+
+    #[test]
+    fn apply_question_action_result_failure_shows_notice_never_silent() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_want = false;
+        v.apply_question_action_result(Err("failed to close q-1: locked".into()));
+        assert!(!v.question_acting);
+        assert!(!v.needs_want, "a failure never triggers a re-fold");
+        let notice = v.notice.as_ref().expect("failure surfaces a notice");
+        assert!(notice.0.contains("failed to close q-1: locked"));
+    }
+
+    // x-f730 task 2.3 AC2-HP: Enter on a no-options question opens the
+    // free-text entry; typing then Enter queues the typed answer.
+    #[tokio::test]
+    async fn answer_keys_enter_on_no_options_question_opens_free_text_then_sends_it() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(vec![question_item("q-2", &[], None)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert_eq!(
+            v.question_answering,
+            Some(("q-2".to_string(), String::new()))
+        );
+        assert_eq!(v.answers, Some(0), "the overlay stays open under the entry");
+        answer_keys(&mut v, b"go with oauth\r", &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(
+            v.question_action,
+            Some(("q-2".to_string(), "go with oauth".to_string()))
+        );
+        assert!(v.question_answering.is_none());
+        assert!(buf.is_empty());
+    }
+
+    // x-f730 task 2.3 AC4-ERR: a digit with no matching option on a
+    // with-options question is a local BEL, same invariant as a
+    // non-answerable NEED row - never a stray keystroke, never queued.
+    #[tokio::test]
+    async fn answer_keys_digit_with_no_matching_question_option_bels() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(vec![question_item("q-3", &["oauth"], Some(true))]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"9", &mut buf).await.unwrap();
+        assert_eq!(v.question_action, None);
+        assert!(!v.question_acting);
+        assert!(buf.is_empty());
+    }
+
+    // x-f730 task 2.3 AC3: a STALE question (asker no longer resolves) still
+    // renders its options and the "recorded but reaches no session" note -
+    // the operator can still answer it, just knows upfront it will not be
+    // seen live.
+    #[test]
+    fn needs_overlay_lines_renders_stale_question_with_explanation() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.questions_fold = Some(vec![question_item("q-4", &["a", "b"], Some(false))]);
+        let projection = v.needs_projection();
+        let lines = needs_overlay_lines(&projection, 0, NeedsFooter::AsOf, NeedsFooter::AsOf);
+        assert!(lines.iter().any(|l| l.contains("STALE")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("recorded but reaches no session")));
+        assert!(lines.iter().any(|l| l.contains("1. a")));
+        assert!(lines.iter().any(|l| l.contains("2. b")));
+    }
+
     // ---- x-b2bf: the yard ----
 
     #[test]
@@ -27504,6 +27848,7 @@ mod tests {
         assert_eq!(yard_eye(&w, None), Eye::Working);
         // Attention: every human-owing need kind.
         for kind in [
+            NeedKind::Question,
             NeedKind::Decision,
             NeedKind::MailQuestion,
             NeedKind::BlockedAnswerable,
@@ -27783,10 +28128,13 @@ mod tests {
         assert!(q[0].pane_id.is_none(), "squadless row has no pane");
     }
 
-    // x-e3be: NeedKind::Decision is now genuinely constructed by three
-    // needs.rs fold kinds, and it leads the severity order.
+    // x-e3be: NeedKind::Decision is constructed by two needs.rs fold kinds and
+    // leads the severity order; x-f730 split `operator_question` into its own
+    // `NeedKind::Question` (still built here, for the roster badge), which
+    // sorts even ahead of Decision - the richer per-question overlay leg is
+    // what actually answers it (see needs_operator_queue).
     #[test]
-    fn operator_question_folds_to_decision_and_sorts_first() {
+    fn operator_question_folds_to_question_and_sorts_first() {
         let mut v = view_with_agents(vec![agent_row("bs", 5, Some(AgentBadge::Working), false)]);
         v.needs_fold = Some(vec![
             fold_item("budget_stop", "bs", false),
@@ -27794,7 +28142,7 @@ mod tests {
         ]);
         let q = v.needs_queue();
         assert_eq!(q.len(), 2);
-        assert_eq!(q[0].kind, NeedKind::Decision);
+        assert_eq!(q[0].kind, NeedKind::Question);
         assert_eq!(q[0].name, "decision-row");
         assert_eq!(q[1].kind, NeedKind::BudgetStop);
     }
