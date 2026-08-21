@@ -287,15 +287,24 @@ class AgentEntry:
     # evidence for "did a birth trigger spawn this?" was a timestamp gap
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
-    # Registration origin: "operator" for a session a human started by hand (the
-    # SessionStart register hook / ``fno agents register``), "spawn" for a
-    # footnote-created worker, None for a row nothing ever stamped. Those are
-    # THREE values, not two. Absence does NOT read as worker: the reap lane
-    # treats a never-recorded origin as UNKNOWN and refuses, because an absence
-    # cannot separate "no human here" from "nobody wrote it down". Reading it
-    # the other way is the defect this field's own node was filed against.
-    # Additive-optional so pre-existing rows and the Rust RegistryEntry
-    # round-trip losslessly.
+    # What created this row, written once at birth and never restamped:
+    # "operator" for a session a human started by hand (the SessionStart
+    # register hook / ``fno agents register``), "spawn" for a worker footnote
+    # launched, "adopted" for one the harness-store healer found already
+    # running, None for a row nothing ever stamped. Those are FOUR values, not
+    # two. Additive-optional (None default) so pre-existing rows and the Rust
+    # RegistryEntry round-trip losslessly.
+    #
+    # ABSENCE MEANS UNKNOWN, never worker. The reap lane treats a never-recorded
+    # origin as UNKNOWN and refuses, because an absence cannot separate "no
+    # human here" from "nobody wrote it down", and the retire lane acts only on
+    # the positive "spawn". A row written before this field existed carries
+    # nothing, and an operator's own terminal adopted from the claude store is
+    # routinely one of those, so reading the absence as "we made this" put a
+    # human's session in a lane that stops sessions. Any new code path that
+    # creates a row must state which kind it made; a test in
+    # cli/tests/test_agents_watchdog.py walks the AST of this package to
+    # enforce that.
     origin: Optional[str] = None
 
     # ----------------------------------------------------------------------
@@ -1415,10 +1424,41 @@ def register_existing_session(
                             ambiguous=True,
                         )
                     entry.short_id = short_id
-                # Only restamp origin when the caller passed one: the harness-store
-                # healer refreshes rows without it, and a blind `entry.origin = None`
-                # would clobber an operator stamp a re-firing hook must preserve.
-                if origin is not None:
+                # WRITE-ONCE. A refresh may FILL an empty origin and may never
+                # change one, because this field is a birth fact and nothing on
+                # this path can observe a birth. Every weaker rule tried here
+                # lost a row to a later refresh, and none of the losses is
+                # recoverable because nothing ever clears the field:
+                #
+                #  - blind assignment let the healer, which refreshes without an
+                #    origin, erase an operator stamp with None;
+                #  - excluding only `adopted` still let `operator` land on a
+                #    worker row. An operator resuming a spawned worker in a
+                #    fresh terminal fires the SessionStart register branch, and
+                #    that row leaves the retire lane for good while joining the
+                #    attended mail escalation.
+                #
+                # Filling an empty one is safe and is what the healer needs: a
+                # row that never stated its origin gains the only claim anyone
+                # has made about it.
+                #
+                # `adopted` -> `operator` is the one CHANGE allowed, because it
+                # is the only transition with no downside. The healer stamps
+                # `adopted` on store rows that its own comment says are
+                # routinely an operator's terminal no SessionStart hook had
+                # registered yet. Refusing the later hook froze those rows at
+                # `adopted`, and `_recipient_is_attended` requires exactly
+                # `operator`, so `fno mail send` stopped escalating questions to
+                # that human permanently and said nothing. The upgrade also
+                # makes the retire lane STRICTER, since `operator` answers
+                # `spawned=False` where `adopted` answers unknown, and both
+                # already refuse to retire. Neither failure this rule was
+                # written against involves it: a blind `None` never lands here,
+                # and `operator` still cannot touch a `spawned` row.
+                upgradeable = entry.origin is None or (
+                    entry.origin == "adopted" and origin == "operator"
+                )
+                if origin is not None and upgradeable:
                     entry.origin = origin
                 # Same preserve-when-silent discipline for the delivery policy:
                 # the SessionStart hook re-fires register without this kwarg

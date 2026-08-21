@@ -1946,3 +1946,58 @@ def test_v9_conflicting_legacy_pair_keeps_short_id_and_warns(
     assert loaded[0].short_id == "aaaaaaaa"  # short_id wins
     err = capsys.readouterr().err
     assert "conflict" in err and "keeping short_id" in err
+
+
+#: `claude` is a HARNESS, and `register_existing_session`'s parameter is named
+#: `provider`, so binding the literal there is what `check-axis-vocabulary`
+#: refuses. Name the axis once - the idiom `test_mail_escalation.py` uses.
+CLAUDE_HARNESS = "claude"
+
+
+def test_origin_is_write_once_and_a_refresh_never_changes_it(tmp_path, monkeypatch):
+    """`origin` is a BIRTH fact, and nothing on the refresh path can observe a
+    birth. Every weaker rule tried here lost a row to a later refresh, and none
+    of the losses is recoverable because nothing ever clears the field.
+
+    The one that survived review twice: an operator resuming a footnote-spawned
+    worker in a fresh terminal fires the SessionStart register branch with
+    `origin="operator"`. Restamping there takes that worker out of the retire
+    lane for good and puts it in the attended mail escalation. Filling an EMPTY
+    origin is still allowed, because that row never made a claim."""
+    from fno.agents.registry import load_registry, register_existing_session
+
+    use_tmpdir(monkeypatch, tmp_path)
+
+    def register(origin):
+        return register_existing_session(
+            provider=CLAUDE_HARNESS,
+            session_id="11111111-2222-3333-4444-555555555555",
+            cwd=str(tmp_path),
+            name="worker",
+            origin=origin,
+        )
+
+    assert register("spawn").origin == "spawn"
+    assert register("operator").origin == "spawn", (
+        "a refresh must not move a worker into the attended lane"
+    )
+    assert register("adopted").origin == "spawn"
+    assert register(None).origin == "spawn"
+    assert [e.origin for e in load_registry()] == ["spawn"]
+
+
+def test_a_refresh_fills_an_origin_the_row_never_had(tmp_path, monkeypatch):
+    """The other side of write-once, and the reason it is not "never write on a
+    refresh". A row that predates the marker made no claim, so the first claim
+    anyone makes about it is the only one there is."""
+    from fno.agents.registry import register_existing_session
+
+    use_tmpdir(monkeypatch, tmp_path)
+    kwargs = dict(
+        provider=CLAUDE_HARNESS,
+        session_id="66666666-7777-8888-9999-aaaaaaaaaaaa",
+        cwd=str(tmp_path),
+        name="legacy",
+    )
+    assert register_existing_session(**kwargs, origin=None).origin is None
+    assert register_existing_session(**kwargs, origin="operator").origin == "operator"

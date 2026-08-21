@@ -754,6 +754,570 @@ def test_reroute_receipts_tell_the_truth(monkeypatch):
 # Enumeration (change 3): a stopped row survives into the returned map
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Retire: stop a finished worker, destroy nothing
+# ---------------------------------------------------------------------------
+#
+# A worker that finishes its deliverable and never exits holds a live slot
+# against config.agents.max_live forever. terminal_stop.rs already stops that
+# population, but its marker is written by finalize, which a /fno:blueprint or
+# /fno:think worker never reaches. Nothing tells those workers to stop.
+
+RETIRE_GRACE = 900
+
+
+def _retire_run(rows, transcripts, *, now_s=NOW_1840, grace=RETIRE_GRACE):
+    """The classifier with an EXPLICIT grace: reading the machine's real config
+    inside a unit test makes the verdict depend on the developer's settings."""
+    return verdicts(
+        rows,
+        transcript_for=lambda sid: transcripts.get(sid),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: None,
+        now_s=now_s,
+        retire_grace_s_value=grace,
+    )
+
+
+def _spawned(row_id="dddd4444-0000", name="bp-worker", state="idle"):
+    """A row footnote spawned, carrying the literal every spawn birth site
+    writes. Retire keys on that positive value, so a fixture that invents its
+    own spelling would test a lane no live row can enter."""
+    return Row(row_id, name, state, None, "/tmp/bp", "spawn")
+
+
+def test_a_finished_spawned_worker_past_the_grace_retires():
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+    assert v.verdict == watchdog.RETIRE
+    assert v.action == "stop"
+    assert "declared itself done" in v.basis
+    assert "worktree and row survive" in v.basis
+
+
+def test_retire_stops_and_removes_nothing():
+    """The whole reason this lane can be armed where reap cannot: one stop, no
+    rm, and the receipt names the undo."""
+    calls = []
+
+    def runner(argv, **kw):
+        calls.append(list(argv))
+        return _Proc(0)
+
+    v = Verdict("dddd4444-0000", "bp-worker", "idle", watchdog.RETIRE,
+                "worker declared itself done", "stop")
+    outcome, detail = apply_verdict(v, lanes="all", cwd="/tmp/bp", runner=runner)
+
+    assert outcome == "applied"
+    assert len(calls) == 1, "retire is exactly one call"
+    assert "stop" in " ".join(calls[0])
+    assert not any("rm" in a for a in calls[0]), "retire never removes anything"
+    assert "resume" in detail, "the receipt must name the undo"
+
+
+def test_a_pending_tool_call_never_retires():
+    """A transcript's last record can be the assistant turn that ISSUED a tool
+    call, which means the tool has not returned. A worker twenty minutes into a
+    build, a `gh pr checks --watch` or a full test run is silent to every other
+    read here, and if that same turn mentioned a promise the tail classifies
+    `done` and this lane stops it mid-call. reap refuses on the same reading."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    facts = _facts("Running the suite. " + FINISHED_TAIL, age_min=20, kind="tool")
+    [v] = _retire_run([row], {row.row_id: facts})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_question_after_a_prose_mention_still_holds_the_row():
+    """The tag appears in prose in this repo routinely, and a worker can mention
+    it and THEN ask its question. A span-deleting strip matched from that FIRST
+    mention to the only closing tag, took the question with it, and retired the
+    row with the question stranded."""
+    text = (
+        "The loop keys on <promise> here.\n"
+        "Should I widen it to <watching> too?\n"
+        "<promise>MISSION COMPLETE</promise>"
+    )
+    assert watchdog._question_pending(_facts(text, age_min=20)) is True
+    row = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+    assert v.verdict != watchdog.RETIRE, "the question outlives the promise"
+
+
+def test_a_bare_prose_mention_alone_is_not_a_question():
+    """The other direction of the same read: over-detection costs a slot that
+    never gets reclaimed, so the cut may not answer yes on a mention alone."""
+    text = "The loop keys on <promise> here.\n" + FINISHED_TAIL
+    assert watchdog._question_pending(_facts(text, age_min=20)) is False
+
+
+def test_retire_is_outside_the_wake_lane():
+    """--apply is documented as the one action that cannot destroy work, and
+    retire stops a session, so it needs --apply-all."""
+    v = Verdict("dddd4444-0000", "bp-worker", "idle", watchdog.RETIRE, "b", "stop")
+    outcome, detail = apply_verdict(v, lanes="wake")
+    assert outcome == watchdog.SKIPPED
+    assert "outside" in detail
+
+
+def test_a_promise_that_also_asks_a_question_never_retires():
+    """classify_tail returns on its FIRST match - watching, then promise, then
+    question - so a turn that both promises and asks classifies `done` and never
+    `your-move`. That is the modal shape here: a blueprint worker mails its plan
+    and asks the operator one thing in the same turn. Retiring it strands the
+    question, so the predicate asks again rather than trusting the classifier's
+    single answer."""
+    row = _spawned()
+    tail = f"{FINISHED_TAIL}\nOne thing before I stop: should the grace stay 900?"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_a_question_asked_before_the_promise_never_retires():
+    """The REAL shape, and the one the ordering above does not cover. The worker
+    is instructed to emit its promise last (skills/target/references/
+    pre-promise.md), so a turn that asks and then finishes ends on `>`, not on
+    `?`. Reading `endswith("?")` against the raw text answers False on exactly
+    the population `_question_pending` exists for, and the row retires with the
+    question stranded."""
+    row = _spawned()
+    tail = "Plan mailed. Should I open the PR too?\n<promise>MISSION COMPLETE</promise>"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_tag_stripping_never_hides_a_pending_question():
+    """The over-strip risk the tag regex introduces, pinned in both directions.
+
+    Stripping terminal tags to find the real end of a turn can eat the question
+    it was meant to expose. An UNCLOSED `<promise>` was the live case: stripping
+    only the tag left its body behind as the apparent end of the turn, so a turn
+    that genuinely ended on a question answered "nothing pending" and the worker
+    retired with the operator still owing an answer.
+
+    The false direction matters as much: over-stripping into a permanent "a
+    question is pending" would stop the lane firing at all.
+    """
+    ask = "Should I open the PR?"
+    for tail, pending in (
+        (f"{ask}\n<promise>DONE</promise>", True),
+        (f"{ask}\n<promise>DONE", True),               # unclosed: body is promise content
+        (f"{ask}\n<promise/>", True),
+        (f'{ask}\n<watching reason="ci" pr="1">', True),
+        ("<promise>DONE</promise>\nOne more thing?", True),
+        ("All green.\n<promise>DONE</promise>", False),
+        ("All done, nothing pending.", False),
+        ("<watching>x</watching>\nStill ok?\n<promise>D</promise>", True),
+        # A bare prose mention consumes to end of text when stripped, so this
+        # shape is caught by the RAW read instead. Agents working on this repo
+        # write the tag in prose routinely; without the raw read the row retires
+        # with the operator's question unanswered.
+        ("the loop keys on <promise> here. Should I widen it?", True),
+        ("I mentioned <watching> above. Ready to merge?", True),
+        # And the raw read must not invent a question where there is none.
+        ("the loop keys on <promise> here. Widening it now.", False),
+    ):
+        facts = _facts(tail, age_min=20)
+        assert watchdog._question_pending(facts) is pending, tail
+
+
+def test_a_clean_promise_with_no_question_still_retires():
+    """The counterweight: stripping the terminal tags must not invent a question
+    where there is none, or the lane never fires at all."""
+    row = _spawned()
+    for tail in (
+        FINISHED_TAIL,
+        "All done, PR is green.\n<promise>MISSION COMPLETE</promise>",
+    ):
+        [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+        assert v.verdict == watchdog.RETIRE, tail
+
+
+def test_a_promise_carrying_a_help_tag_never_retires():
+    row = _spawned()
+    tail = f"{FINISHED_TAIL}\n<help reason='blocked'>needs a ruling</help>"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert "question the operator owes" in v.basis
+
+
+def test_a_working_or_watching_tail_never_retires_at_any_age():
+    """Silence is a reading about the last write, never a verdict about whether
+    the work is over. Only a session that SAID it finished is retirable."""
+    for tail in ("still on it", "<watching>pr 42</watching>"):
+        row = _spawned()
+        [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=24 * 60)})
+        assert v.verdict != watchdog.RETIRE, tail
+
+
+def test_grace_zero_disarms_the_lane():
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)}, grace=0)
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_inside_the_grace_never_retires():
+    """The follow-up window is the point: a worker that just delivered can still
+    be asked one more thing."""
+    row = _spawned()
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=5)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_an_unjoined_or_operator_row_never_retires():
+    """Only the positive `spawn` stamp retires. `operator` is a session a human
+    started by hand, `adopted` is one the harness-store healer found already
+    running (routinely an operator's own terminal), and None is a row the
+    registry join did not answer for. An unanswered read is never a verdict."""
+    for origin in ("operator", "adopted", None):
+        row = Row("dddd4444-0000", "operator-session", "idle", None, "/tmp/bp", origin)
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=24 * 60)})
+        assert v.verdict != watchdog.RETIRE, origin
+
+
+def test_an_unreadable_transcript_never_retires():
+    row = _spawned()
+    [v] = _retire_run([row], {})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_row_whose_process_is_gone_never_retires():
+    """Retire exists to reclaim a LIVE slot. A stopped process holds none, so
+    stopping it again frees nothing and the receipt's promised undo is false."""
+    for state in ("stopped", "exited", "killed"):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, state
+
+
+def test_the_retirable_set_accounts_for_every_live_state_claude_has():
+    """`_RETIRABLE_STATES` is hand-kept, so something has to make it track the
+    harness. Nothing else does: a new claude status that `_LIVE_STATUS_INPUT`
+    maps folds to a canonical word `_row_state` returns with an EMPTY drift
+    warning, and a word absent from the set simply stops being classified. The
+    lane would go quiet on that population and the slot leak would come back
+    with nothing said.
+
+    So every canonical word claude's live vocabulary folds to must be either
+    retirable or listed here as a deliberate exclusion. Adding a status without
+    deciding which fails this test."""
+    from fno.agents.harnesses.claude import _LIVE_STATUS_INPUT
+
+    # Deliberately NOT retirable, each for a reason `_RETIRABLE_STATES` records.
+    excluded = {"blocked"}
+
+    folded = {
+        watchdog._CANONICAL_STATE.get(mapped, mapped.lower())
+        for mapped in _LIVE_STATUS_INPUT.values()
+    }
+    unaccounted = folded - watchdog._RETIRABLE_STATES - excluded
+    assert not unaccounted, (
+        "claude gained live state(s) "
+        + ", ".join(sorted(unaccounted))
+        + "; decide whether retire acts on them and update _RETIRABLE_STATES "
+        "or this test's exclusion list"
+    )
+    # The exclusion list is itself a claim about the harness: a word that is no
+    # longer live must not sit here looking like a considered decision.
+    assert excluded <= folded, "an exclusion naming a state claude no longer emits"
+
+
+def test_a_live_pane_painting_done_still_retires():
+    """The counterweight to the test above, and the reason retire keys on
+    the stopped words rather than `_TERMINAL_STATES`. `Done` is a member of
+    claude's own KNOWN_LIVE_STATUSES, so a pane wearing it is ALIVE - a worker
+    that finished and parked, which is this lane's entire target population.
+    Excluding it reads as caution and silently empties the lane."""
+    for state in sorted(watchdog._RETIRABLE_STATES):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict == watchdog.RETIRE, state
+
+
+def test_an_unmeasurable_state_never_retires():
+    """The state guard is POSITIVE membership, and this is why. `_row_state`
+    returns "" for a row carrying no state under either alias, and returns an
+    unmapped new spelling verbatim. Neither is a stopped word, so a negative
+    test admits both - and claude has already renamed that field once, when
+    every row read "". Under a negative test the next rename turns one
+    --apply-all into a fleet-wide stop of every row whose tail carries a
+    promise, live workers included."""
+    for state in ("", "Some New Spelling", "compacting", "completed"):
+        row = Row("dddd4444-0000", "bp-worker", state, None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, state
+
+
+def test_a_row_needing_input_never_retires():
+    """`blocked` is claude's `Needs input`, and a worker that has finished does
+    not need input - so the row is one a human owes something to, the opposite
+    of what this lane reclaims. `_question_pending` cannot cover it: that reads
+    the assistant's own text and a permission prompt is not assistant text.
+    Stopping such a session takes the prompt away from the operator."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([row], {row.row_id: _facts(FINISHED_TAIL, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_an_unmarked_row_never_retires():
+    """The spawn marker must be MEASURED, not derived from a missing field.
+    `store_fallback` adopts any session it finds in the claude store - exactly
+    the shape of an operator's own session the SessionStart hook never
+    registered. Reading its origin as "worker" because the field is absent, or
+    because it merely is not `operator`, would let --apply-all stop the
+    operator's own terminal.
+
+    The positive control rides along on purpose: without it every assertion
+    here would still pass if the fixture stopped reaching the lane at all."""
+    # `adopted`, and never the row's `status`. Keying on status was a hole:
+    # status is a LIVENESS stamp that `fno agents reconcile` flips back to
+    # "live" as soon as the session answers a probe, so the guard survived
+    # exactly one pass and the adopted operator terminal then read as a worker.
+    # `origin` is written once at registration and nothing flips it.
+    facts = {"dddd4444-0000": _facts(FINISHED_TAIL, age_min=20)}
+    for origin in (None, "adopted", "something-new"):
+        row = Row("dddd4444-0000", "adopted-session", "idle", None, "/tmp/bp", origin)
+        [v] = _retire_run([row], facts)
+        assert v.verdict != watchdog.RETIRE, origin
+
+    control = Row("dddd4444-0000", "bp-worker", "idle", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([control], facts)
+    assert v.verdict == watchdog.RETIRE
+
+
+def test_every_registry_row_is_born_with_an_origin():
+    """The producer half, and it has to cover EVERY birth site in BOTH languages.
+
+    The consumer only acts on a positive marker, so a birth path that forgets
+    one does not open a hole - it makes the lane silently unsatisfiable for the
+    workers that path creates, which is the same defect pointing the other way.
+
+    Scanning only Python was that defect in the test itself. Rust mints rows
+    too, through `RegistryEntry { .. }` literals in the daemon, the three
+    `*_ask` create paths and both adopt paths, and a seventh added later would
+    have shipped unmarked with nothing failing. So this walks the Rust struct
+    literals as well, and accepts the attribute call form (`registry.AgentEntry`)
+    that a plain `func.id` check lets through.
+    """
+    import ast
+    import pathlib
+    import re
+
+    missing = []
+
+    pkg = pathlib.Path(watchdog.__file__).parent
+    for path in sorted(pkg.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name != "AgentEntry":
+                continue
+            # `AgentEntry(**row)` rehydrates a row that was already born.
+            if any(kw.arg is None for kw in node.keywords):
+                continue
+            if not any(kw.arg == "origin" for kw in node.keywords):
+                missing.append(f"{path.name}:{node.lineno}")
+
+    # Rust has no AST here, so read the literal's field list: from the opening
+    # brace to the matching close at the same indent. Struct-update syntax
+    # (`..other`) inherits the field and is not a birth statement.
+    rust = next(
+        (d / "crates" / "fno-agents" / "src")
+        for d in pkg.parents
+        if (d / "crates" / "fno-agents" / "src").is_dir()
+    )
+    # Match the literal ANYWHERE on the line. Anchoring it to the start of the
+    # line after indent was the same mistake this test exists to catch: it saw 8
+    # of the 20 literals, because most are written `let e = RegistryEntry {` or
+    # `entries.push(state::RegistryEntry {`, and it passed by not looking.
+    opener = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*::)*RegistryEntry\s*\{\s*$")
+    seen = 0
+    for path in sorted(rust.rglob("*.rs")):
+        lines = path.read_text().split("\n")
+        for i, line in enumerate(lines):
+            # Type positions, not literals: `struct X {`, `impl X {`, and any
+            # signature whose return type is X. Widening the match to find the
+            # literals swept these in, and a type position has no fields to
+            # carry a marker.
+            if re.search(r"\b(struct|impl|trait|enum)\b", line) or "->" in line:
+                continue
+            if opener.search(line) is None:
+                continue
+            seen += 1
+            body = []
+            for later in lines[i + 1:]:
+                if later.strip() in ("}", "};", "})", "}),"):
+                    break
+                body.append(later)
+            joined = "\n".join(body)
+            if ".." in joined and "origin" not in joined:
+                continue  # struct-update inherits it
+            if not re.search(r"^\s*origin:", joined, re.MULTILINE):
+                missing.append(f"{path.name}:{i + 1}")
+
+    # A scan that matches nothing passes for the same reason a correct one does,
+    # so state the floor. This is a positive control on the instrument, and it
+    # caught the anchored regex above reading 8 sites instead of 20.
+    assert seen >= 15, f"the Rust scan reached only {seen} literals; it is not looking"
+    assert not missing, (
+        "every registry row must state what created it; unmarked at "
+        + ", ".join(missing)
+    )
+
+
+def test_arming_the_lane_never_demotes_the_stale_escalation():
+    """A retire near-miss is a LEAVE, and a LEAVE returned above the wake
+    ceiling deleted the escalation for the rows that most need a human. Measured
+    on review: a spawned row owing the operator an answer and quiet 13h read
+    `stale / needs a human` with the lane off, and `leave / none` with it armed.
+    The verdict must not depend on whether the lane is armed."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
+    tail = f"{FINISHED_TAIL}\nShould the grace stay 900?"
+    facts = {row.row_id: _facts(tail, age_min=13 * 60)}
+
+    [off] = _retire_run([row], facts, grace=0)
+    [armed] = _retire_run([row], facts, grace=RETIRE_GRACE)
+
+    assert off.verdict == STALE
+    assert armed.verdict == STALE, "arming the lane must not hide a needs-human row"
+    assert "needs a human" in armed.basis
+
+
+def test_arming_the_lane_replaces_the_stale_escalation_with_an_action():
+    """The other half, and the one the test above cannot see because it pins
+    `blocked`. `working` is the only state in both the wake lane and
+    `_RETIRABLE_STATES`, so arming retire DOES change that row's verdict.
+
+    That is allowed, and the invariant is narrower than "the verdict must not
+    depend on whether the lane is armed". A stale escalation says a human should
+    look. When the tail closes a promise and owes no question, there is nothing
+    to look at, so arming must replace the escalation with an ACTION - never
+    with `leave`, which is the silence the near-miss ordering bug produced."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    facts = {row.row_id: _facts(FINISHED_TAIL, age_min=13 * 60)}
+
+    [off] = _retire_run([row], facts, grace=0)
+    [armed] = _retire_run([row], facts, grace=RETIRE_GRACE)
+
+    assert off.verdict == STALE
+    assert armed.verdict == watchdog.RETIRE
+    assert armed.action == "stop", "an escalation may become an action, never silence"
+
+
+def test_a_decorated_question_still_holds_the_row():
+    """A closing question is rarely bare. Agents write it bold, quoted or
+    parenthesised, and `endswith("?")` answered no for every one of those - so
+    the row retired with the operator's question stranded, which is the single
+    outcome this predicate exists to prevent."""
+    for closing in (
+        "**Do you want me to cover the migration path too?**",
+        '"Should the grace stay 900?"',
+        "(shall I widen it?)",
+        "Should the grace stay 900?",
+    ):
+        text = f"Plan delivered.\n{closing}\n{FINISHED_TAIL}"
+        assert watchdog._question_pending(_facts(text, age_min=20)) is True, closing
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+        assert v.verdict != watchdog.RETIRE, closing
+
+
+def test_a_quoted_promise_never_retires_and_a_real_one_still_does():
+    """Thirty-four files in this repo carry a literal closing promise tag, this
+    module among them. A worker summarising a diff to one of them quotes the
+    closed block, and every read below answers as if it had declared itself
+    done. The lane ships armed, so that stops a live session by default.
+
+    Both directions are pinned here. The lane must still act on a real promise
+    that happens to sit near quoted material, or the fix would close the leak by
+    emptying the lane."""
+    promise = "<promise>PR is green and reviewed</promise>"
+    cases = {
+        "plain": (promise, True),
+        "fenced": (f"Diff:\n```\n{promise}\n```\nStill working.", False),
+        "tilde fenced": (f"Diff:\n~~~\n{promise}\n~~~\nStill working.", False),
+        "inline span": (f"The tag is `{promise}` here.", False),
+        # A turn that opens a fence and stops is a worker cut off mid-quote, so
+        # everything after the opener is quoted. Requiring the closing fence read
+        # this as a declaration.
+        "unterminated fence": (f"Diff:\n```\n{promise}\n", False),
+        "quote then real": (f"```\n{promise}\n```\n{promise}", True),
+        "real then quote": (f"{promise}\n```\n{promise}\n```", True),
+    }
+    for name, (text, should_retire) in cases.items():
+        row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+        [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+        retired = v.verdict == watchdog.RETIRE
+        assert retired is should_retire, f"{name}: retired={retired}"
+
+
+def test_a_prose_mention_of_the_tag_never_retires():
+    """`classify_tail` answers `done` on any `<promise` in the last turn, prose
+    mention included, and agents working on this repo write the tag in prose
+    routinely. Reading that single answer stopped a live worker whose turn only
+    said it was widening something. The done half asks for the CLOSED block, the
+    same way the question half already refuses to trust a bare mention."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    text = "the loop keys on <promise> here. Widening it now."
+    [v] = _retire_run([row], {row.row_id: _facts(text, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_a_turn_cut_off_mid_promise_never_retires():
+    """An unclosed tag means the turn was cut off while writing its promise,
+    which is not a worker calmly declaring itself finished. Refusing costs a
+    slot that stays held; acting stops a session that never said it was done."""
+    row = Row("dddd4444-0000", "bp-worker", "working", None, "/tmp/bp", "spawn")
+    [v] = _retire_run([row], {row.row_id: _facts("<promise>MISSION COMPL", age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+
+
+def test_an_open_429_window_never_retires():
+    """A session waiting out a rate limit is silent and is NOT finished. Retire
+    sits above the reroute lane, so without this it stops exactly the rows
+    reroute exists to move onto a fresh account, and stops them without
+    rotating anything. `reap_decision` refuses on the same reading."""
+    row = Row("dddd4444-0000", "bp-worker", "blocked", None, "/tmp/bp", "spawn")
+    tail = f"{FINISHED_TAIL}\n{RATE_LIMIT_TAIL}"
+    [v] = _retire_run([row], {row.row_id: _facts(tail, age_min=20)})
+    assert v.verdict != watchdog.RETIRE
+    assert v.verdict == REROUTE, "the row belongs to reroute, not retire"
+
+
+def test_the_predicate_is_the_only_route_to_a_retire_verdict():
+    """The sibling of the reap version of this test, and for the same reason: a
+    guard on one of N paths is decorative. Every condition retire refuses on -
+    terminal state, open 429, pending question, grace - lives in
+    `retire_decision`, so a second construction site is a bypass of all four."""
+    import inspect
+
+    source = inspect.getsource(watchdog._verdict_one)
+    assert source.count("RETIRE,") == 1, (
+        "a second RETIRE verdict site bypasses retire_decision"
+    )
+    assert "retire_decision(" in source
+
+
+def test_reap_outranks_retire_on_the_same_row():
+    """Precedence: ghost > reap > retire. A row that satisfies both takes the
+    more specific verdict, so the reap lane's config freeze still governs it."""
+    row = Row("eeee5555-0000", "w1", "idle", "x-1", "/tmp/w1", "spawn",
+              STALE_MESSAGE_STAMP)
+    monkey_nodes = {"x-1": {"status": "done"}}
+    [v] = verdicts(
+        [row],
+        transcript_for=lambda sid: _facts(FINISHED_TAIL, age_min=20),
+        claim_for=lambda node: {},
+        node_state_for=lambda node: monkey_nodes.get(node),
+        now_s=NOW_1840,
+        retire_grace_s_value=RETIRE_GRACE,
+    )
+    assert v.verdict == REAP
+
+
 def test_one_rotation_per_sweep_across_reroute_rows(monkeypatch):
     """_default_failover mutates the GLOBAL active provider and its storm cap
     is per row, so eight blocked rows would walk the whole account queue in
@@ -2191,10 +2755,15 @@ def test_the_three_origin_values_reach_three_different_verdicts():
     filed against, and the first cut of this predicate committed it: only
     "operator" refused, so `None` fell through to the delete exactly like a
     known worker. Each value now reaches a verdict the others cannot.
+
+    "adopted" is the fourth, and it lands with `None` on purpose: the healers
+    that mint those rows observed a session already running and never observed
+    who started it. Naming the non-answer must not turn it into an answer.
     """
     expected = {
         "operator": watchdog.REAP_NO,
         None: watchdog.REAP_UNKNOWN,
+        "adopted": watchdog.REAP_UNKNOWN,
         "spawn": watchdog.REAP_YES,
     }
     for origin, want in expected.items():
@@ -2211,25 +2780,30 @@ def test_the_three_origin_values_reach_three_different_verdicts():
 def test_an_adopted_row_survives_its_recency_stamp_going_stale():
     """The reachable case the first cut of this predicate would have deleted.
 
-    `mint_adopted_entry` writes `origin: None` beside a FRESH
-    `last_message_at`, and adopt takes in both a session a human started by
-    hand and a footnote orphan. Inside the window the stamp protects the row.
-    This asserts what happens AFTER it goes stale, which is where the two
-    protectors used to fall silent together and hand over a worktree nobody
-    could prove was a worker's.
+    `mint_adopted_entry` writes its marker beside a FRESH `last_message_at`,
+    and adopt takes in both a session a human started by hand and a footnote
+    orphan. Inside the window the stamp protects the row. This asserts what
+    happens AFTER it goes stale, which is where the two protectors used to fall
+    silent together and hand over a worktree nobody could prove was a worker's.
+
+    Both spellings, because the fleet carries both: a row minted before the
+    healers stamped anything reads None, and one minted since reads "adopted".
+    They are the same non-answer and must reach the same refusal.
     """
-    adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
-                  "/wt/solo", origin=None, last_message_at=STALE_MESSAGE_STAMP)
+    for origin, said in ((None, "was never recorded"), ("adopted", "reads adopted")):
+        adopted = Row("aaaa1111-0000", "adopted-external", "working", "x-done",
+                      "/wt/solo", origin=origin,
+                      last_message_at=STALE_MESSAGE_STAMP)
 
-    answer, basis = _decide(
-        adopted,
-        facts=_facts(FINISHED_TAIL, age_min=200),
-        nodes={"x-done": {"status": "done"}},
-    )
+        answer, basis = _decide(
+            adopted,
+            facts=_facts(FINISHED_TAIL, age_min=200),
+            nodes={"x-done": {"status": "done"}},
+        )
 
-    assert answer == watchdog.REAP_UNKNOWN
-    assert "origin was never recorded" in basis
-    assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
+        assert answer == watchdog.REAP_UNKNOWN, origin
+        assert said in basis, basis
+        assert watchdog.REAP_PROTECTION_RULES["origin"] in basis
 
 
 def test_the_unrecorded_origin_read_never_silences_a_more_specific_refusal():

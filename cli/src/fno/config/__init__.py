@@ -2380,6 +2380,15 @@ class RecoveryBlock(BaseModel):
         cannot be undone and a wrong wake can. Classification is unaffected -
         reap verdicts are still computed, reported and mailed, they just do
         not execute until an operator turns this on.
+    retire_grace_s:
+        How long a finished worker stays parked before ``--apply-all`` stops
+        it (default 900). A worker that declares itself done and never exits
+        holds a live slot against ``config.agents.max_live`` forever; this is
+        the follow-up window before the retire lane takes the slot back, so a
+        worker that just delivered can still be asked one more thing. ``0``
+        turns the lane off entirely. Unlike reap this ships ARMED, because
+        retire only runs ``stop``: the worktree, the transcript and the
+        registry row all survive and ``fno agents resume`` undoes it.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -2390,6 +2399,7 @@ class RecoveryBlock(BaseModel):
     watchdog: Literal["off", "report", "wake"] = "off"
     watchdog_mail_to: str = ""
     watchdog_reap: bool = False
+    retire_grace_s: int = Field(default=900, ge=0)
 
 
 class HealthThresholdsBlock(BaseModel):

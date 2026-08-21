@@ -509,6 +509,14 @@ def test_shared_readiness_submits_a_preloaded_seed(harness: str) -> None:
 
 
 def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
+    """A non-zero return code is mux REFUSING the send, and the detail says so.
+
+    It used to read "text delivered, submission unconfirmed", which named the
+    wrong half twice. Whether text was delivered is the `source` field's job,
+    and it is false outright when the seed rode in on argv and the send carried
+    only a submit keystroke. What this arm actually knows is that the send was
+    refused."""
+
     def run(argv, **_kw):
         verb = argv[3]
         if verb == "wait":
@@ -521,8 +529,42 @@ def test_shared_readiness_never_certifies_an_unconfirmed_submit() -> None:
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
     assert state == "unconfirmed"
-    assert detail == "text delivered, submission unconfirmed"
-    assert source == "delivered"
+    assert detail == "submission refused"
+    assert source == "delivered", "this seed was typed, so delivered is true here"
+
+
+def test_a_blank_frame_is_unattempted_not_unconfirmed() -> None:
+    """The two must never collapse. `unconfirmed` says a send was tried and did
+    not land, which the caller may fail the spawn on. A blank frame says the
+    screen could not be read, so nothing was tried - an absence about the
+    instrument, not a fact about the seed. Folding them together reaps an alive
+    child that simply has not painted yet."""
+
+    def run(argv, **_kw):
+        verb = argv[3]
+        if verb == "wait":
+            return _proc(WAIT_ALIVE)
+        if verb == "read":
+            return _proc(0, "   \n")
+        raise AssertionError(f"a blank frame must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    assert state == "unattempted"
+    assert "not attempted" in detail
+
+
+def test_an_unreadable_frame_is_unattempted_not_unconfirmed() -> None:
+    """Same rule when the read itself raises."""
+    from fno.agents.mux_spawn import DispatchAskError
+
+    def run(argv, **_kw):
+        if argv[3] == "read":
+            raise DispatchAskError("mux read failed", exit_code=1)
+        raise AssertionError(f"an unreadable frame must not reach a send: {argv}")
+
+    state, detail, _source = _submit_spawn_seed("claude", "main", 81, "seed text", run)
+    assert state == "unattempted"
+    assert "not attempted" in detail
 
 
 def test_shared_readiness_clears_agy_trust_before_seeding() -> None:
@@ -568,9 +610,13 @@ def test_shared_readiness_waits_for_a_slow_first_paint() -> None:
         raise AssertionError(argv)
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    # A first paint that has not landed is `unattempted`, not `unconfirmed`:
+    # this call never reached a send, so it asserts nothing about the seed. The
+    # caller's one retry is what picks up the second frame, and only a send that
+    # was tried and dropped can fail the spawn.
     assert (state, detail, source) == (
-        "unconfirmed",
-        "text delivered, submission unconfirmed",
+        "unattempted",
+        "pane frame blank, seed submission not attempted",
         "",
     )
 
@@ -586,6 +632,11 @@ def test_shared_readiness_fails_when_agy_trust_does_not_clear() -> None:
         raise AssertionError(argv)
 
     state, detail, source = _submit_spawn_seed("agy", "main", 81, "seed text", run)
+    # `unconfirmed`, not `unattempted`. The clearing submit WAS sent and the
+    # modal outlived it, which is positive evidence the gate did not clear - not
+    # a paint-timing miss. Until a human answers that modal the pane runs
+    # nothing, so calling it `unattempted` would write a live registry row for a
+    # wedged pane and leak the very slot this change exists to reclaim.
     assert state == "unconfirmed"
     assert "trust gate did not clear" in detail
     assert source == "trust-cleared"

@@ -25,6 +25,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from types import SimpleNamespace
+
 import pytest
 
 from fno.paths_testing import use_tmpdir
@@ -4305,3 +4307,202 @@ def test_pane_run_env_does_not_latch_the_writable_dir_grant(
     env = seen["env"]
     assert env is not None
     assert WORKER_ADD_DIRS_ENV not in env
+
+
+# --- An unconfirmed seed is a failed spawn, not a ready worker --------------
+#
+# `_submit_spawn_seed` used to return "unconfirmed" on five paths. The call site
+# folded all five into a rewritten `readiness_detail` and carried on, so the pane
+# got a `ready` row and `spawn_gate.LIVE_STATUSES` counted it live while it sat
+# at an empty prompt having executed nothing. That is a slot held by a worker
+# that never started.
+#
+# Those five split on two questions, which is three answers plus the happy path.
+#
+#   unattempted  nothing was sent - an unreadable or blank frame. An alive
+#                unpainted child is still a live worker, so keep the row. This
+#                is the ONLY retryable state, because it is the only one where
+#                nothing can already be sitting in the pane's buffer.
+#   unconfirmed  the send was REFUSED - a non-zero return code, or a trust
+#                modal still on screen after the clearing submit. Positive
+#                evidence the worker will never start, so fail the spawn on the
+#                first answer.
+#   unknown      mux did not ANSWER - the RPC timed out. The keystroke may have
+#                landed, so reaping would kill a worker already running and a
+#                retry would type the seed twice. Keep the row, say so.
+#
+# The distinction between the last two is the whole point: a timeout is not a
+# rejection, and folding it into one reaped live panes.
+
+
+def _seed_script(monkeypatch, *states: str) -> list[tuple]:
+    """Drive `_submit_spawn_seed` through a scripted sequence of outcomes."""
+    from fno.agents import mux_spawn
+
+    # The retry's real delay exists for a TUI that has not painted; a scripted
+    # sequence has no TUI, so paying it would just add a second of wall clock
+    # per test for nothing.
+    monkeypatch.setattr(mux_spawn, "_SEED_RETRY_DELAY_S", 0)
+
+    calls: list[tuple] = []
+    seq = iter(states)
+
+    def fake_submit(provider, session, pane_id, seed, runner):
+        calls.append((provider, session, pane_id, seed))
+        state = next(seq)
+        detail = {
+            "submitted": "",
+            "unknown": "mux did not answer the submit; the keystroke may have landed",
+        }.get(state, "text delivered, submission unconfirmed")
+        return state, detail, "delivered"
+
+    monkeypatch.setattr(mux_spawn, "_submit_spawn_seed", fake_submit)
+    return calls
+
+
+def test_a_submitted_seed_writes_one_row_and_submits_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The happy path is unchanged: one submit, a ready receipt, one row."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "submitted")
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert len(calls) == 1
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == [], "a submitted seed is never a reap"
+
+
+def test_a_seed_that_submits_on_the_retry_still_spawns_one_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pane that painted late is the common transient. It lands in
+    `unattempted` - nothing was sent - so one retry recovers it, and it must not
+    produce a second pane or a second row."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unattempted", "submitted")
+
+    result, runner = _spawn(monkeypatch, tmp_path)
+
+    assert result.seed == "submitted"
+    assert len(calls) == 2, "the retry must actually re-submit"
+    assert len(load_registry()) == 1
+    assert runner.kill_calls == []
+
+
+def test_an_unconfirmed_send_is_never_retried(tmp_path: Path, monkeypatch) -> None:
+    """`unconfirmed` means text was delivered and the submission was not
+    confirmed, so the pane's buffer may already hold the seed. A retry there
+    re-derives the payload from a frame containing a partial seed and submits
+    fragment+seed into a live pane. Failing the spawn is the safer answer."""
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unconfirmed")  # a second call raises StopIteration
+
+    with pytest.raises(DispatchAskError):
+        _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 1, "one attempt, then fail - never a second send"
+    assert load_registry() == []
+
+
+def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The measured failure: readiness reported live for a worker that never
+    started. A retry that still cannot get the seed in means a pane that will
+    not accept the payload, so it takes the existing readiness-failure path."""
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unattempted", "unconfirmed")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 2, "exactly one retry, then stop holding the slot"
+    message = str(exc.value)
+    assert "submission unconfirmed" in message
+    assert "reaped" in message
+    assert load_registry() == [], "an unstarted worker must not hold a live row"
+
+
+def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
+    """A timeout at the trust gate is not the timeout at the submit, and the
+    modal is the whole difference.
+
+    At the submit the seed was already typed into a RUNNING pane, so an
+    unanswered RPC leaves a worker that may be doing its job. At the trust gate
+    the modal may still be up, and a pane behind an unanswered modal executes
+    NOTHING while holding a slot against max_live. That is the leak this
+    function exists to close, so both trust arms fail the spawn.
+
+    The source must not say `trust-cleared` either. Nothing read back that the
+    gate cleared, and claiming it makes a wedged pane and a healthy one produce
+    identical receipts."""
+    from fno.agents import mux_spawn
+    from fno.agents.mux_spawn import DispatchAskError, _submit_spawn_seed
+
+    modal = "Do you trust this folder?"
+
+    def runner_that_times_out_after_the_modal(argv, **kw):
+        # argv[0] is the fno binary `_run_mux` prepends. The first read paints
+        # the modal; every later RPC times out, which is what `_run_mux` turns
+        # into DispatchAskError.
+        if argv[1:4] == ["mux", "pane", "read"] and not calls:
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout=modal, stderr="")
+        raise DispatchAskError("mux did not answer", exit_code=1)
+
+    calls: list = []
+    state, detail, source = _submit_spawn_seed(
+        "agy", "sess", 3, "seed", runner_that_times_out_after_the_modal
+    )
+
+    assert state == "unconfirmed", "a pane behind a live modal must not keep a row"
+    assert source != "trust-cleared", "nothing read back that the gate cleared"
+    assert "modal may still be up" in detail
+
+
+def test_a_timed_out_submit_keeps_the_row_and_never_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A mux RPC timeout says the instrument did not answer, never that the
+    keystroke failed to land. `mux pane send --submit` can deliver the Enter and
+    then miss its own reply, so the worker is already running its task.
+
+    Reaping there kills a live worker and leaves no row saying it existed.
+    Retrying there types the seed a second time into a pane that already has it.
+    So this state does neither: the row survives, one send was made, and the
+    receipt carries the uncertainty."""
+    from fno.agents.registry import load_registry
+
+    calls = _seed_script(monkeypatch, "unknown")  # a retry would raise StopIteration
+
+    _spawn(monkeypatch, tmp_path)
+
+    assert len(calls) == 1, "an unanswered submit must not be re-sent"
+    rows = load_registry()
+    assert len(rows) == 1, "a worker that may be running must keep its row"
+
+
+def test_a_failed_readiness_never_reaches_the_seed(tmp_path: Path, monkeypatch) -> None:
+    """Readiness already failed, so the seed block is skipped entirely and the
+    pre-existing failure path is byte-identical."""
+    from fno.agents.mux_spawn import DispatchAskError
+
+    calls = _seed_script(monkeypatch)  # any call would StopIteration
+
+    with pytest.raises(DispatchAskError):
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            runner=FakeRunner(read_stdout="", read_returncode=1, wait_returncode=0),
+        )
+
+    assert calls == []

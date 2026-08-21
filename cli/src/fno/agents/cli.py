@@ -2082,8 +2082,11 @@ def cmd_spawn(
                 # worker reached its provider; `status` alone could not, so a
                 # pane about to bind and one already dead read identically.
                 "bound": pane_result.bound,
-                # Independent delivery fact. Null means no seed was requested;
-                # unconfirmed is printed before the command exits non-zero.
+                # Independent delivery fact. Null means no seed was requested.
+                # `unattempted` is printed before the command exits non-zero: the
+                # pane is live but its frame could not be read, so the seed is
+                # unverified. A genuine `unconfirmed` submit never reaches this
+                # receipt - it fails the spawn inside dispatch_spawn_pane.
                 "seed": pane_result.seed,
             }
             if pane_result.seed_source is not None:
@@ -2153,7 +2156,18 @@ def cmd_spawn(
             receipt = json.dumps(receipt_obj)
             sys.stdout.write(receipt + "\n")
             sys.stdout.flush()
-            if pane_result.seed == "unconfirmed":
+            # Exit 22 means one thing: a receipt WAS written and the seed on it
+            # is unverified. So it keys on every state that reaches this line
+            # without a confirmed submit, and there are two.
+            #
+            # `unconfirmed` is deliberately absent, and not because it is
+            # verified: it fails the spawn inside dispatch_spawn_pane and never
+            # reaches a receipt at all, so keying on it here would be a dead
+            # branch. `unattempted` is a live pane whose frame could not be
+            # read. `unknown` is a live pane whose submit mux never answered.
+            # Both leave a caller holding a row it cannot trust, which is what
+            # exit 22 has always told it.
+            if pane_result.seed in ("unattempted", "unknown"):
                 raise typer.Exit(code=22)
             return
         if substrate == "headless":
@@ -3220,6 +3234,20 @@ def cmd_register(
         sys.stderr.write(f"register failed: {exc}\n")
         raise typer.Exit(code=1) from exc
 
+    # `origin` is write-once, so a human taking over a pane footnote spawned
+    # keeps `spawned` and this call cannot change it. Silence there reads as
+    # success: the operator believes they are registered as attended, while mail
+    # still treats them as unattended and the retire lane still holds them
+    # stoppable. The refusal is deliberate - a birth fact is not a claim a later
+    # caller gets to revise - so this says it rather than hiding it.
+    if entry.origin is not None and entry.origin != "operator":
+        sys.stderr.write(
+            f"note: origin stays {entry.origin!r}; it records what created this "
+            "row and is written once. Mail escalation and the watchdog retire "
+            "lane both read it, so this session is still treated as "
+            f"{entry.origin!r}.\n"
+        )
+
     events.emit(
         "session_registered",
         provider=entry.harness,
@@ -3471,13 +3499,14 @@ def cmd_watchdog(
         False,
         "--apply-all",
         help=(
-            "Execute every lane: wake plus reap and reroute, which both stop "
-            "a session. Implies --apply."
+            "Execute every lane: wake plus reap, reroute and retire, which all "
+            "stop a session. Only reap also deletes its worktree; retire is a "
+            "stop that `fno agents resume` undoes. Implies --apply."
         ),
     ),
     only: Optional[str] = typer.Option(
         None, "--only",
-        help="Filter to one verdict: wake|reroute|reap|ghost|stale|leave.",
+        help="Filter to one verdict: wake|reroute|reap|retire|ghost|stale|leave.",
     ),
     mail_to: Optional[str] = typer.Option(
         None,

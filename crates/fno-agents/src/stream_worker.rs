@@ -1988,6 +1988,8 @@ done
             r.entries.push(state::RegistryEntry {
                 name: sid.clone(),
                 short_id: sid.clone(),
+                // Fixture: makes no claim about what created the row.
+                origin: None,
                 legacy_provider: String::new(),
                 provider: None,
                 model: None,
@@ -1997,7 +1999,6 @@ done
                 cwd: "/tmp".into(),
                 project_root: String::new(),
                 session_id: None,
-                origin: None,
                 spawn_trigger: None,
                 legacy_claude_short_id: None,
                 claude_session_uuid: Some("uuid-x".into()),

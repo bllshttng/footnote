@@ -2578,6 +2578,26 @@ def _send_permission_response(
         )
 
 
+#: Pause before the single seed retry. The retry exists for a TUI that had not
+#: painted when the readiness probe returned, and `_run_mux` has no poll or
+#: backoff of its own, so a retry with no delay re-reads the same blank frame
+#: and cannot recover the case it was written for. One spawn, once, so the cost
+#: is bounded and paid only on a pane that already failed to answer.
+_SEED_RETRY_DELAY_S = 1.0
+
+
+def _send_source(payload: str) -> str:
+    """What the send actually put in the pane.
+
+    `delivered` is the word this module reserves for text that WAS typed. When
+    the seed rode in on argv the payload is empty and the send carries only a
+    submit keystroke, so calling that `delivered` names a pane nothing was typed
+    into. Both failure arms used the literal and contradicted the success arm
+    two lines below them, which had the rule right all along.
+    """
+    return "preloaded" if payload == "" else "delivered"
+
+
 def _submit_spawn_seed(
     provider: str,
     session: str,
@@ -2585,14 +2605,44 @@ def _submit_spawn_seed(
     seed: str,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
 ) -> tuple[str, str, str]:
-    """Submit a spawn seed after the shared readiness probe has painted."""
+    """Submit a spawn seed after the shared readiness probe has painted.
+
+    Four states, and every split between them is load-bearing:
+
+    ``submitted``    the seed is in flight (sent, or it rode in the argv).
+    ``unconfirmed``  a send WAS attempted and did not land, or cannot be shown
+                     to have landed into a pane that can run it. A fact about
+                     the seed, so the caller may fail the spawn on it.
+    ``unattempted``  the pane frame could not be read, so no send was tried.
+                     That is a fact about the INSTRUMENT, not about the seed,
+                     and an alive-but-unpainted child is still a live worker.
+                     Folding it into ``unconfirmed`` would reap a healthy pane
+                     for the crime of not having painted yet. It is also the
+                     only state the caller retries, because it is the only one
+                     where nothing can already be sitting in the pane's buffer.
+    ``unknown``      the seed was typed into a RUNNING pane and mux did not
+                     answer the submit. The keystroke may have landed, so
+                     reaping would kill a worker already doing its job, and a
+                     retry would type the seed twice. The row survives and the
+                     receipt carries the uncertainty.
+
+    The agy trust gate is ``unconfirmed`` on every arm, including both timeouts
+    and the dialog still being on screen after the clearing submit. None of
+    those is the ``unknown`` case, and the modal is the reason: an unanswered
+    modal is a pane that executes NOTHING while holding a slot. Calling any of
+    them ``unattempted`` or ``unknown`` would write a live registry row for a
+    wedged pane, which is the slot leak this whole change exists to close.
+    """
     try:
         screen = _run_mux(
             ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
             runner,
         )
     except DispatchAskError:
-        return "unconfirmed", "", "delivered"
+        # source is "", not "delivered": nothing was typed into the pane, and
+        # `delivered` is the word the send arms use for text that WAS. A receipt
+        # reading seed=unattempted with seed_source=delivered contradicts itself.
+        return "unattempted", "pane frame unreadable, seed submission not attempted", ""
     frame = screen.stdout or ""
     if provider == "agy" and re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
         try:
@@ -2601,24 +2651,46 @@ def _submit_spawn_seed(
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+            # `unconfirmed`, NOT `unknown`, and the difference from the submit
+            # arm at the bottom of this function is the modal. There, the seed
+            # was already typed into a running pane and a timeout leaves a
+            # worker that may be doing its job. Here the modal may still be up,
+            # and a pane behind an unanswered modal runs NOTHING while holding
+            # a slot against max_live - the leak this function exists to close.
+            #
+            # The source is "" for the same reason: nothing read back that the
+            # gate cleared, and `trust-cleared` would make a wedged pane and a
+            # healthy one produce identical receipts.
+            return "unconfirmed", "mux did not answer the agy trust submit; the modal may still be up", ""
         if cleared.returncode != 0:
-            return "unconfirmed", "agy trust gate submit failed", "trust-cleared"
+            # A refused submit is STRONGER evidence the gate did not clear than
+            # the timeouts above it, which already stopped claiming it. Harmless
+            # today only because `unconfirmed` fails the spawn before a receipt
+            # exists, and "harmless until the caller changes" is how the other
+            # two got written.
+            return "unconfirmed", "agy trust gate submit refused", ""
         try:
             screen = _run_mux(
                 ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "40"],
                 runner,
             )
         except DispatchAskError:
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            # The read-back IS the evidence the modal cleared, so a timeout here
+            # leaves that unproven. Same reasoning as the arm above: an
+            # unanswered modal is a pane that executes nothing, so this fails
+            # the spawn rather than writing a row for it, and it must not claim
+            # `trust-cleared` for a read that never came back.
+            return "unconfirmed", "mux did not answer the agy trust read-back; the modal may still be up", ""
         frame = screen.stdout or ""
         if re.search(r"trust (?:this )?folder|do you trust", frame, re.I):
-            return "unconfirmed", "agy trust gate did not clear", "trust-cleared"
+            return "unconfirmed", "agy trust gate did not clear; the modal outlived the clearing submit. Grant the directory in ~/.gemini/trustedFolders.json and spawn again - this pane is reaped, so there is no modal left to answer", "trust-cleared"
         trust_source = "trust-cleared"
     else:
         trust_source = ""
     if not frame.strip():
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source
+        # A blank frame is an unpainted TUI, not a refused seed: nothing was
+        # sent, so there is nothing to call unconfirmed.
+        return "unattempted", "pane frame blank, seed submission not attempted", trust_source
     if provider != "agy" and seed not in frame:
         return "submitted", "", "argv"
     payload = "" if seed in frame else seed
@@ -2628,10 +2700,19 @@ def _submit_spawn_seed(
             runner,
         )
     except DispatchAskError:
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
+        # The RPC did not answer. The text was already delivered and the submit
+        # may have landed too, so this is neither "nothing was sent"
+        # (`unattempted`, which retries and would double-type here) nor a
+        # refusal (`unconfirmed`, which reaps). A non-zero return code below IS
+        # a refusal, and that is the one that fails the spawn.
+        return (
+            "unknown",
+            "mux did not answer the submit; the keystroke may have landed",
+            trust_source or _send_source(payload),
+        )
     if submitted.returncode != 0:
-        return "unconfirmed", "text delivered, submission unconfirmed", trust_source or "delivered"
-    return "submitted", "", trust_source or ("preloaded" if payload == "" else "delivered")
+        return "unconfirmed", "submission refused", trust_source or _send_source(payload)
+    return "submitted", "", trust_source or _send_source(payload)
 
 
 def dispatch_spawn_pane(
@@ -3133,7 +3214,48 @@ def dispatch_spawn_pane(
             seed_state, seed_detail, seed_source = _submit_spawn_seed(
                 provider, session, pane_id, message, runner
             )
+            if seed_state == "unattempted":
+                # One retry, and ONLY from `unattempted`. That state means no
+                # send was made, so a second attempt cannot double-type: the
+                # `unconfirmed` detail is literally "text delivered, submission
+                # unconfirmed", and re-deriving the payload from a frame holding
+                # a partial seed would submit fragment+seed into a live pane.
+                # Failing that spawn is the safer answer than typing twice.
+                #
+                # The sleep is load-bearing, not politeness. `unattempted` IS
+                # the late-paint state, and `_run_mux` neither polls nor backs
+                # off, so an immediate re-read lands milliseconds later on the
+                # same blank frame and the retry recovers nothing it was written
+                # to recover.
+                time.sleep(_SEED_RETRY_DELAY_S)
+                seed_state, seed_detail, seed_source = _submit_spawn_seed(
+                    provider, session, pane_id, message, runner
+                )
             if seed_state == "unconfirmed":
+                # A pane that REFUSED the payload is a worker that will never
+                # start. There is no retry budget on this path - the retry above
+                # fires only from `unattempted` - so this is a first-attempt
+                # refusal, and mux said so with a non-zero return code.
+                # Rewriting the detail
+                # string and carrying on used to leave readiness at `ready`, and
+                # spawn_gate.LIVE_STATUSES counts `ready` as live - so the pane
+                # held a slot against max_live while sitting at an empty prompt
+                # having executed nothing. Hand it to the readiness-failure
+                # branch below, which reaps the pane and raises before any
+                # registry row is written.
+                #
+                # `unattempted` is deliberately NOT here. It says the frame
+                # could not be read, which is an absence, and an alive
+                # unpainted child keeps its row exactly as before.
+                readiness = "failed"
+                readiness_detail = seed_detail or "spawn seed never submitted"
+            elif seed_state == "unknown":
+                # mux did not answer. The keystroke may have landed, so reaping
+                # would kill a worker that is already running its task, and
+                # retrying would type the seed twice. Keep the row and say so;
+                # the receipt carries the uncertainty to whoever reads it.
+                readiness_detail = seed_detail or readiness_detail
+            elif seed_state == "unattempted":
                 readiness_detail = seed_detail or readiness_detail
         if readiness == "failed" or (recovered and readiness != "ready"):
             if recovered and readiness != "failed":

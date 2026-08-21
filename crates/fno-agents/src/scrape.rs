@@ -504,6 +504,8 @@ mod tests {
         state::RegistryEntry {
             name: name.into(),
             short_id: String::new(),
+            // Fixture: makes no claim about what created the row.
+            origin: None,
             legacy_provider: provider.into(),
             provider: None,
             model: None,
@@ -513,7 +515,6 @@ mod tests {
             cwd: "/tmp/x".into(),
             project_root: String::new(),
             session_id: None,
-            origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
             claude_session_uuid: None,

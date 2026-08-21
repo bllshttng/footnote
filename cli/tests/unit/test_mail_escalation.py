@@ -356,3 +356,84 @@ def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, c
     out = capsys.readouterr().out
     assert "queued (durable)" in out
     assert "codex app-server daemon start" not in out
+
+
+#: The five axes are never inferred from a value: `claude` is a HARNESS, and
+#: `register_existing_session`'s parameter is named `provider`. Binding the
+#: literal there directly is what `check-axis-vocabulary` refuses, so the
+#: axis is named once here - the same idiom as `CODEX_HARNESS` in
+#: `cli/tests/agents/test_spawn_pane.py`.
+CLAUDE_HARNESS = "claude"
+
+
+def test_store_healing_never_downgrades_an_operator_stamp(mailbox):
+    """`adopted` is the weakest origin and must not overwrite a stronger one.
+
+    `register_existing_session`'s refresh branch restamps `origin` whenever the
+    caller passes one, and the store healer now passes `origin="adopted"`. So
+    healing a hand-registered session by a token that missed the registry
+    restamped `operator` as `adopted`, and `_recipient_is_attended` then read
+    False forever - attended-miss escalation silently stopped firing for that
+    session. The comment above that branch was written against exactly this
+    clobber; the healer became the caller that delivers it.
+    """
+    from fno.agents.registry import register_existing_session, resolve_agent_in, load_registry
+
+    sid = "3f2b71c0-11aa-4bb2-9cc3-5d6e7f809a1b"
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+
+    # The healer refreshing the same row, as it does on a store hit.
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin == "operator", "a store heal must not demote an operator session"
+
+
+def test_store_healing_never_changes_an_origin_a_row_already_has(mailbox):
+    """A refresh may FILL an empty origin and may never CHANGE one.
+
+    The earlier rule here was "`adopted` never lands on a refresh, not even on a
+    row with no origin", which protected a spawn row by refusing every restamp.
+    That protection was aimed at a spawn row carrying `origin=None`, and spawn
+    rows now state `spawned` at birth. Carrying the marker is the stronger
+    guard: refusing every restamp still let `origin="operator"` land on a
+    worker, which took it out of the retire lane for good and into the attended
+    mail escalation. Write-once refuses both.
+
+    A row that never made a claim is a different case. Nothing is lost by giving
+    it the only claim anyone has made, and the retire lane reads `None` and
+    `adopted` identically, so filling one cannot change a lane verdict.
+    """
+    from fno.agents.registry import register_existing_session, load_registry
+
+    sid = "4a1c82d1-22bb-4cc3-8dd4-6e7f8a90b2c3"
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="spawn"
+    )
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="operator"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin == "spawn", "a heal must not exempt a spawned worker from the lane"
+
+
+def test_a_genuinely_new_adoption_still_carries_the_marker(mailbox):
+    """The counterweight: the marker must land at BIRTH, or adopted rows stay
+    indistinguishable from spawned ones and the guard has nothing to read."""
+    from fno.agents.registry import register_existing_session, load_registry
+
+    sid = "5b2d93e2-33cc-4dd4-9ee5-7f8a9b01c3d4"
+    register_existing_session(
+        provider=CLAUDE_HARNESS, session_id=sid, cwd=str(mailbox), origin="adopted"
+    )
+
+    row = next(r for r in load_registry() if r.harness_session_id == sid)
+    assert row.origin == "adopted"

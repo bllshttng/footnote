@@ -1,6 +1,6 @@
 # Fleet watchdog
 
-`fno agents watchdog` runs outside every session and decides, per fleet row, one of four things: wake it, reroute it, reap it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet.
+`fno agents watchdog` runs outside every session and decides, per fleet row, one of five things: wake it, reroute it, reap it, retire it, or leave it. A leg on the `pr_watch` tick can do the same on a cadence behind `config.recovery.watchdog`. The classifier lives in `cli/src/fno/agents/watchdog.py`. It is pure over injected inputs, so tests need no live fleet.
 
 ## Why the transcript is the truth source
 
@@ -16,6 +16,7 @@ Order is precedence. The top row wins.
 |---------|-----------|-----------------|
 | `ghost` | state is `working` or `blocked` (both of claude's spellings for each, folded through the harness map) and no transcript resolves for the row's recorded id | `no transcript for <id>` |
 | `reap` | the node is done or its claim is held live by another session, the worktree has no other occupant, no 429 window is open, and the tail says the session is finished rather than still in play | `node <id> done, tail reads done, quiet <n>m` |
+| `retire` | a footnote-spawned worker whose tail says it declared itself done, carries no question the operator owes, and has been quiet past `config.recovery.retire_grace_s` | `worker declared itself done and has been quiet <n>m (grace <n>m); stop only, worktree and row survive` |
 | `stale` | a wake-state row past the wake ceiling, or any row whose reap reading came back UNKNOWN | `<state> <n>h old, past the 12h wake ceiling, needs a human` |
 | `reroute` | state `blocked` and the transcript tail carries a 429 whose reset window has not opened | `429 resets <utc>, <n>m out` |
 | `wake` | any of `working`, `blocked` or `stopped`, a parseable last event under the ceiling, a tail that positively owes its next move, and no live 429 window | `<state> <n>m silent, last 429 window passed` |
@@ -42,7 +43,7 @@ These were measured by hand on 2026-08-15. Both are pinned by tests in `cli/test
 
 ## Lanes
 
-`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap and reroute, which both stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
+`fno agents watchdog` is a dry run by default and prints every row with its verdict and basis. `--apply` executes the wake lane only, because a wake is the one action that cannot destroy work. `--apply-all` adds reap, reroute and retire, which all stop a session. A ghost never auto-acts at any level: the remedy is a respawn under a new id, and that is the operator's call.
 
 Actions delegate. The watchdog owns the decision, never the mechanism.
 
@@ -51,7 +52,34 @@ Actions delegate. The watchdog owns the decision, never the mechanism.
 | `wake` | `fno agents resume <id>`, then content confirmation in the transcript |
 | `reroute` | `fno.recovery._default_failover`: rotate the provider, stop first, then respawn in the same worktree. A bare redispatch would respawn onto the same capped account, so with no alternate armed the lane refuses and names the outcome rather than looping the fleet on the dead account |
 | `reap` | refuse when the worktree has uncommitted changes or unpushed commits, naming the count. Then `fno agents stop` and `fno agents rm`, never forced: `claude rm`'s own refusal on a dirty worktree is a safety feature to lean on |
+| `retire` | `fno agents stop <id>` and nothing else. No worktree refusal, no linked-worktree check, no config freeze, because none of those guard a stop |
 | `ghost` | report only |
+
+## Retire: the slot a finished worker never gives back
+
+A worker that finishes its deliverable and never exits holds a live slot against `config.agents.max_live` forever. Measured 2026-08-19: four blueprint workers had each mailed a finished plan and each still held a slot at 30 of 30. A build spawn queued 91 seconds waiting for one of them.
+
+`crates/fno-agents/src/terminal_stop.rs` already stops that population, but only for a loop worker. Its marker is written by `finalize`, which runs from the target loop's stop hook. A `/fno:blueprint` or `/fno:think` worker mails its plan and never reaches finalize, so nothing tells it to stop.
+
+The trigger is a predicate over transcript truth, not a signal the worker emits. A signal is a guard on one of N reachable paths. A worker that dies mid-delivery, or ships through a channel nobody wired, emits nothing, and that is the population that leaks slots. A predicate needs no cooperation from the thing it measures. The loop-driven exclusion `should_mark` carries has no counterpart here, and needs none. A `fno-agents loop run` child exits on allow rather than parking at an idle prompt, so it never becomes a quiet parked row.
+
+Retire does not require the node to be done, and does not require the worktree to be this row's alone. Both are reap preconditions because reap deletes a worktree. Retire runs a stop, so the transcript, the worktree and the registry row all survive and `fno agents resume` brings the session back. That reversibility is why it ships armed at a 900 second grace while reap ships off. It is also why a blueprint worker whose node is still `ready` is in scope here and out of scope for reap.
+
+The grace is the follow-up window. A worker that just delivered can still be asked one more thing. `config.recovery.retire_grace_s` tunes it. Set it to `0` to turn the lane off.
+
+`classify_tail` returns on its first match, checking watching, then `<promise>`, then question-or-`<help>`. So a turn that both promises and asks classifies `done` and never `your-move`. That is the modal shape here: a blueprint worker mails its plan and asks the operator one thing in the same turn. Retiring it strands the question, so the retire predicate asks the question half again itself. Reordering `classify_tail` instead is the wrong fix. `reap_decision`, the loop runtime's parked reading and the progress axis all share that classifier, and reap deletes worktrees. One caller needs the finer reading, so the finer reading lives in that caller.
+
+Two reads keep the armed lane off a live session. A transcript can end on the assistant turn that ISSUED a tool call. The tool has not returned. A worker twenty minutes into a build is silent to every other read here. If that same turn mentions a promise, the tail classifies `done`. Retire refuses there. `reap_decision` makes the same read.
+
+The question half asks in front of every terminal marker. It does not delete a span. `re` has no right-most search. A pattern from an open tag to a close tag matches leftmost. A turn can mention the tag in prose and then ask something. The strip took the question with it.
+
+Retire reads `origin` directly, the same raw field the reap protectors read. That field is written once, at row birth. Every path that creates a registry row states what it made. The spawn sites write `spawn`. `register_existing_session` takes the caller's word. The harness-store healer writes `adopted`. Retire acts on the positive `spawn` and nothing else, so a row with no marker answers unknown and no lane acts on it. There is no second derived flag beside `origin`. One field answers both lanes, so they cannot come to disagree about who owns a session.
+
+Reading the absence instead was wrong twice. A row written before the field existed carries nothing. An operator's own terminal adopted from the claude store is routinely one of those. Keying on `status == "orphaned"` did not cover them. `status` is a liveness stamp. One `fno mail send` flips it to `live`.
+
+Retire sits above `stale`, and only `working` is in both lanes. A `working` row quiet past the ceiling used to escalate as "needs a human". If its tail closes a promise and owes no question, there is nothing for a human to decide, so retire stops it instead. That is an action, not the silence the earlier ordering bug produced. A row that owes an answer still escalates, because the question read refuses first.
+
+Every writer must preserve the marker. Rust reads and writes the same registry, and serde drops a field its struct does not declare. Before `RegistryEntry` mirrored `origin`, one daemon write-back erased it. Measured on a live 36-row fleet: no row carried an origin at all, operator rows the SessionStart hook had stamped included. So the lane saw every long-lived worker as unknown. A row born now keeps its marker, and a row that predates the mirror stays unknown until it respawns. Run `fno agents watchdog -J --only retire` to see the current count.
 
 A bus-only row stays bus-only. Every row is eligible for `wake`, because a wake is an attach and a neutral resume, not a paste of a mail body. The wake message is always the bare resume word, never a mail payload.
 
@@ -69,7 +97,7 @@ Two facts make a reap safe. Whether a human is sitting in the session, and wheth
 
 Rule 3 is never reap an operator session. Python stamps `origin="operator"` at both register paths, the SessionStart hook and the `/fno-me` join. Rust's `RegistryEntry` did not model the field. There is no serde catch-all, so every Rust write re-serialized the row from the typed struct and dropped the key. Measured 2026-08-20 on the live fleet: 0 of 37 rows carried `origin` or `spawn_trigger`. The reap lane then read that absence as "not an operator session" rather than as "never recorded". One value carried two facts. A producer on one of several writing paths leaves a field unpopulated, not merely unreliable, which is the write-side form of the decorative-guard trap.
 
-`origin` therefore carries THREE values and not two. `operator` refuses early, because no reading of a transcript outranks a human having started the session. `spawn` is a worker and falls through. `None` means nothing ever recorded an owner, and that refuses too, as UNKNOWN rather than as protection. Reading `None` as "not a human's session" is the same collapse the field was fixed to end, one layer up. The first cut of this predicate did exactly that, and a review round caught it. The reachable case is an adopted row. `mint_adopted_entry` writes `origin: None` beside a fresh `last_message_at`, and adopt takes in both a session a human started by hand and a footnote orphan. The stamp protects it for two hours. After that both protectors used to fall silent together.
+`origin` therefore carries FOUR values and not two. `operator` refuses early, because no reading of a transcript outranks a human having started the session. `spawn` is a worker and falls through. `None` means nothing ever recorded an owner, and that refuses too, as UNKNOWN rather than as protection. `adopted` refuses on the same line as `None`. It is the same non-answer wearing a name. The healers that mint those rows observed a session already running and never observed who started it. Reading either as "not a human's session" is the same collapse the field was fixed to end, one layer up. The first cut of this predicate did exactly that, and a review round caught it. The reachable case is an adopted row. `mint_adopted_entry` writes its marker beside a fresh `last_message_at`, and adopt takes in both a session a human started by hand and a footnote orphan. The stamp protects it for two hours. After that both protectors used to fall silent together.
 
 Rule 2 is that liveness is last-message recency, not a pid. A live pid proves a process exists. It does not prove anyone is using it. The operator drives sessions by hand in ways no probe observes, so a recent `last_message_at` refuses the reap whatever the pid says. This mirrors an earlier guard rather than repeating it. That one forbade inferring death from silence. This one makes a recent message an active protector.
 

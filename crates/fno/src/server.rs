@@ -2177,6 +2177,17 @@ fn dispatch_notice(stdout: &str) -> String {
     let slug = v.get("slug").and_then(|s| s.as_str()).unwrap_or("");
     let label = if slug.is_empty() { node } else { slug };
     match v.get("outcome").and_then(|o| o.as_str()) {
+        // `seed_verified: false` means the pane was created but the command may
+        // never have been submitted. A bare "dispatched" told the operator the
+        // work started, which is the one thing this case cannot promise.
+        // Absent field == an older porcelain, and unknown does not accuse.
+        Some("launched") if v.get("seed_verified").and_then(|b| b.as_bool()) == Some(false) => {
+            if label.is_empty() {
+                "dispatched, seed unverified".to_string()
+            } else {
+                format!("dispatched {label}, seed unverified")
+            }
+        }
         Some("launched") if label.is_empty() => String::new(),
         Some("launched") => format!("dispatched {label}"),
         Some("no-work") => "no ready work".to_string(),
@@ -18517,6 +18528,25 @@ mod tests {
         assert_eq!(
             dispatch_notice(r#"{"outcome":"launched","node":"x-1","slug":"feat"}"#),
             "dispatched feat"
+        );
+        // A verified seed reads exactly as before; only the doubt is new.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":true}"#
+            ),
+            "dispatched feat"
+        );
+        // An unverified seed says so: the pane exists, the command may not have
+        // been submitted, and "dispatched" alone would promise work started.
+        assert_eq!(
+            dispatch_notice(
+                r#"{"outcome":"launched","node":"x-1","slug":"feat","seed_verified":false}"#
+            ),
+            "dispatched feat, seed unverified"
+        );
+        assert_eq!(
+            dispatch_notice(r#"{"outcome":"launched","node":"","slug":"","seed_verified":false}"#),
+            "dispatched, seed unverified"
         );
         // No slug -> fall back to the node id.
         assert_eq!(

@@ -141,6 +141,8 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // daemon is DOWN, status recorded `live` and never reconciled.
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(state::RegistryEntry {
+            // Fixture: makes no claim about what created the row.
+            origin: None,
             name: "stale-ask".into(),
             short_id: String::new(),
             legacy_provider: "codex".into(),
@@ -152,7 +154,6 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
-            origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
             claude_session_uuid: None,
@@ -647,6 +648,8 @@ async fn status_client_exits_13_when_daemon_down() {
 fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agents::AgentStatus) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            // Fixture: makes no claim about what created the row.
+            origin: None,
             name: name.into(),
             short_id: String::new(),
             legacy_provider: "codex".into(),
@@ -658,7 +661,6 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
-            origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
             claude_session_uuid: None,
@@ -791,6 +793,8 @@ fn daemon_stays_resident_while_a_worker_socket_is_live() {
 fn seed_pane_row(home: &AgentsHome, name: &str) {
     state::update_registry(&home.registry_json(), |r| {
         r.entries.push(fno_agents::state::RegistryEntry {
+            // Fixture: makes no claim about what created the row.
+            origin: None,
             name: name.into(),
             short_id: String::new(),
             legacy_provider: "claude".into(),
@@ -802,7 +806,6 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
-            origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,
             claude_session_uuid: None,

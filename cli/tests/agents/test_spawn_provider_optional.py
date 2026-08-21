@@ -90,7 +90,12 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     assert receipt["seed"] is None
 
 
-def test_unconfirmed_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
+def test_unverified_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner):
+    """Exit 22 keys on `unattempted`, the one unverified-seed state that still
+    reaches a written receipt. A genuine `unconfirmed` submit now fails the
+    spawn inside dispatch_spawn_pane and raises before any receipt exists, so
+    this stub used to pin a state the real function can no longer return - the
+    exact shape of a test that certifies its own fixture."""
     _stub_pane_path(monkeypatch)
     from fno.agents import mux_spawn
     from fno.agents.cli import agents_app
@@ -105,7 +110,7 @@ def test_unconfirmed_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner)
             pane_id=7,
             child_pid=42,
             session_uuid=None,
-            seed="unconfirmed",
+            seed="unattempted",
             seed_source="delivered",
             fno_id=kwargs["name"],
         ),
@@ -117,7 +122,7 @@ def test_unconfirmed_seed_prints_receipt_then_exits_nonzero(monkeypatch, runner)
 
     assert result.exit_code == 22
     receipt = json.loads(result.stdout.strip().splitlines()[-1])
-    assert receipt["seed"] == "unconfirmed"
+    assert receipt["seed"] == "unattempted"
     assert receipt["seed_source"] == "delivered"
     assert receipt["fno_id"] == "w1"
 
