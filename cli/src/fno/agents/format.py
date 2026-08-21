@@ -17,6 +17,7 @@ import shutil
 from typing import Optional
 
 from fno.agents.registry import AgentEntry
+from fno.agents.row_contradiction import project_row
 from fno.agents.session_truth import STALE_ATTENTION_S
 
 # Bumped when the JSON output shape changes in a breaking way.
@@ -160,7 +161,7 @@ def serialize_entry(
     that has no truth reading still produces the full key set; the default is
     the same ``no-transcript`` the resolver reports when it finds no file.
     """
-    return {
+    row = {
         "name": entry.name,
         # `harness` is the sole identity axis. The `provider` alias that used to
         # sit beside it carried the HARNESS value ("claude") for a worker routed
@@ -186,6 +187,8 @@ def serialize_entry(
         "cwd": entry.cwd,
         "created_at": entry.created_at,
         "last_message_at": entry.last_message_at,
+        "last_message_at_basis": None,
+        "last_reconciled_at": entry.last_reconciled_at,
         "status": entry.status,
         "live_status": live_status,
         # The model the worker is answering as, read from its transcript. A
@@ -246,7 +249,13 @@ def serialize_entry(
         # reading is never a fresh one.
         "last_event_at": last_event_at,
         "last_message": last_message,
+        # Internal input to the shared projection rule; it is removed before
+        # the row reaches the wire because pid identity is not a row verdict.
+        "pid_start_time": entry.pid_start_time,
     }
+    row = project_row(row)
+    row.pop("pid_start_time", None)
+    return row
 
 
 def render_json(

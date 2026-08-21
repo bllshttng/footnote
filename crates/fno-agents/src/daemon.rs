@@ -4679,6 +4679,68 @@ fn reap_zombies() {
 /// override; `reachable`/`unreachable` and `working`/`done`/`stalled` stay
 /// probe-authoritative and unchanged, matching the monotone-lowering rule
 /// (never let a weaker signal raise a row the probe positively lowered).
+fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = value?;
+    if let Some(raw) = value.as_str() {
+        return chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&chrono::Utc));
+    }
+    let micros = value.as_u64()?;
+    if micros <= 1_000_000_000_000 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_micros(micros as i64)
+}
+
+/// Refuse a row-level verdict when the same emitted row carries fresher
+/// evidence against it. This is deliberately pure and shared by the fixture
+/// test with Python; the caller supplies all fields before the row is written.
+fn apply_row_contradiction(row: &mut Map<String, Value>) {
+    let event_at = row_timestamp(row.get("last_event_at"));
+    let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
+    let terminal = matches!(
+        row.get("status").and_then(Value::as_str),
+        Some("orphaned" | "exited")
+    );
+    if terminal
+        && event_at.is_some()
+        && reconciled_at.is_some()
+        && event_at > reconciled_at
+    {
+        row.insert("status".into(), json!("unknown"));
+        row.insert("basis".into(), json!("stale-verdict-fresher-event"));
+    }
+
+    let message_at = row_timestamp(row.get("last_message_at"));
+    if message_at.is_some() && event_at.is_some() && message_at > event_at {
+        row.insert("last_message_at".into(), Value::Null);
+        row.insert(
+            "last_message_at_basis".into(),
+            json!("refused-newer-than-transcript"),
+        );
+    }
+
+    let has_pid = row
+        .get("pid")
+        .is_some_and(|value| !value.is_null());
+    let liveness_origin = if !has_pid {
+        Value::Null
+    } else if let (Some(created_at), Some(pid_started_at)) = (
+        row_timestamp(row.get("created_at")),
+        row_timestamp(row.get("pid_start_time")),
+    ) {
+        if (pid_started_at - created_at).num_seconds() > 600 {
+            json!("resumed")
+        } else {
+            json!("survivor")
+        }
+    } else {
+        Value::Null
+    };
+    row.insert("liveness_origin".into(), liveness_origin);
+}
+
 fn rendered_status_from_truth(
     probe: Option<&crate::claude_ask::TruthProbe>,
     pid_confirmed_live: bool,
@@ -5122,7 +5184,7 @@ where
                     )),
                     None => Value::Null,
                 };
-                json!({
+                let mut row = json!({
                     "name": e.name,
                     // `harness` is the sole identity axis, and it names the CLI,
                     // never the model vendor. The `provider` alias that sat beside
@@ -5138,6 +5200,8 @@ where
                     "cwd": e.cwd,
                     "created_at": e.created_at,
                     "last_message_at": e.last_message_at,
+                    "last_message_at_basis": null,
+                    "last_reconciled_at": e.last_reconciled_at,
                     "status": rendered_status,
                     // The reachability triple, from the same probe the rendered
                     // word above came from. `fno agents list` is where `peek` and
@@ -5173,7 +5237,7 @@ where
                     // `last_reconciled_at` is the raw RFC3339 of the last probe (null
                     // when never reconciled); the client renders it as the CHECKED age.
                     "pid": e.pid,
-                    "last_reconciled_at": e.last_reconciled_at,
+                    "pid_start_time": e.pid_start_time,
                     "log_path": log_path,
                     // The mux hosting ref ({session, pane_id}) for a pane-hosted row,
                     // else null. A pane row's short_id is empty, so this is the only
@@ -5207,7 +5271,12 @@ where
                     // contract) alongside the shared parity fields. Python list
                     // has no project_root; the extra key is a harmless superset.
                     "project_root": e.project_root,
-                })
+                });
+                if let Some(object) = row.as_object_mut() {
+                    apply_row_contradiction(object);
+                    object.remove("pid_start_time");
+                }
+                row
             },
         )
         .collect();
@@ -12390,6 +12459,22 @@ done
         assert_eq!(row["crown_grantor"], "king");
 
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn row_contradiction_fixture_matches_python_projection() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/agents-row-contradiction.json"
+        ));
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        for case in fixture["cases"].as_array().expect("cases is an array") {
+            let mut row = case["row"].as_object().expect("row is an object").clone();
+            apply_row_contradiction(&mut row);
+            for (key, expected) in case["expected"].as_object().expect("expected is an object") {
+                assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
+            }
+        }
     }
 
     /// The reachability EVIDENCE reaches the row, not just the verdict the
