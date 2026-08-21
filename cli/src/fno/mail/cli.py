@@ -2124,6 +2124,7 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             usage=True,
         )
 
+
     # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
     # shared size ceiling and structure gate here before any of the reachable
     # transports can fire. Under --check the cap refusal is a usage error
@@ -2401,14 +2402,28 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
         delivered = _mail_inject_claude(session_id, stripped, sender=sender)
 
     # 8. Four-state receipt (never a boolean; never a durable write).
+    # The note used to read as a refusal: it named a defect in the argument and
+    # prescribed a different one, with no word saying the verb had already
+    # fired. A caller re-sent with a handoff path and queued a SECOND /compact.
+    # The operator watched both sit in one prompt line on 2026-08-21, and
+    # /compact is not idempotent -- the second summarises the summary.
+    #
+    # A bare /compact stays legal, because a self-send of it is a reachable
+    # prescribed path, so this cannot become a precondition refusal without
+    # breaking that caller (six tests in test_mail_raw.py say so). Instead the
+    # receipt leads with the completed action and states do-not-re-send BEFORE
+    # the advice, the same shape the unconfirmed branch below already uses. The
+    # advice survives as retrospective ("would have"), which is what it is:
+    # nothing here is actionable for the send that just happened.
     if delivered:
         note = ""
         if stripped == "/compact":
             note = (
-                " (bare /compact at ~100% context has no headroom to summarize; "
-                "pass a handoff path)"
+                " ALREADY SENT - do not re-send. A handoff path (/compact "
+                "<path>) would have produced a better summary: a bare /compact "
+                "at ~100% context has no headroom left to summarize."
             )
-        print(f"injected{note}")
+        print(f"injected.{note}" if note else "injected")
         raise typer.Exit(code=0)
     # not-confirmed: the transport returns one bool for two different worlds --
     # poll-budget exhaustion on a paste that DID land, and a clean send failure
