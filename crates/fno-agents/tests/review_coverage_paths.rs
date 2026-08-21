@@ -327,6 +327,7 @@ fn new_reader_sites_must_join_the_table() {
         }
         let text = fs::read_to_string(entry.path()).unwrap();
         if text.contains("review_coverage_for_gate")
+            || text.contains("review_coverage_for_head(")
             || text.contains("latest_review_coverage(")
             || text.contains("read_review_coverage(")
             || text.contains("_scan_coverage(")

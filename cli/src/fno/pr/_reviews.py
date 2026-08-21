@@ -24,6 +24,15 @@ from fno.pr_watch._discover import _reviewer_matches
 
 Runner = Callable[..., Result]
 
+_COUNTED_FRESHNESS = {
+    "fresh",
+    "carried_base_sync",
+    "carried_docs_only",
+    "carried_subset",
+}
+_KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
+_KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
+
 # The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
 # (resolved below) extends this; config.review.required_bots is the separate GATE
 # (read by loop-check) and is out of scope here.
@@ -406,19 +415,20 @@ def review_coverage_for_gate(
     <why>"``, so a gate can say "retry after the quota reset" instead of a
     bare "nobody reviewed this".
     """
-    data = latest_review_coverage(pr_number, cwd)
+    raw = latest_review_coverage(pr_number, cwd)
     note = ""
-    ev_head = (data or {}).get("head_sha")
-    mismatch = bool(head and data and ev_head and head != ev_head)
+    data = _shape_review_coverage(raw, head, cwd) if raw is not None else None
+    ev_head = (raw or {}).get("head_sha")
+    mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
-    if data is None or mismatch or unusable:
+    if raw is None or mismatch or unusable:
         ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
         if ran:
             fresh = latest_review_coverage(pr_number, cwd)
             if fresh is not None:
-                data = fresh
+                data = _shape_review_coverage(fresh, head, cwd)
                 note = "recomputed"
-                if why and fresh.get("coverage") == "unknown":
+                if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
             else:
                 note = "recompute produced no row"
@@ -437,17 +447,68 @@ def _is_covered(data: Optional[dict]) -> bool:
         return False
 
 
-def _stale_verdicts(data: dict) -> list[dict]:
-    """Reviewers that responded against a commit that no longer describes HEAD.
+def _reviewed_sha_is_ancestor(
+    reviewed_sha: str, head: str, cwd: Optional[str]
+) -> bool:
+    """Whether Git proves that ``reviewed_sha`` remains in ``head`` history."""
+    try:
+        result = run(
+            ["git", "merge-base", "--is-ancestor", reviewed_sha, head],
+            cwd=cwd,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable proof is not fresh
+        return False
+    return result.returncode == 0
 
-    Each entry is ``{name, producer, reviewed_sha, freshness}``. Present only on
-    events from a loop-check that computes per-verdict freshness (x-5b99);
-    older events carry no ``freshness`` key and yield an empty list, which reads
-    the same as "nothing stale" and keeps this additive.
+
+def _verdicts_with_current_freshness(
+    data: dict, head: Optional[str], cwd: Optional[str]
+) -> list[dict]:
+    """Copy verdicts and recheck stored freshness against current history.
+
+    A freshness stamp describes the branch only when it was written. When a
+    current head is available, the reviewed commit must still be its ancestor.
+    Missing metadata or an unreadable ancestry result cannot prove freshness.
     """
     verdicts = data.get("verdicts")
     if not isinstance(verdicts, list):
         return []
+    ancestry: dict[str, bool] = {}
+    shaped: list[dict] = []
+    for verdict in verdicts:
+        if not isinstance(verdict, dict):
+            continue
+        current = dict(verdict)
+        verdict_kind = verdict.get("verdict")
+        stale = verdict_kind == "stale"
+        reviewed_sha = verdict.get("reviewed_sha")
+        if verdict_kind == "reviewed":
+            stale = verdict.get("freshness") not in _COUNTED_FRESHNESS
+        elif verdict_kind != "stale":
+            current.pop("freshness", None)
+        if verdict_kind == "reviewed" and head:
+            if not isinstance(reviewed_sha, str) or not reviewed_sha:
+                stale = True
+            elif reviewed_sha not in ancestry:
+                ancestry[reviewed_sha] = _reviewed_sha_is_ancestor(
+                    reviewed_sha, head, cwd
+                )
+            if isinstance(reviewed_sha, str) and not ancestry.get(reviewed_sha, False):
+                stale = True
+        if stale:
+            current["freshness"] = "stale"
+        shaped.append(current)
+    return shaped
+
+
+def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
+    """Reviewers that responded against a commit that no longer describes HEAD.
+
+    Each entry is ``{name, producer, reviewed_sha, freshness}``. The verdicts
+    have already been normalized against current Git history, so older events
+    with no freshness metadata fail closed instead of reading as fresh.
+    """
     return [
         {
             "name": v.get("name"),
@@ -456,8 +517,49 @@ def _stale_verdicts(data: dict) -> list[dict]:
             "freshness": v.get("freshness"),
         }
         for v in verdicts
-        if isinstance(v, dict) and v.get("freshness") == "stale"
+        if isinstance(v, dict)
+        and v.get("verdict") in {"reviewed", "stale"}
+        and v.get("freshness") == "stale"
     ]
+
+
+def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) -> dict:
+    """Shape one event and invalidate any unproven covered verdict."""
+    shaped = dict(data)
+    verdicts = _verdicts_with_current_freshness(data, head, cwd)
+    shaped["verdicts"] = verdicts
+    shaped["stale_verdicts"] = _stale_verdicts(verdicts)
+    if data.get("coverage") != "covered":
+        return shaped
+
+    raw_verdicts = data.get("verdicts")
+    malformed = (
+        not isinstance(raw_verdicts, list)
+        or not raw_verdicts
+        or any(
+            not isinstance(v, dict)
+            or v.get("verdict") not in _KNOWN_REVIEW_VERDICTS
+            or v.get("producer") not in _KNOWN_COVERAGE_PRODUCERS
+            or not isinstance(v.get("name"), str)
+            or not v.get("name")
+            for v in raw_verdicts
+        )
+    )
+    reviewed = [v for v in verdicts if v.get("verdict") == "reviewed"]
+    valid = [v for v in reviewed if v.get("freshness") in _COUNTED_FRESHNESS]
+    explicit_stale = any(v.get("verdict") == "stale" for v in verdicts)
+    if malformed or explicit_stale or not reviewed or len(valid) != len(reviewed):
+        shaped["coverage"] = "uncovered"
+        shaped["reviewed_count"] = len(valid)
+    return shaped
+
+
+def review_coverage_for_head(
+    pr_number: int, cwd: Optional[str], head: Optional[str]
+) -> Optional[dict]:
+    """Latest event shaped against the current head, without recomputing it."""
+    data = latest_review_coverage(pr_number, cwd)
+    return _shape_review_coverage(data, head, cwd) if data is not None else None
 
 
 def read_review_coverage(
@@ -471,7 +573,9 @@ def read_review_coverage(
     no usable row and ``recompute`` is set (x-3a3f). The default stays a pure
     read so direct callers (and hermetic tests) never spawn a subprocess; the
     two gate surfaces - ``fno pr merge`` and ``fno pr status`` - opt in.
-    Additive and fail-open: any failure degrades to the unknown sentinel.
+    Event-read failures degrade to the unknown sentinel. When ``head`` is
+    supplied, verdict freshness fails closed unless Git proves the reviewed
+    commit remains in that head's history.
     Python still consumes the event rather than recomputing coverage itself
     (Ownership: Rust computes, Python reads) - the recompute shells out to the
     SAME Rust producer the stop hook runs.
@@ -484,7 +588,7 @@ def read_review_coverage(
         if recompute:
             latest, note = review_coverage_for_gate(pr_number, cwd, head)
         else:
-            latest, note = latest_review_coverage(pr_number, cwd), ""
+            latest, note = review_coverage_for_head(pr_number, cwd, head), ""
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
     if latest is None:
@@ -494,7 +598,7 @@ def read_review_coverage(
         "reviewed_count": latest.get("reviewed_count"),
         "self_attested_count": latest.get("self_attested_count"),
         "head_sha": latest.get("head_sha"),
-        "stale_verdicts": _stale_verdicts(latest),
+        "stale_verdicts": latest.get("stale_verdicts", []),
     }
     # The raw verdict list rides along when present (older events carry none):
     # the local-pass conjunct scans it, and dropping it here made `fno pr

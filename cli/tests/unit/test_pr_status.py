@@ -8,6 +8,7 @@ not red, and an empty rollup is *unknown* not red.
 from __future__ import annotations
 
 import json as _json
+import subprocess
 
 import pytest
 
@@ -1124,6 +1125,9 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     }
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_is_ancestor", lambda reviewed, head, cwd: True
+    )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True, out["ready_blockers"]
@@ -1187,7 +1191,7 @@ def test_closed_pr_skips_the_probes_and_the_coverage_conjunct(monkeypatch, capsy
 
 def test_read_review_coverage_from_events(tmp_path):
     """x-0eaf: read_review_coverage consumes the latest review_coverage event
-    for the PR from the project events log; no event -> unknown (fail-open)."""
+    for the PR from the project events log; missing verdict proof fails closed."""
     import json
 
     from fno.pr._reviews import read_review_coverage
@@ -1202,14 +1206,12 @@ def test_read_review_coverage_from_events(tmp_path):
         encoding="utf-8",
     )
     assert read_review_coverage(7, cwd=str(tmp_path)) == {
-        "coverage": "covered",
-        "reviewed_count": 1,
-        # x-5b99: the covered head is surfaced so a reader can check WHICH
-        # commit was covered. An event from an older loop-check carries no
-        # per-verdict freshness, so nothing reads as stale - additive.
+        "coverage": "uncovered",
+        "reviewed_count": 0,
         "self_attested_count": None,
         "head_sha": "a",
         "stale_verdicts": [],
+        "verdicts": [],
     }
     # A different PR -> no event -> unknown sentinel.
     assert read_review_coverage(99, cwd=str(tmp_path)) == {
@@ -1268,6 +1270,7 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
         encoding="utf-8",
     )
     got = read_review_coverage(826, cwd=str(tmp_path))
+    assert got["coverage"] == "uncovered"
     assert got["head_sha"] == "89bc0b91"
     assert got["self_attested_count"] == 1
     assert got["stale_verdicts"] == [
@@ -1278,6 +1281,242 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
             "freshness": "stale",
         }
     ]
+
+
+def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": 1006,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "reviewed",
+                            "reviewed_sha": head,
+                            "freshness": "fresh",
+                        },
+                        {
+                            "producer": "github_app",
+                            "name": "optional-reviewer",
+                            "verdict": "refused",
+                            "freshness": "stale",
+                        },
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    got = read_review_coverage(1006, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "covered"
+    assert got["stale_verdicts"] == []
+    assert "freshness" not in got["verdicts"][1]
+
+
+@pytest.mark.parametrize(
+    "malformed_kind", ["non-dict", "missing-identity", "unknown-producer"]
+)
+def test_malformed_verdict_cannot_hide_beside_fresh_review(
+    tmp_path, malformed_kind
+):
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    malformed = {
+        "non-dict": "malformed",
+        "missing-identity": {
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+            "freshness": "fresh",
+        },
+        "unknown-producer": {
+            "producer": "not-a-producer",
+            "name": "invented-reviewer",
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+            "freshness": "fresh",
+        },
+    }[malformed_kind]
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": 1007,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [
+                        {
+                            "producer": "local_attestation",
+                            "name": "code-review",
+                            "verdict": "reviewed",
+                            "reviewed_sha": head,
+                            "freshness": "fresh",
+                        },
+                        malformed,
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    got = read_review_coverage(1007, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "uncovered"
+
+
+def _git(tmp_path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _review_coverage_event(tmp_path, pr: int, head: str, verdict: dict) -> None:
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": pr,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [verdict],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _commit_reviewed_history(tmp_path) -> str:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "review-test@example.com")
+    _git(tmp_path, "config", "user.name", "Review Test")
+    (tmp_path / "reviewed.txt").write_text("reviewed\n", encoding="utf-8")
+    _git(tmp_path, "add", "reviewed.txt")
+    _git(tmp_path, "commit", "-qm", "reviewed history")
+    return _git(tmp_path, "rev-parse", "HEAD")
+
+
+def test_read_review_coverage_rejects_rebased_out_review(
+    tmp_path, monkeypatch, capsys
+):
+    """A stored fresh stamp cannot survive when its commit leaves HEAD history."""
+    from fno.pr._reviews import read_review_coverage
+
+    reviewed_sha = _commit_reviewed_history(tmp_path)
+    _git(tmp_path, "checkout", "--orphan", "rewritten")
+    (tmp_path / "rewritten.txt").write_text("rewritten\n", encoding="utf-8")
+    _git(tmp_path, "add", "rewritten.txt")
+    _git(tmp_path, "commit", "-qm", "rewritten history")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    _review_coverage_event(
+        tmp_path,
+        1003,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "fresh",
+        },
+    )
+
+    got = read_review_coverage(1003, cwd=str(tmp_path), head=head)
+    assert got["coverage"] != "covered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"] == [
+        {
+            "name": "code-review",
+            "producer": "local_attestation",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "stale",
+        }
+    ]
+
+    _lane_fetch(monkeypatch, head=head)
+    monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    _status.run_status("1003", cwd=str(tmp_path))
+    status = _json.loads(capsys.readouterr().out)
+    assert status["ready"] is False
+    assert "review_coverage_uncovered" in status["ready_blockers"]
+
+
+def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
+    """Missing freshness metadata is unknown evidence, never a fresh review."""
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    _review_coverage_event(
+        tmp_path,
+        1004,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+        },
+    )
+
+    got = read_review_coverage(1004, cwd=str(tmp_path), head=head)
+    assert got["coverage"] != "covered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"][0]["reviewed_sha"] == head
+
+
+def test_read_review_coverage_preserves_ancestor_review(tmp_path):
+    from fno.pr._reviews import read_review_coverage
+
+    reviewed_sha = _commit_reviewed_history(tmp_path)
+    (tmp_path / "later.txt").write_text("later\n", encoding="utf-8")
+    _git(tmp_path, "add", "later.txt")
+    _git(tmp_path, "commit", "-qm", "later history")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    _review_coverage_event(
+        tmp_path,
+        1005,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "fresh",
+        },
+    )
+
+    got = read_review_coverage(1005, cwd=str(tmp_path), head=head)
+    assert got["coverage"] == "covered"
+    assert got["verdicts"][0]["freshness"] == "fresh"
+    assert got["stale_verdicts"] == []
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
@@ -1594,13 +1833,19 @@ def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path)
                 "ts": "2026-08-14T03:00:00Z",
                 "type": "review_coverage",
                 "data": {"pr": pr_number, "coverage": "covered",
-                         "reviewed_count": 1, "head_sha": "abc"},
+                         "reviewed_count": 1, "head_sha": "abc",
+                         "verdicts": [{"name": "code-review",
+                                       "producer": "local_attestation",
+                                       "verdict": "reviewed",
+                                       "reviewed_sha": "abc",
+                                       "freshness": "fresh"}]},
             }) + "\n",
             encoding="utf-8",
         )
         return True, ""
 
     monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_verb)
+    monkeypatch.setattr(_reviews, "_reviewed_sha_is_ancestor", lambda *args: True)
     # The status read resolves the project log from its cwd; point it at the
     # fixture. The lane is pinned on because recompute rides on it: a no-lane
     # repo must not fire the producer, and tmp_path resolves no real config.
