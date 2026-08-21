@@ -3460,6 +3460,160 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
     return key, scan_unread(key)
 
 
+def _self_handle_or_exit() -> str:
+    """This session's canonical mail handle, or exit 3 with the reason."""
+    from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.harness or not ident.session_id:
+        sys.stderr.write(
+            "no ambient harness identity - there is no session to hold mail for\n"
+        )
+        raise typer.Exit(code=3)
+    return canonical_handle(ident.session_id)
+
+
+@mail_app.command("hold")
+def cmd_hold(
+    minutes: int = typer.Option(
+        None,
+        "--minutes",
+        "-m",
+        help="Idle minutes before the hold lifts by itself (default 5). The "
+        "window restarts every time you submit a prompt.",
+    ),
+    off: bool = typer.Option(
+        False, "--off", help="Lift the hold now and deliver what it held."
+    ),
+    status: bool = typer.Option(
+        False, "--status", help="Report the current hold without changing it."
+    ),
+) -> None:
+    """Busy mode: hold this session's incoming mail, and drain it on a timer.
+
+    While the hold is on, mail addressed to this session never pastes into the
+    prompt line. It queues durable and the sender gets a receipt saying so.
+    The hold lifts by itself after ``--minutes`` of no prompt from you, and the
+    lift DELIVERS - it does not wait for you to type. That is the whole point:
+    a hold whose only drain trigger is the operator converts an interruption
+    into a stall.
+
+    The hold reuses the ``delivery_policy = "bus-only"`` flag that already
+    exists on the agent row, so every injector lane refuses it before any
+    transport call. This verb owns the clock, not the enforcement.
+    """
+    import shutil
+    import subprocess
+
+    from fno.mail import hold as hold_mod
+
+    handle = _self_handle_or_exit()
+
+    if status:
+        clock = hold_mod.read(handle)
+        if clock is None:
+            print(f"{handle}: no hold - mail delivers normally")
+            return
+        label = hold_mod.remaining_label(handle)
+        if clock.until is None:
+            print(f"{handle}: bus-only, no expiry (hand-stamped policy)")
+        elif label is None:
+            print(f"{handle}: hold lapsed - the next send delivers")
+        else:
+            print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
+        return
+
+    if off:
+        result = hold_mod.release(handle, held_for_s=0)
+        if result["held_count"]:
+            print(
+                f"hold off: delivered {result['held_count']} held message(s) "
+                f"({result['deduped_count']} deduped) - {result['outcome']}"
+            )
+        else:
+            print("hold off: nothing was held")
+        return
+
+    window = hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    if window < 1:
+        sys.stderr.write("error: --minutes must be at least 1\n")
+        raise typer.Exit(code=2)
+
+    from fno.agents.registry import register_existing_session
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    register_existing_session(
+        provider=ident.harness,
+        session_id=ident.session_id,
+        cwd=os.getcwd(),
+        delivery_policy="bus-only",
+    )
+    clock = hold_mod.arm(handle, window)
+
+    # The third drain trigger. Detached on purpose: it must outlive this CLI
+    # invocation, because the whole contract is that the drain happens with no
+    # further input from the operator.
+    binary = shutil.which("fno")
+    armed = False
+    if binary:
+        try:
+            subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                [binary, "mail", "hold-release", "--handle", handle],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            armed = True
+        except OSError:
+            armed = False
+
+    until = clock.until or datetime.now(timezone.utc)
+    print(
+        f"busy mode on for {handle}: mail holds until "
+        f"{until.strftime('%H:%M:%S')} UTC ({window}m idle), then delivers itself."
+    )
+    if not armed:
+        print(
+            "note: the release timer did not start, so the hold lifts on the "
+            "next send attempt or at your next prompt instead of on the clock."
+        )
+
+
+@mail_app.command("hold-release", hidden=True)
+def cmd_hold_release(
+    handle: str = typer.Option(..., "--handle", help="The held session's handle."),
+    poll_s: int = typer.Option(
+        15, "--poll-s", hidden=True, help="Seconds between clock re-reads."
+    ),
+) -> None:
+    """Sleep until ``handle``'s hold expires, then release it.
+
+    Re-reads the clock on every wake rather than sleeping once to the original
+    deadline, so an idle re-arm (the operator typed again) extends the hold
+    instead of being overrun by a timer that already committed to a time.
+
+    Exits quietly when the clock disappears or turns permanent: both mean
+    someone else took the hold off, and a second release would be a no-op that
+    still emitted a release event.
+    """
+    from fno.mail import hold as hold_mod
+
+    started = time.monotonic()
+    while True:
+        clock = hold_mod.read(handle)
+        if clock is None or clock.until is None:
+            return
+        remaining = (clock.until - datetime.now(timezone.utc)).total_seconds()
+        if remaining <= 0:
+            break
+        time.sleep(min(remaining, max(1, poll_s)))
+
+    result = hold_mod.release(handle, held_for_s=int(time.monotonic() - started))
+    print(json.dumps(result))
+
+
 @mail_app.command("drain-self", hidden=True)
 def cmd_drain_self(
     json_out: bool = typer.Option(
@@ -3807,6 +3961,19 @@ def cmd_notify_self() -> None:
         return
 
     handle = canonical_handle(ident.session_id)
+
+    # Busy mode (x-481e). This hook fires on every UserPromptSubmit, which is
+    # precisely the "the operator is not idle" signal the hold window resets
+    # on - so one hook is both the suppressor and the idle re-arm, and no new
+    # wiring is needed. A live timed hold renders nothing and pushes its own
+    # deadline out. A lapsed one is tidied here rather than on the send path,
+    # where the gate stays a pure read to avoid a re-entrant registry lock.
+    from fno.mail import hold as hold_mod
+
+    if hold_mod.extend(handle) is not None:
+        return
+    hold_mod.tidy_lapsed(handle)
+
     lines: list[str] = []
 
     unread = scan_unread(handle)

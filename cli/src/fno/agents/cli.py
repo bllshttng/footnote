@@ -3248,6 +3248,18 @@ def cmd_register(
             f"{entry.origin!r}.\n"
         )
 
+    # x-481e: a hand-stamped policy carries a clock that says "no expiry".
+    # Busy mode's self-heal lifts a bus-only flag that has NO readable clock,
+    # so without this write a deliberate permanent stamp would be lifted by the
+    # very safety property that protects a timed hold.
+    if delivery_policy is not None:
+        from fno.mail import hold as _hold
+
+        if delivery_policy == "bus-only":
+            _hold.arm_permanent(entry.name)
+        else:
+            _hold.clear(entry.name)
+
     events.emit(
         "session_registered",
         provider=entry.harness,
