@@ -116,8 +116,12 @@ def test_armed_unknown_manifests_name_stale_plugin_cache_as_cause(
 ) -> None:
     """x-4be1: an `unknown` source count is answerable. When the deployed
     claude plugin cache is PROVEN stale, the armed-manifest finding carries the
-    cause and names `fno doctor update`; any other cache verdict stays a bare count
-    (never guess an origin)."""
+    cause; any other cache verdict stays a bare count (never guess an origin).
+
+    x-2486: the cause names `claude plugin update`, the verb that owns
+    installed_plugins.json, and explicitly rules out `fno doctor update`. The old
+    prescription was measured against the artifact and left it byte-identical
+    on a 15-minute exit-0 run, so naming it here sent readers to a no-op."""
     _patch_silent(
         monkeypatch,
         settings=_fake_settings(auto_merge=True, grant="dispatch"),
@@ -137,7 +141,8 @@ def test_armed_unknown_manifests_name_stale_plugin_cache_as_cause(
     finding = by_sw["auto_merge_approved (worktree manifests)"]
     assert finding["cause"] == (
         "deployed plugin cache is stale (a8f3c5537ed5, 2026-08-13); likely "
-        "predates the auto_merge_source writer. Fix: fno doctor update"
+        "predates the auto_merge_source writer. Fix: claude plugin "
+        "update fno@footnote (not fno doctor update), then restart"
     )
 
 

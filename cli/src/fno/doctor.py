@@ -1191,7 +1191,8 @@ def _silent_switch_report(plugin_cache: Optional[dict[str, Any]] = None) -> dict
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
                     f"deployed plugin cache is stale ({sha}, {when}); likely "
-                    "predates the auto_merge_source writer. Fix: fno doctor update"
+                    "predates the auto_merge_source writer. Fix: claude plugin "
+                    "update fno@footnote (not fno doctor update), then restart"
                 )
         findings.append(finding)
     return {"findings": findings, "posture": _read_posture_stamp()}
@@ -1857,9 +1858,16 @@ def _emit_human(
     if pc.get("status") == "stale":
         sha = str(pc.get("sha") or "")[:12]
         when = str(pc.get("installed_at") or "")[:10] or "?"
+        # `fno update` cannot refresh this: installed_plugins.json is claude's
+        # install registry, which mints its own gitCommitSha. update.py names
+        # ~/.claude/plugins only as a SOURCE to install FROM. The old
+        # prescription exited 0 having changed nothing, so the line has to say
+        # so or a reader who already ran it runs it again.
         out(
             f"fno doctor: deployed claude plugin cache STALE (pinned {sha}, "
-            f"{when}; hooks run pre-HEAD bytes). Run `fno doctor update`."
+            f"{when}; hooks run pre-HEAD bytes). Fix: `claude plugin update "
+            "fno@footnote`, then restart the session. `fno doctor update` does "
+            "NOT refresh this cache; it updates the fno CLI."
         )
     elif pc.get("status") == "fresh":
         out("fno doctor: deployed claude plugin cache: fresh (pinned at source HEAD).")
@@ -3511,6 +3519,20 @@ def doctor_command(
 
             hmsg, _ = heal_watcher(launch_agents_dir=_LAUNCH_AGENTS_DIR)
             typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
+
+        # A stale plugin cache is counted in `blockers`, and nothing on this path
+        # clears it: the exec below is `fno update`, which does not own claude's
+        # install registry. Say so here rather than exit past a declared blocker
+        # in silence. Advisory, like the two around it - the exit code is settled
+        # by the blocker list, and the defect this closes is the silence.
+        pc = result.get("plugin_cache") or {}
+        if pc.get("status") == "stale" and not json_out:
+            typer.echo(
+                "fno doctor: --fix cannot refresh the claude plugin cache; that "
+                "registry belongs to claude. Run: `claude plugin update "
+                "fno@footnote`, then restart.",
+                err=True,
+            )
 
         # Install the groom agent when the pass has never run and nothing is
         # scheduled to run it. The receipt already reports the BOOTSTRAP result
