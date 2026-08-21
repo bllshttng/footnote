@@ -75,6 +75,37 @@ impl Chrome {
         self.level
     }
 
+    /// (x-b465) Clamp the chrome's own text to an inner width the viewport can
+    /// actually hold, eliding what does not fit.
+    ///
+    /// [`min_inner_w`](Self::min_inner_w) widens the frame to fit the subtitle
+    /// and footer, and nothing above it knows how wide the terminal is: `frame`
+    /// takes no viewport and `blit` paints the full framed width, clipping at
+    /// the screen edge. So a footer wider than the content area used to push the
+    /// right border and the esc chip off the right of the screen - the very
+    /// outcome the widening was meant to prevent, moved one step out.
+    ///
+    /// The title is deliberately untouched. Its `title + 9` minimum predates
+    /// this and every modal is sized by it, so clamping it here would resize
+    /// surfaces this change has no business resizing.
+    pub fn fit_to(mut self, inner_w: usize) -> Self {
+        let elide = |s: &str, w: usize| -> String {
+            if s.chars().count() <= w {
+                return s.to_string();
+            }
+            let keep = w.saturating_sub(1);
+            let head: String = s.chars().take(keep).collect();
+            format!("{head}…")
+        };
+        if let Some(f) = self.footer.take() {
+            self.footer = Some(elide(&f, inner_w));
+        }
+        if let Some(s) = self.subtitle.take() {
+            self.subtitle = Some(elide(&s, inner_w));
+        }
+        self
+    }
+
     /// The rule, in code: anchored menus wear `Bare`, centered modals wear
     /// `Full`. Stated here rather than per call site so two menus can never
     /// disagree about it.
@@ -588,12 +619,26 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_too_narrow_for_the_footer_clips_it_rather_than_the_border() {
-        // The backstop: when the VIEWPORT cannot fit the footer, a clipped word
-        // beats a border pushed off the right edge, and no click target is
-        // advertised past what was drawn.
-        let chrome = Chrome::new("t", Anchor::Center).footer("esc close and a great deal more");
+    fn fit_to_keeps_the_widened_frame_inside_the_viewport() {
+        // The widening in `min_inner_w` has no idea how wide the terminal is,
+        // and `blit` paints the full framed width, so an unclamped footer pushes
+        // the right border off the screen - the same defect the widening fixed,
+        // moved one step out.
+        //
+        // An earlier version of this test asserted "clipping" against `frame`
+        // alone, where it can never happen: the widening always removes the need
+        // to clip, so the test passed with or without the code it named.
+        let footer = "esc close and a great deal more besides";
+        let inner = 12;
+        let chrome = Chrome::new("t", Anchor::Center)
+            .footer(footer)
+            .fit_to(inner);
         let framed = frame(&[bl("x")], &chrome, 4, None);
+        assert!(
+            framed.width <= inner + Chrome::FRAME_COLS,
+            "the frame outgrew the viewport it was fitted to: {}",
+            framed.width
+        );
         let widths: Vec<usize> = framed
             .lines
             .iter()
@@ -601,7 +646,16 @@ mod tests {
             .collect();
         assert!(
             widths.iter().all(|&w| w == framed.width),
-            "still square when clipped: {widths:?}"
+            "and it is still square: {widths:?}"
+        );
+        let text: String = framed.lines.iter().map(|l| l.text.clone()).collect();
+        assert!(
+            text.contains('…'),
+            "the elision is visible as one: {text:?}"
+        );
+        assert!(
+            !text.contains("besides"),
+            "the tail really was dropped: {text:?}"
         );
         for line in &framed.lines {
             for &(_, off, len) in &line.hits {
@@ -611,6 +665,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fit_to_leaves_text_that_already_fits_alone() {
+        let chrome = Chrome::new("t", Anchor::Center)
+            .footer("empty resets to auto")
+            .fit_to(40);
+        assert_eq!(chrome.footer.as_deref(), Some("empty resets to auto"));
     }
 
     #[test]

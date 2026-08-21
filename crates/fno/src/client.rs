@@ -4029,7 +4029,22 @@ impl View {
             DisplayRow::Card(c) => Some(format!("card:{}", c.id)),
             DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
             DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
-            DisplayRow::Sub(t) => Some(format!("sub:{t}")),
+            // A `Sub` line's own text is not unique: it carries an agent's
+            // `cwd_base`, and two agents in one directory render the same
+            // string, as do repeated `+N more` remainders. Anchor it to the
+            // nearest identifiable row above plus its offset from that anchor,
+            // which survives a push the way a bare index does not.
+            DisplayRow::Sub(t) => {
+                let rows = self.display_rows();
+                let anchor = (0..i)
+                    .rev()
+                    .find(|&j| !matches!(rows.get(j), Some(DisplayRow::Sub(_))));
+                let (head, off) = match anchor {
+                    Some(j) => (self.row_identity(j).unwrap_or_default(), i - j),
+                    None => (String::new(), i),
+                };
+                Some(format!("sub:{head}+{off}:{t}"))
+            }
             DisplayRow::NewSquad => Some("newsquad".into()),
             DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
         }
@@ -6050,6 +6065,9 @@ impl View {
         if let Some(h) = hint {
             chrome = chrome.footer(h);
         }
+        // The footer widens the frame to fit, so on a narrow viewport it has to
+        // be clamped or the right border leaves the screen.
+        chrome = chrome.fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
         // A name longer than the body scrolls, keeping the CURSOR end visible.
         // Stamping the head instead cuts the `_` off the right edge, so on a
         // narrow terminal the operator types a name they cannot see - the one
@@ -7822,7 +7840,27 @@ fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     // mark the active tab, and the squad label's own surrounding spaces.
     let shrink = |s: &mut TabSpan| {
         let mut chars: Vec<char> = s.text.chars().collect();
-        chars.remove(chars.len() - 2);
+        // (x-b465) A group marker must not outlive the name it marks. Columns
+        // come off the right, so the `·N` count goes early - correct, it is the
+        // least of the three. The leading glyph would otherwise survive to the
+        // floor and leave a strip of identical nameless cells, which is worse
+        // than no marker at all: before the marker existed each tab still kept
+        // its first character. Once the count is gone and the name is down to
+        // its last couple of characters, the glyph goes instead.
+        let glyph_at = chars.iter().position(|&c| c == TAB_GROUP_GLYPH);
+        let count_gone = !chars.contains(&TAB_GROUP_SEP);
+        match glyph_at {
+            Some(g) if count_gone && chars.len() <= GROUP_GLYPH_FLOOR => {
+                // The glyph and the space after it.
+                if chars.get(g + 1) == Some(&' ') {
+                    chars.remove(g + 1);
+                }
+                chars.remove(g);
+            }
+            _ => {
+                chars.remove(chars.len() - 2);
+            }
+        }
         s.text = chars.into_iter().collect();
     };
     while total(spans) > width {
@@ -8334,11 +8372,23 @@ fn tab_label_text(name: &str, i: usize, named: bool) -> String {
 /// before this existed.
 fn tab_group_label(label: String, panes: usize) -> String {
     if panes > 1 {
-        format!("▤ {label}·{panes}")
+        format!("{TAB_GROUP_GLYPH} {label}{TAB_GROUP_SEP}{panes}")
     } else {
         label
     }
 }
+
+/// The stacked glyph a grouped tab leads with, and the separator before its
+/// count. Named because [`condense_to_width`] has to recognize them: a marker
+/// that outlives the name it marks turns a crowded strip into identical
+/// nameless cells.
+const TAB_GROUP_GLYPH: char = '▤';
+const TAB_GROUP_SEP: char = '·';
+
+/// Total span width at or below which [`condense_to_width`] drops a group glyph
+/// rather than another name character: one pad, the glyph and its space, two
+/// characters of name, one pad.
+const GROUP_GLYPH_FLOOR: usize = 6;
 
 /// Abbreviate `$HOME` to `~` for the status row; only at a path-component
 /// boundary so `/home/user2/...` never reads as `~2/...`.
@@ -10121,9 +10171,20 @@ async fn attach_and_run(
                 if !view.open_drag_menu() {
                     view.cancel_tab_drag();
                     view.cancel_row_drag();
-                    // (x-b465) A press-hold that did not become a menu is a dead
-                    // gesture: drop it so a later stray release cannot claim it.
-                    view.press_hold = None;
+                    // (x-b465) A press-hold `open_drag_menu` declined is a dead
+                    // gesture - drop it so a later stray release cannot claim
+                    // it. Only when its OWN deadline expired, though: the
+                    // deadline above is a `min()` across the latches, so a tab
+                    // drag firing first must not clear a press-hold that is
+                    // still young. That would swallow the click its press
+                    // deferred, with nothing left to run it.
+                    if view
+                        .press_hold
+                        .as_ref()
+                        .is_some_and(|(_, _, start)| start.elapsed() >= PANE_DRAG_TIMEOUT)
+                    {
+                        view.press_hold = None;
+                    }
                 }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -10197,11 +10258,18 @@ async fn handle_stdin(
         // would leave the drag latched - visibly stuck, eating input until its
         // timeout - for a gesture the operator has already finished. Nobody is
         // shift-selecting text mid-drag, so nothing is taken away here.
+        // (x-b465) `press_hold` belongs in this list for the same reason and with
+        // more at stake: the press it latched DEFERRED a click, so dropping its
+        // release does not merely leave state armed - it swallows the action
+        // entirely. On a terminal that marks releases with Shift, every plain
+        // click on a workspace, section or card row would become a no-op, and
+        // the reaper would later open a menu nobody asked for.
         let ends_a_drag = matches!(rep.kind, MouseKind::Release(MouseButton::Left))
             && (view.pane_drag.is_some()
                 || view.seam_drag.is_some()
                 || view.tab_drag.is_some()
-                || view.row_drag.is_some());
+                || view.row_drag.is_some()
+                || view.press_hold.is_some());
         if rep.shift && !ends_a_drag {
             continue;
         }
@@ -10515,10 +10583,24 @@ async fn handle_stdin(
                         continue;
                     }
                     // Too short to be a hold: it was a click, so run the action
-                    // the press deferred. Gated on the SAME identity check - a
-                    // click whose row moved under it must cancel rather than
-                    // act on whatever took its place.
-                    if same_row {
+                    // the press deferred.
+                    //
+                    // Two gates, because `chrome_hit` resolves at the RELEASE
+                    // coordinates and the identity check only vouches for the
+                    // PRESSED index. A release that slipped to another row - no
+                    // intervening Drag report is required, the row-drag arm
+                    // above assumes terminals that omit them - would otherwise
+                    // run the OTHER row's action: a different workspace
+                    // selected, a different card's dispatch confirm armed. So
+                    // the release must still land on the row that was pressed,
+                    // which is `still_on_row` in the drag arm's vocabulary.
+                    // Position matters here even though it must not gate the
+                    // MENU: opening a menu on the pressed row is unambiguous,
+                    // acting on a row nobody pressed is not.
+                    let still_on_row = held.as_ref().is_some_and(|(i, _, _)| {
+                        view.press_hold_row_at(rep.row, rep.col).map(|(j, _)| j) == Some(*i)
+                    });
+                    if same_row && still_on_row {
                         if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
                             apply_hit(view, hit, sock_w).await?;
                         }
@@ -30303,7 +30385,7 @@ mod tests {
             .map(|i| format!("release-candidate-{i:02}"))
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        for cols in [68u16, 72, 80, 100] {
+        for cols in [44u16, 52, 60, 68, 80, 100] {
             let mut squad = named_meta(1, "readyrule/readyrule-web", &refs, 13);
             // Every tab a four-pane group, the worst case for width.
             for (t, tab) in squad.tabs.iter_mut().enumerate() {
@@ -30326,6 +30408,22 @@ mod tests {
                 window.iter().any(|s| matches!(s.hit, Some(TabHit::NewTab))),
                 "the + must survive the markers at {cols} cols"
             );
+            // Width and the `+` alone pass on the outcome that matters most:
+            // a strip of identical nameless `▤` cells. Columns come off the
+            // right, so the marker would otherwise outlive the name it marks.
+            // No visible tab may be marker-only.
+            for span in window.iter().filter(|s| s.role == SpanRole::Tab) {
+                let bare: String = span
+                    .text
+                    .chars()
+                    .filter(|c| !matches!(c, ' ' | '[' | ']') && *c != TAB_GROUP_GLYPH)
+                    .collect();
+                assert!(
+                    !bare.is_empty(),
+                    "a tab kept its marker and lost its whole name at {cols} cols: {:?}",
+                    span.text
+                );
+            }
         }
         // And the marker really is rendering, or the widths above prove nothing.
         let mut squad = named_meta(1, "footnote", &["build"], 0);
@@ -30344,6 +30442,31 @@ mod tests {
         assert!(
             strip.contains("▤ build·4"),
             "a four-pane tab names its size in the strip: {strip:?}"
+        );
+    }
+
+    #[test]
+    fn condensing_sheds_a_group_marker_before_the_last_of_its_name() {
+        // Tested on `condense_to_width` directly, not through the strip. Under
+        // real layouts the strip HIDES a tab into the overflow counter long
+        // before shrinking one this far - measured across a dozen widths and
+        // both tab counts - so an integration assertion here passes whatever
+        // `shrink` does. That is the vacuous-test trap twice over in this PR
+        // already; this pins the rule where the rule lives.
+        let span = |text: &str| TabSpan {
+            text: text.to_string(),
+            flags: 0,
+            fg: Color::Default,
+            hit: Some(TabHit::Tab(1)),
+            role: SpanRole::Tab,
+        };
+        let mut spans = vec![span(" ▤ build·4 ")];
+        super::condense_to_width(&mut spans, 4);
+        let text = spans.first().map(|s| s.text.clone()).unwrap_or_default();
+        let name: String = text.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        assert!(
+            !name.is_empty(),
+            "the marker outlived the name it marks: {text:?}"
         );
     }
 
