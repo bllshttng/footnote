@@ -6049,15 +6049,11 @@ def _hold_lapsed_for(entry) -> bool:
     """True when ``entry``'s ``bus-only`` flag no longer holds mail (x-481e).
 
     Busy mode arms the flag with a clock (``fno.mail.hold``). This reads the
-    clock for whichever address form the row carries and FAILS OPEN: no
-    readable clock on any form reads as lapsed, so a hold whose timer process
-    died lifts on the next send instead of holding mail forever. That is the
-    same direction :func:`_delivery_policy_refusal` already takes on an
-    unresolvable read, and fail-closed here would silently lose exactly the
-    mail auto-expire exists to protect.
-
-    A deliberate permanent policy is not ambiguous: it carries a clock reading
-    ``until: null`` and never lapses.
+    clock for whichever address form the row carries. A row with no clock on
+    any form is not a busy-mode hold at all - it is a policy stamped by
+    ``fno agents register --delivery-policy bus-only``, which has no clock by
+    construction - so it never lapses and the refusal stands exactly as it did
+    before this function existed. Only a timed hold can expire here.
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     already holding the registry lock; the stale flag is tidied by the release
@@ -6073,9 +6069,9 @@ def _hold_lapsed_for(entry) -> bool:
         ):
             if form and _hold.read(form) is not None:
                 return _hold.lapsed(form)
-    except Exception:  # noqa: BLE001 - the gate never raises
-        return True
-    return True
+    except Exception:  # noqa: BLE001 - the gate never raises, and never lifts a hold it could not read
+        return False
+    return False
 
 
 def _delivery_policy_refusal(target) -> Optional[str]:

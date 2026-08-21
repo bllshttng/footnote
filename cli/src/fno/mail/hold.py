@@ -171,28 +171,30 @@ def extend(handle: str) -> Optional[Hold]:
 
 
 def lapsed(handle: str) -> bool:
-    """True when a set ``bus-only`` flag for ``handle`` no longer holds mail.
+    """True when a TIMED hold for ``handle`` has run out. Only ever timed.
 
-    Called from the delivery gate, so it FAILS OPEN in every ambiguous case:
-    no clock, an unreadable clock, or a past expiry all read as lapsed. That
-    direction is the one the gate's own docstring already takes ("an
-    unresolvable read is no-policy... failing open here fails toward today's
-    behavior, never toward stranding a worker's mail"), and it is what makes
-    auto-expire a safety property rather than a convenience. Fail closed here
-    and a hold whose timer process died holds mail forever, silently, which is
-    the exact loss busy mode was built to prevent.
+    An absent or unreadable clock reads as NOT lapsed, which leaves the flag
+    exactly as it behaved before busy mode existed. The alternative was tried
+    and is wrong: lifting a flag that has no clock silently revokes the
+    delivery policy of every row stamped by ``fno agents register
+    --delivery-policy bus-only`` before this file existed, and a row so stamped
+    has no clock by construction. That is a shipped no-paste guarantee broken
+    on rows nobody touched.
 
-    A deliberate permanent policy is not ambiguous, so it never lapses: it
-    carries a clock that says ``until: null``.
+    The fear that argument answers - a hold whose timer died holding mail
+    forever - does not describe this design. Held mail is durable on the bus.
+    It surfaces at the recipient's next SessionStart or turn boundary, and
+    ``fno mail notify-self`` tidies the stale flag when it gets there. So a
+    lost clock costs a stall bounded by the operator's next prompt, never a
+    lost message. Auto-expire stays a safety property by having two carriers
+    that do not depend on this file surviving: the detached release timer, and
+    that turn-boundary tidy.
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
-    that already holds the registry lock and cannot raise into the gate. The
-    stale flag is tidied by the release path and by ``notify-self``.
+    that already holds the registry lock and cannot raise into the gate.
     """
     hold = read(handle)
-    if hold is None:
-        return True
-    if hold.until is None:
+    if hold is None or hold.until is None:
         return False
     return hold.until <= _now()
 
@@ -235,6 +237,28 @@ def remaining_label(handle: str) -> Optional[str]:
     if seconds < 60:
         return f"~{int(seconds)}s"
     return f"~{math.ceil(seconds / 60)}m"
+
+
+def bounce_reason(recipient: str) -> Optional[str]:
+    """The busy-mode receipt a sender reads, or None when no hold is running.
+
+    A refusal that says nothing is the defect this replaces. A sender that gets
+    silence cannot tell a hold from a dead bus, so it re-sends, which is how one
+    held message becomes five. The generic ``bus-only`` receipt is no better
+    here: it promises the recipient's next turn boundary, and a busy-mode hold
+    exists precisely because that turn boundary is not coming.
+
+    So the reason names the recipient, the state, and when the message actually
+    lands. Returns None for a permanent hand-stamped policy, which really does
+    surface at a turn boundary and already has an accurate receipt.
+    """
+    label = remaining_label(recipient)
+    if label is None or label == "held":
+        return None
+    return (
+        f"held: {recipient} is in do-not-disturb, lifts in "
+        f"{label.lstrip('~')} and delivers itself then"
+    )
 
 
 def set_policy(handle: str, policy: Optional[str]) -> bool:

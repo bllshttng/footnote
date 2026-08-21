@@ -90,6 +90,24 @@ def row_address(
     return None
 
 
+def _dnd_label(entry: AgentEntry) -> Optional[str]:
+    """Remaining time on this row's do-not-disturb hold, or None (x-481e).
+
+    None whenever mail flows right now, so a row whose hold already lapsed
+    reads the same as a row that never had one. Both are states in which a
+    message lands, and the column exists to answer that question, not to
+    report a flag nobody cleaned up.
+    """
+    if getattr(entry, "delivery_policy", None) != "bus-only":
+        return None
+    try:
+        from fno.mail import hold as _hold
+
+        return _hold.remaining_label(entry.name)
+    except Exception:  # noqa: BLE001 - a render helper never breaks the listing
+        return None
+
+
 def serialize_entry(
     entry: AgentEntry,
     live_status: Optional[str],
@@ -161,6 +179,16 @@ def serialize_entry(
         # spawn-recorded route would report the INTENDED model in exactly the
         # case an operator suspects a silent fallback; this cannot.
         "observed_model": observed_model or {"kind": "no-transcript"},
+        # x-481e: a field fno already modelled, consumed internally, and never
+        # showed. `delivery_policy` (registry.py, schema v14) decides whether
+        # mail to this row may ever paste into its prompt line - readable by
+        # twelve call sites and invisible to the human deciding.
+        # `dnd` is the derived half: the remaining time on a busy-mode hold, so
+        # a do-not-disturb row shows when it ends rather than a bare yes. The
+        # clock is read only for a row that actually carries the flag, so the
+        # common case pays no file read at all.
+        "delivery_policy": entry.delivery_policy,
+        "dnd": _dnd_label(entry),
         "log_path": entry.log_path,
         # Crown (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
         # minion can resolve who to escalate to and a second live crown over the
@@ -256,6 +284,7 @@ _COLUMNS = (
     ("address", "ADDRESS"),
     ("harness", "HARNESS"),
     ("status", "STATUS"),
+    ("dnd", "DND"),
     ("live", "LIVE"),
     ("event_age", "EVENT AGE"),
     ("last_message", "LAST MESSAGE"),
@@ -413,6 +442,7 @@ def render_table(
                 "address": row.get("address") or "-",
                 "harness": row.get("harness") or "-",
                 "status": row.get("status") or "-",
+                "dnd": row.get("dnd") or "-",
                 "live": live,
                 "event_age": event_age,
                 "last_message": last_msg,

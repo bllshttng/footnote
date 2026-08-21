@@ -1682,11 +1682,21 @@ def _name_lane_send(
     # live-miss that reads as a dead recipient. A bus-only queue is neither: it
     # is the recipient's declared delivery policy, and its receipt says the
     # message WILL surface at the recipient's turn boundary.
+    # x-481e: a busy-mode hold is a bus-only flag with a clock on it, and the
+    # generic receipt above would promise a turn boundary that is not coming.
+    # Say what is actually true: it is held, here is when it lands.
+    hold_note = None
     if bus_only:
-        reason = "bus-only: recipient polls the bus at each turn boundary"
+        from fno.mail import hold as _hold
+
+        hold_note = _hold.bounce_reason(recipient)
+    if bus_only:
+        reason = hold_note or "bus-only: recipient polls the bus at each turn boundary"
     else:
         reason = "self-send" if self_send else (live_reason or "live-miss")
     hint = ""
+    if hold_note:
+        hint = f" `fno mail withdraw {msg_id}` retracts it."
     if not self_send and not bus_only and provider == "codex" and _codex_daemon_socket_absent():
         hint = (
             " codex app-server daemon not running: run "
@@ -2947,10 +2957,14 @@ def cmd_send(
             from fno.agents.dispatch import BUS_ONLY_POLICY
 
             if result.reason == BUS_ONLY_POLICY:
+                from fno.mail import hold as _hold
+
+                _note = _hold.bounce_reason(result.recipient)
                 print(
                     f"{result.msg_id} queued (durable) for {result.recipient} "
                     f"[project {to_project}] "
-                    f"[bus-only: recipient polls the bus at each turn boundary]"
+                    f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+                    + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
                 )
             else:
                 # The anycast lane reaches the SAME dispatch_send as the by-name
@@ -3107,9 +3121,13 @@ def cmd_send(
         # x-e21e: the registered-agent lane's gate refused by policy; the
         # durable write already happened inside dispatch_send. Designed, not
         # stranded -- no recovery ladder.
+        from fno.mail import hold as _hold
+
+        _note = _hold.bounce_reason(name)
         print(
             f"{result.msg_id} queued (durable) "
-            f"[bus-only: recipient polls the bus at each turn boundary]"
+            f"[{_note or 'bus-only: recipient polls the bus at each turn boundary'}]"
+            + (f" `fno mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:
         reason_tok = result.reason or "live-miss"
