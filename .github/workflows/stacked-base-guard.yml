@@ -59,12 +59,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           # The lineage probe compares the base branch against the default
           # branch, which a shallow single-branch clone cannot answer.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v3
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
       - name: Check base lineage
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,10 +79,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v3
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
       - name: Re-stamp open PRs stacked on a non-default base
         env:
           GH_TOKEN: ${{ github.token }}
