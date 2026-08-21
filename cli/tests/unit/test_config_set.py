@@ -9,6 +9,7 @@ wrapper), so ``_read`` returns a flat dict and paths carry no ``config`` key.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import tomllib
 
 import pytest
@@ -304,3 +305,115 @@ def test_set_list_single_item_round_trips(tmp_path):
     )
     assert res.value == ["gemini"]
     assert _read(tmp_path)["review"]["external_reviewers"] == ["gemini"]
+
+
+# ---------------------------------------------------------------------------
+# Post-write override detection and positive receipt markers (x-389d)
+# ---------------------------------------------------------------------------
+
+
+def _pin_two_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project: str, global_: str
+) -> None:
+    """Project + global config.toml chain (worktree==canonical==tmp project)."""
+    monkeypatch.delenv("FNO_CONFIG", raising=False)
+    monkeypatch.delenv("FNO_REPO_ROOT", raising=False)
+    proj = tmp_path / "proj" / ".fno" / "config.toml"
+    proj.parent.mkdir(parents=True, exist_ok=True)
+    proj.write_text(project, encoding="utf-8")
+
+    gdir = tmp_path / "global" / ".fno"
+    gdir.mkdir(parents=True, exist_ok=True)
+    glob = gdir / "config.toml"
+    glob.write_text(global_, encoding="utf-8")
+    glob_yaml = gdir / "settings.yaml"
+
+    import fno.paths as paths_mod
+    from fno import config as config_mod
+
+    monkeypatch.setattr(paths_mod, "resolve_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path / "proj")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(glob_yaml))
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_set_warns_when_higher_precedence_layer_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-389d: when a global write succeeds on disk but a project layer
+    overrides it, stdout confirms the write and stderr warns with the winning
+    file and targeting flag."""
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="[auto_merge]\nenabled = true\n",
+        global_="[auto_merge]\nenabled = true\n",
+    )
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(app, ["set", "auto_merge.enabled", "false"])
+    assert res.exit_code == 0, res.output
+    # stdout carries the standard confirmation.
+    assert "set auto_merge.enabled = False (global:" in res.stdout
+    # stderr carries the positive warning marker naming the winning project file and --local.
+    assert "warn: auto_merge.enabled set in" in res.stderr
+    assert str(tmp_path / "proj" / ".fno" / "config.toml") in res.stderr
+    assert "overrides it (value in effect: True)" in res.stderr
+    assert "--local" in res.stderr
+
+
+def test_set_stays_silent_when_no_higher_precedence_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-389d: when no higher layer overrides the write, stderr remains silent."""
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="schema_version = 1\n",
+        global_="schema_version = 1\n",
+    )
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(app, ["set", "auto_merge.enabled", "false"])
+    assert res.exit_code == 0, res.output
+    assert "set auto_merge.enabled = False (global:" in res.stdout
+    assert "warn:" not in res.stderr
+
+
+def test_set_local_override_stays_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-389d: writing --local overrides global, so the write takes effect and stderr stays silent."""
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="[auto_merge]\nenabled = true\n",
+        global_="[auto_merge]\nenabled = true\n",
+    )
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(app, ["set", "auto_merge.enabled", "false", "--local"])
+    assert res.exit_code == 0, res.output
+    assert "set auto_merge.enabled = False (project:" in res.stdout
+    assert "warn:" not in res.stderr
+
+
+def test_set_multi_key_warns_only_for_overridden_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """x-389d: in multi-key sets, only the overridden key emits a warning."""
+    _pin_two_layers(
+        tmp_path,
+        monkeypatch,
+        project="[auto_merge]\nenabled = true\n",
+        global_="schema_version = 1\n",
+    )
+    from fno.config_cli import app
+
+    res = CliRunner().invoke(
+        app, ["set", "auto_merge.enabled=false", "blueprint.max_prs_per_epic=8"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "warn: auto_merge.enabled set in" in res.stderr
+    assert "max_prs_per_epic" not in res.stderr
+
