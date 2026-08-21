@@ -86,7 +86,7 @@ fn writer_return_table() -> Vec<(&'static str, &'static str)> {
         ),
         (
             "unreadable label protects an existing override status",
-            "protected existing coverage-override status",
+            "protected existing coverage-override marker",
         ),
         (
             "covered predicate has no counted coverage variant",
