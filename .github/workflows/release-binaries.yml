@@ -38,7 +38,8 @@ jobs:
           # windows-x64: built (toolchain exercised) but not attached to releases this phase.
           - { name: windows-x64, runs-on: windows-latest, rust-target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
