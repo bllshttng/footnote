@@ -21,10 +21,12 @@ from typing import Any, Optional
 
 from fno.agents.crown import (
     _canonical_project,
-    _same_territory,
+    _graph_index,
+    _territory_key,
     crown_reading,
     split_scope,
 )
+from fno.plan._status import TERMINAL_STATUSES as PLAN_TERMINAL_STATUSES
 
 
 def _by_id() -> Optional[dict[str, dict]]:
@@ -35,18 +37,7 @@ def _by_id() -> Optional[dict[str, dict]]:
     here" are not the same fact for a caller deciding whether to trust the
     absence of a disagreement.
     """
-    from fno.tracker.metadata import read_entries
-
-    try:
-        entries = read_entries("agents.crown")
-    except Exception:
-        return None
-    by_id: dict[str, dict] = {}
-    for e in entries:
-        node_id = e.get("id") if isinstance(e, dict) else None
-        if node_id:
-            by_id[node_id] = e
-    return by_id
+    return _graph_index()
 
 
 def _agreement(
@@ -79,7 +70,7 @@ def _agreement(
         if node_type != "epic":
             return False, f"{node_id!r} is a {node_type or 'node'}, not an epic"
         status = entry.get("status")
-        if status in ("done", "superseded"):
+        if status in PLAN_TERMINAL_STATUSES:
             return False, f"{node_id!r} status is {status!r} (terminal)"
         return True, None
     # Level 0/1: a portfolio or single-project crown agrees when every member
@@ -115,17 +106,19 @@ def _conflicts(rows: list) -> list[dict[str, Any]]:
         scope = getattr(row, "crown_scope", None)
         if isinstance(scope, str) and scope.strip():
             claims.append((row, scope))
-    seen: list[tuple[str, list[str]]] = []
+    seen: dict[frozenset[str], tuple[str, list[str]]] = {}
     for row, scope in claims:
-        for other_scope, holders in seen:
-            if _same_territory(other_scope, scope):
-                holders.append(row.name)
-                break
+        key = _territory_key(scope)
+        if not key:
+            continue
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = (scope, [row.name])
         else:
-            seen.append((scope, [row.name]))
+            existing[1].append(row.name)
     return [
         {"scope": scope, "holders": holders}
-        for scope, holders in seen
+        for scope, holders in seen.values()
         if len(holders) > 1
     ]
 

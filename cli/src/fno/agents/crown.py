@@ -211,6 +211,22 @@ def _graph_entry(node_id: str) -> Optional[dict]:
     )
 
 
+def _graph_index() -> Optional[dict[str, dict]]:
+    """Return the readable crown graph as an id index, or ``None``."""
+    from fno.tracker.metadata import read_entries
+
+    try:
+        entries = read_entries("agents.crown")
+    except Exception:
+        return None
+    by_id: dict[str, dict] = {}
+    for entry in entries:
+        node_id = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(node_id, str) and node_id:
+            by_id[node_id] = entry
+    return by_id
+
+
 def _canonical_project(name: str) -> Optional[str]:
     """``name`` resolved to its CANONICAL project name, or None if it is not a
     project. Projects are declared in config
@@ -384,6 +400,15 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
             "not an attended human. Run /fno-me to join or wait for the row, then "
             "retry; or spawn from an attended shell."
         )
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    status = getattr(caller_row, "status", None)
+    if status in TERMINAL_STATUSES:
+        return (
+            f"cannot verify the grantor's authority: its STORED status is "
+            f"{status!r}, which is terminal, so it cannot bestow a crown. "
+            "Re-register the grantor in its live session or use an attended shell."
+        )
     holder = getattr(caller_row, "crown_scope", None)
     if not holder:
         return (
@@ -420,9 +445,14 @@ def _canonical_members(scope: Optional[str]) -> set:
     return {(_canonical_project(m) or m) for m in split_scope(scope)}
 
 
+def _territory_key(scope: Optional[str]) -> frozenset[str]:
+    """The hashable normalized territory used by all scope equality checks."""
+    return frozenset(_canonical_members(scope))
+
+
 def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
     """Do two stored scopes name the same territory, aliases normalized?"""
-    left, right = _canonical_members(a), _canonical_members(b)
+    left, right = _territory_key(a), _territory_key(b)
     return bool(left) and left == right
 
 
@@ -517,6 +547,13 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         if caller is not None:
             live_caller = next((row for row in rows if row.name == grantor), None)
+            if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
+                raise CrownPromotionError(
+                    f"refusing to crown {target_name!r}: the grantor's STORED "
+                    f"status is {live_caller.status!r}, which is terminal, so "
+                    "authority ended before the registry write. Re-register the "
+                    "grantor in its live session or use an attended shell."
+                )
             live_scope = None if live_caller is None else live_caller.crown_scope
             if not _same_territory(live_scope, granting_scope):
                 raise CrownPromotionError(
@@ -650,21 +687,11 @@ def _stranded_subordinates(
     """
     if vacated is None or _same_territory(vacated, new_scope):
         return []
-    from fno.tracker.metadata import read_entries
-
     from fno.agents.registry import TERMINAL_STATUSES
 
-    try:
-        # One parse serves both the availability probe and every per-row
-        # epic lookup: raises ExternalMetadataUnavailable under an external
-        # tracker backend, where containment checks would silently degrade
-        # to "not contained".
-        entries = read_entries("agents.crown")
-    except Exception:
+    by_id = _graph_index()
+    if by_id is None:
         return None
-    by_id = {
-        e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")
-    }
     stranded: list[str] = []
     for row in rows:
         if row.name == target_name or row.status in TERMINAL_STATUSES:
