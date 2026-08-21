@@ -110,6 +110,49 @@ def resolve_king_manifest_path(
     return path if path.is_file() else None
 
 
+def arm_king_manifest(
+    scope: str,
+    harness_session_id: str,
+    *,
+    state_root: Optional[Path] = None,
+    owner_pid: Optional[int] = None,
+    owner_cwd: Optional[str] = None,
+) -> Optional[Path]:
+    """Refresh loop state at the moment a crown becomes authoritative."""
+    if not king_loop_enabled():
+        return None
+    if not harness_session_id.strip():
+        raise ValueError("a crowned king manifest needs a harness session id")
+    if state_root is None:
+        from fno import paths
+
+        state_root = paths.state_dir()
+    path = king_manifest_path(scope, state_root=state_root)
+    write_manifest(
+        path,
+        scope=scope,
+        harness_session_id=harness_session_id,
+        force=True,
+        owner_pid=owner_pid,
+        owner_cwd=owner_cwd,
+    )
+    return path
+
+
+def remove_king_manifest(scope: str, *, state_root: Optional[Path] = None) -> bool:
+    """Best-effort cleanup; live registry authority never depends on this."""
+    try:
+        if state_root is None:
+            from fno import paths
+
+            state_root = paths.state_dir()
+        path = king_manifest_path(scope, state_root=state_root)
+        path.unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -133,6 +176,8 @@ def write_manifest(
     harness_session_id: str = "",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     force: bool = False,
+    owner_pid: Optional[int] = None,
+    owner_cwd: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once. Raises :class:`KingManifestExists` if it is there."""
     path = Path(path)
@@ -147,8 +192,8 @@ def write_manifest(
         "scope": scope,
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
-        "owner_pid": str(os.getpid()),
-        "owner_cwd": str(Path.cwd()),
+        "owner_pid": str(owner_pid or os.getpid()),
+        "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),
     }
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"

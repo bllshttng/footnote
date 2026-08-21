@@ -3689,8 +3689,7 @@ def dispatch_spawn_pane(
             ):
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
-            rows.append(
-                AgentEntry(
+            entry = AgentEntry(
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
@@ -3722,7 +3721,16 @@ def dispatch_spawn_pane(
                     route_settings_path=route_settings_path,
                     fno_id=stored_session_uuid or name,
                 )
-            )
+            if entry.crown_level is not None and entry.crown_scope:
+                from fno.king.state import arm_king_manifest
+
+                arm_king_manifest(
+                    entry.crown_scope,
+                    entry.harness_session_id or entry.short_id or entry.name,
+                    owner_pid=entry.pid,
+                    owner_cwd=entry.cwd,
+                )
+            rows.append(entry)
             return rows
 
         try:

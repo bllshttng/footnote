@@ -6016,6 +6016,25 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
     .await
 }
 
+fn cleanup_king_manifest(entry: &state::RegistryEntry) {
+    let Some(scope) = entry.crown_scope.as_deref() else {
+        return;
+    };
+    if scope.is_empty()
+        || scope.contains("..")
+        || scope.contains('/')
+        || scope.contains('\\')
+        || scope.contains('\0')
+    {
+        return;
+    }
+    let path = std::path::Path::new(&entry.cwd)
+        .join(".fno")
+        .join("kings")
+        .join(format!("{scope}.md"));
+    let _ = std::fs::remove_file(path);
+}
+
 async fn handle_rm_with(
     ctx: &Ctx,
     req: &Request,
@@ -6262,6 +6281,7 @@ async fn handle_rm_with(
             ),
         );
     }
+    cleanup_king_manifest(&entry);
     let pane_session = entry.mux.as_ref().map(|mux| mux.session.clone());
     let pane_id = entry.mux.as_ref().map(|mux| mux.pane_id);
     let event = json!({
@@ -7916,6 +7936,46 @@ mod tests {
             .unwrap()
             .entries
             .is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
+        let home = short_home("rmcrownstate");
+        let project = home.root().join("project");
+        let manifest = project.join(".fno/kings/alpha.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "---\nscope: alpha\n---\n").unwrap();
+        let mut row = claude_rm_row(
+            "stopped-worker",
+            "aaaa2222",
+            "aaaa2222-1111-2222-3333-444444444444",
+        );
+        row.cwd = project.to_string_lossy().into_owned();
+        row.crown_level = Some(1);
+        row.crown_scope = Some("alpha".into());
+        row.crown_grantor = Some("human".into());
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "stopped-worker"}));
+        let snapshots = claude_row_then_absent("aaaa2222", "stopped");
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &snapshots,
+            &|_| Ok(()),
+            &|_, _| Ok(true),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        assert!(response.error().is_none(), "{response:?}");
+        assert!(
+            !manifest.exists(),
+            "successful rm left crown loop state behind"
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
