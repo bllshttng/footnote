@@ -189,7 +189,11 @@ def test_extend_pushes_a_live_hold_out_and_refuses_everything_else():
 def test_tidy_lapsed_clears_a_timed_hold_but_never_a_permanent_policy(monkeypatch):
     cleared = []
     monkeypatch.setattr(
-        hold_mod, "set_policy", lambda handle, policy: cleared.append((handle, policy))
+        hold_mod,
+        "set_policy",
+        # Returns True: this stub stands in for a write that SUCCEEDED, and
+        # tidy_lapsed now reports the write rather than the attempt.
+        lambda handle, policy: (cleared.append((handle, policy)), True)[1],
     )
 
     hold_mod.arm_permanent(HANDLE)
@@ -386,6 +390,32 @@ def test_a_row_with_no_hold_renders_a_null_dnd():
     row = fmt.serialize_entry(_full_entry(delivery_policy=None), live_status=None)
     assert row["delivery_policy"] is None
     assert row["dnd"] is None
+
+
+def test_an_unreadable_clock_renders_a_question_mark_not_an_empty_cell(monkeypatch):
+    """An instrument that declines to answer must not answer anyway.
+
+    None renders as "-", the same cell a row with no hold gets, so a failed
+    read would report mail flowing to a session whose flag says it is held.
+    """
+    def _boom(_entry):
+        raise RuntimeError("clock unreadable")
+
+    monkeypatch.setattr(hold_mod, "dnd_label", _boom)
+
+    assert fmt._dnd_label(_full_entry()) == "?"
+
+
+def test_tidy_lapsed_reports_the_write_not_the_attempt(monkeypatch):
+    """Returning True over a policy write that no-opped is the same defect."""
+    _expire(HANDLE)
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: False)
+
+    assert hold_mod.tidy_lapsed(HANDLE) is False
+
+    _expire(HANDLE)
+    monkeypatch.setattr(hold_mod, "set_policy", lambda *a, **k: True)
+    assert hold_mod.tidy_lapsed(HANDLE) is True
 
 
 def test_a_bus_only_row_with_no_clock_reads_held_not_blank():

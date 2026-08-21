@@ -114,7 +114,11 @@ def _dnd_label(entry: AgentEntry) -> Optional[str]:
         # a blank cell for a held codex session.
         return _hold.dnd_label(entry)
     except Exception:  # noqa: BLE001 - a render helper never breaks the listing
-        return None
+        # "?" and not None. None renders as "-", which is the cell a row with
+        # no hold gets, so a failed read would tell the operator mail is
+        # flowing to a session whose flag says it is held. An instrument that
+        # declines to answer must not answer anyway.
+        return "?"
 
 
 def serialize_entry(

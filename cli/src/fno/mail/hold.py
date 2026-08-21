@@ -222,8 +222,11 @@ def tidy_lapsed(handle: str) -> bool:
     if clock is None or clock.until is None or clock.until > _now():
         return False
     clear(handle)
-    set_policy(handle, None)
-    return True
+    # Report what the WRITE did, not that the attempt was made. `set_policy`
+    # returns False for a registry it could not read or a row it never found,
+    # and returning True over that is an instrument reporting success on its
+    # own no-op path. The caller learns nothing, and the flag is still set.
+    return set_policy(handle, None)
 
 
 def candidate_keys(target) -> tuple:
