@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -274,6 +274,122 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
         seen.add(num)
 
     return refs
+
+
+@dataclass
+class PrRowBinding:
+    node_id: str
+    action: str  # filled_primary | appended_additional | already_bound | already_done
+
+
+@dataclass
+class PrRowBindResult:
+    outcome: Literal["bound", "refused"]
+    claimed_ids: list[str] = field(default_factory=list)
+    bindings: list[PrRowBinding] = field(default_factory=list)
+    refusal: Optional[str] = None
+
+    @property
+    def bound_ids(self) -> list[str]:
+        return [
+            binding.node_id
+            for binding in self.bindings
+            if binding.action in ("filled_primary", "appended_additional")
+        ]
+
+
+def bind_pr_rows(
+    entries: list[dict],
+    claimed_ids: list[str],
+    *,
+    pr_number: int,
+    pr_url: Optional[str],
+    repo: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> PrRowBindResult:
+    """Validate and bind every PR claim as one graph-owned mutation.
+
+    Callers may run this against a copy for a dry-run or inside
+    ``locked_mutate_graph`` for persistence. Validation completes before any
+    row changes, so malformed, unknown, or cross-repository claims cannot
+    leave a partial binding behind.
+    """
+    from fno.graph._constants import is_wellformed_node_id
+    from fno.graph._intake import _find_node
+
+    if not claimed_ids:
+        return PrRowBindResult(outcome="refused", refusal="no closure claims to bind")
+
+    our_repo = repo or repo_slug_from_url(pr_url)
+    nodes: dict[str, dict] = {}
+    for nid in claimed_ids:
+        if not is_wellformed_node_id(nid):
+            return PrRowBindResult(
+                outcome="refused", claimed_ids=claimed_ids, refusal=f"malformed claim: {nid!r}"
+            )
+        node = _find_node(entries, nid)
+        if node is None:
+            return PrRowBindResult(
+                outcome="refused", claimed_ids=claimed_ids, refusal=f"unknown node: {nid}"
+            )
+        existing_refs = node_pr_refs(node)
+        if our_repo:
+            for number, url in existing_refs:
+                existing_repo = repo_slug_from_url(url)
+                if existing_repo is None:
+                    return PrRowBindResult(
+                        outcome="refused",
+                        claimed_ids=claimed_ids,
+                        refusal=(
+                            f"{nid} already carries a PR #{number} ref with no "
+                            f"resolvable repo; this PR is {our_repo} - refusing an "
+                            "unverifiable cross-repo claim"
+                        ),
+                    )
+                if existing_repo.lower() != our_repo.lower():
+                    return PrRowBindResult(
+                        outcome="refused",
+                        claimed_ids=claimed_ids,
+                        refusal=(
+                            f"{nid} already carries a {existing_repo} PR ref; "
+                            f"this PR is {our_repo} - refusing a cross-repo claim"
+                        ),
+                    )
+        elif existing_refs:
+            return PrRowBindResult(
+                outcome="refused",
+                claimed_ids=claimed_ids,
+                refusal=(
+                    f"{nid} already carries a PR ref and this PR's repo is "
+                    "unresolvable - refusing an unscoped claim"
+                ),
+            )
+        nodes[nid] = node
+
+    bindings: list[PrRowBinding] = []
+    clean_owner = owner.strip() if isinstance(owner, str) else ""
+    for nid in claimed_ids:
+        node = nodes[nid]
+        refs = node_pr_refs(node)
+        if any(number == pr_number for number, _ in refs):
+            action = "already_bound"
+        elif not node_is_open(node):
+            action = "already_done"
+        elif not isinstance(node.get("pr_number"), int):
+            node["pr_number"] = pr_number
+            node["pr_url"] = pr_url
+            action = "filled_primary"
+        else:
+            additional = list(node.get("additional_prs") or [])
+            additional.append({"number": pr_number, "url": pr_url})
+            node["additional_prs"] = additional
+            action = "appended_additional"
+        if clean_owner and node_is_open(node):
+            node["locked_by"] = clean_owner
+            node["session_id"] = clean_owner
+        bindings.append(PrRowBinding(nid, action))
+
+    return PrRowBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
 
 
 def node_cwd_in_repo(entry: dict, our_root: str) -> bool:
@@ -1702,4 +1818,3 @@ def emit_gate_escape_for_record(
         )
         _record_gate_escape_emit_failure(fail_log, record.node_id, reason, exc)
         return None
-

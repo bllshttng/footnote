@@ -190,6 +190,45 @@ def test_worker_ship_passes_the_trailer_to_gh(tmp_path, monkeypatch):
     assert parse_closure_trailer(sent_body) == ["x-49ec"]
 
 
+def test_worker_ship_reports_incomplete_delivery_when_graph_binding_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    state_dir = tmp_path / ".fno"
+    state_dir.mkdir(parents=True)
+    (state_dir / "target-state.md").write_text(
+        "---\nstatus: IN_PROGRESS\nsession_id: session-1\n"
+        "artifact_shipped: false\nauto_merge_approved: false\n---\n"
+        "graph_node_id: x-49ec\n"
+    )
+    pr_url = "https://github.com/o/r/pull/42"
+    mock_run = MagicMock()
+    mock_run.side_effect = [
+        MagicMock(returncode=0, stdout="feature/x-49ec\n", stderr=""),
+        MagicMock(returncode=0, stdout="[]", stderr=""),
+        MagicMock(returncode=0, stdout=f"{pr_url}\n", stderr=""),
+        MagicMock(returncode=1, stdout="", stderr="binding refused"),
+    ]
+    with patch("subprocess.run", mock_run), patch(
+        "fno.pr._preflight.check_stale_base", return_value=(0, None)
+    ), patch("fno.pr._preflight.local_verification_required", lambda **_k: (False, "")), \
+            patch("fno.pr.closure.known_node_ids", lambda: KNOWN):
+        from fno.worker.ship import ship
+
+        result = ship(
+            state_path=state_dir / "target-state.md",
+            title="feat: x",
+            body="Auto-generated PR body",
+            artifacts_dir=tmp_path / ".fno" / "artifacts",
+        )
+
+    assert result["action"] == "incomplete_delivery"
+    assert result["pr_number"] == 42
+    assert result["pr_url"] == pr_url
+    assert result["binding_error"] == "binding refused"
+    assert result["repair_command"] == (
+        f"fno do pr bind-created --url {pr_url} --repo {tmp_path}"
+    )
+
+
 def test_a_graph_unknown_branch_candidate_is_never_claimed():
     # "cache-dead" is cache plus the hex dead, so it parses as a node id and is
     # ordinary English. Claiming it passed CI and then made bind_closure_claims

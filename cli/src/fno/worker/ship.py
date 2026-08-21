@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -38,12 +39,13 @@ def _read_graph_node_id(state_path: Path) -> Optional[str]:
     init-target-state.sh (below the frontmatter _read_state parses). Returns
     None when absent or ``null`` so the caller skips the node<->PR stamp.
     """
+    from fno.graph.types import normalize_graph_node_id
+
     try:
         for line in state_path.read_text(encoding="utf-8").splitlines():
             m = re.match(r"^\s*graph_node_id:\s*(.*?)\s*$", line)
             if m:
-                raw = m.group(1).strip().strip('"').strip("'")
-                return raw if raw and raw != "null" else None
+                return normalize_graph_node_id(m.group(1))
     except OSError:
         return None
     return None
@@ -277,18 +279,31 @@ def ship(
     # Best-effort + idempotent (re-stamping the same PR is a no-op); a stamp
     # failure logs but never fails the ship.
     node_id = _read_graph_node_id(state_path)
+    binding_error: Optional[str] = None
+    repair_command: Optional[str] = None
     if node_id and pr_number:
+        repo_root = os.getcwd()
+        owner = state.get("target_claim_holder")
+        bind_args = [
+            "fno", "do", "pr", "bind-created", "--url", pr_url,
+            "--repo", repo_root,
+        ]
+        repair_command = " ".join(bind_args)
+        if isinstance(owner, str) and owner.strip():
+            bind_args.extend(["--owner", owner.strip()])
+            repair_command = " ".join(bind_args)
         stamp = subprocess.run(
-            ["fno", "backlog", "update", node_id,
-             "--pr-number", str(pr_number), "--pr-url", pr_url],
+            bind_args,
             capture_output=True,
             text=True,
         )
         if stamp.returncode != 0:
+            binding_error = (stamp.stderr or stamp.stdout).strip()[:200]
+            action = "incomplete_delivery"
             import sys
             print(
                 f"worker.ship: node<->PR stamp failed for {node_id} "
-                f"PR {pr_number}: {(stamp.stderr or stamp.stdout).strip()[:200]}",
+                f"PR {pr_number}: {binding_error}; repair with `{repair_command}`",
                 file=sys.stderr,
             )
         # Step 2.6 used to stamp ship provenance here with an explicit
@@ -308,4 +323,6 @@ def ship(
         "pr_url": pr_url,
         "artifact_path": str(artifact_path),
         "session_id": session_id,
+        **({"binding_error": binding_error} if binding_error else {}),
+        **({"repair_command": repair_command} if binding_error else {}),
     }

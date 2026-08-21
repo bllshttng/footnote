@@ -335,6 +335,7 @@ def bind_closure_claims(
     pr_number: int,
     pr_url: Optional[str],
     repo: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> ClosureBindResult:
     """Validate every claimed id, then bind all of them - or mutate nothing.
 
@@ -350,95 +351,22 @@ def bind_closure_claims(
     (never extra I/O per claim): a node with no PR ref yet has no known repo
     and is accepted, mirroring ``_find_pr_node_id``'s best-effort stance.
     """
-    from fno.graph._intake import _find_node
-    from fno.graph._reconcile import node_is_open, node_pr_refs, repo_slug_from_url
+    from fno.graph._reconcile import bind_pr_rows
 
-    if not claimed_ids:
-        return ClosureBindResult(outcome="refused", refusal="no closure claims to bind")
-
-    our_repo = repo or repo_slug_from_url(pr_url)
-
-    nodes: dict[str, dict] = {}
-    for nid in claimed_ids:
-        if not is_wellformed_node_id(nid):
-            return ClosureBindResult(
-                outcome="refused",
-                claimed_ids=claimed_ids,
-                refusal=f"malformed claim: {nid!r}",
-            )
-        node = _find_node(entries, nid)
-        if node is None:
-            return ClosureBindResult(
-                outcome="refused",
-                claimed_ids=claimed_ids,
-                refusal=f"unknown node: {nid}",
-            )
-        existing_refs = node_pr_refs(node)
-        if our_repo:
-            for _num, url in existing_refs:
-                existing_repo = repo_slug_from_url(url)
-                if existing_repo is None:
-                    # A stale ref can carry pr_number with no parseable
-                    # pr_url (e.g. a pre-repo-scoping stamp). our_repo IS
-                    # known here, so silently treating this as "no conflict"
-                    # is the same silent-wrong-close the definite-mismatch
-                    # branch below refuses - fail closed instead.
-                    return ClosureBindResult(
-                        outcome="refused",
-                        claimed_ids=claimed_ids,
-                        refusal=(
-                            f"{nid} already carries a PR #{_num} ref with no "
-                            "resolvable repo; this PR is "
-                            f"{our_repo} - refusing an unverifiable cross-repo claim"
-                        ),
-                    )
-                if existing_repo.lower() != our_repo.lower():
-                    return ClosureBindResult(
-                        outcome="refused",
-                        claimed_ids=claimed_ids,
-                        refusal=(
-                            f"{nid} already carries a {existing_repo} PR ref; "
-                            f"this PR is {our_repo} - refusing a cross-repo claim"
-                        ),
-                    )
-        elif existing_refs:
-            # our_repo is unresolvable (no --repo, no parseable pr_url), so the
-            # cross-repo check above cannot run at all. A node with NO existing
-            # ref is still safe to accept (nothing to collide with); a node
-            # that already carries a ref is not - binding blind here is the
-            # exact silent-wrong-close this function otherwise refuses. Fail
-            # closed instead of skipping the check.
-            return ClosureBindResult(
-                outcome="refused",
-                claimed_ids=claimed_ids,
-                refusal=(
-                    f"{nid} already carries a PR ref and this PR's repo is "
-                    "unresolvable - refusing an unscoped claim"
-                ),
-            )
-        nodes[nid] = node
-
-    bindings: list[ClosureBinding] = []
-    for nid in claimed_ids:
-        node = nodes[nid]
-        refs = node_pr_refs(node)
-        if any(num == pr_number for num, _ in refs):
-            bindings.append(ClosureBinding(nid, "already_bound"))
-            continue
-        if not node_is_open(node):
-            bindings.append(ClosureBinding(nid, "already_done"))
-            continue
-        if not isinstance(node.get("pr_number"), int):
-            node["pr_number"] = pr_number
-            node["pr_url"] = pr_url
-            bindings.append(ClosureBinding(nid, "filled_primary"))
-        else:
-            existing_list = list(node.get("additional_prs") or [])
-            existing_list.append({"number": pr_number, "url": pr_url})
-            node["additional_prs"] = existing_list
-            bindings.append(ClosureBinding(nid, "appended_additional"))
-
-    return ClosureBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
+    result = bind_pr_rows(
+        entries,
+        claimed_ids,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        repo=repo,
+        owner=owner,
+    )
+    return ClosureBindResult(
+        outcome=result.outcome,
+        claimed_ids=result.claimed_ids,
+        bindings=[ClosureBinding(b.node_id, b.action) for b in result.bindings],
+        refusal=result.refusal,
+    )
 
 
 def bind_created_pr(
@@ -455,9 +383,7 @@ def bind_created_pr(
     URL must carry both a repository and PR number. Repeating the same
     observation is idempotent.
     """
-    from fno.graph._intake import _find_node
     from fno.graph._reconcile import (
-        node_is_open,
         pr_number_from_url,
         repo_slug_from_url,
     )
@@ -492,15 +418,11 @@ def bind_created_pr(
         pr_number=pr_number,
         pr_url=pr_url,
         repo=repo,
+        owner=owner,
     )
     if result.outcome != "bound":
         return result
 
-    node = _find_node(entries, matched[0])
-    clean_owner = owner.strip() if isinstance(owner, str) else ""
-    if node is not None and clean_owner and node_is_open(node):
-        node["locked_by"] = clean_owner
-        node["session_id"] = clean_owner
     return result
 
 
