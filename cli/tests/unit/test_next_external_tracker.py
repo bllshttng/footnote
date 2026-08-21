@@ -278,3 +278,59 @@ def test_next_claim_uses_the_claims_subsystem_not_the_graph(
     # No claim pointer in the sidecar.
     sc = json.loads((Path(str(claims_root)).parent / "sidecars" / "EXT-hi.json").read_text())
     assert "locked_by" not in sc
+
+
+# --- x-2fe6 AC10-EDGE: the external node claim must land in the GLOBAL root ---
+
+
+def test_external_claim_lands_where_every_node_reader_looks(tmp_path, monkeypatch):
+    """A `node:` claim written to the cwd-default tree is a lock nobody honors.
+
+    Every reader of a `node:` key resolves the global root through
+    `claims_root_for` (`_read_node_claim` documents the trap in as many words:
+    a bare `claim_status(key)` reads the wrong tree as free). The external arm
+    of `backlog next --claim` was the one `node:` site that passed no `root=`,
+    so its lock landed under the cwd-default root and the node still read
+    `free` to the dispatch guard.
+
+    The two roots are pinned APART here on purpose. Every other test in this
+    file sets `FNO_CLAIMS_ROOT`, which `claims_dir()` and `global_claims_root()`
+    both honor, so they collapse to one directory and the bug is invisible.
+    """
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_dir, claims_root_for, global_claims_root
+
+    rows = _rows_basic()
+    _wire(monkeypatch, tmp_path, rows, {
+        "EXT-hi": {"plan_path": "/plans/hi.md"},
+        "EXT-lo": {"plan_path": "/plans/lo.md"},
+    })
+    # Split the roots: global from $HOME, cwd-default from the canonical repo.
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir(exist_ok=True)
+    repo.mkdir(exist_ok=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("fno.paths.resolve_canonical_repo_root", lambda: repo)
+    assert global_claims_root() != claims_dir().parent, "roots must differ"
+
+    r = runner.invoke(
+        app, ["backlog", "next", "--claim", "sess-ext-root"],
+        catch_exceptions=False,
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "EXT-hi"
+
+    key = "node:EXT-hi"
+    # The positive marker: the reader that every dispatch surface uses finds
+    # the claim live, and names the same holder the acquire was given.
+    info = claim_status(key, root=claims_root_for(key))
+    assert info["state"] == "live", info
+    assert info["holder"] == "sess-ext-root"
+    # And it is the same lockfile the acquire wrote, not a second one.
+    globals_ = list(claims_dir(global_claims_root()).rglob("*EXT-hi*"))
+    assert globals_, f"no lock under the global root {global_claims_root()}"
+    assert not list(claims_dir().rglob("*EXT-hi*")), (
+        "the claim landed in the cwd-default tree, where no node reader looks"
+    )

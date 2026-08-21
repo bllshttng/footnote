@@ -4154,11 +4154,19 @@ def cmd_next(
             # through to the next ranked candidate rather than failing the
             # whole selection.
             from fno.claims.core import ClaimHeldByOther, acquire_claim
+            from fno.claims.io import claims_root_for
 
             candidates = _pick_ready(pre_entries)
             for winner in candidates:
+                key = f"node:{winner['id']}"
+                # ROUTE the root. A bare acquire lands in the cwd-default tree,
+                # while every reader of a `node:` key resolves the global root
+                # through `claims_root_for` - so the lock was written where
+                # nobody looks and the node still read `free` to the dispatch
+                # guard. `_read_node_claim` names the same trap from the other
+                # side. This is the one `node:` site that did not route.
                 try:
-                    acquire_claim(f"node:{winner['id']}", claim)
+                    acquire_claim(key, claim, root=claims_root_for(key))
                 except ClaimHeldByOther:
                     continue
                 result[0] = _node_summary(winner)
