@@ -236,7 +236,7 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-review-invocation-single-source.sh
 
-      # From the AGENTS.md reachable-paths pitfall graduation (x-5ff6).
+      # Graduated from the AGENTS.md reachable-paths pitfall entry.
       - name: Reachable-paths lint + self-test
         if: ${{ !cancelled() }}
         timeout-minutes: 5

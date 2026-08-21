@@ -87,21 +87,21 @@ REGISTRY = [
         "glob": "cli/src/fno/agents/harnesses/*.py",
         "site": r"dict\(os\.environ\)",
         "required": r"scrub_ambient_identity",
-        "why": "every child-env build on a spawn path scrubs ambient identity (x-b57a)",
+        "why": "every child-env build on a spawn path scrubs ambient identity; the unscrubbed codex env build is the known offender",
     },
     {
         "name": "status-derivation-helper",
         "glob": "cli/src/fno/graph/*.py",
         "site": r"def _(?:effective_)?status",
         "required": r"_apply_readiness_overlay|read_graph|load_graph",
-        "why": "a status helper returning the stored field skips the read-time blocked derivation (x-d2c1)",
+        "why": "a status helper returning the stored field skips the read-time blocked derivation",
     },
     {
         "name": "provider-resolution",
         "glob": "cli/src/fno/agents/spawn_gate.py",
         "site": r"row\.provider",
         "required": r"resolve_provider|provider_for",
-        "why": "a raw provider read bypasses the resolver; the resolver lands with x-f273",
+        "why": "a raw provider read bypasses the resolver; the resolver does not exist yet",
     },
 ]
 
@@ -296,7 +296,8 @@ def main():
     for n in sorted(b_stale):
         findings.append(f"B stale baseline entry (duplication gone): {n[:100]}")
     for o in sorted(r_new):
-        findings.append(f"R offender {o} - site matches, enclosing function lacks the required reference")
+        why = next((e["why"] for e in REGISTRY if o.startswith(e["name"] + ":")), "")
+        findings.append(f"R offender {o} - site matches, enclosing function lacks the required reference ({why})")
     for o in sorted(r_stale):
         findings.append(f"R stale baseline entry (offender fixed or moved): {o}")
     for name in vacuous:
