@@ -147,7 +147,7 @@ def test_supersede_repaints_both_nodes(tmp_graph, tmp_path):
     _seed(tmp_graph, [old, new])
 
     res = runner.invoke(
-        app, ["backlog", "supersede", "x-0ec0", "--replaces", "x-01d0", "--reason", "dup"]
+        app, ["backlog", "supersede", "x-0ec0", "--replaces", "x-01d0", "--cause", "dup", "--surface", "x.py"]
     )
     assert res.exit_code == 0, res.output
     # The new node's doc mirrors its graph priority.

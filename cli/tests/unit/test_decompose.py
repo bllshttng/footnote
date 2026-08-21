@@ -2824,7 +2824,7 @@ def test_supersede_releases_its_contained_children(graph_env, monkeypatch):
     _seed_children(g, _node("ab-new00001", status="ready"))
     assert _invoke(
         ["backlog", "supersede", "ab-new00001", "--replaces", unit,
-         "--reason", "regrouped"]
+         "--cause", "regrouped", "--surface", "x.py"]
     ).exit_code == 0
 
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
@@ -3024,7 +3024,7 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
     unit = _child(read_entries(), "one")["id"]
     assert _invoke([
         "backlog", "supersede", "ab-new00001", "--replaces", unit,
-        "--reason", "reshaped",
+        "--cause", "reshaped", "--surface", "x.py",
     ]).exit_code == 0
 
     result = _decompose(ADOPT_ONE)
@@ -3089,7 +3089,7 @@ def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
     unit = _child(read_entries(), "one")["id"]
     assert _invoke([
         "backlog", "supersede", "ab-new00001", "--replaces", unit,
-        "--reason", "reshaped",
+        "--cause", "reshaped", "--surface", "x.py",
     ]).exit_code == 0
 
     # Model what `_apply_completion_fields` does on close: stamp completed_at

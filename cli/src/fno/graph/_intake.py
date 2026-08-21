@@ -279,11 +279,18 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     created_at = epic.get("created_at")
     if created_at is not None and not isinstance(created_at, str):
         return None
-    if (
-        (isinstance(status, str) and status in _TERMINAL_EPIC_STATUSES)
-        or _has_terminal_marker(epic, "completed_at")
+    # ``recompute_statuses`` may derive ``status: done`` from all direct
+    # children without stamping the container's own completed_at. Keep that
+    # legacy board overlay visible for this derived shape; explicit terminal
+    # markers still make the epic terminal.
+    explicitly_terminal = (
+        _has_terminal_marker(epic, "completed_at")
         or _has_terminal_marker(epic, "superseded_by")
         or _has_terminal_marker(epic, "deferred_at")
+    )
+    if explicitly_terminal or (
+        isinstance(status, str)
+        and status in _TERMINAL_EPIC_STATUSES - {"done"}
     ):
         return None
     return epic
