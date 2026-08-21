@@ -786,7 +786,13 @@ def test_a_one_shot_releases_the_reservation_in_seconds_not_at_ttl(
     started = time.monotonic()
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--once",
+        # codex, NOT claude. Real `dispatch_spawn` refuses claude + --once
+        # without --substrate headless (`provider == "claude" and once and not
+        # headless` -> exit 2), so a claude spawn here would take the
+        # pre-existing `not spawn_succeeded` arm and prove nothing about the
+        # one-shot split. The stub hid that. codex + --once is a path a caller
+        # can actually reach.
+        ["spawn", "--name", "w1", "hi", "--harness", "codex", "--once",
          "--node", "x-abcd"],
     )
     elapsed = time.monotonic() - started
@@ -795,9 +801,9 @@ def test_a_one_shot_releases_the_reservation_in_seconds_not_at_ttl(
     assert claim_status("node:x-abcd", root=tmp_path)["state"] == "free"
     # Free because it was RELEASED, not because it expired. The reservation
     # carries a 3m TTL and the handover claim 15m, so a run this short cannot
-    # have reached either. The bound is generous on purpose: it only has to be
-    # under the shorter TTL to rule expiry out, and CLI startup dominates it.
-    assert elapsed < 60
+    # have reached either. The bound only has to sit under the SHORTER TTL to
+    # rule expiry out, and it is generous because CLI startup dominates it.
+    assert elapsed < 60, "ran long enough that expiry is no longer excluded"
 
 
 def test_a_headless_substrate_releases_the_reservation(monkeypatch, tmp_path):

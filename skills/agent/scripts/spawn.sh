@@ -202,9 +202,9 @@ if [[ -n "$NODE" ]]; then
           printf 'result=self-handoff name=%s reason="you already hold node:%s (%s); /agent cannot reassign it from here. Hand off via /target self-handoff (archives state, emits the delegated event, releases the claim atomically), or run '"'"'fno backlog unclaim %s'"'"' then re-dispatch."\n' "$NAME" "$NODE" "$holder" "$NODE"
         elif [[ "$reason" == "unproven-claim" ]]; then
           # Report what was MEASURED. A held claim proves a holder, never a
-          # worker: `fno backlog next --claim <h> --external` and a hand
-          # `fno claim acquire` both write this key with nobody behind it, and
-          # a launch window is a worker that may still never boot.
+          # worker: a hand `fno claim acquire` writes this key with nobody
+          # behind it, and a launch window is a worker that can die before it
+          # boots.
           printf 'result=already-running name=%s reason="node:%s is held by %s but no target init took that claim; no worker has reached target init"\n' "$NAME" "$NODE" "$holder"
         else
           printf 'result=already-running name=%s reason="live worker holds node:%s (%s)"\n' "$NAME" "$NODE" "$holder"

@@ -201,19 +201,21 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
     """True when a `fno target init` PROVABLY took this node claim.
 
     A live `node:<id>` claim proves a HOLDER exists. It does not prove a WORKER
-    exists: `fno backlog next --claim <holder> --external` acquires the key
-    directly with no worker anywhere, and a hand `fno claim acquire` does the
-    same. Reporting either as a live worker tells a king the opposite of the
-    truth at the moment the king decides whether to staff the node.
+    exists: a `spawn-handover:` claim covers a launch window whose worker can
+    die before it boots, and a hand `fno claim acquire` from a live process
+    takes the key with nothing launched at all. Reporting either as a live
+    worker tells a king the opposite of the truth at the moment the king
+    decides whether to staff the node.
 
-    Two POSITIVE markers, either of which only `fno target init` produces. This
-    never reads an absence as a yes:
+    Two markers, both POSITIVE. This never reads an absence as a yes:
 
     1. The holder shape. Init acquires under `target-session:<id>`
-       (``hooks/helpers/init-target-state.sh``), the sole writer of that prefix.
-       A `spawn-handover:` holder is a launch window whose worker may never
-       boot, which is exactly the "starting versus never started" case a reader
-       could not tell apart before.
+       (``hooks/helpers/init-target-state.sh``). This is a CONVENTION, not
+       proof: `fno claim acquire --holder target-session:anything` writes the
+       same prefix, and a hand acquire is one of the cases this function exists
+       to exclude. It is kept because it is the only marker that reaches a
+       worker running in its own worktree, whose manifest this process cannot
+       see. Marker 2 is the non-forgeable one.
     2. A manifest under CWD binding `target_claim_key: node:<id>` AND naming
        the OBSERVED holder in `target_claim_holder`. The stronger fact, and
        never the only one: a worktree worker's manifest lives under its own
@@ -1840,8 +1842,11 @@ def cmd_spawn(
     # TTL with nothing launched. Taking the reservation after the launch is
     # proven is one placement; a release bolted onto each exit is a guard on
     # one of N paths, and the next exit added to that stretch leaks again.
-    # Below this point the only exit is `run_gate`, whose `except
-    # BaseException` releases both keys.
+    # Below this point the next exit is `run_gate`, whose `except BaseException`
+    # releases both keys. Not the ONLY one: the TARGET_NO_MERGE set-or-clear
+    # block sits between a successful `run_gate` and the `try` whose `finally`
+    # releases, so an exception there still leaks both. Narrow, and named rather
+    # than papered over.
     node_reservation: tuple[str, str] | None = None
     node_claim: tuple[str, str] | None = None
     if node is not None:
@@ -1870,14 +1875,23 @@ def cmd_spawn(
             handover_holder=handover_holder,
         )
         if guard.get("verdict") != "dispatchable":
+            # `reason` FIRST, and detail as its own field. Both shell consumers
+            # read this line with `sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q'`,
+            # so whatever lands in `reason=` is the machine token they switch
+            # on. `detail` is a prose sentence, and the acquire-race return sets
+            # BOTH - so leading with detail put `node:<id>` in the slot, matched
+            # no case arm in either consumer, and dropped a benign refusal into
+            # the generic failure handler. Detail is still printed, just not in
+            # the slot something parses.
             guard_reason = (
-                guard.get("detail") or guard.get("reason") or guard.get("verdict") or "unknown"
+                guard.get("reason") or guard.get("verdict") or "unknown"
             )
             prior = f" prior_holder={guard['holder']}" if guard.get("holder") else ""
+            detail = f" detail={guard['detail']!r}" if guard.get("detail") else ""
             print(
                 f"node dispatch refused: node={guarded_node} "
                 f"verdict={guard.get('verdict')} reason={guard_reason}{prior}; "
-                "no worker launched",
+                f"no worker launched{detail}",
                 file=sys.stderr,
             )
             # This is the launch path, so a remedy here HAS earned itself:
@@ -2355,8 +2369,8 @@ def cmd_spawn_guard(
     - already-running a live ``node:<id>`` claim with a target init behind it
                       (reason=live-claim, holder=<owner>), a held claim with NO
                       target init behind it (reason=unproven-claim: a launch
-                      window, an external ``backlog next --claim``, or a hand
-                      ``claim acquire`` - a holder exists, a worker is unproven),
+                      window, or a hand ``claim acquire`` - a holder exists and
+                      a worker is unproven),
                       a suspect claim (reason=suspect-claim: TTL-unexpired dead pid,
                       a respawned worker - the caller maps this to skipped-contested,
                       x-ba4b), OR a racing dispatcher already holds ``dispatch:<id>``
@@ -2386,7 +2400,16 @@ def cmd_spawn_guard(
         for key, value in obj.items():
             if key == "verdict":
                 continue
-            parts.append(f'{key}="{value}"' if key == "detail" else f"{key}={value}")
+            # Booleans render lowercase, matching the --json lane. Python's
+            # str(True) is "True", and this text line is parsed with sed by
+            # shell callers, so a capitalised token would be a second spelling
+            # of the same fact for anything that learns to read it.
+            if key == "detail":
+                parts.append(f'{key}="{value}"')
+            elif isinstance(value, bool):
+                parts.append(f"{key}={'true' if value else 'false'}")
+            else:
+                parts.append(f"{key}={value}")
         line = " ".join(parts)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()

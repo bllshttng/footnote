@@ -142,10 +142,18 @@ no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worke
 # benign skip into a hard failure. That is how unproven-claim shipped covering
 # only the probe path.
 #
-# CEILING, stated rather than implied: this list is written here, not derived
-# from the producer, because the reasons are built in a ternary and no grep
-# reads them reliably. So it catches a reason DROPPED from Python and a reason
-# missing an arm. It does NOT catch a brand-new reason nobody added here.
+# Each consumer is checked on BOTH of its paths, because they are separate code
+# and a reason can reach one and not the other. The post-spawn refusal is a
+# `case` arm; the probe verdict is an if/elif chain. Matching only the `case`
+# passed a reason that was missing from the probe chain, which is the same
+# half-coverage this check exists to catch.
+#
+# CEILING, stated rather than implied. The list is written here, not derived
+# from the producer, because the reasons are built in a ternary that no grep
+# reads reliably. So it catches a reason DROPPED from Python, and a reason
+# mentioned in neither path of a consumer. It does NOT catch a brand-new reason
+# nobody adds to this list, and it does not prove the arm it found does the
+# right thing - the behavioral tests above do that for `unproven-claim`.
 _GUARD_REASONS='live-claim unproven-claim suspect-claim reservation-held duplicate-claim auto-deferred defer-failed'
 _SPAWN_SH_LOCAL="$(dirname "${BASH_SOURCE[0]}")/../scripts/spawn.sh"
 _CLI_PY="$(dirname "${BASH_SOURCE[0]}")/../../../cli/src/fno/agents/cli.py"
@@ -158,10 +166,12 @@ for reason in $_GUARD_REASONS; do
   fi
   for consumer in "$_SPAWN_SH_LOCAL" "$_DISPATCH_SH"; do
     label="$(basename "$consumer")"
-    if grep -qE "^[[:space:]]*[a-z|-]*${reason}[a-z|-]*\)" "$consumer"; then
-      ok "$label has an arm for: $reason" "handled" "handled"
+    # A `case` arm (post-spawn refusal) OR an explicit comparison (probe chain).
+    if grep -qE "^[[:space:]]*[a-z|-]*${reason}[a-z|-]*\)" "$consumer" \
+       || grep -qF "== \"${reason}\"" "$consumer"; then
+      ok "$label handles reason: $reason" "handled" "handled"
     else
-      ok "$label has an arm for: $reason" "UNHANDLED (falls to the failure handler)" "handled"
+      ok "$label handles reason: $reason" "UNHANDLED (falls to the failure handler)" "handled"
     fi
   done
 done
