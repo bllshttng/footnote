@@ -37,6 +37,8 @@ Columns:
 | LAST MESSAGE | Flattened text of the worker's last transcript turn (`[tool_use: name]` markers inline), capped for display; `-` when the probe did not answer. |
 | CWD | Working directory the agent was created in, printed in full. |
 
+The emitter refuses self-contradictory stored fields. If a terminal `status` is behind a fresher transcript event, it becomes `unknown` with `basis: stale-verdict-fresher-event`. If `last_message_at` is newer than `last_event_at`, it becomes `null` with `last_message_at_basis: refused-newer-than-transcript`. When process-start evidence is unavailable, `liveness_origin` is `null`. Otherwise it is `resumed` or `survivor`.
+
 ### Filters
 
 ```bash
@@ -69,11 +71,13 @@ Returns a canonical object suitable for scripts:
       "cwd": "/Users/foo/code/proj",
       "created_at": "2026-05-20T17:00:00Z",
       "last_message_at": "2026-05-20T17:30:12Z",
+      "last_message_at_basis": null,
       "status": "live",
       "live_status": null,
       "observed_model": { "kind": "observed", "model": "glm-5.2", "samples": 300 },
       "pid": 75742,
       "last_reconciled_at": "2026-05-20T17:30:00Z",
+      "liveness_origin": "survivor",
       "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl",
       "mux": null,
       "crown": null,
@@ -172,7 +176,7 @@ fno agents whoami
 
 Answers the one question `list` cannot: *what is MY registered name* — the handle peers use to address you via `fno mail send <name>`. A worker that lost track of its name after a compaction has a native answer instead of grepping `list` for its own session.
 
-It resolves identity from the `FNO_AGENT_SELF` environment variable the spawn path injects into every worker, falling back to a registry row whose recorded session id matches `CLAUDE_CODE_SESSION_ID` when the env is absent. The resolved name is then enriched, best-effort, from the registry row (provider, session id, short id, status, claude's live status) and from the local target session (the held backlog node, when one is bound).
+It resolves identity with a process-tree prover. A proven harness marker wins over inherited markers. If multiple harness families are present and no marker is proven, the command refuses instead of guessing. It exits 4. The refusal names the markers and prints a `find ~/.codex/sessions ~/.claude/projects -name '*<id>*'` lookup. With one marker, behavior remains unchanged. The command then enriches the name from the registry row and the local target session.
 
 ```
 name:        worker-frontend
@@ -189,6 +193,7 @@ Like `list`, it is a pure read (it never mutates the registry, writes state, or 
 |---|---|
 | 0 | A name was resolved (from the env, or the session fallback). |
 | 3 | Not a registered mesh agent — a human shell or top-level session with no injected identity. The JSON shape carries `registered: false`. |
+| 4 | Ambient harness markers disagree and no process-tree proof can choose one. |
 
 If the registry is unreadable but `FNO_AGENT_SELF` is set, the name still comes back (with a `WARN:` line) — the env answer never depends on the registry. This verb reports your *mesh* identity; the top-level `fno whoami` reports operating context (fleet, walker, session, harness) and, when you are a mesh worker, now echoes your name on one extra `agent:` line as a pointer here.
 
