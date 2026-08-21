@@ -7039,6 +7039,8 @@ def _queue_durable_fallback(
         to=mail_ctx.to,
         id=mail_ctx.id,
     )
+    from fno import style as _style
+
     try:
         write_new_thread(
             recipient=durable_recipient,
@@ -7051,6 +7053,9 @@ def _queue_durable_fallback(
             provider_from=provider_from,
             from_session=from_session,
             owner=DurableOwner.WAKE_DAEMON.value,
+            # Count the raw body, not the wire wrapper: Rule 7 and the rolling
+            # budget read the same string, so the row must too.
+            word_count=_style.word_count(message),
         )
     except (OSError, ValueError, RuntimeError) as exc:
         events.emit(
@@ -7512,6 +7517,9 @@ def dispatch_send(
                             to=mail_ctx.to,
                             id=mail_ctx.id,
                         )
+                        from fno import style as _hstyle
+
+                        _hosted_words = _hstyle.word_count(message)
                         try:
                             record_hosted_delivery(
                                 msg_id=msg_id,
@@ -7523,6 +7531,7 @@ def dispatch_send(
                                 from_session=from_session,
                                 from_model=mail_ctx.model,
                                 to_kind="session",
+                                word_count=_hosted_words,
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
@@ -8025,6 +8034,8 @@ def dispatch_send_to_project(
     except Exception:  # noqa: BLE001 - sender identity is best-effort
         pass
 
+    from fno import style as _pstyle
+
     try:
         handle = write_new_thread(
             recipient=project,
@@ -8034,6 +8045,7 @@ def dispatch_send_to_project(
             to_kind="project",
             from_session=from_session,
             provider_from=provider_from,
+            word_count=_pstyle.word_count(message),
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,
