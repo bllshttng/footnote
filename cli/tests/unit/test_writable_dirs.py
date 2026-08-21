@@ -60,6 +60,34 @@ def test_state_root_and_divergent_claims_root_both_granted(
     assert worker_writable_dirs(tmp_path) == [str(configured), str(claims_home)]
 
 
+def test_granted_root_is_an_ancestor_of_the_live_claim_store(tmp_path, monkeypatch):
+    """The grant must reach the directory claims actually uses."""
+    claims_root = tmp_path / "elsewhere"
+    (claims_root / ".fno" / "claims").mkdir(parents=True)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+
+    from fno.claims.io import claims_dir, global_claims_root
+
+    target = claims_dir(global_claims_root()).resolve()
+    granted = [Path(d).resolve() for d in worker_writable_dirs(tmp_path)]
+
+    assert any(target == root or target.is_relative_to(root) for root in granted)
+
+
+def test_granted_root_is_an_ancestor_of_the_live_registry_path(tmp_path, monkeypatch):
+    """The grant must reach the registry module's real write directory."""
+    claims_root = tmp_path / "elsewhere"
+    (claims_root / ".fno" / "claims").mkdir(parents=True)
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(claims_root))
+
+    from fno import paths
+
+    target = paths.agents_registry_path().parent.resolve()
+    granted = [Path(d).resolve() for d in worker_writable_dirs(tmp_path)]
+
+    assert any(target == root or target.is_relative_to(root) for root in granted)
+
+
 def test_plan_dir_is_granted_but_never_the_vault_above_it(
     fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
