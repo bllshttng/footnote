@@ -42,14 +42,9 @@ local command.
 **A send injects into the recipient's live session. The durable queue is what
 happens when that misses, and it is recovery, not delivery.**
 
-`fno mail send` tries a live inject first. On success nothing is written to the
-bus at all: the `<fno_mail>` turn lands in the recipient's session and it acts on
-it this turn. Only when there is no live inject path does the envelope fall to
-the durable `messages.jsonl` log, where it waits on a drain the recipient may
-never run. Both exit 0, so **read the receipt, not the exit code**:
+`fno mail send` tries a live inject first. On success the `<fno_mail>` turn lands in the recipient's session and an audit-only `delivery: hosted` row records it in `messages.jsonl`. Recipient drains ignore that row because delivery already happened. When no live inject confirms, the envelope instead enters the durable queue and waits on a drain the recipient does not reliably run. Both exit 0, so **read the receipt, not the exit code**:
 
-- `msg-<id> delivered (hosted)` - the inject was confirmed into the recipient's
-  session. This is the normal outcome.
+- `msg-<id> delivered (hosted)` - the inject was confirmed into the recipient's session and is visible in the sender's outbox. This is the normal outcome.
 - `msg-<id> queued (durable)` - live delivery was **not confirmed**, so treat it
   as not delivered. Nobody checks their voicemail.
 

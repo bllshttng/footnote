@@ -79,7 +79,7 @@ def test_an_envelope_with_no_recipient_attribute_still_resolves():
 def test_a_job_address_is_not_read_as_a_foreign_session():
     # `to="node:<id>"` names work, not a session, so it carries no evidence
     # either way. Treating it as "addressed elsewhere" drops a live lane that
-    # writes no durable record and has nowhere else to resolve from.
+    # may have no audit record and nowhere else to resolve from.
     text = '<fno_mail from="aaaa1111" to="node:x-1234" id="msg-job"> job'
     assert sender_from_transcript_text(text, "msg-job", session_id=SID) == "aaaa1111"
 
