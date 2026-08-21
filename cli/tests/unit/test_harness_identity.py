@@ -700,3 +700,22 @@ def test_rust_identity_mirror_matches_python_addressing_rule():
         r"legacy_suffix_handle\(session_id\)",
         source,
     ), "Rust tier order must be [full, canonical(first-8), legacy_suffix(last-8)]"
+
+
+def test_strip_flags_keep_fno_plumbing():
+    """The self-rescue strip set is foreign HARNESS families only. TARGET_SESSION_ID
+    is this run's own claim linkage (the resolver never consults it), so a strip
+    line that includes it would tell the operator to break their own run's claim
+    matching while curing nothing."""
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own",
+        "CODEX_THREAD_ID": "foreign",
+        "CODEX_CI": "1",
+        "TARGET_SESSION_ID": "my-run",
+    }
+    flags = ambient_identity_strip_flags("claude", env)
+    assert "CODEX_THREAD_ID" in flags and "CODEX_CI" in flags
+    assert "TARGET_SESSION_ID" not in flags
+    assert "CLAUDE_CODE_SESSION_ID" not in flags

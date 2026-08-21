@@ -47,22 +47,32 @@ def identity_ambiguity_message(identity) -> str:
     for _marker, harness, _value in identity.markers_present:
         if harness not in families:
             families.append(harness)
-    strip_lines = "".join(
-        f"  if this is a {family} session: env {' '.join(ambient_identity_strip_flags(family))}"
-        " <command>\n"
-        for family in families
-        if ambient_identity_strip_flags(family)
+    strip_lines = ""
+    for family in families:
+        flags = ambient_identity_strip_flags(family)
+        if flags:
+            strip_lines += (
+                f"  if this is a {family} session: env {' '.join(flags)}"
+                " <command>\n"
+            )
+    strip_section = (
+        # A single-family ambiguous disposition (a proven harness with two
+        # distinct ids, or a contradicted only marker) has no foreign family
+        # to strip, so the section is omitted entirely rather than printing
+        # the header with no command under it.
+        f"or strip the foreign family's markers and retry:\n{strip_lines}"
+        "keeping your own harness's markers; each harness re-mints "
+        "its own for a child\n"
+        if strip_lines
+        else ""
     )
     return (
         "cannot decide which session is 'self': multiple harness markers present "
         "(inherited env?)\n"
         f"markers: {markers}\n"
         "resolve with: find ~/.codex/sessions ~/.claude/projects -name "
-        f"'*{lookup_id}*'\n"
-        "or strip the foreign family's markers and retry:\n"
-        f"{strip_lines}keeping your own harness's markers; each harness re-mints "
-        "its own for a child"
-    )
+        f"'*{lookup_id}*'\n" + strip_section
+    ).rstrip("\n")
 
 
 def require_self_identity(env: Optional[Mapping[str, str]] = None):

@@ -289,3 +289,24 @@ def test_model_floors_unknown_when_transcript_absent(tmp_path, monkeypatch):
         "deadbeef-0000-0000-0000-000000000000",
     )
     assert self_stamp.resolve_self_model() == "unknown"
+
+
+def test_ambiguity_message_omits_strip_section_when_no_foreign_family(monkeypatch):
+    """A single-family ambiguous disposition (a proven harness carrying two
+    distinct ids, or a contradicted only marker) has no foreign family to
+    strip: the refusal must end at the resolve-with line, not print the
+    'or strip ... and retry:' header over an empty command."""
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV, OwnedHarnessIdentity
+
+    for name in AMBIENT_IDENTITY_ENV:
+        monkeypatch.delenv(name, raising=False)
+    identity = OwnedHarnessIdentity(
+        None,
+        None,
+        (("CODEX_THREAD_ID", "codex", "aaa"), ("CODEX_SESSION_ID", "codex", "bbb")),
+        "ambiguous",
+    )
+    message = self_stamp.identity_ambiguity_message(identity)
+    assert "or strip" not in message
+    assert "keeping your own harness's markers" not in message
+    assert message.rstrip("\n").endswith("'*aaa*'")

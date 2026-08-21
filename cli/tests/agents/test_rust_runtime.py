@@ -7,6 +7,7 @@ the test process is never replaced.
 """
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -979,3 +980,51 @@ def test_the_account_picker_leaves_a_cutover_spawn_alone(monkeypatch) -> None:
     )
     args = ["spawn", "w", "--harness", "claude", "--dispatch-account", "ccr"]
     assert rr._pick_account_at_seam(args) == args
+
+
+def test_exec_lane_scrubs_ambient_identity_before_rust_spawn(monkeypatch, tmp_path) -> None:
+    """A --substrate bg spawn execs the Rust client, which launches the worker
+    from its own inherited env; the Python identity floor never runs on that
+    lane. The scrub at the exec seam is what closes it: the client (and the
+    worker it spawns) must not inherit the parent's identity markers."""
+    from fno.cli import app
+
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
+    seen: dict = {}
+
+    def fake_route(args, **kw):
+        seen["markers"] = {
+            name: os.environ.get(name)
+            for name in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_CI")
+        }
+        seen["path"] = os.environ.get("PATH")
+        raise SystemExit(99)
+
+    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setenv("CODEX_THREAD_ID", "parent-thread")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-claude")
+    monkeypatch.setenv("CODEX_CI", "1")
+
+    result = CliRunner().invoke(
+        app,
+        ["agents", "spawn", "--name", "worker", "--harness", "codex", "--substrate", "bg"],
+    )
+    assert result.exit_code == 99
+    assert seen["markers"] == {
+        "CODEX_THREAD_ID": None,
+        "CLAUDE_CODE_SESSION_ID": None,
+        "CODEX_CI": None,
+    }, "identity markers must be scrubbed from the exec'd client's env"
+    assert seen["path"], "the scrub must not touch non-identity env"
+
+
+def test_identity_scrub_at_exec_is_worker_verbs_only(monkeypatch) -> None:
+    """Read verbs still see the ambient markers (the Rust client resolves
+    identity for them); only worker-launching verbs scrub."""
+    monkeypatch.setenv("CODEX_THREAD_ID", "live-thread")
+    rr._scrub_ambient_identity_at_exec("list")
+    assert os.environ["CODEX_THREAD_ID"] == "live-thread"
+    rr._scrub_ambient_identity_at_exec("spawn")
+    assert "CODEX_THREAD_ID" not in os.environ

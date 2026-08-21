@@ -737,6 +737,32 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     os.environ.update(overlay.env)
 
 
+#: Verbs whose Rust-client handling launches a harness child that would inherit
+#: the exec'd client's env verbatim. ``worker_environment`` scrubs identity for
+#: every Python adapter seam, but a spawn/ask that execs the binary crosses no
+#: Python seam, and the Rust spawn arms only scrub model vars
+#: (model_env_scrub), so without this the identity floor is one of two
+#: reachable implementations - decorative for the default installed-binary
+#: route. Direct ``fno-agents`` invocations still need the Rust-side twin.
+_WORKER_LAUNCHING_VERBS = frozenset({"spawn", "ask"})
+
+
+def _scrub_ambient_identity_at_exec(verb: str) -> None:
+    """Drop ambient identity markers from ``os.environ`` right before the exec,
+    so the Rust client (and the worker it launches) cannot inherit them.
+
+    Only the exec branches call this: the process is replaced immediately, so
+    the mutation never reaches a Python code path (parent-edge capture in
+    ``cmd_spawn`` still sees the markers on the fall-through route). Scoped to
+    worker-launching verbs because the client itself resolves identity for
+    other verbs and must keep seeing the ambient markers."""
+    if verb not in _WORKER_LAUNCHING_VERBS:
+        return
+    from fno.harness_identity import scrub_ambient_identity
+
+    scrub_ambient_identity()
+
+
 def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     """Exit 2 rather than launch a worker whose model alias the ambient env
     redefines. Runs at the routing seam, BEFORE the Rust/Python fork, so this
@@ -1108,6 +1134,7 @@ def make_agents_group_cls() -> type:
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
+                    _scrub_ambient_identity_at_exec(verb)
                     route_to_rust(list(args))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
@@ -1118,6 +1145,7 @@ def make_agents_group_cls() -> type:
                     binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
+                        _scrub_ambient_identity_at_exec(verb)
                         route_to_rust(list(args), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.

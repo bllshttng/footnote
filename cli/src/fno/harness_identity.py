@@ -150,18 +150,22 @@ def ambient_identity_strip_flags(
     keep_family: str, env: Optional[Mapping[str, str]] = None
 ) -> list[str]:
     """``env -u`` flag pairs for identity names PRESENT in ``env`` that belong
-    to a family OTHER than ``keep_family``.
+    to a foreign HARNESS family (every family except ``keep_family`` and fno
+    plumbing).
 
     The one-line self-rescue for a poisoned session: it cannot prove which
     harness it is (that is the ambiguity), but the operator reading the
     refusal knows, and stripping the foreign family restores self-resolution
     while keeping the session's own markers. Names not in
-    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here.
+    :data:`AMBIENT_IDENTITY_FAMILY` are never stripped here. The ``fno``
+    family is kept too: TARGET_SESSION_ID is this run's own claim linkage
+    (the resolver never consults it, so stripping it cannot cure the
+    ambiguity) and dropping it would mis-key the retried command's claims.
     """
     environ = os.environ if env is None else env
     flags: list[str] = []
     for name in AMBIENT_IDENTITY_ENV:
-        if AMBIENT_IDENTITY_FAMILY.get(name) == keep_family:
+        if AMBIENT_IDENTITY_FAMILY.get(name) in (keep_family, "fno"):
             continue
         if (environ.get(name) or "").strip():
             flags += ["-u", name]
