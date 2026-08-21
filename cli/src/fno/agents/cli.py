@@ -259,7 +259,7 @@ def _spawn_guard_decision(
     no_reserve: bool = False,
     cwd: str | None = None,
     handover_holder: str | None = None,
-) -> tuple[dict[str, str], int]:
+) -> tuple[dict[str, object], int]:
     """Return the shared family-2 pre-birth verdict without rendering it.
 
     ``handover_holder``, when given, also takes the ``node:<id>`` claim under
@@ -522,7 +522,7 @@ def _spawn_guard_decision(
             "reason": "duplicate-claim",
             "holder": post.get("holder") or "unknown",
         }, 0
-    out = {
+    out: dict[str, object] = {
         "verdict": "dispatchable",
         "reservation_key": res_key,
         "reservation_holder": holder,
@@ -1887,20 +1887,26 @@ def cmd_spawn(
             if guard.get("remedy"):
                 print(guard["remedy"], file=sys.stderr)
             raise typer.Exit(code=guard_exit or 2)
+        # str() at the boundary: the verdict dict carries a bool
+        # (`init_reached`) beside its strings, so these keys are typed `object`
+        # coming out and the claim keys are strings going in.
         node_reservation = (
-            guard["reservation_key"],
-            guard["reservation_holder"],
+            str(guard["reservation_key"]),
+            str(guard["reservation_holder"]),
         )
         if guard.get("node_claim_key"):
             # Released on the SAME two failure paths as the reservation. A
             # launch that dies after the claim must not strand the node for the
             # whole handover window; that is the wedge this PR exists to delete,
             # reintroduced by its own fix.
-            node_claim = (guard["node_claim_key"], guard["node_claim_holder"])
+            node_claim = (
+                str(guard["node_claim_key"]),
+                str(guard["node_claim_holder"]),
+            )
             # The worker proves it is the intended successor by naming this
             # holder back. It travels in the environment, never on the command
             # line, so it reaches exactly the process spawned for this node.
-            prov_env["FNO_NODE_CLAIM_HOLDER"] = guard["node_claim_holder"]
+            prov_env["FNO_NODE_CLAIM_HOLDER"] = str(guard["node_claim_holder"])
         elif guard.get("node_claim_error"):
             print(
                 f"note: node:{guarded_node} claim not taken at dispatch "
