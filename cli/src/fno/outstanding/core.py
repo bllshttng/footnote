@@ -126,6 +126,10 @@ class Outstanding:
     capture_row_total: int = 0
     lane: "list[LaneItem]" = field(default_factory=list)
     lane_parked: int = 0
+    #: The one project-scoped leg names its root; the machine-wide legs name
+    #: their stores, so a zero in any stream is diagnosable instead of
+    #: silently meaning either "clean" or "read from the wrong place".
+    carveout_root: Optional[str] = None
 
     @property
     def empty(self) -> bool:
@@ -140,7 +144,18 @@ class Outstanding:
         by_project: "dict[str, int]" = {}
         for c in self.captures:
             by_project[c.project] = by_project.get(c.project, 0) + 1
+        from fno import paths
+
         return {
+            "roots": {
+                "carveouts": {"scope": "project", "root": self.carveout_root},
+                "questions": {"scope": "machine", "store": str(questions_path())},
+                "captures": {
+                    "scope": "machine",
+                    "files_read": self.capture_file_total,
+                },
+                "lane": {"scope": "machine", "store": str(paths.operator_lane())},
+            },
             "carveouts": {
                 "total": self.carveout_total,
                 "by_kind": dict(self.carveout_by_kind),
@@ -701,6 +716,7 @@ def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:
         capture_row_total=capture_row_total,
         lane=open_items(lane_read),
         lane_parked=len(parked_items(lane_read)),
+        carveout_root=str(Path(root)),
     )
 
 
@@ -764,6 +780,8 @@ def render(
             f"{n} {kind}" for kind, n in sorted(outstanding.carveout_by_kind.items())
         )
         head = f"{_plural(outstanding.carveout_total, 'carve-out')} unharvested"
+        if outstanding.carveout_root:
+            head += f" from {outstanding.carveout_root}"
         if split:
             head += f" ({split})"
         if outstanding.carveout_oldest_ts:

@@ -1719,3 +1719,74 @@ def test_clear_with_answer_names_an_undeliverable_posture(
     assert "no stored session" in cleared.output
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == [], "an undeliverable answer still closes the question"
+
+
+# --- named roots: every stream states where it read (BREAK 3) ----------------
+
+
+def test_payload_names_the_root_each_stream_read(root: Path):
+    """AC2: a zero has two explanations - clean and misdirected. Name the root."""
+    _write_carveouts(root, [_carveout("cv-1", "oos-bug")])
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+
+    roots = payload["roots"]
+    assert roots["carveouts"]["scope"] == "project"
+    assert roots["carveouts"]["root"] == str(root)
+    assert roots["questions"]["scope"] == "machine"
+    assert roots["captures"]["scope"] == "machine"
+    assert roots["lane"]["scope"] == "machine"
+
+
+def test_two_roots_yield_two_stated_carveout_roots(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The same verb run from a different directory answers about a different
+    carveout ledger; the payload must say which, so a zero can be diagnosed."""
+    _write_carveouts(root, [_carveout("cv-1", "oos-bug")])
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.setenv("FNO_REPO_ROOT", str(other))
+
+    payload = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+
+    assert payload["carveouts"]["total"] == 0
+    assert payload["roots"]["carveouts"]["root"] == str(other)
+
+
+def test_render_names_the_carveout_root_it_read(root: Path):
+    _write_carveouts(root, [_carveout("cv-1", "oos-bug")])
+    out = runner.invoke(outstanding_app, []).stdout
+    assert str(root) in out
+
+
+# --- BREAK 4 read-side pin: render paths never slice --------------------------
+
+
+def test_a_long_question_renders_whole_never_sliced(root: Path):
+    """The write side caps at QUESTION_CAP; the read side must not cut too.
+
+    A king escalation cut mid-node-id read as 'nothing is clearing: stalled',
+    which is a different sentence about a different board. The full id list
+    must survive the render.
+    """
+    ids = "stalled_holder:x-5c59, " * 30
+    long_q = f"nothing is clearing: {ids}decide"
+    runner.invoke(outstanding_app, ["ask", long_q])
+
+    out = runner.invoke(outstanding_app, []).stdout
+
+    assert ids.strip() in out, "the whole id list must be on screen; wrap, never truncate"
+
+
+def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
+    from fno.events import QUESTION_CAP
+
+    long_answer = "a" * (QUESTION_CAP + 50)
+    asked = runner.invoke(outstanding_app, ["ask", "short question?"])
+    qid = asked.stdout.strip().splitlines()[-1]
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", long_answer])
+
+    assert "recorded truncated" in cleared.output
+    assert str(QUESTION_CAP) in cleared.output

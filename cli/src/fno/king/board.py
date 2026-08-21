@@ -109,7 +109,10 @@ class BoardInputs:
     claimed_nodes: SourceRead
     holder_activity: dict[str, dict]
     prs: SourceRead
-    questions: SourceRead
+    #: The WHOLE ``fno inbox outstanding --json`` payload. One read feeds three
+    #: queues (questions, carveouts, captures); keeping a quarter of the
+    #: payload here is how 661 of 665 awaiting-a-human items went invisible.
+    outstanding: SourceRead
     needs: SourceRead
     #: The operator's own ranked lane. A 66-byte file read done in process at
     #: fetch time, never through `_run_json` - there is no verb behind it.
@@ -143,6 +146,7 @@ def _queue(
     *,
     actionable: bool,
     note: str = "",
+    count: "int | None" = None,
 ) -> dict:
     if not read.ok:
         return {
@@ -170,7 +174,10 @@ def _queue(
         "source": source,
         "status": "ok",
         "error": "",
-        "count": len(rows),
+        # Summary queues (per-kind, per-project rows) pass the STREAM total:
+        # a by-kind pair reporting 2 for a 14-row ledger is the misleading
+        # count this board exists to prevent.
+        "count": len(rows) if count is None else count,
         "rows": rows,
         "actionable": actionable,
         "note": note,
@@ -264,10 +271,41 @@ def build_board(
         {"number": r.get("number"), "title": r.get("title")} for r in inputs.prs.rows()
     ]
 
+    # One outstanding read, three streams. A non-dict payload (a verb that
+    # changed shape) degrades to empty streams rather than a crash, mirroring
+    # every other reader here.
+    outstanding_payload = (
+        inputs.outstanding.payload if inputs.outstanding.ok else {}
+    )
+    outstanding_payload = (
+        outstanding_payload if isinstance(outstanding_payload, dict) else {}
+    )
     question_rows = [
         {"id": r.get("id"), "question": r.get("question"), "ts": r.get("ts")}
-        for r in inputs.questions.rows()
+        for r in (outstanding_payload.get("questions") or [])
     ]
+
+    carveout_stream = outstanding_payload.get("carveouts") or {}
+    carveout_rows = [
+        {"kind": kind, "n": n}
+        for kind, n in sorted(carveout_stream.get("by_kind", {}).items())
+    ]
+    carveout_root = ((outstanding_payload.get("roots") or {}).get("carveouts") or {}).get("root")
+
+    capture_stream = outstanding_payload.get("captures") or {}
+    capture_by_project = dict(capture_stream.get("by_project") or {})
+    # Per-project COUNTS, never the rows themselves: a hundreds-row stream
+    # cannot be listed, and the cut is stated as a row so the loop and the
+    # human render both see it.
+    capture_rows = [
+        {"project": project, "n": n}
+        for project, n in sorted(
+            capture_by_project.items(), key=lambda kv: (-kv[1], kv[0])
+        )[:_CAPTURE_PROJECT_CAP]
+    ]
+    elided = len(capture_by_project) - len(capture_rows)
+    if elided > 0:
+        capture_rows.append({"elided_projects": elided})
 
     # `fno agents needs` emits operator questions in the same list. They are the
     # queue above, read from its own verb; counting them here would report one
@@ -325,11 +363,32 @@ def build_board(
         _queue(
             "operator_question",
             SRC_QUESTIONS,
-            inputs.questions,
+            inputs.outstanding,
             question_rows,
             actionable=False,
             note="report-only: a human answers these, so counting them would "
             "hold the loop open forever",
+        ),
+        _queue(
+            "carveout_pending",
+            SRC_QUESTIONS,
+            inputs.outstanding,
+            carveout_rows,
+            actionable=False,
+            note=(
+                "report-only: the sweep is a human verb"
+                + (f"; root {carveout_root}" if carveout_root else "")
+            ),
+            count=int(carveout_stream.get("total") or 0),
+        ),
+        _queue(
+            "capture_pending",
+            SRC_QUESTIONS,
+            inputs.outstanding,
+            capture_rows,
+            actionable=False,
+            note="report-only: per-project counts only; the rows cannot be listed",
+            count=int(capture_stream.get("total") or 0),
         ),
         _queue(
             "unreachable_worker",
@@ -463,12 +522,19 @@ def _read_prs(timeout: int, max_pr_reads: int) -> tuple[SourceRead, list[str]]:
     return SourceRead(payload=ready), warnings
 
 
-def _read_questions(timeout: int) -> SourceRead:
+#: Per-project rows rendered for the capture stream. The count stays whole;
+#: the cut is stated as an elided_projects row so nothing reads as full
+#: coverage.
+_CAPTURE_PROJECT_CAP = 8
+
+
+def _read_outstanding(timeout: int) -> SourceRead:
+    """The whole four-stream payload; one subprocess read feeds three queues."""
     read = _run_json([*_fno(), "inbox", "outstanding", "--json"], timeout=timeout)
     if not read.ok:
         return read
     payload = read.payload if isinstance(read.payload, dict) else {}
-    return SourceRead(payload=payload.get("questions") or [])
+    return SourceRead(payload=payload)
 
 
 def _read_lane() -> SourceRead:
@@ -581,7 +647,7 @@ def collect_inputs(*, timeout: int = 60, max_pr_reads: int = 20) -> BoardInputs:
         claimed_nodes=claimed_nodes,
         holder_activity=_resolve_holder_activity(holders),
         prs=prs,
-        questions=_read_questions(timeout),
+        outstanding=_read_outstanding(timeout),
         needs=_run_json([*_fno(), "agents", "needs", "--json"], timeout=timeout),
         lane=_read_lane(),
         warnings=warnings,
