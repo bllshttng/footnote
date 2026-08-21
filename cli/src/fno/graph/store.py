@@ -1383,6 +1383,67 @@ def remove_open_session_record(
     return result["found"], result["removed"]
 
 
+def reap_open_session_record(
+    path: Path,
+    node_id: str,
+    *,
+    phase: str,
+    harness: str,
+    session_id: str,
+) -> dict:
+    """Remove one exact open observer-owned session row and report settlement.
+
+    Unlike rollback, this operation has positive death evidence from the
+    observer and therefore does not require the row's ``started_at`` value.
+    Closed provenance is immutable, and only an unfinished row with the exact
+    identity can be removed.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph.statuses import is_open_do_row
+
+    if phase != "do":
+        raise ValueError("observer session reap only supports phase 'do'")
+    harness, session_id = _validate_session_identity(phase, harness, session_id)
+    result = {
+        "found": False,
+        "settled": False,
+        "row_removed": False,
+        "status_before": None,
+        "status_after": None,
+        "remaining_open_do": 0,
+    }
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            return entries
+        result["found"] = True
+        result["status_before"] = node.get("status")
+        rows = node.get("sessions") or []
+        keep = [
+            row for row in rows
+            if not (
+                is_open_do_row(row)
+                and (row.get("harness"), row.get("session_id"))
+                == (harness, session_id)
+            )
+        ]
+        result["row_removed"] = len(keep) != len(rows)
+        if result["row_removed"]:
+            node["sessions"] = keep
+        return entries
+
+    updated = locked_mutate_graph(path, mutator)
+    node = _find_node(updated, node_id)
+    if node is None:
+        return result
+    rows = node.get("sessions") or []
+    result["status_after"] = node.get("status")
+    result["remaining_open_do"] = sum(is_open_do_row(row) for row in rows)
+    result["settled"] = True
+    return result
+
+
 def _node_carries_pr(node: dict, pr_number: int) -> bool:
     """True if the node's primary pr_number OR any additional_prs entry == pr_number."""
     if node.get("pr_number") == pr_number:

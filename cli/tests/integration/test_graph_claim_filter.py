@@ -160,12 +160,12 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
     assert len(set(selected)) == max_lanes
 
 
-def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
+def test_rank_uses_stored_status_board_lane(tmp_graph, tmp_path):
     entries = [
         {"id": "ab-claimed1", "title": "Claimed", "status": "ready",
          "priority": "p3", "project": "p"},
         {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
-         "priority": "p1", "project": "p", "rank": 5.0},
+         "priority": "p3", "project": "p", "rank": 5.0},
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
     acquire_claim(
@@ -180,7 +180,7 @@ def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert "Now/p" in result.output
+    assert "Later/p" in result.output
     persisted = {
         entry["id"]: entry
         for entry in json.loads(tmp_graph.read_text())["entries"]
@@ -189,9 +189,7 @@ def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
     assert persisted["ab-claimed1"]["rank"] < persisted["ab-anchor1"]["rank"]
 
 
-def test_rank_refuses_when_live_claim_state_is_unavailable(
-    tmp_graph, monkeypatch
-):
+def test_rank_does_not_need_live_claim_state(tmp_graph):
     entries = [
         {"id": "ab-target01", "title": "Target", "status": "ready",
          "priority": "p3", "project": "p"},
@@ -200,20 +198,16 @@ def test_rank_refuses_when_live_claim_state_is_unavailable(
     ]
     tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
-    def unavailable(*args, **kwargs):
-        raise OSError("claims unavailable")
-
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", unavailable
-    )
-
     result = _invoke(
         "backlog", "rank", "ab-target01", "--before", "ab-anchor01"
     )
 
-    assert result.exit_code == 1
-    assert "live claim state is unavailable" in result.output
-    assert json.loads(tmp_graph.read_text())["entries"] == entries
+    assert result.exit_code == 0, result.output
+    persisted = {
+        entry["id"]: entry
+        for entry in json.loads(tmp_graph.read_text())["entries"]
+    }
+    assert persisted["ab-target01"]["rank"] < persisted["ab-anchor01"]["rank"]
 
 
 def test_released_claim_does_not_block(tmp_graph, tmp_path):

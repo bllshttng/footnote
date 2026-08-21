@@ -1824,6 +1824,18 @@ event_types:
         cascade_refused:
           type: [object, "null"]
           description: "When the post-reap cascade into the harness's own session store refused or failed: {id, reason}. Never swallowed, and never rolls back the registry reap."
+        node_session_cleared:
+          type: boolean
+          description: "True only after the exact open node do-row was positively settled by the observer cascade."
+        node_row_removed:
+          type: [boolean, "null"]
+          description: "Whether the observer cascade removed an open row; false means it was already settled."
+        node_status_before:
+          type: [string, "null"]
+        node_status_after:
+          type: [string, "null"]
+        node_remaining_open_do:
+          type: [integer, "null"]
 
   - name: worktree_sweep
     description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."

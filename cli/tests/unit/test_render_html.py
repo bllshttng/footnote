@@ -583,42 +583,27 @@ def test_render_html_project_local_settings_cannot_shadow_global_vault(
     )
 
 
-def test_html_overlay_live_claim_bucketed_now(monkeypatch):
-    """x-4845: the HTML board's _bucket consults live_claimed_node_ids so a
-    lockfile-held node lands in Now even at p3, without a graph session_id."""
+def test_html_overlay_live_claim_does_not_bucket_now():
+    """AC6: HTML rendering consumes stored status, not claim liveness."""
     from fno.graph.render_html import _bucket
 
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {"x-live"}
-    )
     entries = [_entry("x-live", priority="p3")]
-    cols = _bucket(entries)
-    assert any(e["id"] == "x-live" for e in cols["Now"])
-    assert all(e["id"] != "x-live" for e in cols["Later"])
+    cols = _bucket(entries, live_claimed=frozenset({"x-live"}))
+    assert all(e["id"] != "x-live" for e in cols["Now"])
+    assert any(e["id"] == "x-live" for e in cols["Later"])
 
 
-def test_html_render_binds_one_live_claim_snapshot(tmp_path, monkeypatch):
-    calls = 0
-
-    def claims(**_kwargs):
-        nonlocal calls
-        calls += 1
-        return {"x-live"} if calls == 1 else set()
-
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", claims)
+def test_html_render_does_not_read_live_claim_snapshot(tmp_path):
     entries = [_entry("x-live", priority="p3", project="web")]
 
     render_graph_html(entries, tmp_path / "graph.html")
 
-    assert calls == 1
+    assert "x-live" in (tmp_path / "graph.html").read_text()
 
 
-def test_html_live_epic_priority_promotes_child_to_now(monkeypatch):
+def test_html_live_epic_priority_promotes_child_to_now():
     from fno.graph.render_html import _bucket
 
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
-    )
     epic = _entry("epic", type="epic", priority="p1")
     child = _entry("child", parent="epic", priority="p2")
     cols = _bucket([epic, child])
@@ -626,11 +611,8 @@ def test_html_live_epic_priority_promotes_child_to_now(monkeypatch):
     assert all(e["id"] != "child" for e in cols["Next"])
 
 
-def test_html_overlay_degrades_on_empty_claims(tmp_path: Path, monkeypatch):
-    """Claims unreadable -> empty overlay, HTML render still succeeds."""
-    monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
-    )
+def test_html_render_does_not_need_claims_for_status_placement(tmp_path: Path):
+    """HTML rendering succeeds from stored status without claim reads."""
     entries = [_entry("x-none", priority="p2")]
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
