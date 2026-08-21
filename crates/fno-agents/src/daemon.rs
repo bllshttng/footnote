@@ -4703,11 +4703,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         row.get("status").and_then(Value::as_str),
         Some("orphaned" | "exited")
     );
-    if terminal
-        && event_at.is_some()
-        && reconciled_at.is_some()
-        && event_at > reconciled_at
-    {
+    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
         row.insert("status".into(), json!("unknown"));
         row.insert("basis".into(), json!("stale-verdict-fresher-event"));
     }
@@ -4721,9 +4717,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         );
     }
 
-    let has_pid = row
-        .get("pid")
-        .is_some_and(|value| !value.is_null());
+    let has_pid = row.get("pid").is_some_and(|value| !value.is_null());
     let liveness_origin = if !has_pid {
         Value::Null
     } else if let (Some(created_at), Some(pid_started_at)) = (
