@@ -47,9 +47,10 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
         projected["last_message_at"] = None
         projected["last_message_at_basis"] = "refused-newer-than-transcript"
 
+    has_pid = row.get("pid") is not None
     created_at = _timestamp(row.get("created_at"))
     pid_started_at = _timestamp(row.get("pid_start_time"))
-    if created_at is None or pid_started_at is None:
+    if not has_pid or created_at is None or pid_started_at is None:
         projected["liveness_origin"] = None
     elif (pid_started_at - created_at).total_seconds() > _RESUME_BAND_SECONDS:
         projected["liveness_origin"] = "resumed"

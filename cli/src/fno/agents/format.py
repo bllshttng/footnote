@@ -133,6 +133,7 @@ def serialize_entry(
     last_activity_age_s: Optional[int] = None,
     last_event_at: Optional[str] = None,
     last_message: Optional[str] = None,
+    status: Optional[str] = None,
 ) -> dict:
     """Produce the canonical dict shape for one agent.
 
@@ -189,7 +190,7 @@ def serialize_entry(
         "last_message_at": entry.last_message_at,
         "last_message_at_basis": None,
         "last_reconciled_at": entry.last_reconciled_at,
-        "status": entry.status,
+        "status": entry.status if status is None else status,
         "live_status": live_status,
         # The model the worker is answering as, read from its transcript. A
         # spawn-recorded route would report the INTENDED model in exactly the
@@ -251,9 +252,11 @@ def serialize_entry(
         "last_message": last_message,
         # Internal input to the shared projection rule; it is removed before
         # the row reaches the wire because pid identity is not a row verdict.
+        "pid": entry.pid,
         "pid_start_time": entry.pid_start_time,
     }
     row = project_row(row)
+    row.pop("pid", None)
     row.pop("pid_start_time", None)
     return row
 

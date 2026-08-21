@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from typing import Optional
 
 from fno.agents import format as fmt
-from fno.agents.row_contradiction import project_row
 from fno.agents import truth_status
 from fno.agents.reachability import (
     WIRE_STATUS,
@@ -226,9 +225,8 @@ def list_agents(
             last_activity_age_s=reach.age_s,
             last_event_at=last_event_at,
             last_message=last_message,
+            status=rendered_status,
         )
-        row["status"] = rendered_status
-        row = project_row(row)
         rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort

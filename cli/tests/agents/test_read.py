@@ -85,6 +85,29 @@ def test_list_agents_populated_table(tmp_path, monkeypatch, _patch_claude_agents
     assert result.warnings == []
 
 
+def test_list_agents_preserves_registered_liveness_origin(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """The registered-agent path must retain process-start evidence."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(
+                name="survivor",
+                pid=123,
+                pid_start_time=1779296700000000,
+            )
+        ]
+    )
+    _patch_claude_agents_json({})
+
+    row = json.loads(
+        list_agents(json_out=True, tty=True, discover=False).output
+    )["agents"][0]
+
+    assert row["liveness_origin"] == "survivor"
+
+
 def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_claude_agents_json):
     """AC1-EDGE — empty registry returns valid empty shape."""
     use_tmpdir(monkeypatch, tmp_path)
