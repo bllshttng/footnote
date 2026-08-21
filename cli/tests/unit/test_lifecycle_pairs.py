@@ -88,7 +88,8 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
 KNOWN_COMMANDS: dict[str, frozenset[str]] = {
     "backlog": frozenset({
         "add", "advance", "album", "archive", "archive-dedupe-ids", "bases", "batch",
-        "board", "capture", "collisions", "cost", "decompose", "defer",
+        "board", "capture", "collisions", "cost", "decide", "decide-reindex",
+        "decisions", "decompose", "defer",
         "dispatch-lanes", "done", "epic", "find", "get", "groom",
         "idea", "intake", "lane-fill", "lanes", "maintain", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",
