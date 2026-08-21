@@ -357,21 +357,29 @@ fn run_truth_subprocess(
     // margin under the 64 KiB buffer, while N handles cross it near 120 rows
     // -- and an 88-row roster is already on the record in `daemon.rs`, with
     // `last_message` free text able to inflate any one entry.
+    //
+    // The readers hand their bytes back over a channel rather than a join
+    // handle, because a JOIN here is its own unbounded wait: a GRANDCHILD
+    // inherits these pipe fds, so `read_to_end` does not end when the child
+    // does. `sh -c "sleep 5"` under a 50ms bound proves it -- joining waited
+    // the full five seconds and blew the bound this function exists to keep.
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = out_pipe.as_mut() {
             let _ = std::io::Read::read_to_end(pipe, &mut buf);
         }
-        buf
+        let _ = out_tx.send(buf);
     });
-    let err_reader = std::thread::spawn(move || {
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(pipe) = err_pipe.as_mut() {
             let _ = std::io::Read::read_to_end(pipe, &mut buf);
         }
-        buf
+        let _ = err_tx.send(buf);
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -394,18 +402,32 @@ fn run_truth_subprocess(
             }
         }
     };
-    // Joined on every path, timeout included: the kill above closes the pipes,
-    // so both readers end rather than outliving the call.
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
-    match status {
-        Some(status) => BoundedRun::Output(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        }),
-        None => BoundedRun::NoOutput,
-    }
+    // A run that blew its bound is over NOW. Waiting on the readers here is
+    // what broke the bound in the first place, and there is no answer to
+    // collect anyway; the threads end when the fds finally close.
+    let Some(status) = status else {
+        return BoundedRun::NoOutput;
+    };
+    // The child exited on its own, so its bytes are already written and the
+    // readers are done or nearly so. Still bounded, for the same grandchild
+    // reason: an inherited fd can hold these pipes open past the child's own
+    // exit, and this function may never wait without a limit.
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+    let stdout = match out_rx.recv_timeout(DRAIN_GRACE) {
+        Ok(buf) => buf,
+        Err(_) => {
+            eprintln!("WARN: family-1 truth probe for {label} left its output undrained");
+            return BoundedRun::NoOutput;
+        }
+    };
+    // stderr is diagnostic only, so a slow one degrades to empty rather than
+    // discarding an answer stdout already delivered.
+    let stderr = err_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    BoundedRun::Output(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn family1_truth_attempt(
@@ -4874,6 +4896,28 @@ mod tests {
         // Bounded well under the deadline: proves it returned because the
         // child finished, not because the timeout fired.
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_open_cannot_outrun_the_bound() {
+        // The regression that the drain itself introduced, pinned so it cannot
+        // come back. The child exits AT ONCE while a grandchild keeps the
+        // inherited stdout open for 30s. Reading to end therefore does not end
+        // when the child does, so joining the reader waited on the grandchild
+        // and blew the bound. This must return on the drain grace instead.
+        //
+        // Written with an explicit background grandchild rather than a plain
+        // `sleep`, because a shell may exec a single command in place, which
+        // leaves no grandchild at all and quietly passes on one platform while
+        // failing on another. That is exactly how this reached CI.
+        let mut orphan = std::process::Command::new("sh");
+        orphan.args(["-c", "sleep 30 & exit 0"]);
+        let started = Instant::now();
+        let _ = run_truth_subprocess(orphan, Duration::from_millis(200), "an orphan", false);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the call waited on a grandchild instead of its own bound"
+        );
     }
 
     #[test]
