@@ -11,6 +11,8 @@ for task delegation, identity, and agent registration.
 | `plugins/fno.ts` | The plugin. opencode auto-scans `.opencode/plugins/*.ts` and loads it directly — no build step. |
 | `fno-orchestrator.md` | The orchestrator system prompt injected at session start. |
 | `agents/{explore,oracle,librarian}.md` | Three native opencode agents, auto-loaded from `.opencode/agents/`. |
+| `skills/` | Symlink farm: `<name> -> ../../skills/<name>` for every shipped skill. opencode scans `.opencode/skills/`, never the repo-root `skills/`, so these tracked links are what makes footnote's skills discoverable on a fresh clone (and in any worktree - the links are relative). |
+| `commands/{target,think,review,fix,pr}.md` | The five advertised verbs as opencode slash commands (`/target "add OAuth login"`). Each stub loads the matching skill and passes `$ARGUMENTS` through. `/target` is also what the stop-hook bridge's `/target --resume` re-drive resolves against. |
 | `tests/fno.test.ts` | `bun test` unit coverage for the pure helpers + task tool. |
 
 ## What it does (and what opencode does natively)
@@ -27,9 +29,11 @@ The plugin only supplies what opencode can't infer on its own:
   delegations, 120s sync timeout, empty-output detection.
 
 opencode does the rest **natively** — it auto-loads `.opencode/agents/*.md`,
-discovers `skills/**/SKILL.md` (footnote's skills already ship in that shape),
-and exposes its own `skill` tool. That's why there is no custom skill tool,
-no build toolchain, and no vendored agent framework here.
+discovers skills through the `.opencode/skills/` farm (its scan paths are
+`.opencode/skills/`, `.claude/skills/`, `.agents/skills/` — the repo-root
+`skills/` dir is NOT scanned, which is why the farm exists), and exposes its
+own `skill` tool. That's why there is no custom skill tool, no build toolchain,
+and no vendored agent framework here.
 
 ## Activation is opt-in
 
@@ -68,3 +72,6 @@ provider registry actually has it, and otherwise falls back silently. A
 ```bash
 cd .opencode && bun install && bun test
 ```
+
+Note for Windows: the farm relies on git-tracked symlinks, which need WSL2
+(footnote's supported Windows path) or developer-mode symlink support.
