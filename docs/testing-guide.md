@@ -150,10 +150,7 @@ tail -5 /tmp/gate.log
 
 `set -o pipefail` also fixes the pipeline case, but it is a property of the shell you happen to be in rather than of the command you are reading, so it does not travel with a command pasted into a review, a hook, or a chat message.
 
-A gate that compares commits fails a different way: it answers the right question about the wrong version.
-`scripts/ci/loc-ratchet.sh` diffs against the merge base, so running it while your change is still unstaged measures the previous commit and passes for work it never saw.
-Commit first, then run it.
-Otherwise the verdict you are reading belongs to someone else's diff.
+A gate that compares commits can answer the right question about the wrong version. Diff-based checks compare committed content with the merge base. When changes are unstaged, a check can measure the previous commit and miss the intended work. Commit first, then run it. Otherwise the verdict belongs to someone else's diff.
 
 The same rule covers watchers and monitors, where it matters more because they announce completion:
 

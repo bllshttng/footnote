@@ -1080,7 +1080,7 @@ def test_the_skip_receipt_fires_on_the_files_branch_too(tmp_path: Path) -> None:
 
 
 def test_the_skip_receipt_fires_on_the_stdin_branch_too(tmp_path: Path) -> None:
-    """Same guarantee on --stdin, which check-pr-style.sh pipes a PR body through.
+    """Same guarantee on the hand-run ``fno lint style --stdin`` path.
 
     A body carrying the marker used to pass with an empty log.
     """

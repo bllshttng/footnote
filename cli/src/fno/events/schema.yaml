@@ -885,7 +885,7 @@ event_types:
       properties:
         surface:
           type: string
-          description: "The surface the check ran on (mail today; the pr-body and markdown gates run at CI, not here)."
+          description: "The surface the check ran on. Mail can refuse delivery; pr-body and markdown are hand-run lint surfaces."
         rule_ids:
           type: array
           description: "The rule numbers (1-6) that fired on the refused body."

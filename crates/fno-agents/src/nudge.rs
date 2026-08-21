@@ -12,7 +12,7 @@
 //! in Python (`fno agents nudge-peek`), reused here via a fail-open shell-out:
 //! the Python side already owns the bus reader and the project resolver, and
 //! keeping the logic there avoids a second, drifting implementation. This file
-//! is intentionally OUTSIDE the `loop*` loc-ratchet glob so the control-plane
+//! is intentionally OUTSIDE the historical `loop*` control-plane glob so the
 //! delta stays minimal — `loopcheck.rs` only calls in.
 //!
 //! Fail-open by contract: a missing `fno`, a non-zero exit, or empty output

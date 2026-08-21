@@ -4244,7 +4244,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
                         "transport": "switchboard-mirror",
                         // No provider field: a provider-named binding holding a
                         // harness literal is the axis-vocabulary violation the
-                        // content scan prohibits (check-axis-vocabulary).
+                        // vocabulary contract prohibits.
                         "reason": format!("registry re-read failed: {e}"),
                     }),
                 );

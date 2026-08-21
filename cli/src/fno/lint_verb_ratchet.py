@@ -9,7 +9,7 @@ the live surface and the baseline disagree.
 
 Shape copied from ``scripts/ci/company-boundary-baseline.txt`` (a human-readable,
 diffable, checked-in set with a stated removal rule) rather than
-``scripts/ci/loc-ratchet.sh`` (a numeric delta): a verb list is small, enumerable,
+the former LOC ratchet (a numeric delta): a verb list is small, enumerable,
 and reviewable line by line.
 
 Both binaries. ``fno`` is a Rust front (``crates/fno``) that owns ``mux`` and
@@ -819,7 +819,7 @@ _HEADER = """\
 # rather than emitting a byte-identical file plus a success line.
 # A deliberate addition carries a PR-body line:
 #   verb-exception: <rationale>
-# (mirrors `loc-exception:` so contributors learn one idiom, not two).
+# (an explicit rationale keeps the exception reviewable).
 # Two PRs that each add a verb both edit this file; the merge conflict is the
 # intended review moment, not tooling noise.
 #

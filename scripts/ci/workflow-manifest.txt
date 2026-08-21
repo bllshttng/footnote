@@ -14,7 +14,6 @@ executor-routing.yml
 guards.yml
 install-script-portability.yml
 internal-refs.yml
-merge-coverage-audit.yml
 nightly-release-tag.yml
 pitfalls.yml
 pr-node-closure.yml

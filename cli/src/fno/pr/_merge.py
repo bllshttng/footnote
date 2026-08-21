@@ -1751,7 +1751,7 @@ def _do_merge(
     # satisfied the gate here (gate_verdict, threaded down), never a fresh
     # read - the label or the row can change while this merge waits on the
     # lock, and a receipt that flips to failure on a head the merge then lands
-    # is a false red the post-merge audit cannot repair. Posted only now,
+    # leaves a false-red status on a merge that passed the gate. Posted only now,
     # after every local refusal - armed-check, checks verdict, unreadable
     # head - has said yes: a success status stamped before a later refusal
     # would green the head for the web button - which enforces only the

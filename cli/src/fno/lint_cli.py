@@ -24,7 +24,7 @@ import typer
 #
 # A check's option must still be DECLARED on `lint` below, and forgetting one is
 # silent here and loud four jobs later in CI - `--surface` was missed on the
-# first pass and only `check-markdown-style` said so.
+# first pass and the former CI wrapper was the only caller that exposed it.
 # `test_every_check_parameter_is_declared_on_the_dispatcher` closes that gap by
 # comparing the two sets directly.
 CHECKS: dict[str, str] = {
@@ -42,8 +42,7 @@ CHECKS: dict[str, str] = {
 
 # x-71b6 In-N-Out menu ratchet: the advertised command surface stays small.
 # These are the two knobs a maintainer touches to widen the menu, on purpose,
-# in a one-line diff that shows up in review - the display-surface counterpart
-# of the control-plane LOC ratchet. New verbs default to hidden; promotion is a
+# in a one-line diff that shows up in review. New verbs default to hidden; promotion is a
 # deliberate act that must fit under these caps.
 MENU_CAP_TOP_LEVEL = 10
 MENU_CAP_SUB_APP = 12

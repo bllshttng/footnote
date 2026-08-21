@@ -295,7 +295,7 @@ The verdict is also published where GitHub can see it. The stop hook, the standa
 
 `review-coverage-gate.yml` refreshes the status on the events only GitHub sees. A push invalidates the head. The `coverage-override` label arms or withdraws the release valve, naming its actor.
 
-`apply-merge-ruleset.sh` makes `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice. If the live ruleset drifts, or a merge lands uncovered, `merge-coverage-audit.yml` fails the next push to main.
+`apply-merge-ruleset.sh` makes `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice.
 
 One source also has to mean one *location*.
 
@@ -347,9 +347,7 @@ The residual hole was a human typing gh in a terminal. The required status conte
 
 The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
 
-Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head. Do it before the change that adds `merge-coverage-audit.yml` merges. Until the ruleset exists, that audit fails every push to main with `ruleset not found`. That is the same red it shows for a deleted or weakened gate.
-
-`merge-coverage-audit.yml` re-checks the live ruleset on every push to main. Weakening or deleting the gate in the GitHub UI fails the next push rather than passing silently.
+Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.
 The `guard` job therefore skips fork PRs outright rather than running and failing on the POST, which would have hung a permanently red check on every external contribution.
 Marking it required while fork PRs are accepted blocks every one of them permanently, waiting on a context no run can produce, so the setting is safe only on a repo that takes no fork PRs; covering forks needs a privileged second workflow, which is a security decision this PR does not make.

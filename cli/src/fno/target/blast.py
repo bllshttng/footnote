@@ -108,7 +108,7 @@ def match_recursive(file_path: str, pat: str) -> bool:
 def match_manifest_entry(file_path: str, entry: str) -> bool:
     """Match a loc-ratchet manifest include entry (prefix/star/exact semantics).
 
-    Mirrors scripts/ci/loc-ratchet.sh include handling:
+    Mirrors the historical control-plane manifest's include handling:
       trailing ``/`` -> directory prefix (path starts with the prefix)
       trailing ``*`` -> path-prefix glob (path starts with the part before ``*``)
       otherwise      -> exact path match
@@ -163,7 +163,7 @@ def _load_manifest_globs(manifest_path: str | os.PathLike[str] | None) -> list[s
     """Read the include entries from the loc-ratchet manifest, fail-safe to [].
 
     Uses a tiny line-oriented parse of the ``include:`` section (the same YAML
-    subset loc-ratchet.sh parses) rather than a YAML dependency, so a comment
+    subset used by the control-plane consumers) rather than a YAML dependency, so a comment
     or a sibling section can never change behavior. Any read/parse error
     contributes no globs (the general list still carries the safety weight).
     """

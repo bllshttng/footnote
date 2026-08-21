@@ -23,9 +23,8 @@
 #        2 usage error, or the data file itself is malformed
 #
 # Applying changes repository settings for everyone: it is an operator step,
-# run once, after a PR has proven a green status on its own head. --check is
-# what the post-merge audit runs; it compares live state to the file so a
-# ruleset deleted or weakened in the GitHub UI fails the next push to main.
+# run once, after a PR has proven a green status on its own head. --check is a
+# manual comparison of live state with the committed ruleset data.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

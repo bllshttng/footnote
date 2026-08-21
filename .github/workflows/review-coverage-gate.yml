@@ -146,10 +146,9 @@ jobs:
           }
           case "$EVENT:$ACTION" in
             pull_request:synchronize|pull_request:labeled|pull_request:unlabeled)
-              # A queued run can outlive its PR. A status posted on a MERGED
-              # head is read by the post-merge audit, where a late invalidate
-              # would false-red a merge that passed every gate, and nothing
-              # can repair it (the branch is gone). Re-read the live state.
+              # A queued run can outlive its PR. Do not overwrite the status
+              # on a merged head after that merge passed every gate. Re-read
+              # the live state before posting.
               # Retries the same 3x/5s backoff as the reads below it: this is
               # the first gh call in the step, so an un-retried transient 5xx
               # here would abort the run earlier than any of its siblings.
@@ -175,11 +174,10 @@ jobs:
           esac
           # The description our context currently carries on this head, via
           # the COMBINED endpoint (one entry per context, the latest - no
-          # same-second tie to break; the same read the post-merge audit
-          # uses). Empty means no status yet. Retries the same 3x/5s backoff
-          # as coverage-carry.sh's status_read and the audit's coverage_field
-          # before giving up, so a transient 5xx does not abort this run one
-          # call earlier than either sibling would. A read that still fails
+          # same-second tie to break). Empty means no status yet. Retries the
+          # same 3x/5s backoff as coverage-carry.sh's status_read before giving
+          # up, so a transient 5xx does not abort this run one call earlier
+          # than its sibling would. A read that still fails
           # after retrying fails the run (set -e): an unreadable description
           # must never masquerade as "no status", or the invalidate arms
           # would clobber a green verdict on the same transient class post()
