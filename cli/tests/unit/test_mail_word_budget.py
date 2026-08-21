@@ -44,7 +44,6 @@ def send(sender: str, recipient: str, n: int, msg_id: str, *, enforce: bool = Tr
 
 def test_rule_seven_and_budget_share_one_count():
     body = "Ship the fix. See `cli/src/fno/mail/budget.py` and --flag now."
-    count = style.word_count(body)
     # Rule 7 reports the same number in its own violation detail.
     long_body = " ".join([body] * 40)
     violations = style.check(long_body, surface="mail")
