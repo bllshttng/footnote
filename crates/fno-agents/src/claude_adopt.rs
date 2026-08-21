@@ -85,6 +85,13 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        // Genuinely unknown, and `None` says exactly that. Adopt takes in BOTH
+        // a session a human started by hand and a footnote /target orphan
+        // (that is what `fno_id` above is for), so neither stamp would be true
+        // of every adopted row. Guessing here would rebuild the defect x-944f
+        // fixes, one field over: a confident value nothing measured.
+        origin: None,
+        spawn_trigger: None,
         legacy_claude_short_id: None,
     }
 }

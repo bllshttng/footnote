@@ -3267,6 +3267,12 @@ def dispatch_spawn_pane(
                     spawned_by_harness=spawned_by_harness,
                     spawned_by_cwd=spawned_by_cwd,
                     spawn_trigger=spawn_trigger,
+                    # footnote created this worker, so the reap lane's "did a
+                    # human start this session by hand" reads no. The operator
+                    # stamp already existed at both register paths; without this
+                    # one a worker row stayed ABSENT, and absent is the value
+                    # that cannot be told apart from never-recorded (x-944f).
+                    origin="spawn",
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,

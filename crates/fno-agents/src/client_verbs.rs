@@ -389,7 +389,8 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] =
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1681,6 +1682,11 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
             Some(id.fno_id.clone())
         },
         delivery_policy: None,
+        // Synthesized from a session identity that arrived without a row, so
+        // nothing here observed how that session started. `None` is the honest
+        // never-recorded, not a claim that no human is sitting in it.
+        origin: None,
+        spawn_trigger: None,
         legacy_claude_short_id: None,
     }
 }

@@ -46,6 +46,14 @@ RATE_LIMIT_TAIL = "API Error: 429 rate limit, window resets at 02:48:21 SGT"
 # session that merely stopped writing.
 FINISHED_TAIL = "<promise>PR is green and reviewed</promise>"
 
+# Well outside REAP_RECENT_MESSAGE_S measured from NOW_1840. A row that is meant
+# to reach a REAP verdict has to carry a stale last_message_at, because x-944f
+# makes an ABSENT stamp UNKNOWN: absence has two causes (nothing stamped it, the
+# session never spoke) and the predicate cannot tell them apart. Fixtures that
+# assert a refusal from an EARLIER read leave the stamp unset on purpose - that
+# is what proves the earlier guard still answers first.
+STALE_MESSAGE_STAMP = "2026-08-15T00:00:00Z"
+
 
 def _facts(
     text: str, age_min: float = 5, role: str = "assistant", kind: str = "text"
@@ -210,7 +218,8 @@ def test_identity_joins_on_claim_holder_not_name():
     # Two rows whose NAMES both carry node x-9d11, but the recorded manifest
     # node differs (x-2222 vs none). Only the claim/manifest join may decide.
     rows = [
-        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a"),
+        Row("eeee1111-0000", "target-x-9d11-alpha", "working", "x-2222", "/tmp/a",
+            last_message_at=STALE_MESSAGE_STAMP),
         Row("ffff2222-0000", "target-x-9d11-beta", "working", None, "/tmp/b"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -229,7 +238,8 @@ def test_identity_joins_on_claim_holder_not_name():
 
 def test_node_done_reaps_and_own_claim_does_not():
     rows = [
-        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1"),
+        Row("aaaa1111-0000", "w1", "working", "x-done", "/tmp/w1",
+            last_message_at=STALE_MESSAGE_STAMP),
         Row("bbbb2222-0000", "w2", "working", "x-mine", "/tmp/w2"),
     ]
     transcripts = {r.row_id: _facts(FINISHED_TAIL, age_min=200) for r in rows}
@@ -299,7 +309,7 @@ def test_deliverable_reaps_regardless_of_age():
     # A row whose node is done with its PR merged reaps at any age; age
     # decides what to do with an UNKNOWN row, never a finished one.
     rows = [Row("e65d5fff-0000", "t-xd214-mail-raw-onto-rpc", "blocked",
-                "x-d214", "/canonical")]
+                "x-d214", "/canonical", last_message_at=STALE_MESSAGE_STAMP)]
     [v] = _run(
         rows,
         {"e65d5fff-0000": _facts("blocked mid turn", age_min=87852)},
@@ -1352,7 +1362,8 @@ def test_a_shared_worktree_is_never_reaped_even_with_a_done_node():
     rows = [
         Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/x-bcb5"),
         Row("bbbb2222-0000", "busy", "working", "x-done", "/wt/x-bcb5"),
-        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo"),
+        Row("cccc3333-0000", "alone", "working", "x-done", "/wt/solo",
+            last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1551,8 +1562,10 @@ def test_occupancy_is_read_from_the_transcript_not_the_roster():
     """
     # A live sibling by TRANSCRIPT, while its roster state says stopped.
     rows = [
-        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one"),
-        Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one"),
+        Row("aaaa1111-0000", "quiet", "working", "x-done", "/wt/one",
+            last_message_at=STALE_MESSAGE_STAMP),
+        Row("bbbb2222-0000", "live-but-reads-stopped", "stopped", "x-done", "/wt/one",
+            last_message_at=STALE_MESSAGE_STAMP),
     ]
     vs = _run(
         rows,
@@ -1650,7 +1663,8 @@ def test_every_failed_read_is_unknown_and_unknown_never_reaps():
     pins the shape instead: whatever fails, the answer is UNKNOWN, and the
     only way to YES is through three positive markers.
     """
-    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+              last_message_at=STALE_MESSAGE_STAMP)
     quiet = _facts(FINISHED_TAIL, age_min=120)
 
     def boom(_n):
@@ -1756,7 +1770,8 @@ def test_a_session_still_in_play_is_never_reaped():
     """Silence is a reading about the last write, never a verdict that the
     work is over. A worker parked on <watching>, one holding a question, and
     one waiting out a rate limit are all silent and all still in play."""
-    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo")
+    row = Row("aaaa1111-0000", "w1", "working", "x-done", "/wt/solo",
+              last_message_at=STALE_MESSAGE_STAMP)
     nodes = {"x-done": {"status": "done"}}
 
     parked = _facts("<watching>ci</watching>", age_min=200)

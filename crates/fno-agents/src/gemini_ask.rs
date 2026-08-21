@@ -1006,6 +1006,11 @@ fn dispatch_create(
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
+        // footnote minted this row, so the answer to "did a human start this
+        // session by hand" is no, and saying so beats leaving an absence a
+        // later reader has to guess at.
+        origin: Some("spawn".to_string()),
+        spawn_trigger: None,
         legacy_claude_short_id: None,
         claude_session_uuid: None,
         messaging_socket_path: None,
