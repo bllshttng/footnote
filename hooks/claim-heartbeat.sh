@@ -262,11 +262,16 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
        && _handover_now - _handover_mtime < _HANDOVER_THROTTLE )) && _handover_due=0
   fi
   if [[ "$_handover_due" -eq 1 ]]; then
-    _HANDOVER_STATUS="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-      fno claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
-    [[ -n "$_HANDOVER_STATUS" ]] || _HANDOVER_STATUS="$(with_timeout \
-      "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-      fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+    _handover_status_json() {
+      local status_json
+      status_json="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+        fno claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
+      [[ -n "$status_json" ]] || status_json="$(with_timeout \
+        "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+        fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+      printf '%s' "$status_json"
+    }
+    _HANDOVER_STATUS="$(_handover_status_json)"
     _HANDOVER_STATUS_VALID="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
       if (type == "object") and
          (.state == "free" or .state == "live" or .state == "suspect" or
@@ -277,6 +282,10 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       | jq -r '.state // empty' 2>/dev/null)"
     _RECORDED_HANDOVER_HOLDER="$(printf '%s' "$_HANDOVER_STATUS" \
       | jq -r '.holder // empty' 2>/dev/null)"
+    _RECORDED_HANDOVER_EXPIRES="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
+      if ((.expires_at | type) == "number") and
+         ((.expires_at | floor) == .expires_at)
+      then .expires_at else empty end' 2>/dev/null)"
     if [[ "$_HANDOVER_STATUS_VALID" != 1 ]]; then
       echo "claim-heartbeat: handover claim status unreadable for node:$_HANDOVER_NODE; refresh remains due" >&2
     # The short-lived spawner normally exits before init, so its unexpired
@@ -284,10 +293,31 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     elif [[ ( "$_RECORDED_HANDOVER_STATE" == live \
               || "$_RECORDED_HANDOVER_STATE" == suspect ) \
             && "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
-      if with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
+      if [[ ! "$_RECORDED_HANDOVER_EXPIRES" =~ ^[0-9]+$ ]]; then
+        echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE (missing deadline); refresh remains due" >&2
+      elif with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
         fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
         --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
-        touch "$_HANDOVER_STAMP" 2>/dev/null || true
+        _HANDOVER_AFTER="$(_handover_status_json)"
+        _HANDOVER_AFTER_VALID="$(printf '%s' "$_HANDOVER_AFTER" | jq -r '
+          if (type == "object") and
+             (.state == "live" or .state == "suspect") and
+             ((.holder | type) == "string") and
+             ((.expires_at | type) == "number") and
+             ((.expires_at | floor) == .expires_at)
+          then 1 else 0 end' 2>/dev/null)"
+        _HANDOVER_AFTER_HOLDER="$(printf '%s' "$_HANDOVER_AFTER" \
+          | jq -r '.holder // empty' 2>/dev/null)"
+        _HANDOVER_AFTER_EXPIRES="$(printf '%s' "$_HANDOVER_AFTER" \
+          | jq -r '.expires_at // empty' 2>/dev/null)"
+        if [[ "$_HANDOVER_AFTER_VALID" == 1 \
+              && "$_HANDOVER_AFTER_HOLDER" == "$_HANDOVER_HOLDER" \
+              && "$_HANDOVER_AFTER_EXPIRES" =~ ^[0-9]+$ ]] \
+              && (( _HANDOVER_AFTER_EXPIRES > _RECORDED_HANDOVER_EXPIRES )); then
+          touch "$_HANDOVER_STAMP" 2>/dev/null || true
+        else
+          echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE; refresh remains due" >&2
+        fi
       else
         echo "claim-heartbeat: handover refresh failed for node:$_HANDOVER_NODE; refresh remains due" >&2
       fi

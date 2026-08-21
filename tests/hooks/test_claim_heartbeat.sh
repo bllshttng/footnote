@@ -63,11 +63,20 @@ case "\$1 \$2" in
     if [[ -n "\${STUB_STATUS_JSON+x}" ]]; then
       printf '%s' "\$STUB_STATUS_JSON"
     else
-      printf '{"holder":"%s","state":"%s"}\n' "\${STUB_HOLDER:-}" "\${STUB_STATE:-live}"
+      if [[ -f "${TMP_DIR}/refresh-observed" ]]; then
+        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+          "\${STUB_HOLDER_AFTER:-\${STUB_HOLDER:-}}" \
+          "\${STUB_STATE_AFTER:-\${STUB_STATE:-live}}" \
+          "\${STUB_EXPIRES_AFTER:-200}"
+      else
+        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+          "\${STUB_HOLDER:-}" "\${STUB_STATE:-live}" "\${STUB_EXPIRES_BEFORE:-100}"
+      fi
     fi
     exit "\${STUB_STATUS_RC:-0}"
     ;;
   "claim refresh")
+    [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]] && touch "${TMP_DIR}/refresh-observed"
     exit "\${STUB_REFRESH_RC:-0}"
     ;;
   "pr bind-created")
@@ -85,6 +94,7 @@ EOF
 teardown_env() {
   rm -rf "$TMP_DIR"
   unset STUB_HOLDER STUB_STATE STUB_STATUS_JSON STUB_STATUS_RC STUB_REFRESH_RC
+  unset STUB_HOLDER_AFTER STUB_STATE_AFTER STUB_EXPIRES_BEFORE STUB_EXPIRES_AFTER
   unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP
 }
 
@@ -715,6 +725,23 @@ if [[ "$bind_calls" -eq 0 && "$err" == *"not attributable"* ]]; then
 else
   fail "T39 multiline compound calls=$bind_calls diagnostic=[$err]"
 fi
+teardown_env
+
+# ── T40: exit-zero refresh without lease extension remains due ────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="suspect"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100 STUB_STATE_AFTER="stale"
+err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
+if [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T40 unconfirmed exit-zero refresh incorrectly throttled later repair"
+elif [[ "$err" != *"ownership-lost/refresh-not-confirmed"* ]]; then
+  fail "T40 unconfirmed refresh emitted no ownership diagnostic: [$err]"
+else
+  pass "T40 exit-zero without positive lease extension remains due"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
 teardown_env
 
 echo "[heartbeat] ${PASS} passed, ${FAIL} failed"
