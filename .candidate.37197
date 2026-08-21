@@ -1,0 +1,10 @@
+---
+fno_id: 20260820T081951Z-kg51307-7ecc4b
+created_at: 2026-08-20T08:19:51Z
+scope: fno
+harness: claude
+harness_session_id: 119e3c52-62bf-43b4-b3c4-3c7ce659f802
+owner_pid: 51307
+owner_cwd: /Users/bb16/code/footnote/footnote
+budget_max_iterations: 40
+---
