@@ -41,6 +41,10 @@ cat > "$MOCKBIN/fno" <<'MOCK'
 set -uo pipefail
 S="${MOCK_STATE:?}"
 sub="${1:-}"; verb="${2:-}"
+if [[ "$sub $verb" == "agents dispatch" || "$sub $verb" == "agents claim" ]]; then
+  shift
+  sub="${1:-}"; verb="${2:-}"
+fi
 case "$sub $verb" in
   "backlog get")
     id="${3:-}"
