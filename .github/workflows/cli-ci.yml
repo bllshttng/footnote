@@ -150,7 +150,18 @@ jobs:
     # paid as phantom red PRs and re-run cycles, not as a visible timeout.
     # Raise the ceiling rather than the suite: if this step approaches 30, the
     # suite is the thing to fix.
-    timeout-minutes: 30
+    #
+    # 2026-08-21: it approached 30. The step measured 29m01s and the cap fired
+    # one second later, cancelling a trailing 6s guard on a suite that had
+    # already passed. That is 16m35s -> 29m01s in fifteen days. At a sub-minute
+    # margin a re-run is a coin flip: the same commit went green and cancelled
+    # on consecutive attempts, which reads as flake and is not one. Raised to 45
+    # because cold cache is the normal state for a new branch.
+    #
+    # This raise is the unblock, NOT the fix - the line above already ruled on
+    # that and x-5b73 owns it. The step below emits its own duration so the next
+    # reading of this trend is a log line rather than API archaeology.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -165,7 +176,16 @@ jobs:
         # pre-extraction semantics; ::group:: markers keep per-step folding in
         # the CI log. Bootstrapped via `uv run --project cli` (no repo-root
         # pyproject, no global fno-py in a fresh checkout); uv auto-syncs.
-        run: uv run --project cli fno-py test smoke
+        # Emit the duration on every exit path (trap, not a trailing echo:
+        # the runner's bash is -e, so a failing suite would skip a plain echo
+        # and the slow runs - the only ones worth trending - would be the ones
+        # that never reported). A hard timeout SIGKILLs the job and no trap
+        # runs, which is itself the signal: no duration line means the cap ate
+        # the run.
+        run: |
+          start=$SECONDS
+          trap 'printf "smoke-duration-seconds=%s\n" "$(( SECONDS - start ))"' EXIT
+          uv run --project cli fno-py test smoke
 
       # Static dead-import guard (x-ac5f): a module move down a layer can leave
       # test-only callers on the old `from fno.agents import moved` path that

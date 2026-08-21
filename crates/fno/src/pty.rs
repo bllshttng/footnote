@@ -700,6 +700,19 @@ fn base_command(
     // asserting half a capability. Stating both is one unconditional rule,
     // which cannot be wrong about a launch context the way inheritance can.
     cmd.env("COLORTERM", "truecolor");
+    // And CLEAR the suppression, which is the half that actually greys panes.
+    // `NO_COLOR` is honored by nearly every TUI, and it OUTRANKS the two lines
+    // above: stating TERM and COLORTERM while `NO_COLOR=1` rides along still
+    // renders monochrome. It arrives by inheritance the same way, and the
+    // usual source is an agent shell - this harness exports `NO_COLOR=1`, so a
+    // server an agent restarts is detached at PPID 1 carrying it for life, and
+    // hands it to every pane it will ever spawn. Measured 2026-08-21: a pane
+    // env held `NO_COLOR=1` with `COLORTERM=` empty while the outer terminal
+    // had neither problem.
+    //
+    // A pane host IS a terminal. It has no business inheriting a caller's
+    // decision to suppress color in that caller's own output.
+    cmd.env_remove("NO_COLOR");
     cmd.env("FNO_SESSION", session);
     cmd.env("FNO_PANE", pane_id.to_string());
     // Unique per pane-host spawn: descendants (incl. a nested claude) inherit
@@ -1000,6 +1013,39 @@ mod tests {
     /// Poisoning the parent env with a value the code must OVERRIDE is what
     /// separates "stated by base_command" from "inherited from whoever ran
     /// the test" - the exact distinction the shipped bug turned on.
+    /// A pane must CLEAR `NO_COLOR`, not merely state the two positives.
+    ///
+    /// `NO_COLOR` outranks `TERM` and `COLORTERM`: a pane carrying all three
+    /// renders monochrome anyway, which is why stating the positives alone
+    /// left the reported bug alive. It arrives by inheritance, and the usual
+    /// source is an agent shell that exports it - a server an agent restarts
+    /// is detached at PPID 1 and hands `NO_COLOR=1` to every pane for life.
+    ///
+    /// The sentinel here is the parent's own `NO_COLOR=1`. Without setting it
+    /// first, a machine whose developer has no `NO_COLOR` passes this test
+    /// with `env_remove` deleted, because there was nothing to remove.
+    #[test]
+    fn pane_env_clears_inherited_no_color() {
+        let _gate = PTY_GATE.blocking_lock();
+        let restore = std::env::var_os("NO_COLOR");
+        std::env::set_var("NO_COLOR", "1");
+
+        let cmd = base_command(OsStr::new("/bin/sh"), None, "main", 7);
+        let no_color = cmd.get_env("NO_COLOR").map(|v| v.to_owned());
+
+        match restore {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+
+        assert_eq!(
+            no_color, None,
+            "a pane must CLEAR an inherited NO_COLOR; it outranks TERM and \
+             COLORTERM, so a pane that carries it renders monochrome even \
+             with both positives stated"
+        );
+    }
+
     #[test]
     fn pane_env_states_both_color_signals() {
         // Serialized: `set_var`/`remove_var` are process-wide, and this is the

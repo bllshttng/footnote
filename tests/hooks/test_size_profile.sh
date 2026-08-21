@@ -51,9 +51,28 @@ EOF
             TARGET_INPUT="test" \
             ${size_env:+TARGET_SIZE="$size_env"} \
             "$@" \
-            bash "$INIT_SCRIPT" >/dev/null 2>&1
+            bash "$INIT_SCRIPT" >/dev/null 2>"$tmp/init.stderr"
     )
     echo "$tmp/.fno/target-state.md"
+}
+
+# Print the init script's own refusal when it wrote no state.
+#
+# This existed as `2>&1` for the script's whole life, and it cost two sessions
+# an evening. The suite fails here in-sequence on a developer box and passes
+# both standalone and on CI, so it depends on state an earlier step leaves.
+# Nobody isolated WHICH step, because the one line naming the reason was
+# discarded at the moment it was produced. The assertion then reported "state
+# file not written" and nothing else - a true statement carrying no diagnosis.
+#
+# The reason is not the failure. It is the only evidence that distinguishes
+# the candidate causes, and it is free.
+init_stderr() {
+    local state="$1"
+    local err
+    err="$(dirname "$(dirname "$state")")/init.stderr"
+    [[ -s "$err" ]] && { echo "  init-target-state.sh said:"; sed 's/^/    /' "$err"; }
+    return 0
 }
 
 # Extract live flag value (line outside the skip_flags_initial block).
@@ -91,7 +110,7 @@ assert_flag() {
 
 # ── Scenario 1: TARGET_SIZE=S minimal-ceremony profile ──────────────────
 state=$(run_init S)
-[[ -f "$state" ]] || { fail "S: state file not written"; exit 1; }
+[[ -f "$state" ]] || { fail "S: state file not written"; init_stderr "$state"; exit 1; }
 ok=1
 for k in no_external no_docs no_memory no_goals no_browser no_how_to no_verify no_clean; do
     assert_flag "$state" "$k" "true" "S" || ok=0
