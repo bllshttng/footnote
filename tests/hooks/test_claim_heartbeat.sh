@@ -676,5 +676,46 @@ fi
 unset FNO_NODE FNO_NODE_CLAIM_HOLDER
 teardown_env
 
+# ── T37: quoted shell punctuation belongs to gh arguments ───────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd 'gh pr create --body "literal ; & | text"' '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
+  pass "T37 quoted shell punctuation remains one attributable gh invocation"
+else
+  fail "T37 quoted punctuation calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T38: backslash-newline formatting remains one gh invocation ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+formatted_cmd="$(printf 'gh pr create \\\n  --fill')"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$formatted_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
+  pass "T38 backslash-newline formatting is attributable"
+else
+  fail "T38 multiline calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T39: an unescaped newline introduces a second shell command ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+compound_cmd="$(printf 'gh pr create --fill\necho second-command')"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$compound_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 0 && "$err" == *"not attributable"* ]]; then
+  pass "T39 actual multiline compound command refuses binding"
+else
+  fail "T39 multiline compound calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
 echo "[heartbeat] ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

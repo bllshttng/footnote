@@ -1003,9 +1003,11 @@ def refresh_claim(
     """Extend a TTL claim's expires_at.
 
     Returns the new Claim on success. Returns None for PID-liveness claims
-    (no expires_at) - the call is a no-op by design; the caller is told
-    via the return type rather than an exception so refresh is safe to
-    call from a generic timer that does not know the claim's mode.
+    (no expires_at) and claims already expired when re-read under the recovery
+    mutex. Both are no-ops by design; an expired lease is reclaimable and must
+    never be resurrected over a concurrent recovery. The caller is told via the
+    return type rather than an exception so refresh is safe to call from a
+    generic timer that does not know the claim's mode.
 
     ``_attempt`` is internal bookkeeping only (never pass it): on mutex
     contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
@@ -1057,6 +1059,8 @@ def refresh_claim(
         if existing.holder != holder:
             raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
         if existing.expires_at is None:
+            return None
+        if is_expired(existing):
             return None
 
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS

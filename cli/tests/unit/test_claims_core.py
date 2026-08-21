@@ -31,7 +31,8 @@ from fno.claims.core import (
     refresh_claim,
     release_claim,
 )
-from fno.claims.io import claim_path, claims_dir, serialize_claim
+from fno.claims.io import claim_path, claims_dir, read_claim_file, serialize_claim
+from fno.claims.staleness import now_ms
 from fno.claims.types import Claim, ClaimState
 
 
@@ -334,6 +335,33 @@ class TestRefresh:
         acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
         with pytest.raises(ClaimValidationError):
             refresh_claim("k", HOLDER_A, ttl_ms=10, root=tmp_path)
+
+    def test_refresh_refuses_claim_that_expires_while_waiting_for_recovery_mutex(
+        self, tmp_path, monkeypatch
+    ):
+        """The under-mutex reread is the authority: expiry in the wait window
+        cannot be rewritten into a new lease by the old holder."""
+        import fno.claims.core as claims_core
+
+        path = claim_path("k", root=tmp_path)
+        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        real_acquire = claims_core.acquire_dir_mutex
+        expired_deadline = now_ms() - 1
+
+        def acquire_then_expire(lock_path, timeout_s, **kwargs):
+            token = real_acquire(lock_path, timeout_s, **kwargs)
+            existing = read_claim_file(path)
+            path.write_text(
+                serialize_claim(existing.model_copy(update={"expires_at": expired_deadline}))
+            )
+            return token
+
+        monkeypatch.setattr(claims_core, "acquire_dir_mutex", acquire_then_expire)
+
+        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+
+        assert refreshed is None
+        assert read_claim_file(path).expires_at == expired_deadline
 
 
 # ---------------------------------------------------------------------------
