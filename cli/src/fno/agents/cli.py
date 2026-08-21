@@ -214,19 +214,28 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
        A `spawn-handover:` holder is a launch window whose worker may never
        boot, which is exactly the "starting versus never started" case a reader
        could not tell apart before.
-    2. A manifest under CWD binding `target_claim_key: node:<id>`. The stronger
-       fact, and never the only one: a worktree worker's manifest lives under
-       its own root, not the dispatcher's, so requiring it alone would report
-       every real worktree worker as unproven.
+    2. A manifest under CWD binding `target_claim_key: node:<id>` AND naming
+       the OBSERVED holder in `target_claim_holder`. The stronger fact, and
+       never the only one: a worktree worker's manifest lives under its own
+       root, not the dispatcher's, so requiring it alone reports every real
+       worktree worker as unproven.
+
+    The holder match on marker 2 is what makes it a measurement rather than a
+    snapshot. Manifest claim fields are written once at init and are never
+    ownership truth, and a dispatcher is handed the NODE's project root as
+    `--cwd`, which is exactly where a finished session leaves its manifest. A
+    key-only test therefore reads a dead session's file and calls an unrelated
+    holder a live worker, which is the lie this function exists to delete.
 
     Any read fault answers False. An unreadable manifest must never manufacture
     a worker.
     """
     from fno.agents.truth_status import _HOLDER_PREFIX
 
-    if str(holder or "").startswith(_HOLDER_PREFIX):
+    holder = str(holder or "")
+    if holder.startswith(_HOLDER_PREFIX):
         return True
-    if not cwd:
+    if not cwd or not holder:
         return False
     try:
         from pathlib import Path
@@ -234,7 +243,10 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
         from fno.target.manifest import read_target_manifest
 
         raw = read_target_manifest(Path(cwd)) or {}
-        return str(raw.get("target_claim_key") or "") == f"node:{node_id}"
+        return (
+            str(raw.get("target_claim_key") or "") == f"node:{node_id}"
+            and str(raw.get("target_claim_holder") or "") == holder
+        )
     except Exception:  # noqa: BLE001 - an unreadable manifest proves nothing
         return False
 

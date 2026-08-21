@@ -124,6 +124,48 @@ out="$(STUB_VERDICT='{"verdict":"already-running","reason":"unproven-claim","hol
 ok  'unproven + --self -> self-handoff receipt' "$(field "$out")" 'self-handoff'
 no  'unproven self-handoff did NOT spawn' "$(calllog)" 'agents spawn --harness'
 
+# --- unproven-claim on the POST-SPAWN refusal, the path a real dispatch takes -
+# The probe above runs before the spawn. This block fires when the claim is
+# taken in the window between them. An arm on only one of the two reads as
+# protection and ships green while the live path stays broken: without it the
+# reason falls past the esac and a benign skip becomes result=failed, exit 1.
+out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=unproven-claim \
+  run --name w2p --provider claude --message '/target x' --node "$NODE")"; rc=$?
+ok  'post-spawn unproven-claim -> already-running' "$(field "$out")" 'already-running'
+ok  'post-spawn unproven-claim exits 0' "$rc" '0'
+has 'post-spawn unproven-claim names the untested condition' "$out" 'no worker has reached target init'
+no  'post-spawn unproven-claim does NOT assert a live worker' "$out" 'live worker holds node'
+
+# --- every guard reason has an arm in BOTH consumers -------------------------
+# One Python producer, two shell consumers, and neither case statement carries a
+# default: an unhandled reason falls through to a failure handler and turns a
+# benign skip into a hard failure. That is how unproven-claim shipped covering
+# only the probe path.
+#
+# CEILING, stated rather than implied: this list is written here, not derived
+# from the producer, because the reasons are built in a ternary and no grep
+# reads them reliably. So it catches a reason DROPPED from Python and a reason
+# missing an arm. It does NOT catch a brand-new reason nobody added here.
+_GUARD_REASONS='live-claim unproven-claim suspect-claim reservation-held duplicate-claim auto-deferred defer-failed'
+_SPAWN_SH_LOCAL="$(dirname "${BASH_SOURCE[0]}")/../scripts/spawn.sh"
+_CLI_PY="$(dirname "${BASH_SOURCE[0]}")/../../../cli/src/fno/agents/cli.py"
+_DISPATCH_SH="$(dirname "${BASH_SOURCE[0]}")/../../target/scripts/dispatch-node.sh"
+for reason in $_GUARD_REASONS; do
+  if grep -qF "\"$reason\"" "$_CLI_PY"; then
+    ok "producer still emits: $reason" "present" "present"
+  else
+    ok "producer still emits: $reason" "GONE from cli.py (stale list)" "present"
+  fi
+  for consumer in "$_SPAWN_SH_LOCAL" "$_DISPATCH_SH"; do
+    label="$(basename "$consumer")"
+    if grep -qE "^[[:space:]]*[a-z|-]*${reason}[a-z|-]*\)" "$consumer"; then
+      ok "$label has an arm for: $reason" "handled" "handled"
+    else
+      ok "$label has an arm for: $reason" "UNHANDLED (falls to the failure handler)" "handled"
+    fi
+  done
+done
+
 # --- reservation acquired by a peer between probe and launch -> NO worker ----
 out="$(STUB_VERDICT='{"verdict":"dispatchable"}' STUB_CLI_GUARD_REASON=reservation-held \
   run --name w3 --provider claude --message '/target x' --node "$NODE")"

@@ -917,6 +917,15 @@ for id in "${NODES[@]}"; do
           echo "already-running $id reason=\"$guard_reason by shared family-2 guard; no worker launched\""
           n_already=$((n_already + 1))
           continue ;;
+        unproven-claim)
+          # This arm carries the ordinary dispatch. The probe above runs only
+          # under --dry-run or for a `claimed` node, so a ready node reaches
+          # the guard verdict HERE and nowhere else. Without this arm the
+          # reason falls past the esac to the generic failure handler, turning
+          # a benign skip into `failed` and a non-zero exit for the batch.
+          echo "already-running $id reason=\"node:$id is held but no target init took that claim; no worker has reached target init\""
+          n_already=$((n_already + 1))
+          continue ;;
         reservation-held|duplicate-claim)
           echo "already-running $id reason=\"skipped: duplicate-claim (peer dispatcher holds dispatch:$id); no worker launched\""
           n_already=$((n_already + 1))

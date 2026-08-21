@@ -481,6 +481,15 @@ if [[ "$spawn_rc" -ne 0 ]]; then
       live-claim)
         printf 'result=already-running name=%s action=%s reason="shared family-2 guard refused node:%s; no worker launched"\n' "$NAME" "$guard_reason" "$NODE"
         exit 0 ;;
+      unproven-claim)
+        # The SAME outcome as live-claim for this caller, and it needs its own
+        # arm on THIS path, not only on the probe above. The probe runs before
+        # the spawn; this block fires when the claim is taken in the window
+        # between them, which is the race it exists for. Without an arm here
+        # the reason falls past the esac into the generic failure handler, and
+        # a benign dedup skip becomes result=failed with exit 1.
+        printf 'result=already-running name=%s action=%s reason="node:%s is held but no target init took that claim; no worker has reached target init"\n' "$NAME" "$guard_reason" "$NODE"
+        exit 0 ;;
       suspect-claim)
         # THE wedge, and this is the arm that fires on one. Recovery ran here,
         # inside the real spawn, and could not prove the holder dead, so nobody

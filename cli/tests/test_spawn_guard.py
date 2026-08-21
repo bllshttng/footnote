@@ -520,3 +520,30 @@ def test_an_unreadable_manifest_never_manufactures_a_worker(claims_tmp, monkeypa
     obj = json.loads(res.output)
     assert obj["reason"] == "unproven-claim"
     assert obj["init_reached"] is False
+
+
+def test_a_stale_manifest_does_not_manufacture_a_worker(claims_tmp):
+    """The manifest marker is a measurement, not a snapshot.
+
+    Manifest claim fields are written once at init and are never ownership
+    truth. A dispatcher is handed the NODE's project root as `--cwd`, which is
+    exactly where a finished session leaves its file behind. A key-only test
+    therefore reads a dead session's manifest and calls an unrelated holder a
+    live worker, re-manufacturing the lie this whole change deletes.
+
+    Here the manifest binds the key under a holder that finished. Somebody else
+    now holds the claim. The verdict must be unproven.
+    """
+    import os
+
+    project = _write_manifest(
+        claims_tmp, claim_key="node:x-5555", holder="probe-holder-that-finished"
+    )
+    acquire_claim("node:x-5555", "someone-else-entirely", pid=os.getpid())
+    res = _invoke(
+        "x-5555", "--holder", "probe:1", "--no-reserve", "--cwd", str(project), "--json"
+    )
+    assert res.exit_code == 0
+    obj = json.loads(res.output)
+    assert obj["reason"] == "unproven-claim"
+    assert obj["init_reached"] is False
