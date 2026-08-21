@@ -848,7 +848,8 @@ def test_real_relay_descendant_releases_captured_receipt_pipes(
     """A real double-forked relay cannot delay the hosted CLI-style receipt."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, write_registry
-    from fno.bus.log import bus_log_path
+    from fno.bus.cursor import scan_unread
+    from fno.bus.log import iter_messages
 
     write_registry(
         [
@@ -935,7 +936,13 @@ print(f"{result.msg_id} delivered ({result.delivery})")
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(result.stdout.splitlines()) == 1
         assert result.stdout.strip().endswith("delivered (hosted)")
-        assert not bus_log_path().exists()
+        audit_rows = list(iter_messages())
+        assert len(audit_rows) == 1
+        audit = audit_rows[0]
+        assert audit.delivery == "hosted"
+        assert audit.id in result.stdout
+        assert "hello" in audit.body
+        assert scan_unread(audit.to) == []
         # Poll for the CONTENT, not the path. `exists()` goes true the instant the
         # file is created, so a poll on it can read an empty file the relay has not
         # finished writing, and the assert fails on '' instead of "started".

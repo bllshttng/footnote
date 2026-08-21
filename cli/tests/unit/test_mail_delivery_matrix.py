@@ -154,7 +154,7 @@ def test_cell1_discovery_miss_still_injects_over_the_socket(
     assert res.exit_code == 0, res.output
     assert "delivered (hosted)" in res.output
     assert attempts, "the socket was never consulted on a discovery miss"
-    # No durable copy: a confirmed inject is self-recording in the transcript.
+    # No durable copy: the confirmed inject has only an audit bus record.
     assert "queued (durable)" not in res.output
 
 
@@ -948,3 +948,15 @@ def test_exactly_one_receipt_line_per_send(
     ]
     assert len(receipts) == 1, f"expected exactly one receipt line, got {receipts}"
     assert expected in receipts[0]
+
+    from fno.bus.cursor import scan_unread
+    from fno.bus.log import iter_messages
+
+    rows = [m for m in iter_messages() if m.from_ == "web"]
+    assert len(rows) == 1
+    if expected == "queued (durable)":
+        assert rows[0].delivery is None
+        assert [m.id for m in scan_unread(rows[0].to)] == [rows[0].id]
+    else:
+        assert rows[0].delivery == "hosted"
+        assert scan_unread(rows[0].to) == []

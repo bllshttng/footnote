@@ -7084,9 +7084,8 @@ def _stamp_after_delivery(
     """Bump `last_message_at` (and `status` for a hosted send) after delivery.
 
     Delivery is already complete when this runs, so a failure here cannot make
-    the send retryable, but it must stay visible: a hosted send has no durable
-    envelope to expose the degradation later. Shared by the normal path and the
-    lock-timeout queue so a durable success is booked the same way in both.
+    the send retryable, but it must stay visible. Shared by the normal path and
+    the lock-timeout queue so a durable success is booked the same way in both.
     """
     try:
 
@@ -7169,8 +7168,9 @@ def dispatch_send(
     durable inbox envelope is written ONLY when the recipient is not
     live-reachable or the live inject does not confirm. A confirmed live
     (``hosted``) send is self-recording in the transcript and is NOT also queued;
-    the durable bus is the offline fallback tier. Both the live turn and the
-    durable body carry the same ``<fno_mail>`` envelope.
+    its bus row is audit-only, while the durable bus remains the offline fallback
+    tier. Both the live turn and the bus record carry the same ``<fno_mail>``
+    envelope.
 
     Orchestration:
 
@@ -7498,6 +7498,36 @@ def dispatch_send(
                     )
                     if _live_delivered:
                         delivery = "hosted"
+                        from fno.bus.log import record_hosted_delivery
+                        from fno.mail.envelope import wrap_fno_mail
+
+                        hosted_body = wrap_fno_mail(
+                            message,
+                            from_=mail_ctx.from_,
+                            harness=mail_ctx.harness,
+                            model=mail_ctx.model,
+                            node=mail_ctx.node,
+                            to=mail_ctx.to,
+                            id=mail_ctx.id,
+                        )
+                        try:
+                            record_hosted_delivery(
+                                msg_id=msg_id,
+                                sender=mail_ctx.from_,
+                                recipient=durable_recipient or existing.short_id,
+                                body=hosted_body,
+                                provider_from=provider_from,
+                                provider_to=existing.harness,
+                                from_session=from_session,
+                                from_model=mail_ctx.model,
+                                to_kind="session",
+                            )
+                        except Exception as exc:  # noqa: BLE001 - delivery already succeeded
+                            print(
+                                "delivery succeeded; outbox record failed; "
+                                f"do not retry: {exc}",
+                                file=sys.stderr,
+                            )
                     else:
                         live_miss_reason = _live_reason[0] if _live_reason else None
                 if _bus_only:

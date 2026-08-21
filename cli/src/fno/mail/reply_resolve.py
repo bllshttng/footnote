@@ -1,11 +1,9 @@
 """Recover the sender of a live-injected ``<fno_mail id="...">`` from the invoking
-session's OWN transcript, for ``fno mail reply --to <id>`` when the id has no
-durable bus thread.
+session's OWN transcript when ``fno mail reply --to <id>`` cannot find a bus row.
 
-A live-confirmed delivery writes no durable record BY DESIGN (the recipient's
-transcript IS the record). So a reply to a live-injected message cannot resolve
-its sender off the bus -- the only place the ``id -> from`` binding exists is the
-envelope the recipient already has in its transcript. This module reads it back.
+Current hosted delivery appends an audit-only bus record, but legacy deliveries
+and a nonretryable audit-append failure can still leave the transcript as the only
+place the ``id -> from`` binding exists. This module reads that fallback record.
 """
 from __future__ import annotations
 
@@ -35,8 +33,7 @@ def _addressed_here(tag: str, session_id: str) -> bool:
     A present session address is matched by TIER, not by string equality
     against the canonical handle: a send to a full session id stamps the full
     id, and codex addressing is often the full id in practice, so an equality
-    check drops a lane that writes no durable record and has nowhere else to
-    resolve from.
+    check can drop a legacy or degraded lane with no bus record to resolve from.
     """
     from fno.harness_identity import session_handle_tier
 

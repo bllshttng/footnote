@@ -921,6 +921,7 @@ def _envelope_to_dict(env) -> dict:
         ("provider_from", env.provider_from), ("provider_to", env.provider_to),
         ("from_session", env.from_session), ("from_model", env.from_model),
         ("to_kind", env.to_kind), ("in_reply_to", env.in_reply_to),
+        ("delivery", env.delivery),
     ):
         if val:
             out[key] = val
@@ -979,7 +980,11 @@ def cmd_view(
         body1 = (m.body or "").strip().replace("\n", " ")
         if len(body1) > 80:
             body1 = body1[:77] + "..."
-        typer.echo(f"{m.ts}  {who_from} -> {m.to}{kindtag} ({m.kind}): {body1}")
+        delivery = f"/{m.delivery}" if m.delivery else ""
+        typer.echo(
+            f"{m.ts}  {who_from} -> {m.to}{kindtag} "
+            f"({m.kind}{delivery}): {body1}"
+        )
 
 
 @mail_app.command("status")
@@ -1473,16 +1478,19 @@ def _name_lane_send(
 
     # Wire `to` carries the canonical handle, matching the durable-bus recipient
     # exactly -- `from` is already a handle via stamp_from, so both attrs agree.
+    sender = stamp_from(from_name)
+    sender_harness = infer_invoking_harness()
+    sender_model = resolve_self_model()
     wrapped = wrap_fno_mail(
         message,
-        from_=stamp_from(from_name),
+        from_=sender,
         # Through harness_for_provider like every other send path: the wire
         # vocabulary is claude-code, and stamping a raw "claude" here made the
         # name lane the one producer disagreeing with dispatch, the relay, and
         # the Rust contract. "cli" survives as the honest no-harness value: the
         # mapper defaults a MISSING provider to claude-code, a guess we avoid.
-        harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
-        model=resolve_self_model(),
+        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
+        model=sender_model,
         to=recipient,
         id=msg_id,
         reply_to=reply_to,
@@ -1604,12 +1612,34 @@ def _name_lane_send(
                 if entry.status == "live":
                     injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
 
+    assert recipient is not None  # resolved before either hosted or durable receipt
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
     # Surface the minted id so the sender can quote it and the recipient (who
     # also sees it in the injected <fno_mail id=...>) can reply --to it even
     # though a live-confirmed delivery writes no durable thread (US3).
     idtag = f" id:{msg_id}"
+    if injected:
+        from fno.bus.log import record_hosted_delivery
+
+        try:
+            record_hosted_delivery(
+                msg_id=msg_id,
+                sender=sender,
+                recipient=recipient,
+                body=wrapped,
+                provider_from=sender_harness,
+                provider_to=provider,
+                in_reply_to=reply_to,
+                from_model=sender_model,
+                to_kind="name",
+            )
+        except Exception as exc:  # noqa: BLE001 - delivery already succeeded
+            print(
+                "delivery succeeded; outbox record failed; "
+                f"do not retry: {exc}",
+                file=sys.stderr,
+            )
     if injected and woken_as:
         print(f"delivered (woken) to {recipient}{idtag}{corr} [revived as bg thread {woken_as}]")
         return
@@ -1652,7 +1682,6 @@ def _name_lane_send(
         recipient_resumable=not recipient_live,
     )
 
-    assert recipient is not None  # resolved by the name-lane logic before the durable write
     # x-e21e: a bus-only queue is DESIGNED, not stranded. The recipient polls
     # the durable bus at each turn boundary (notify-self), so this is delivery
     # on the recipient's terms -- no recovery warning, no escalation, and a
@@ -1801,11 +1830,14 @@ def _job_lane_send(
     # handle: this is what makes the address outlive the session. pr:<n> was
     # already normalized to node:<id> by the resolver.
     recipient = job.address
+    sender = stamp_from(from_name)
+    sender_harness = infer_invoking_harness()
+    sender_model = resolve_self_model()
     wrapped = wrap_fno_mail(
         message,
-        from_=stamp_from(from_name),
-        harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
-        model=resolve_self_model(),
+        from_=sender,
+        harness=harness_for_provider(sender_harness) if sender_harness else "cli",
+        model=sender_model,
         to=recipient,
         node=job.node_id,
         id=msg_id,
@@ -1826,6 +1858,25 @@ def _job_lane_send(
 
     holder_tag = f" [holder {provider} {session_id[:8]}]"
     if injected:
+        from fno.bus.log import record_hosted_delivery
+
+        try:
+            record_hosted_delivery(
+                msg_id=msg_id,
+                sender=sender,
+                recipient=recipient,
+                body=wrapped,
+                provider_from=sender_harness,
+                provider_to=provider,
+                from_model=sender_model,
+                to_kind="node",
+            )
+        except Exception as exc:  # noqa: BLE001 - delivery already succeeded
+            print(
+                "delivery succeeded; outbox record failed; "
+                f"do not retry: {exc}",
+                file=sys.stderr,
+            )
         print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
         return
 
@@ -3254,6 +3305,7 @@ def cmd_sent(
                     {
                         "id": m.id, "to": m.to, "to_kind": m.to_kind,
                         "kind": m.kind, "ts": m.ts,
+                        "delivery": m.delivery or "durable",
                         "claimed": claimed_flag[m.id],
                     }
                     for m in msgs
@@ -3267,9 +3319,14 @@ def cmd_sent(
         print(f"no {scope}mail sent from {handle}")
         return
     for m in msgs:
-        state = "claimed" if claimed_flag[m.id] else "UNCLAIMED"
+        state = (
+            "delivered" if m.delivery == "hosted"
+            else "claimed" if claimed_flag[m.id]
+            else "UNCLAIMED"
+        )
         lane = m.to_kind or "?"
-        print(f"{m.id}  -> {m.to}  [{lane}]  {m.ts}  {state}")
+        delivery = m.delivery or "durable"
+        print(f"{m.id}  -> {m.to}  [{lane}/{delivery}]  {m.ts}  {state}")
     print("\nto retract one: fno mail withdraw <id>")
 
 
@@ -3332,7 +3389,12 @@ def cmd_withdraw(
     if msg_id in withdrawn_ids(all_msgs):
         print(f"{msg_id} is already withdrawn")
         raise typer.Exit(code=0)
-
+    if target.delivery == "hosted":
+        print(
+            f"{msg_id} was already delivered (hosted); it cannot be withdrawn",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
     cursor = read_cursor(target.to)
     if cursor is not None:
         pos = {m.id: i for i, m in enumerate(all_msgs)}
@@ -3388,7 +3450,7 @@ def cmd_bus_ack(
     cost a reader two failed invocations before they resorted to ``--help``.
     """
     from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.bus.log import iter_messages
+    from fno.bus.log import is_deliverable, iter_messages
 
     # The ack target must be a retained message addressed to `name`. Two failure
     # modes this guards (both would silently corrupt the read position because
@@ -3410,6 +3472,13 @@ def cmd_bus_ack(
         print(
             f"message {msg_id!r} is addressed to {target.to!r}, not {name!r}; "
             f"cursor not advanced (ack only your own messages)",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if not is_deliverable(target):
+        print(
+            f"message {msg_id!r} was already delivered (hosted); "
+            "cursor not advanced",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -3982,7 +4051,7 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
     from datetime import timezone as _tz
 
     from fno.bus.cursor import read_cursor
-    from fno.bus.log import iter_messages, withdrawn_ids
+    from fno.bus.log import is_deliverable, iter_messages, withdrawn_ids
 
     now = _dt.now(tz=_tz.utc)
     all_msgs = list(iter_messages())
@@ -3990,7 +4059,10 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
     # reader takes `iter_messages` directly and so is NOT covered by the filter
     # in `scan_unread`. Without this line the nag survives its own withdrawal.
     retracted = withdrawn_ids(all_msgs)
-    sent = [m for m in all_msgs if m.from_ == handle and m.id not in retracted]
+    sent = [
+        m for m in all_msgs
+        if m.from_ == handle and m.id not in retracted and is_deliverable(m)
+    ]
     if not sent:
         return []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
