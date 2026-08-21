@@ -2269,6 +2269,66 @@ class TestTickRecordsAndDeadline:
         assert len(ends) == 1
         assert ends[0]["outcome"] == "ok"
 
+    def test_watchdog_tick_escalates_stale_rows(self, monkeypatch, tmp_path):
+        import typer
+        from typer.testing import CliRunner
+        from unittest.mock import MagicMock
+
+        from fno.agents import stale_escalate, watchdog
+        from fno.pr_watch import cli as prcli
+        from fno.pr_watch._dispatch import TickResult
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+        settings = MagicMock()
+        settings.pr_watch.enabled = True
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.pr_watch.graphql_min_remaining = 200
+        settings.recovery.enabled = True
+        settings.recovery.watchdog = "report"
+        settings.recovery.watchdog_mail_to = ""
+        settings.autonomy.enabled = True
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        monkeypatch.setattr(
+            "fno.pr_watch._dispatch.tick",
+            lambda **kw: TickResult(open_prs=0, acted=0),
+        )
+        monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *a, **k: 0)
+        monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **kw: ([], 0))
+        monkeypatch.setattr(prcli, "_emit_event", lambda *a, **k: True)
+
+        row = watchdog.Row("stale-row", "stale-worker", "blocked", None, "/tmp/stale")
+        verdict = watchdog.Verdict(
+            "stale-row", "stale-worker", "blocked", watchdog.STALE, "blocked 14h", "human"
+        )
+        payload = {
+            "verdicts": [verdict._asdict()],
+            "counts": {watchdog.STALE: 1},
+            "warnings": [],
+        }
+        monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, [row]))
+        monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
+        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
+        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
+        captured = []
+        monkeypatch.setattr(
+            stale_escalate,
+            "escalate_stale",
+            lambda rows, **kwargs: captured.extend(rows) or ("recorded", "q-stale"),
+        )
+        monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
+        monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        assert [(item.row_id, item.node, item.basis) for item in captured] == [
+            ("stale-row", None, "blocked 14h")
+        ]
+
     def test_sweep_failure_end_record_reads_degraded(self, monkeypatch):
         """AC4-EDGE at the CLI boundary: the end record distinguishes degraded."""
         from fno.pr_watch._dispatch import TickResult

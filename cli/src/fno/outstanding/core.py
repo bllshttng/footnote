@@ -810,22 +810,30 @@ def render(
             if q.ask:
                 lines.append(f"    Action: {q.ask}")
 
-        last_live: "bool | None | object" = object()
+        group_order: "list[str | bool | None]" = []
+        grouped: "dict[str | bool | None, list[Question]]" = {}
+        for q in shown:
+            group: "str | bool | None" = "unaddressed" if q.asker is None else q.live
+            if group not in grouped:
+                group_order.append(group)
+                grouped[group] = []
+            grouped[group].append(q)
+
         has_stale = False
         has_unknown = False
-        for q in shown:
-            is_live = q.live
-            if is_live != last_live:
-                if is_live is True:
-                    lines.append("  Live open questions:")
-                elif is_live is False:
-                    lines.append("  Stale questions:")
-                else:
-                    lines.append("  Questions with unknown liveness:")
-                last_live = is_live
-            append_question(q, stale_row=is_live is False)
-            has_stale = has_stale or is_live is False
-            has_unknown = has_unknown or is_live is None
+        for group in group_order:
+            if group == "unaddressed":
+                lines.append("  Questions for you (no agent is waiting):")
+            elif group is True:
+                lines.append("  Live open questions:")
+            elif group is False:
+                lines.append("  Stale questions:")
+            else:
+                lines.append("  Questions with unknown liveness:")
+            for q in grouped[group]:
+                append_question(q, stale_row=group is False)
+            has_stale = has_stale or group is False
+            has_unknown = has_unknown or group is None
         if has_stale:
             lines.append("  Answering a stale question records the decision but reaches nobody.")
         if has_unknown:
