@@ -835,7 +835,7 @@ struct View {
     ans_esc: Vec<u8>,
     /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
-    /// this open). Merged with the live badge leg by [`View::needs_view`].
+    /// this open). Merged with the live badge leg by [`View::needs_queue`].
     needs_fold: Option<Vec<crate::needs_overlay::FoldItem>>,
     /// Operator-owned priorities folded independently from the event lane.
     mine_fold: Option<Vec<crate::needs_overlay::MineItem>>,
@@ -847,6 +847,17 @@ struct View {
     /// The MINE command failed/timed out; the operator lane degrades visibly
     /// without hiding THEY NEED YOU.
     mine_degraded: bool,
+    /// (x-f730 task 2.2) The MINE add-line text buffer: `Some(text)` while the
+    /// `a` mini text-entry is open inside the needs overlay (appended below
+    /// the MINE lane), `None` when closed. Owns the keyboard ahead of the
+    /// normal overlay keys so a typed letter never triggers cycle/answer.
+    mine_adding: Option<String>,
+    /// (x-f730 task 2.2) A MINE mutation queued by the stdin handler for the
+    /// run loop to shell out (kept out of the deep stdin handler, mirrors
+    /// `conn_action`); `mine_acting` bounds it to one in flight so a second
+    /// x/d/add press cannot race the first write.
+    mine_action: Option<crate::needs_overlay::MineMutation>,
+    mine_acting: bool,
     /// (x-feec) Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
     /// deep stdin handler.
@@ -2168,6 +2179,9 @@ impl View {
             needs_fold_at: None,
             needs_degraded: false,
             mine_degraded: false,
+            mine_adding: None,
+            mine_action: None,
+            mine_acting: false,
             needs_want: false,
             needs_inflight: false,
             needs_gen: 0,
@@ -2477,6 +2491,19 @@ impl View {
             NeedsFooter::Folding
         } else {
             NeedsFooter::AsOf
+        }
+    }
+
+    /// (x-f730 task 2.2) Apply a finished MINE mutation: success re-folds so
+    /// the render reflects the file (the client never simulates the write
+    /// itself - `mine_fold` is untouched here either way); a failure shows
+    /// the reason as a notice and leaves everything - the file included -
+    /// unchanged (AC3-ERR: never a silent no-op).
+    fn apply_mine_action_result(&mut self, result: Result<(), String>) {
+        self.mine_acting = false;
+        match result {
+            Ok(()) => self.needs_want = true,
+            Err(msg) => self.set_notice(format!("mine: {msg}")),
         }
     }
 
@@ -9471,6 +9498,14 @@ async fn attach_and_run(
     let (needs_tx, mut needs_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::needs_overlay::FoldOutcome)>();
 
+    // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
+    // and reports back here. Single-flight (`mine_acting`), ungated by
+    // generation - a mutation always applies wherever the overlay currently
+    // is, since a write from a stale open is still a real write the operator
+    // asked for.
+    let (mine_act_tx, mut mine_act_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
+
     // x-b2bf: the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
     let (yard_tx, mut yard_rx) =
@@ -9548,6 +9583,17 @@ async fn attach_and_run(
             tokio::spawn(async move {
                 let result = crate::needs_overlay::fold_both(&since).await;
                 let _ = tx.send((gen, result));
+            });
+        }
+        // x-f730 task 2.2: kick a queued MINE mutation off the UI loop.
+        // `mine_acting` is already set by the stdin handler at enqueue time
+        // (mirrors `Connections::acting`), so a second x/d/add press before
+        // this one lands is a no-op there rather than a race here.
+        if let Some(mutation) = view.mine_action.take() {
+            let tx = mine_act_tx.clone();
+            tokio::spawn(async move {
+                let result = crate::needs_overlay::mine_mutate(mutation).await;
+                let _ = tx.send(result);
             });
         }
         if view.yard_want && !view.yard_inflight {
@@ -9942,6 +9988,13 @@ async fn attach_and_run(
                     // A superseded fold returned while the current overlay still
                     // needs one (re-opened past the cache): kick a fresh fold.
                     view.needs_want = true;
+                }
+            }
+            Some(result) = mine_act_rx.recv() => {
+                // x-f730 task 2.2: a queued MINE mutation finished.
+                view.apply_mine_action_result(result);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             Some((gen, outcome)) = conn_rx.recv() => {
@@ -14126,17 +14179,22 @@ async fn rename_keys(
 }
 
 /// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE in as
-/// a first, still-inert-to-digits lane): a digit answers the selected
-/// answerable NEED row (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned
-/// keystroke, fingerprint fail-closed, focus unchanged), `n`/`N` (and j/k/
-/// arrows) cycle across BOTH lanes, Enter routes per kind (goto its
-/// pane/attach, else a focus-manually notice for a squadless live row or a
-/// MINE row - editing MINE in place is a later task), q/Esc closes. The
-/// projection is read once per chunk from the same [`View::needs_projection`]
-/// the overlay draws, so the cursor and the rendered rows never diverge. An
-/// empty overlay (the "nothing needs you" state) closes on ANY key
-/// (AC4-EDGE). Closing bumps the generation token so an in-flight fold result
-/// is discarded (AC6-FR).
+/// a first, editable lane): a digit answers the selected answerable NEED row
+/// (unchanged [`ClientMsg::PaneAnswer`] - daemon-pinned keystroke, fingerprint
+/// fail-closed, focus unchanged), `n`/`N` (and j/k/arrows) cycle across BOTH
+/// lanes, Enter routes per kind (goto its pane/attach, else a focus-manually
+/// notice for a squadless live row or a MINE row), q/Esc closes. `x` toggles
+/// and `d` drops the selected MINE row; `a` opens a text entry (typed below
+/// the MINE lane) that appends a new unticked item on Enter, Esc cancels it.
+/// Every MINE key only ever queues `View::mine_action` for the run loop to
+/// shell out (single-flight via `mine_acting`) - the file is the one writer,
+/// so the render updates only once the mutation lands and re-folds, never
+/// optimistically. The projection is read once per chunk from the same
+/// [`View::needs_projection`] the overlay draws, so the cursor and the
+/// rendered rows never diverge. An empty overlay (the "nothing needs you"
+/// state) closes on ANY key except `a` (AC4-EDGE - but the operator must be
+/// able to add their first item to an empty lane). Closing bumps the
+/// generation token so an in-flight fold result is discarded (AC6-FR).
 async fn answer_keys(
     view: &mut View,
     bytes: &[u8],
@@ -14159,7 +14217,38 @@ async fn answer_keys(
         .and_then(|s| s.tabs.get(s.active_tab))
         .map(|t| t.id);
     for &k in &keys {
-        // The empty "nothing needs you" state: any key dismisses it (AC4-EDGE).
+        // The MINE add text entry owns the keyboard ahead of everything below
+        // it - a typed letter must never be read as a cycle/answer key.
+        if let Some(buf) = view.mine_adding.as_mut() {
+            match k {
+                b'\r' | b'\n' => {
+                    let text = std::mem::take(buf).trim().to_string();
+                    view.mine_adding = None;
+                    if !text.is_empty() && !view.mine_acting {
+                        view.mine_action = Some(crate::needs_overlay::MineMutation::Add(text));
+                        view.mine_acting = true;
+                    }
+                }
+                0x1b => view.mine_adding = None,
+                0x7f | 0x08 => {
+                    buf.pop();
+                }
+                0x20..=0x7e => buf.push(k as char),
+                _ => {}
+            }
+            continue;
+        }
+        // `a` opens the add entry unconditionally - unlike every other key it
+        // has a meaning on an empty overlay (start the operator's first
+        // item), so it is handled ahead of the empty-dismisses-all rule.
+        if k == b'a' {
+            if !view.mine_acting {
+                view.mine_adding = Some(String::new());
+            }
+            continue;
+        }
+        // The empty "nothing needs you" state: any other key dismisses it
+        // (AC4-EDGE).
         if projection.rows.is_empty() {
             view.answers = None;
             view.needs_gen = view.needs_gen.wrapping_add(1);
@@ -14175,6 +14264,21 @@ async fn answer_keys(
             b'n' | b'j' => view.answers = Some((cur + 1) % projection.rows.len()),
             b'N' | b'k' => {
                 view.answers = Some((cur + projection.rows.len() - 1) % projection.rows.len())
+            }
+            // A MINE row toggle/drop; a NEED row is not addressable by either
+            // key and both are a silent no-op there (only `a`/digit/Enter/q
+            // act on a NEED row).
+            b'x' if !view.mine_acting => {
+                if let NeedsOverlayRow::Mine(item) = &projection.rows[cur] {
+                    view.mine_action = Some(crate::needs_overlay::MineMutation::Toggle(item.n));
+                    view.mine_acting = true;
+                }
+            }
+            b'd' if !view.mine_acting => {
+                if let NeedsOverlayRow::Mine(item) = &projection.rows[cur] {
+                    view.mine_action = Some(crate::needs_overlay::MineMutation::Drop(item.n));
+                    view.mine_acting = true;
+                }
             }
             b'0'..=b'9' => {
                 // A MINE row has no `NeedRow` to answer - `.need()` is None and
@@ -27250,6 +27354,138 @@ mod tests {
             needs_overlay_lines(&projection, selected, NeedsFooter::AsOf, NeedsFooter::AsOf);
         let selected_line = lines.iter().find(|line| line.contains('▸')).unwrap();
         assert!(selected_line.contains(projection.rows[selected].label()));
+    }
+
+    // x-f730 task 2.2 AC1-HP: x on a MINE row queues its toggle by file index,
+    // never a stray keystroke to any pane.
+    #[tokio::test]
+    async fn answer_keys_x_on_mine_row_queues_toggle() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![mine_item(3, "ship it", false)]);
+        v.needs_fold = Some(Vec::new());
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert_eq!(
+            v.mine_action,
+            Some(crate::needs_overlay::MineMutation::Toggle(3))
+        );
+        assert!(v.mine_acting, "single-flight guard set while queued");
+        assert!(buf.is_empty(), "a MINE toggle never sends a pane keystroke");
+    }
+
+    // x-f730 task 2.2: d on a MINE row queues its drop by file index.
+    #[tokio::test]
+    async fn answer_keys_d_on_mine_row_queues_drop() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![mine_item(7, "cut it", false)]);
+        v.needs_fold = Some(Vec::new());
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"d", &mut buf).await.unwrap();
+        assert_eq!(
+            v.mine_action,
+            Some(crate::needs_overlay::MineMutation::Drop(7))
+        );
+    }
+
+    // x/d on a NEED row (not MINE) are a silent no-op - only a MINE row is
+    // addressable by either key.
+    #[tokio::test]
+    async fn answer_keys_x_and_d_on_need_row_are_inert() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(vec![fold_item("operator_question", "q", true)]);
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"x", &mut buf).await.unwrap();
+        assert_eq!(v.mine_action, None);
+        answer_keys(&mut v, b"d", &mut buf).await.unwrap();
+        assert_eq!(v.mine_action, None);
+        assert_eq!(v.answers, Some(0), "overlay stays open, row unaffected");
+    }
+
+    // x-f730 task 2.2 AC2-HP: a opens the add entry - even over an empty
+    // projection, the one case where "any key dismisses" must not apply -
+    // and typing text then Enter queues an Add with the trimmed text.
+    #[tokio::test]
+    async fn answer_keys_a_then_type_then_enter_queues_add() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(Vec::new());
+        v.needs_fold = Some(Vec::new());
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"a", &mut buf).await.unwrap();
+        assert!(
+            v.mine_adding.is_some(),
+            "a opens the add entry even on an empty lane"
+        );
+        assert_eq!(
+            v.answers,
+            Some(0),
+            "the empty-dismisses-all rule never fires for a"
+        );
+        answer_keys(&mut v, b"buy milk\r", &mut buf).await.unwrap();
+        assert_eq!(
+            v.mine_action,
+            Some(crate::needs_overlay::MineMutation::Add("buy milk".into()))
+        );
+        assert!(v.mine_adding.is_none(), "submit closes the text entry");
+    }
+
+    // x-f730 task 2.2: Esc while adding cancels the text entry without
+    // queuing a mutation, and without closing the whole overlay.
+    #[tokio::test]
+    async fn answer_keys_esc_while_adding_cancels_without_closing_overlay() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![mine_item(1, "existing", false)]);
+        v.needs_fold = Some(Vec::new());
+        v.answers = Some(0);
+        let mut buf: Vec<u8> = Vec::new();
+        answer_keys(&mut v, b"a", &mut buf).await.unwrap();
+        answer_keys(&mut v, b"partial", &mut buf).await.unwrap();
+        // A lone Esc byte pends in fold_selector_keys until a disambiguating
+        // byte arrives (shared arrow-vs-bare-Esc fold); the trailing space
+        // flushes it to a bare 0x1b and is itself swallowed as the
+        // disambiguator, never reaching mine_adding as its own keystroke.
+        answer_keys(&mut v, b"\x1b ", &mut buf).await.unwrap();
+        assert!(v.mine_adding.is_none());
+        assert_eq!(v.mine_action, None);
+        assert!(
+            v.answers.is_some(),
+            "Esc cancels the add box, not the overlay"
+        );
+    }
+
+    // x-f730 task 2.2 AC3-ERR: a failed mutation shows the failure and
+    // leaves state untouched (mine_fold, and never a re-fold) - never a
+    // silent no-op.
+    #[test]
+    fn apply_mine_action_result_shows_failure_never_silent() {
+        let mut v = view_with_agents(vec![]);
+        v.mine_fold = Some(vec![mine_item(1, "existing", false)]);
+        v.needs_want = false;
+        v.apply_mine_action_result(Err(
+            "mine: failed: item text must be one non-empty line".into()
+        ));
+        assert!(!v.mine_acting);
+        assert!(!v.needs_want, "a failure never triggers a re-fold");
+        let notice = v.notice.as_ref().expect("failure surfaces a notice");
+        assert!(notice.0.contains("item text must be one non-empty line"));
+        // The (untouched) prior MINE state is exactly what was there before.
+        assert_eq!(v.mine_fold.as_ref().unwrap()[0].text, "existing");
+    }
+
+    #[test]
+    fn apply_mine_action_result_success_requests_refold() {
+        let mut v = view_with_agents(vec![]);
+        v.needs_want = false;
+        v.apply_mine_action_result(Ok(()));
+        assert!(!v.mine_acting);
+        assert!(
+            v.needs_want,
+            "success re-folds so the render reflects the file"
+        );
     }
 
     // ---- x-b2bf: the yard ----

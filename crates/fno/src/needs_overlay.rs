@@ -106,6 +106,60 @@ pub async fn fold_both(since_epoch: &str) -> FoldOutcome {
     FoldOutcome { needs, mine }
 }
 
+/// One MINE mutation the panel can send, addressed by `MineItem::n` (the
+/// stable file index `mine_now` already carries for this purpose). The verb
+/// is the one writer; the client never edits the file or `mine_fold` itself -
+/// it re-folds on success so the render always reflects what the file holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MineMutation {
+    Toggle(usize),
+    Drop(usize),
+    Add(String),
+}
+
+/// Run one MINE mutation through the installed/current `fno` binary, bounded
+/// by the same timeout as every other overlay shell-out. `Ok(())` on a clean
+/// exit; `Err(message)` on a timeout, spawn failure, or a nonzero exit (the
+/// CLI writes `mine: failed: ...` to stderr, which is captured here) - the
+/// operator sees WHY a write failed, never a silent no-op.
+pub async fn mine_mutate(mutation: MineMutation) -> Result<(), String> {
+    let mut args: Vec<String> = vec!["inbox".into(), "outstanding".into(), "mine".into()];
+    match mutation {
+        MineMutation::Toggle(n) => {
+            args.push("done".into());
+            args.push(n.to_string());
+        }
+        MineMutation::Drop(n) => {
+            args.push("drop".into());
+            args.push(n.to_string());
+        }
+        MineMutation::Add(text) => {
+            args.push("add".into());
+            args.push(text);
+        }
+    }
+    let fut = tokio::process::Command::new(crate::server::fno_bin())
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("exit {}", output.status)
+        } else {
+            stderr
+        })
+    }
+}
+
 /// Parse the verb's JSON array. Fails quiet (returns `None`) on unparseable
 /// output so a torn stdout degrades the overlay rather than crashing it.
 fn parse(stdout: &[u8]) -> Option<Vec<FoldItem>> {
