@@ -84,6 +84,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     import secrets
 
     from fno.events import operator_question
+    from fno.harness_identity import canonical_handle
     from fno.outstanding.core import append_question_event
 
     key = dedupe_key(stalled_ids)
@@ -99,6 +100,10 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
             question=question_text(ids, key, reason),
             session_id=session_id,
             cwd=str(cwd),
+            # The delivery address for the eventual answer. The king that asked
+            # is dead by then, but the durable mail tier reaches its successor;
+            # an asker-less row can only ever be answered into the void.
+            asker=canonical_handle(session_id) if session_id else None,
             # No node. A stalled row is queue-qualified (`undispatched:x-1234`)
             # and not every queue holds backlog nodes, so any value here would
             # be a guess. The question text names the rows instead.

@@ -1572,3 +1572,150 @@ def test_render_caps_rows_and_states_the_drop_count(root: Path):
     out = runner.invoke(outstanding_app, []).stdout
     assert "11 open question" in out
     assert "Showing 10 of 11 open questions" in out
+
+
+# --- delivery edge: an answered close reaches its asker -----------------------
+
+
+class _StoredSession:
+    """The one field deliver_answer needs from resolve_reachable's hit."""
+
+    session_id = "89abcdef-full-session-id"
+
+
+def _asked_question_with_asker(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_harness_identity",
+        lambda: HarnessIdentity(session_id="89abcdef-full-session", harness="codex"),
+    )
+    asked = runner.invoke(outstanding_app, ["ask", "which lane?"])
+    return asked.stdout.strip().splitlines()[-1]
+
+
+def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPatch):
+    """AC1: a resolvable asker gets the answer over mail, whole, plus the ids."""
+    from fno.outstanding import deliver as deliver_mod
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-ab12cd34", ts="2026-08-21T00:00:00Z", question="which lane?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "coordination lane", "d-1a2b")
+
+    assert sent, "a resolvable asker must produce exactly one mail send"
+    argv = sent[0]
+    flat = " ".join(argv)
+    assert " mail send " in flat
+    # Address by the FULL session id: short ids collide (codex ids are
+    # time-prefixed), and a truncated address is mail nobody drains.
+    assert "89abcdef-full-session-id" in argv
+    assert "coordination lane" in flat, "the answer must travel verbatim"
+    assert "q-ab12cd34" in flat, "the asker must learn WHICH question was answered"
+    assert "--style-exception" in flat, "operator prose is data, not authored relay"
+    assert "delivered to 89abcdef" in line
+    assert "d-1a2b" in line
+
+
+def test_no_asker_gets_a_stated_posture_not_a_silent_drop(monkeypatch: pytest.MonkeyPatch):
+    """AC4: king escalations carry asker None; the answer still says where it landed."""
+    from fno.outstanding import deliver as deliver_mod
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-00000001", ts="2026-08-21T00:00:00Z", question="king stalled", asker=None)
+    line = deliver_mod.deliver_answer(q, "reap them", "d-9f")
+
+    assert not sent
+    assert "no asker on record" in line
+    assert "d-9f" in line
+    assert "fno backlog decisions" in line, "the posture names the recovery verb"
+
+
+def test_ambiguous_asker_is_never_guessed(monkeypatch: pytest.MonkeyPatch):
+    """AC4: two stored sessions under one short id; waking either could wake a stranger."""
+    from fno.outstanding import deliver as deliver_mod
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(
+        deliver_mod, "_resolve_asker", lambda a: (None, ["uuid-one", "uuid-two"])
+    )
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-00000002", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "do both", "d-3")
+
+    assert not sent
+    assert "ambiguous" in line
+    assert "2" in line, "the posture names how many candidate sessions"
+    assert "never guess" in line
+
+
+def test_gone_asker_names_that_nobody_was_woken(monkeypatch: pytest.MonkeyPatch):
+    """AC4: no stored session; the answer is on record and the output says so."""
+    from fno.outstanding import deliver as deliver_mod
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (None, []))
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-00000003", ts="2026-08-21T00:00:00Z", question="which?", asker="deadbeef")
+    line = deliver_mod.deliver_answer(q, "ship it", "d-4")
+
+    assert not sent
+    assert "no stored session" in line
+    assert "d-4" in line
+
+
+def test_failed_mail_send_names_the_retry_and_never_raises(monkeypatch: pytest.MonkeyPatch):
+    """The close is durable before delivery runs; a mail failure is a stated line."""
+    from fno.outstanding import deliver as deliver_mod
+
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (11, "agent lock contention"))
+
+    q = Question(id="q-00000004", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "ship it", "d-5")
+
+    assert "delivery failed" in line
+    assert "agent lock contention" in line
+    assert "fno mail send 89abcdef-full-session-id" in line, "the retry command is copy-pasteable"
+
+
+def test_clear_with_answer_prints_the_delivery_posture(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC1 wiring: the posture line reaches the operator through clear itself."""
+    from fno.outstanding import deliver as deliver_mod
+
+    qid = _asked_question_with_asker(root, monkeypatch)
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coordination lane"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert sent, "clear must deliver when the asker resolves"
+    assert "delivered to 89abcdef" in cleared.output
+
+
+def test_clear_with_answer_names_an_undeliverable_posture(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC4 wiring: asker gone; the answer records, the close lands, the output says why."""
+    from fno.outstanding import deliver as deliver_mod
+
+    qid = _asked_question_with_asker(root, monkeypatch)
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (None, []))
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert not sent
+    assert "no stored session" in cleared.output
+    after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert after["questions"] == [], "an undeliverable answer still closes the question"

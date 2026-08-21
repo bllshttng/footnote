@@ -138,3 +138,25 @@ def test_a_huge_stalled_board_still_dedupes(tmp_path: Path) -> None:
     assert second_id == first_id
     # The count is load-bearing even when the rows are elided.
     assert "150 board row(s)" in question.question
+
+
+def test_escalations_carry_the_king_session_as_asker(tmp_path: Path) -> None:
+    """BREAK 1: an answered escalation must be deliverable to a successor king.
+
+    The king that asked is dead when the operator answers, but the durable mail
+    tier reaches the respawned one; neither works without an address on the row.
+    """
+    from fno.harness_identity import canonical_handle
+
+    _, _qid = _run(tmp_path, STALLED)
+    (question,) = read_open_questions(tmp_path)
+
+    assert question.asker == canonical_handle("k-test")
+
+
+def test_a_sessionless_escalation_records_without_an_asker(tmp_path: Path) -> None:
+    """No session id is the legacy shape; the question still lands, asker None."""
+    escalate(STALLED, reason="NoProgress", root=tmp_path, session_id=None, cwd=tmp_path)
+    (question,) = read_open_questions(tmp_path)
+
+    assert question.asker is None
