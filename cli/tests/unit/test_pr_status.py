@@ -8,6 +8,7 @@ not red, and an empty rollup is *unknown* not red.
 from __future__ import annotations
 
 import json as _json
+import subprocess
 
 import pytest
 
@@ -1124,6 +1125,9 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     }
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(
+        _reviews, "_reviewed_sha_is_ancestor", lambda reviewed, head, cwd: True
+    )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True, out["ready_blockers"]
@@ -1278,6 +1282,107 @@ def test_read_review_coverage_surfaces_stale_verdicts(tmp_path):
             "freshness": "stale",
         }
     ]
+
+
+def _git(tmp_path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _review_coverage_event(tmp_path, pr: int, head: str, verdict: dict) -> None:
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        _json.dumps(
+            {
+                "type": "review_coverage",
+                "data": {
+                    "pr": pr,
+                    "coverage": "covered",
+                    "reviewed_count": 1,
+                    "head_sha": head,
+                    "verdicts": [verdict],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _commit_reviewed_history(tmp_path) -> str:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "review-test@example.com")
+    _git(tmp_path, "config", "user.name", "Review Test")
+    (tmp_path / "reviewed.txt").write_text("reviewed\n", encoding="utf-8")
+    _git(tmp_path, "add", "reviewed.txt")
+    _git(tmp_path, "commit", "-qm", "reviewed history")
+    return _git(tmp_path, "rev-parse", "HEAD")
+
+
+def test_read_review_coverage_rejects_rebased_out_review(tmp_path):
+    """A stored fresh stamp cannot survive when its commit leaves HEAD history."""
+    from fno.pr._reviews import read_review_coverage
+
+    reviewed_sha = _commit_reviewed_history(tmp_path)
+    _git(tmp_path, "checkout", "--orphan", "rewritten")
+    (tmp_path / "rewritten.txt").write_text("rewritten\n", encoding="utf-8")
+    _git(tmp_path, "add", "rewritten.txt")
+    _git(tmp_path, "commit", "-qm", "rewritten history")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+    _review_coverage_event(
+        tmp_path,
+        1003,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "fresh",
+        },
+    )
+
+    got = read_review_coverage(1003, cwd=str(tmp_path), head=head)
+    assert got["coverage"] != "covered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"] == [
+        {
+            "name": "code-review",
+            "producer": "local_attestation",
+            "reviewed_sha": reviewed_sha,
+            "freshness": "stale",
+        }
+    ]
+
+
+def test_read_review_coverage_rejects_verdict_without_freshness(tmp_path):
+    """Missing freshness metadata is unknown evidence, never a fresh review."""
+    from fno.pr._reviews import read_review_coverage
+
+    head = _commit_reviewed_history(tmp_path)
+    _review_coverage_event(
+        tmp_path,
+        1004,
+        head,
+        {
+            "producer": "local_attestation",
+            "name": "code-review",
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+        },
+    )
+
+    got = read_review_coverage(1004, cwd=str(tmp_path), head=head)
+    assert got["coverage"] != "covered"
+    assert got["verdicts"][0]["freshness"] == "stale"
+    assert got["stale_verdicts"][0]["reviewed_sha"] == head
 
 
 def test_error_verdict_carries_the_reason(monkeypatch, capsys):
