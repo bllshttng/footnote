@@ -69,6 +69,9 @@ MAN
 # the child live; everything else is a benign success.
 cat > "${BIN_DIR}/fno" <<ABIEOF
 #!/usr/bin/env bash
+if [[ "\${1:-} \${2:-}" == "agents claim" ]]; then
+  shift
+fi
 case "\$1 \$2" in
   "claim status")
     printf '{"holder":"target-session:${SID}","state":"live"}\n' ;;

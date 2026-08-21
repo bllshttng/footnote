@@ -556,7 +556,7 @@ command is about" and differs by family:
   fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
   fno gate verify                       -p phase      (-s state, -x strict)
   fno doctor event emit                 -t type       (-d data, -s source)
-  fno agents mail send                         -k kind       (-b body; --to-project long-only)
+  fno agents mail send                  -k kind       (-b body; --to-project long-only)
   fno done                              -p pr-number  (-l link, -m note)
   fno carveout add                      -k kind       (-p priority)
 

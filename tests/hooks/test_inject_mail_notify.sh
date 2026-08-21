@@ -61,7 +61,7 @@ OUT="$(FNO_STUB_ARGS_LOG="$ARGS_LOG" FNO_STUB_OUT="$EXPECTED" run_hook 2>/dev/nu
 [[ $RC -eq 0 ]] && pass "unread: exit 0" || fail "unread rc=$RC"
 [[ "$OUT" == "$EXPECTED" ]] \
   && pass "unread: relays CLI-owned hook JSON unchanged" || fail "unread: output was rewrapped: $OUT"
-[[ "$(cat "$ARGS_LOG")" == "mail notify-self" ]] \
+[[ "$(cat "$ARGS_LOG")" == "agents mail notify-self" ]] \
   && pass "unread: invokes the atomic delivery verb once" || fail "unread: unexpected argv: $(cat "$ARGS_LOG")"
 echo "$OUT" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1 \
   && pass "unread: emits UserPromptSubmit hookSpecificOutput" || fail "unread: bad envelope: $OUT"
