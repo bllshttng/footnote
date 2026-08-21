@@ -106,6 +106,50 @@ def test_raw_refuses_multiline_payload(mailbox, monkeypatch, capsys):
     assert "single line" in capsys.readouterr().err
 
 
+def test_bare_compact_receipt_says_sent_before_it_says_anything_else(
+    mailbox, monkeypatch, capsys
+):
+    """x-c5aa: the receipt must not open with refusal grammar.
+
+    The old line was `injected (bare /compact ... pass a handoff path)`. It
+    named a defect in the argument and prescribed a different one, with no word
+    saying the verb had already fired. A caller followed the advice, re-sent
+    with a path, and queued a SECOND /compact; the operator watched both sit in
+    one prompt line on 2026-08-21. /compact is not idempotent.
+
+    A bare /compact stays legal (a self-send of it is reachable), so the fix is
+    the grammar: the completed action first, do-not-re-send before the advice,
+    and the advice in the past tense because nothing about it is actionable now.
+    """
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *a, **k: True)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "/compact", self_ok=False)
+    out = capsys.readouterr().out.strip()
+    assert exc.value.exit_code == 0
+    # The completed action leads, so the line cannot be read as a rejection.
+    assert out.startswith("injected")
+    # The instruction that stops the second fire precedes the advice.
+    assert "do not re-send" in out
+    assert out.index("do not re-send") < out.index("handoff path")
+    # The advice is retrospective, never a prescription for a send already made.
+    assert "would have" in out
+
+
+def test_compact_with_a_path_gets_a_bare_receipt(mailbox, monkeypatch, capsys):
+    """The correct call gets no advice at all: there is nothing to say."""
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *a, **k: True)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "/compact /tmp/handoff.md", self_ok=False)
+    assert exc.value.exit_code == 0
+    assert capsys.readouterr().out.strip() == "injected"
+
+
 def test_raw_refuses_forged_envelope_tag(mailbox, monkeypatch, capsys):
     # The mux lane pastes `_raw_send`'s payload directly and never reaches the
     # Rust mail-inject binary's own forged-tag check, so this door is the only
