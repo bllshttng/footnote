@@ -31,6 +31,7 @@ _COUNTED_FRESHNESS = {
     "carried_subset",
 }
 _KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
+_KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
 
 # The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
 # (resolved below) extends this; config.review.required_bots is the separate GATE
@@ -484,6 +485,8 @@ def _verdicts_with_current_freshness(
         reviewed_sha = verdict.get("reviewed_sha")
         if verdict_kind == "reviewed":
             stale = verdict.get("freshness") not in _COUNTED_FRESHNESS
+        elif verdict_kind != "stale":
+            current.pop("freshness", None)
         if verdict_kind == "reviewed" and head:
             if not isinstance(reviewed_sha, str) or not reviewed_sha:
                 stale = True
@@ -514,7 +517,9 @@ def _stale_verdicts(verdicts: list[dict]) -> list[dict]:
             "freshness": v.get("freshness"),
         }
         for v in verdicts
-        if isinstance(v, dict) and v.get("freshness") == "stale"
+        if isinstance(v, dict)
+        and v.get("verdict") in {"reviewed", "stale"}
+        and v.get("freshness") == "stale"
     ]
 
 
@@ -532,7 +537,11 @@ def _shape_review_coverage(data: dict, head: Optional[str], cwd: Optional[str]) 
         not isinstance(raw_verdicts, list)
         or not raw_verdicts
         or any(
-            not isinstance(v, dict) or v.get("verdict") not in _KNOWN_REVIEW_VERDICTS
+            not isinstance(v, dict)
+            or v.get("verdict") not in _KNOWN_REVIEW_VERDICTS
+            or v.get("producer") not in _KNOWN_COVERAGE_PRODUCERS
+            or not isinstance(v.get("name"), str)
+            or not v.get("name")
             for v in raw_verdicts
         )
     )

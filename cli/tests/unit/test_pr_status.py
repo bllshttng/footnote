@@ -1310,6 +1310,7 @@ def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
                             "producer": "github_app",
                             "name": "optional-reviewer",
                             "verdict": "refused",
+                            "freshness": "stale",
                         },
                     ],
                 },
@@ -1325,10 +1326,30 @@ def test_refused_verdict_without_freshness_is_not_reported_stale(tmp_path):
     assert "freshness" not in got["verdicts"][1]
 
 
-def test_malformed_verdict_cannot_hide_beside_fresh_review(tmp_path):
+@pytest.mark.parametrize(
+    "malformed_kind", ["non-dict", "missing-identity", "unknown-producer"]
+)
+def test_malformed_verdict_cannot_hide_beside_fresh_review(
+    tmp_path, malformed_kind
+):
     from fno.pr._reviews import read_review_coverage
 
     head = _commit_reviewed_history(tmp_path)
+    malformed = {
+        "non-dict": "malformed",
+        "missing-identity": {
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+            "freshness": "fresh",
+        },
+        "unknown-producer": {
+            "producer": "not-a-producer",
+            "name": "invented-reviewer",
+            "verdict": "reviewed",
+            "reviewed_sha": head,
+            "freshness": "fresh",
+        },
+    }[malformed_kind]
     events = tmp_path / ".fno" / "events.jsonl"
     events.parent.mkdir(parents=True)
     events.write_text(
@@ -1348,7 +1369,7 @@ def test_malformed_verdict_cannot_hide_beside_fresh_review(tmp_path):
                             "reviewed_sha": head,
                             "freshness": "fresh",
                         },
-                        "malformed",
+                        malformed,
                     ],
                 },
             }
