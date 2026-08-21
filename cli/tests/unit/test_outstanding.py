@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.harness_identity import HarnessIdentity
+from fno.harness_identity import OwnedHarnessIdentity
 from fno.king.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
 from fno.outstanding.core import RENDER_CAP, Outstanding, Question, render
@@ -225,9 +225,13 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("fno.outstanding.cli._session_id", lambda: "ledger-run-id")
+    # The asker handle is stamped on a durable question event, so it resolves
+    # through the owned-identity seam rather than raw precedence.
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: HarnessIdentity(session_id="01234567-full-session", harness="codex"),
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            "01234567-full-session", "codex", (), "single"
+        ),
     )
 
     asked = runner.invoke(
@@ -619,8 +623,10 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr(
-        "fno.harness_identity.resolve_harness_identity",
-        lambda: HarnessIdentity(session_id="89abcdef-full-session", harness="codex"),
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            "89abcdef-full-session", "codex", (), "single"
+        ),
     )
     qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
     recorded: dict[str, object] = {}

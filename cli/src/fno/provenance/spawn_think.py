@@ -399,6 +399,8 @@ def _owned_manifest_attended(project_root: Path, environ: Mapping[str, str]) -> 
     leaks a presence verdict this session does not own. Returns None when there
     is no owned manifest (caller falls back to env signal).
     """
+    # READ-ONLY (x-20f1 LD5): compares this process's id against a manifest to
+    # decide ownership. The id is the PREDICATE, never the value written.
     identity = resolve_harness_identity(environ)
     if identity.harness != "claude" or not identity.session_id:
         return None
@@ -459,6 +461,7 @@ def classify_presence(
     if attended is not None:
         return "attended" if attended else "away"
 
+    # READ-ONLY (x-20f1 LD5): an attended/away verdict, not a stamp.
     identity = resolve_harness_identity(environ)
     if identity.session_id and identity.harness in ("claude", "codex"):
         return "attended"

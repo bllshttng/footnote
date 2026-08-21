@@ -983,6 +983,13 @@ def resolve_owned_identity_cmd() -> None:
             return None
         return harness == true_harness
 
+    # The COLLIDER stays wired HERE and is deliberately not hoisted into the
+    # shared resolver every stamp site uses. A live registry row holding an id
+    # proves the id is not ours only while the prover is silent about it - and a
+    # session whose OWN row holds its id, in an environment where the process
+    # tree cannot be walked, is then refused its own identity. Survivable at
+    # this init-time verb, which reports the collision to a human reading the
+    # output. On the per-call stamp path it would silently unstamp a fleet.
     owned = resolve_owned_identity(
         env,
         prove=_prove,
@@ -2089,6 +2096,8 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
     """Resolved policy iff this is a canonical Codex Desktop Local chat."""
     from fno.harness_identity import resolve_harness_identity
 
+    # READ-ONLY (x-20f1 LD5): branches on whether this is a Codex Desktop
+    # chat. Nothing is stamped.
     identity = resolve_harness_identity()
     if identity.harness != "codex" or not identity.session_id:
         return None
@@ -2186,6 +2195,7 @@ def _codex_native_repo(cwd: Path) -> Optional[Path]:
     """
     from fno.harness_identity import resolve_harness_identity
 
+    # READ-ONLY (x-20f1 LD5): branches on whether this is a Codex Desktop chat.
     identity = resolve_harness_identity()
     if identity.harness != "codex" or not identity.session_id:
         return None
@@ -2586,14 +2596,19 @@ def _successor_claim_holder() -> str:
     from datetime import datetime, timezone
 
     from fno.claims.session_pid import resolve_session_pid
-    from fno.harness_identity import resolve_harness_identity
 
     try:
         pid = resolve_session_pid(from_pid=os.getpid()) or os.getpid()
     except Exception:
         pid = os.getpid()
+    # OWNED, not precedence (x-20f1): this infix is baked into the claim HOLDER
+    # string, which is written to the lockfile and read back as ownership. An
+    # ambiguous resolve leaves it empty rather than minting a holder that
+    # claims a harness this process cannot prove.
+    from fno.claims.self_identity import resolve_self_identity
+
     infix = _HARNESS_CLAIM_INFIX.get(
-        (resolve_harness_identity().harness or "").lower(), ""
+        (resolve_self_identity().harness or "").lower(), ""
     )
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"target-session:{ts}-{infix}{pid}-{secrets.token_hex(3)}"
@@ -2823,6 +2838,8 @@ def start(
     #    ambient marker omits it and ensure degrades to the external base.
     from fno.harness_identity import resolve_harness_identity
 
+    # READ-ONLY (x-20f1 LD5): selects a worktree LOCATION. Nothing durable
+    # records this harness, and a wrong guess costs a path, not an identity.
     ambient_harness = resolve_harness_identity().harness
     ensure_cmd = fno + ["worktree", "ensure", "--repo", str(repo_root), "--name", name]
     if ambient_harness:

@@ -1,0 +1,26 @@
+# Callers of the RAW identity precedence primitive (`resolve_harness_identity`)
+# that are allowed to keep it, each with the reason it is not a durable stamp.
+#
+# The discriminator is the primitive's own docstring: does the resolved harness
+# or session id end up WRITTEN to a claim, a mail record, an event, an
+# agent-state row, a registry row, a crown grant, a decision record or a graph
+# session record? If yes it must use `fno.claims.self_identity`, which proves
+# ownership from the process tree, checks the id against live registry rows, and
+# refuses rather than laundering an inherited marker. If it only reads to
+# display or branch, it belongs here.
+#
+# This list IS the record of that decision. An unlisted new caller fails
+# scripts/ci/check-identity-stamp-sites.sh until someone makes the call and
+# writes it down. Keyed file::function, so a reorder inside a caller is free.
+#
+# Format: <file>::<function>  <reason>
+
+cli/src/fno/agents/rust_runtime.py::env_scrub_spawn_warning  BRANCH. Picks a default provider name for a warning. Nothing durable carries it.
+cli/src/fno/outstanding/cli.py::_is_crowned  DISPLAY. Resolves the crown holder to show it. The GRANT path uses the owned identity.
+cli/src/fno/provenance/spawn_think.py::_owned_manifest_attended  PREDICATE. Compares this process's id against a manifest to decide ownership; the id is never the value written.
+cli/src/fno/provenance/spawn_think.py::classify_presence  BRANCH. An attended/away verdict.
+cli/src/fno/review_capability.py::detect_session  BRANCH. Names this harness's native review verb.
+cli/src/fno/target/resume_bind.py::resume_bind  PREDICATE. Refuses when ambient identity does not match the manifest; a mismatch is the output, not a stamp.
+cli/src/fno/target_cli.py::_codex_desktop_handoff_policy  BRANCH. Decides whether this is a Codex Desktop chat.
+cli/src/fno/target_cli.py::_codex_native_repo  BRANCH. Same Codex Desktop decision, for the repo lane.
+cli/src/fno/target_cli.py::start  BRANCH. Selects a worktree LOCATION. A wrong guess costs a path, not an identity.

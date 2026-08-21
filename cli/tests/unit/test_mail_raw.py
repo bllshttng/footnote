@@ -53,6 +53,17 @@ def _clear_harness_markers(monkeypatch):
 
 
 def _seed_claude(mailbox, monkeypatch):
+    # This helper says "this process IS a claude session", so make both halves
+    # of that true. Clearing the other families stops a marker inherited from
+    # the developer's own shell reading as a contaminated env; pinning the
+    # process-tree harness gives the owned identity path the proof a real
+    # claude worker has and a test runner does not. Without the proof the
+    # collider rejects this session's OWN registry row, since an unproven id a
+    # live row holds cannot be told from a stranger's.
+    _clear_harness_markers(monkeypatch)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: "claude"
+    )
     register_existing_session(
         provider="claude", session_id=SID_CLAUDE, cwd=str(mailbox), name="claudepeer"
     )
@@ -65,6 +76,11 @@ def _seed_claude(mailbox, monkeypatch):
 
 
 def _seed_codex_app_server(mailbox, monkeypatch):
+    # Clear the other families for the same reason as _seed_claude. No prover
+    # pin here: this seeds the RECIPIENT, and callers set whichever harness the
+    # SENDER is. It registers no registry row either, so there is no collision
+    # for an unproven single marker to trip over.
+    _clear_harness_markers(monkeypatch)
     import fno.mail.cli as mail_cli
     from fno.agents.registry import AgentEntry
 
@@ -1023,12 +1039,41 @@ def test_to_self_and_to_project_mutually_exclusive(runner, mailbox, monkeypatch)
 def test_to_self_refuses_contaminated_identity(runner, mailbox, monkeypatch):
     """An inherited foreign marker (e.g. CODEX_THREAD_ID from a codex parent in a
     claude worker) makes the precedence resolver pick the PARENT session; --to-self
-    must refuse rather than inject into the parent."""
+    must refuse rather than inject into the parent.
+
+    With no process-tree proof available (a test runner has no harness
+    ancestor), the owned path cannot decide and refuses. The refusal now names
+    both competing markers, which the old >1-family message did not.
+    """
+    _clear_harness_markers(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
     monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
     res = runner.invoke(app, ["agents", "mail", "send", "/compact", "--to-self", "--raw"])
     assert res.exit_code == 2
-    assert "multiple harness markers" in (res.output + (res.stderr or ""))
+    out = res.output + (res.stderr or "")
+    assert "cannot decide which session is 'self'" in out
+    assert "CODEX_THREAD_ID" in out and "CLAUDE_CODE_SESSION_ID" in out
+
+
+def test_to_self_resolves_a_contaminated_env_the_process_tree_can_prove(
+    runner, mailbox, monkeypatch
+):
+    """The same contaminated env, on a real claude worker, RESOLVES.
+
+    Refusing is the fallback, not the behavior: when the process tree proves the
+    claude marker is this process's own, --to-self addresses this session rather
+    than the parent whose marker it inherited - the answer precedence order got
+    wrong.
+    """
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness", lambda *a, **k: "claude"
+    )
+    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    assert res.exit_code == 0, res.output + (res.stderr or "")
+    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[:8])]
 
 
 def test_raw_refuses_from_self(runner, mailbox, monkeypatch):

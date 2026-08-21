@@ -326,10 +326,11 @@ FIELD_META: dict[str, Meta] = {
     "mux.board_scope": Meta(
         "advanced",
         "Which projects the mux backlog board shows: repo (default, this "
-        "checkout's project.id) | all | workspace:<name> (the projects "
-        "work.workspaces.<name> declares). A scope that cannot resolve shows "
-        "the unscoped lane only - the board refuses to widen back to every "
-        "project. Latched at mux server birth; `fno mux kill-server` re-reads.",
+        "checkout's project.id) | all | workspace:<name>, e.g. "
+        "workspace:main for a workspace holding web, backend and marketing. "
+        "A scope that cannot resolve shows the unscoped lane only - the board "
+        "refuses to widen back to every project. Latched at mux server birth; "
+        "`fno mux kill-server` re-reads.",
         default_source="default",
     ),
     "mux.prefix": Meta("advanced", "The mux prefix key, as C-a / Ctrl-a / ^a or a bare printable character. A digit 1-9 is refused (those select tabs), as is a key an action already holds. Unset keeps the built-in Ctrl-b."),

@@ -218,6 +218,11 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-mail-inject-callers.sh
 
+      - name: identity precedence-primitive caller ratchet
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-identity-stamp-sites.sh
+
       # From plan-rung-authority.yml.
       - name: One readiness authority (Python table, shell verb, Rust delegation)
         if: ${{ !cancelled() }}

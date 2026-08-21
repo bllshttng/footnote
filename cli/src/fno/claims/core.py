@@ -51,7 +51,7 @@ from .io import (
     serialize_claim,
 )
 from .staleness import classify, classify_for_sweep, is_expired, is_live, now_ms
-from ..harness_identity import resolve_harness_identity
+from .self_identity import resolve_self_identity
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from .types import (
     MAX_ENCODED_FILENAME_BYTES,
@@ -98,7 +98,7 @@ class ClaimContended(Exception):
     says nothing about who, if anyone, ends up holding the claim. Callers
     that only catch this narrow type cannot accidentally reclassify an
     unrelated RuntimeError raised deeper in the call stack (pydantic,
-    resolve_harness_identity, serialize_claim, ...) as contention.
+    resolve_self_identity, serialize_claim, ...) as contention.
 
     Callers of acquire_claim/refresh_claim should catch this ALONGSIDE
     ClaimHeldByOther, not instead of it - an except clause naming only one of
@@ -224,7 +224,11 @@ def _make_claim(
         # Rust make_claim resolver via the shared harness_identity markers.
         # An explicit `harness` wins over ambient resolution so callers can pin
         # the owning harness deterministically.
-        harness=harness if harness is not None else resolve_harness_identity().harness,
+        # OWNED, not precedence: this tag is read back by the dispatch guard to
+        # decide a foreign owner, so laundering an inherited marker here fences
+        # the wrong fleet. An ambiguous resolve leaves the tag unset rather than
+        # guessing (x-20f1).
+        harness=harness if harness is not None else resolve_self_identity().harness,
         metadata=metadata or {},
     )
 
@@ -690,7 +694,11 @@ def compare_and_rebind(
         # flows on into the do provenance row. The init hook omits --harness
         # whenever its owned-identity probe fails, so this is not a rare path.
         effective_new_harness = (
-            (new_harness if new_harness is not None else resolve_harness_identity().harness)
+            (
+                new_harness
+                if new_harness is not None
+                else resolve_self_identity().harness
+            )
             if handover_allowed
             else None
         )
