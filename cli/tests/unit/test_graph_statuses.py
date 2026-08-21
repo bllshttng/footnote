@@ -140,8 +140,8 @@ def test_ac1_hp_recompute_stale_lock_cleared():
     assert e["claimed_at"] is None
 
 
-def test_stale_lock_on_in_progress_node_is_named_and_preserved():
-    """A dead recorded owner on active work is a defect, not cleanup permission."""
+def test_old_lock_on_in_progress_node_is_unknown_and_preserved():
+    """Age alone cannot prove that a long-running worker is dead."""
     old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
     entry = _entry(
         "ab-livework1",
@@ -151,18 +151,15 @@ def test_stale_lock_on_in_progress_node_is_named_and_preserved():
         claimed_at=old,
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="ownership defect.*ab-livework1.*dead-worker",
-    ):
-        recompute_statuses([entry])
+    result = recompute_statuses([entry])
 
+    assert result[0]["status"] == "in_progress"
     assert entry["locked_by"] == "dead-worker"
     assert entry["session_id"] == "dead-worker"
     assert entry["claimed_at"] == old
 
 
-def test_stale_lock_on_legacy_claimed_node_is_named_and_preserved():
+def test_old_lock_on_legacy_claimed_node_is_migrated_and_preserved():
     old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
     entry = _entry(
         "ab-livework2",
@@ -172,13 +169,12 @@ def test_stale_lock_on_legacy_claimed_node_is_named_and_preserved():
         claimed_at=old,
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="ownership defect.*ab-livework2.*dead-legacy-worker",
-    ):
-        recompute_statuses([entry])
+    result = recompute_statuses([entry])
 
+    assert result[0]["status"] == "in_progress"
     assert entry["locked_by"] == "dead-legacy-worker"
+    assert entry["session_id"] == "dead-legacy-worker"
+    assert entry["claimed_at"] == old
 
 
 def test_ac1_hp_recompute_cascade_unblock_ignores_blocked_by_at_write_time():

@@ -1417,6 +1417,46 @@ def test_owner_and_pr_receipt_reads_all_fields_from_stored_row(tmp_graph, monkey
     assert "owner=worker-7" in result.output
 
 
+def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
+    old = "2020-01-01T00:00:00+00:00"
+    node_id = "ab-oldowner1"
+    tmp_graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": node_id,
+                        "title": "Long-running work",
+                        "status": "in_progress",
+                        "locked_by": "worker-old",
+                        "session_id": "worker-old",
+                        "claimed_at": old,
+                        "plan_path": "plans/long-running.md",
+                        "created_at": old,
+                    }
+                ]
+            }
+        )
+    )
+
+    replaced = _invoke(
+        "backlog", "update", node_id, "--locked-by", "worker-replacement"
+    )
+    assert replaced.exit_code == 0, replaced.output
+    row = _read_graph(tmp_graph)[0]
+    assert row["status"] == "in_progress"
+    assert row["locked_by"] == "worker-replacement"
+    assert row["session_id"] == "worker-replacement"
+    assert row["claimed_at"] != old
+
+    cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
+    assert cleared.exit_code == 0, cleared.output
+    row = _read_graph(tmp_graph)[0]
+    assert row["locked_by"] is None
+    assert row["session_id"] is None
+    assert row["claimed_at"] is None
+
+
 def test_remove_pr_drops_entry_by_number(tmp_graph):
     """--remove-pr N drops the entry with that number from additional_prs."""
     r = _invoke("backlog", "add", "Multi")
