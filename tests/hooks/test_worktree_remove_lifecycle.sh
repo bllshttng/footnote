@@ -117,8 +117,8 @@ rm -rf "$S"
 
 echo "== 2. _wt_pids keys on cwd, not open files =="
 
-# Source just the helper (the script body runs a case statement on source).
-eval "$(sed -n '/^_wt_pids()/,/^}/p' "$LIFECYCLE")"
+# Source just the helpers (the script body runs a case statement on source).
+eval "$(sed -n '/^_wt_refresh_cwd_snapshot()/,/^}/p; /^_wt_pids()/,/^}/p' "$LIFECYCLE")"
 
 if command -v lsof >/dev/null 2>&1; then
     WT=$(mktemp -d -t wt-pids.XXXXXX); mkdir -p "$WT/sub"; echo x > "$WT/sub/f"
@@ -128,6 +128,7 @@ if command -v lsof >/dev/null 2>&1; then
     ( cd "$WT/sub" && exec sleep 5 ) & IN=$!
     disown "$OFF" "$IN" 2>/dev/null || true   # silence job-control "Terminated" notices
     sleep 0.6
+    _wt_refresh_cwd_snapshot
     pids="$(_wt_pids "$WT")"
     if ! printf '%s\n' "$pids" | grep -qx "$OFF"; then pass "open-file-only process excluded (uv-hardlink false-positive fix)"; else fail "cwd-anchor exclude" "matched off-process $OFF"; fi
     if printf '%s\n' "$pids" | grep -qx "$IN"; then pass "cwd-inside process still detected"; else fail "cwd-anchor include" "missed in-process $IN; got [$pids]"; fi
@@ -142,7 +143,7 @@ echo "== 3. archive-worktree.sh declines cleanly without a tty =="
 S=$(new_sandbox)
 ( cd "$S" && git worktree add -q wt >/dev/null 2>&1 )
 WT="$S/wt"
-( cd "$WT" && exec sleep 8 ) & HOLD=$!
+( cd "$WT" && exec sleep 300 ) & HOLD=$!
 disown "$HOLD" 2>/dev/null || true
 sleep 0.6
 # Run in its OWN session (separate PGID, so the holder isn't self-filtered) with
@@ -230,7 +231,7 @@ rm -rf "$LOCKDIR" "$S" "$BARE"
 # 5c. _wt_pids spawns exactly one `ps` snapshot per worktree, not one per
 # matched pid. Stub process enumeration so the assertion stays deterministic
 # inside CI sandboxes that deny access to the host process table.
-eval "$(sed -n '/^_wt_pids()/,/^}/p' "$LIFECYCLE")"
+eval "$(sed -n '/^_wt_refresh_cwd_snapshot()/,/^}/p; /^_wt_pids()/,/^}/p' "$LIFECYCLE")"
 STUBDIR=$(mktemp -d -t ps-stub.XXXXXX)
 COUNTFILE="$STUBDIR/count.log"; : > "$COUNTFILE"
 cat > "$STUBDIR/lsof" <<'EOF'
@@ -248,6 +249,7 @@ printf '101 bash holder $STUBDIR/wt\n102 bash holder $STUBDIR/wt\n103 bash holde
 EOF
 chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
 WT="$STUBDIR/wt"; mkdir -p "$WT"
+PATH="$STUBDIR:$PATH" _wt_refresh_cwd_snapshot
 FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
 N_FOUND=$(printf '%s\n' "$FOUND" | grep -c .)
 N_PS=$(wc -l < "$COUNTFILE" | tr -d ' ')
@@ -272,6 +274,7 @@ exit 0
 EOF
 chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
 WT="$STUBDIR/wt"; mkdir -p "$WT"
+PATH="$STUBDIR:$PATH" _wt_refresh_cwd_snapshot
 FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
 if [[ "$FOUND" == $'201\n202' ]]; then
     pass "empty ps snapshot preserves all candidate pids"
@@ -280,7 +283,132 @@ else
 fi
 rm -rf "$STUBDIR"
 
-# 5e. Two sweeps racing to reclaim the same dead-holder lock: exactly one
+# 5e. An unreadable cwd snapshot is not proof that a worktree is idle. The
+# argv lane still returns candidates, while the nonzero status tells each
+# destructive caller to keep the worktree even when argv is empty.
+STUBDIR=$(mktemp -d -t cwd-unreadable-stub.XXXXXX)
+cat > "$STUBDIR/lsof" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+cat > "$STUBDIR/pgrep" <<'EOF'
+#!/usr/bin/env bash
+printf '301\n'
+EOF
+cat > "$STUBDIR/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '301 holder\n'
+EOF
+chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
+WT="$STUBDIR/wt"; mkdir -p "$WT"
+PATH="$STUBDIR:$PATH" _wt_refresh_cwd_snapshot >/dev/null 2>&1
+SNAPSHOT_RC=$?
+FOUND=$(PATH="$STUBDIR:$PATH" _wt_pids "$WT")
+PIDS_RC=$?
+if [[ "$SNAPSHOT_RC" -ne 0 && "$PIDS_RC" -ne 0 && "$FOUND" == "301" ]]; then
+    pass "unreadable cwd snapshot fails closed and preserves argv candidates"
+else
+    fail "unreadable cwd snapshot" "snapshot_rc=$SNAPSHOT_RC pids_rc=$PIDS_RC found=[$FOUND]"
+fi
+rm -rf "$STUBDIR"
+
+# 5f. One machine-wide cwd snapshot serves a 94-worktree phase. Field output
+# keeps parsing independent of lsof's human columns; matching is exact or below
+# the worktree boundary, so wt-1 never absorbs wt-10.
+eval "$(sed -n '/^_wt_refresh_cwd_snapshot()/,/^}/p; /^_wt_pids()/,/^}/p; /^_cargo_target_mtime()/,/^}/p; /^_cargo_target_bytes()/,/^}/p; /^_cargo_target_inventory()/,/^}/p' "$LIFECYCLE")"
+if declare -f _wt_refresh_cwd_snapshot >/dev/null 2>&1; then
+    STUBDIR=$(mktemp -d -t cwd-snapshot-stub.XXXXXX)
+    COUNTFILE="$STUBDIR/lsof.log"; : > "$COUNTFILE"
+    WORKTREE_LIST="$STUBDIR/worktrees.txt"; : > "$WORKTREE_LIST"
+    INVENTORY="$STUBDIR/inventory.tsv"
+    WT_ROOT="$STUBDIR/worktrees"; mkdir -p "$WT_ROOT"
+    i=1
+    while [[ "$i" -le 94 ]]; do
+        mkdir -p "$WT_ROOT/wt-$i/target"
+        printf 'x' > "$WT_ROOT/wt-$i/target/artifact"
+        printf 'worktree %s\n\n' "$WT_ROOT/wt-$i" >> "$WORKTREE_LIST"
+        i=$((i + 1))
+    done
+    cat > "$STUBDIR/lsof" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$COUNTFILE"
+printf 'p1001\nfcwd\nn%s\np1010\nfcwd\nn%s\np1094\nfcwd\nn%s\np2000\nfcwd\nn%s\n' \
+  "$WT_ROOT/wt-1" "$WT_ROOT/wt-10/sub" "$WT_ROOT/wt-94" "$WT_ROOT/elsewhere"
+EOF
+    cat > "$STUBDIR/pgrep" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    cat > "$STUBDIR/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '1001 holder\n1010 holder\n1094 holder\n2000 holder\n'
+EOF
+    cat > "$STUBDIR/git" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "worktree list --porcelain" ]]; then
+    cat "$WORKTREE_LIST"
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps" "$STUBDIR/git"
+    export COUNTFILE WORKTREE_LIST WT_ROOT
+    _wt_live() { return 1; }
+    PATH="$STUBDIR:$PATH" _cargo_target_inventory "$INVENTORY"
+    N_LSOF=$(wc -l < "$COUNTFILE" | tr -d ' ')
+    N_WORKTREES=$(wc -l < "$INVENTORY" | tr -d ' ')
+    WT1_PROTECTION=$(awk -F '\t' -v wt="$WT_ROOT/wt-1" '$4 == wt {print $3}' "$INVENTORY")
+    WT10_PROTECTION=$(awk -F '\t' -v wt="$WT_ROOT/wt-10" '$4 == wt {print $3}' "$INVENTORY")
+    WT2_PROTECTION=$(awk -F '\t' -v wt="$WT_ROOT/wt-2" '$4 == wt {print $3}' "$INVENTORY")
+    if [[ "$N_LSOF" -eq 1 && "$N_WORKTREES" -eq 94 && "$WT1_PROTECTION" == "processes:1" && "$WT10_PROTECTION" == "processes:1" && "$WT2_PROTECTION" == "-" ]] && ! grep -q -- '+D' "$COUNTFILE"; then
+        pass "lsof_calls=1 worktrees=94"
+    else
+        fail "shared cwd snapshot" "lsof_calls=$N_LSOF worktrees=$N_WORKTREES wt1=$WT1_PROTECTION wt10=$WT10_PROTECTION wt2=$WT2_PROTECTION argv=[$(cat "$COUNTFILE")]"
+    fi
+    unset COUNTFILE WORKTREE_LIST WT_ROOT
+    rm -rf "$STUBDIR"
+else
+    fail "shared cwd snapshot" "_wt_refresh_cwd_snapshot is missing"
+fi
+
+# 5g. Apply mode refreshes after inventory and before deletion. A process that
+# appears only in the second snapshot protects the selected target.
+S=$(new_sandbox)
+git -C "$S" worktree add -q "$S/wt" >/dev/null 2>&1
+mkdir -p "$S/wt/target"
+printf 'artifact' > "$S/wt/target/file"
+STUBDIR=$(mktemp -d -t cwd-recheck-stub.XXXXXX)
+COUNTFILE="$STUBDIR/lsof.log"; : > "$COUNTFILE"
+PROTECTED_WT="$(cd "$S/wt" && pwd -P)"
+cat > "$STUBDIR/lsof" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$COUNTFILE"
+n=$(wc -l < "$COUNTFILE" | tr -d ' ')
+if [[ "$n" -ge 2 ]]; then
+    printf 'p401\nfcwd\nn%s\n' "$PROTECTED_WT"
+fi
+EOF
+cat > "$STUBDIR/pgrep" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+cat > "$STUBDIR/ps" <<'EOF'
+#!/usr/bin/env bash
+printf '401 holder\n'
+EOF
+chmod +x "$STUBDIR/lsof" "$STUBDIR/pgrep" "$STUBDIR/ps"
+export COUNTFILE PROTECTED_WT
+out=$(cd "$S" && PATH="$STUBDIR:$PATH" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1); rc=$?
+N_LSOF=$(wc -l < "$COUNTFILE" | tr -d ' ')
+if [[ "$rc" -eq 1 && "$N_LSOF" -eq 3 && -d "$S/wt/target" ]] && echo "$out" | grep -q 'reason=process-recheck' && echo "$out" | grep -q 'status=over-cap-protected'; then
+    pass "apply recheck refresh protects newly rooted worktree"
+else
+    fail "apply cwd recheck" "rc=$rc lsof_calls=$N_LSOF target_exists=$([[ -d "$S/wt/target" ]] && echo yes || echo no) out=[$out]"
+fi
+unset COUNTFILE PROTECTED_WT
+rm -rf "$STUBDIR" "$S"
+
+# 5h. Two sweeps racing to reclaim the same dead-holder lock: exactly one
 # proceeds, the other backs off - never both, and never neither.
 S=$(new_sandbox)
 git -C "$S" branch -M main >/dev/null 2>&1
