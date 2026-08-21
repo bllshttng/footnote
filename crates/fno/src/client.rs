@@ -951,8 +951,14 @@ struct View {
     /// not a placement source, and making it one would offer a drag with nowhere
     /// to land. This is the hold clock and the pressed row, nothing else.
     ///
-    /// `(display_row, pressed_at)`.
-    press_hold: Option<(usize, Instant)>,
+    /// `(display_row, identity, pressed_at)`. The identity is load-bearing: an
+    /// index alone is not a row. `display_rows()` is rebuilt on every layout
+    /// push, so a row dropped during the hold slides a DIFFERENT row under the
+    /// same number, and the release would open that row's lifecycle menu - Stop
+    /// and Remove pointed at a worker nobody pressed. Re-checked at release
+    /// against [`View::row_identity`], the same discipline `RowDrag` gets from
+    /// `RowSource` and the selector gets from its name re-anchor.
+    press_hold: Option<(usize, String, Instant)>,
     /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
@@ -3201,6 +3207,26 @@ impl View {
                 }
             }
             self.set_notice("no menu on the held row".into());
+            return false;
+        }
+        // (x-b465) The press-hold latch gets the same treatment, and needs it
+        // more: a hold on a workspace row emits no events at all while it is
+        // held, so without this the menu waits for the release. Identity
+        // re-checked here too - the reaper fires precisely when a layout push
+        // is most likely to have landed under the held pointer.
+        if let Some((i, id, start)) = self.press_hold.clone() {
+            if !held_long_enough(start, false) {
+                return false;
+            }
+            self.press_hold = None;
+            if self.row_identity(i).as_ref() != Some(&id) {
+                self.set_notice("the held row moved".into());
+                return false;
+            }
+            if self.open_row_menu(i, Anchor::Center) {
+                return true;
+            }
+            self.set_notice("no menu on the held row".into());
         }
         false
     }
@@ -3987,16 +4013,38 @@ impl View {
         None
     }
 
-    /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
-    /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
-    /// id; a row with neither (a dead external tombstone) is not draggable.
-    /// (x-b465) The sideline row a press at `(row, col)` should HOLD on, for the
-    /// rows `row_drag_source_at` declines. Every sideline row qualifies, inert
-    /// ones included: a hold that opens no menu answers with a notice, and
-    /// silence is the defect this fixes. The density button is the one exclusion,
-    /// mirroring `row_drag_source_at`'s own row-0 guard - it is pinned chrome
-    /// painted OVER an agent row, so holding it must not open that row's menu.
-    fn press_hold_row_at(&self, row: u16, col: u16) -> Option<usize> {
+    /// (x-b465) A content-derived identity for the sideline row at `i`, stable
+    /// across a layout push. `None` for a row with no identity of its own (a
+    /// spacer, a table head): those cannot be re-checked after a push, so a
+    /// gesture must not latch onto one in the first place.
+    ///
+    /// An INDEX is not an identity. `display_rows()` is rebuilt on every layout,
+    /// so a row that vanishes mid-gesture slides a different row under the same
+    /// number - which is why `set_layout` re-anchors the selector by agent name
+    /// and why `RowDrag` carries a `RowSource` rather than a position.
+    fn row_identity(&self, i: usize) -> Option<String> {
+        match self.display_rows().get(i)? {
+            DisplayRow::Agent(a) => Some(format!("agent:{}", a.name)),
+            DisplayRow::Sel(s) => Some(format!("squad:{}:{:?}", s.squad, s.tab)),
+            DisplayRow::Card(c) => Some(format!("card:{}", c.id)),
+            DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
+            DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
+            DisplayRow::Sub(t) => Some(format!("sub:{t}")),
+            DisplayRow::NewSquad => Some("newsquad".into()),
+            DisplayRow::Blank | DisplayRow::TableHead | DisplayRow::TableEmpty => None,
+        }
+    }
+
+    /// (x-b465) The sideline row a press at `(row, col)` should HOLD on, with the
+    /// identity to re-check it by, for the rows `row_drag_source_at` declines.
+    /// Inert rows qualify: a hold that opens no menu answers with a notice, and
+    /// silence is the defect this fixes. A row with no stable identity does not,
+    /// so its press keeps the pre-hold behavior rather than latching.
+    ///
+    /// The density button is the one positional exclusion, mirroring
+    /// `row_drag_source_at`'s own row-0 guard - it is pinned chrome painted OVER
+    /// an agent row, so holding it must not open that row's menu.
+    fn press_hold_row_at(&self, row: u16, col: u16) -> Option<(usize, String)> {
         if row == 0 {
             if let Some(range) = self.density_button_range(self.panel_w() as usize) {
                 if range.contains(&(col as usize)) {
@@ -4004,9 +4052,13 @@ impl View {
                 }
             }
         }
-        self.sideline_row_at(row, col)
+        let i = self.sideline_row_at(row, col)?;
+        Some((i, self.row_identity(i)?))
     }
 
+    /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
+    /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
+    /// id; a row with neither (a dead external tombstone) is not draggable.
     fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
         // The density button is pinned chrome painted over row 0 (chrome_hit
         // resolves it to CycleDensity before any row action). A press there must
@@ -8402,7 +8454,18 @@ fn draw_lines_overlay<S: AsRef<str>>(
         if r >= rows {
             break;
         }
-        blank_straddling_pair(cells, cols, r, origin_c, (origin_c + box_w).min(cols));
+        // `framed.width`, not `box_w`: `blit` paints the FULL framed width, and
+        // `box_w` is that width clamped to the viewport. When the chrome's own
+        // minimum (a long title) pushes the frame past the viewport the two
+        // differ, and clamping here would leave the real right edge unchecked -
+        // stranding a spacer on exactly the overflow this guard exists for.
+        blank_straddling_pair(
+            cells,
+            cols,
+            r,
+            origin_c,
+            (origin_c + framed.width).min(cols),
+        );
     }
     chrome::blit(cells, rows, cols, (origin_r, origin_c), &framed, theme);
 }
@@ -9569,6 +9632,17 @@ async fn attach_and_run(
                     .as_ref()
                     .map(|d| d.last_at + PANE_DRAG_TIMEOUT),
             )
+            // (x-b465) The press-hold latch joins the same reaper. It has no
+            // `last_at` to refresh - a hold is motionless by definition - so its
+            // deadline runs from the press. Lose terminal focus mid-hold and the
+            // release lands in the other app; without this the latch survives,
+            // and a later stray release pops a menu on a row nobody is pressing,
+            // its clock long past the long-press threshold.
+            .chain(
+                view.press_hold
+                    .as_ref()
+                    .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
+            )
             .min();
         // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
@@ -10047,6 +10121,9 @@ async fn attach_and_run(
                 if !view.open_drag_menu() {
                     view.cancel_tab_drag();
                     view.cancel_row_drag();
+                    // (x-b465) A press-hold that did not become a menu is a dead
+                    // gesture: drop it so a later stray release cannot claim it.
+                    view.press_hold = None;
                 }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -10404,12 +10481,24 @@ async fn handle_stdin(
                     // neighbour. Under a usurping overlay the hold degrades to
                     // the plain click below - a menu there would steal the
                     // overlay's keys.
-                    let long_press = !view.menu_usurping_open()
-                        && held.is_some_and(|(_, start)| held_long_enough(start, false));
+                    // Fail closed unless the pressed row is STILL that row. A
+                    // layout push during the hold rebuilds `display_rows()`, so
+                    // a row that vanished slides its neighbour under the same
+                    // index and the menu would open on a worker nobody pressed
+                    // - Stop and Remove aimed at the wrong agent. Re-checking
+                    // the identity is what `still_on_row` is for the drag arm.
+                    let same_row = held
+                        .as_ref()
+                        .is_some_and(|(i, id, _)| view.row_identity(*i).as_ref() == Some(id));
+                    let long_press = same_row
+                        && !view.menu_usurping_open()
+                        && held
+                            .as_ref()
+                            .is_some_and(|(_, _, start)| held_long_enough(*start, false));
                     if long_press {
-                        let opened = held.is_some_and(|(i, _)| {
+                        let opened = held.as_ref().is_some_and(|(i, _, _)| {
                             view.open_row_menu(
-                                i,
+                                *i,
                                 Anchor::At {
                                     row: rep.row,
                                     col: rep.col,
@@ -10426,9 +10515,13 @@ async fn handle_stdin(
                         continue;
                     }
                     // Too short to be a hold: it was a click, so run the action
-                    // the press deferred.
-                    if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
-                        apply_hit(view, hit, sock_w).await?;
+                    // the press deferred. Gated on the SAME identity check - a
+                    // click whose row moved under it must cancel rather than
+                    // act on whatever took its place.
+                    if same_row {
+                        if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
+                            apply_hit(view, hit, sock_w).await?;
+                        }
                     }
                     view.refresh_hover_affordances(rep.row, rep.col);
                     continue;
@@ -10517,8 +10610,8 @@ async fn handle_stdin(
             // a zone-less release to that same action. Before `chrome_hit`, for
             // the same reason `begin_row_drag` is: applying the click here would
             // spend the press before the hold could be measured.
-            if let Some(i) = view.press_hold_row_at(rep.row, rep.col) {
-                view.press_hold = Some((i, Instant::now()));
+            if let Some((i, id)) = view.press_hold_row_at(rep.row, rep.col) {
+                view.press_hold = Some((i, id, Instant::now()));
                 continue;
             }
             if let Some(hit) = view.chrome_hit(rep.row, rep.col) {
@@ -20387,7 +20480,10 @@ mod tests {
         // armed no state and the release had nothing to resolve.
         let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         let hdr = squad_header_at(&v, 1);
-        v.press_hold = Some((hdr, Instant::now() - Duration::from_millis(600)));
+        let id = v
+            .row_identity(hdr)
+            .expect("a workspace row has an identity");
+        v.press_hold = Some((hdr, id, Instant::now() - Duration::from_millis(600)));
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, hdr as u16, 5, &mut buf).await.unwrap();
         assert!(
@@ -20410,7 +20506,10 @@ mod tests {
         // cannot tell a deferred click from a dropped one.
         let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
         let hdr = squad_header_at(&v, 2);
-        v.press_hold = Some((hdr, Instant::now()));
+        let id = v
+            .row_identity(hdr)
+            .expect("a workspace row has an identity");
+        v.press_hold = Some((hdr, id, Instant::now()));
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, hdr as u16, 4, &mut buf).await.unwrap();
         assert!(v.row_menu.is_none(), "too short to be a hold");
@@ -20429,21 +20528,104 @@ mod tests {
         // ANSWER - silence is the defect, and a menu of failing entries would be
         // worse than none.
         let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        // Seed a real mission squad: the fixture's own squads are ids 1 and 2,
+        // neither synthetic, so without this there is no `Sub` row and the test
+        // asserts nothing. An earlier version guarded on the row's existence and
+        // returned - a green test measuring nothing.
+        v.layout.squads.push(mission_meta(7, "epic  1/2"));
         let sub = v
             .display_rows()
             .iter()
             .position(|r| matches!(r, DisplayRow::Sub(_)))
-            .unwrap_or(usize::MAX);
-        if sub == usize::MAX {
-            return; // no Sub row in this fixture; the notice path is covered below
-        }
-        v.press_hold = Some((sub, Instant::now() - Duration::from_millis(600)));
+            .expect("the mission band renders its squad as an inert Sub row");
+        let id = v.row_identity(sub).expect("a Sub row has an identity");
+        v.press_hold = Some((sub, id, Instant::now() - Duration::from_millis(600)));
         let mut buf: Vec<u8> = Vec::new();
         release_left(&mut v, sub as u16, 5, &mut buf).await.unwrap();
         assert!(v.row_menu.is_none(), "an inert row opens no menu");
+        assert_eq!(
+            v.notice.as_ref().map(|(t, _)| t.as_str()),
+            Some("no menu on the held row"),
+            "the hold answers rather than falling silent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hold_whose_row_moved_under_it_refuses_rather_than_acting() {
+        // An INDEX is not a row. `display_rows()` is rebuilt on every layout
+        // push, so a row dropped mid-hold slides its neighbour under the same
+        // number. Acting on that number would open a lifecycle menu - Stop,
+        // Remove - on a worker nobody pressed. The same trap `RowDrag` avoids
+        // with `RowSource` and the selector avoids by re-anchoring on name.
+        let mut v = view_with_agents(vec![
+            agent_row("alpha", 10, Some(AgentBadge::Working), false),
+            agent_row("beta", 11, Some(AgentBadge::Working), false),
+        ]);
+        let held = agent_row_at(&v, |a| a.name == "alpha");
+        let id = v.row_identity(held).expect("an agent row has an identity");
+        v.press_hold = Some((held, id, Instant::now() - Duration::from_millis(600)));
+        // alpha leaves while the button is down; beta takes its index.
+        v.layout.agents.retain(|a| a.name != "alpha");
+        assert_eq!(
+            v.row_identity(held),
+            Some("agent:beta".into()),
+            "fixture: beta really did slide under the held index"
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        release_left(&mut v, held as u16, 5, &mut buf)
+            .await
+            .unwrap();
         assert!(
-            v.notice.is_some(),
-            "but the hold answers rather than falling silent"
+            v.row_menu.is_none(),
+            "no menu opens on the row that took the index"
+        );
+        assert!(buf.is_empty(), "and no command rides the released press");
+    }
+
+    #[tokio::test]
+    async fn a_press_on_a_sideline_row_defers_its_click_to_the_release() {
+        // The press arm end to end, through handle_stdin: it now defers EVERY
+        // sideline click to the release, so a regression that swallowed the
+        // press without the release re-applying it would look green in a suite
+        // that only ever sets `press_hold` by hand.
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let hdr = squad_header_at(&v, 2);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut scanner = Scanner::default();
+        let mut carry = Vec::new();
+        let press = format!("\x1b[<0;{};{}M", 4 + 1, hdr + 1);
+        super::handle_stdin(&mut v, &mut scanner, &mut carry, press.as_bytes(), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.press_hold.is_some(), "the press armed the hold");
+        assert!(
+            buf.is_empty(),
+            "and sent nothing yet - the click is deferred"
+        );
+
+        release_left(&mut v, hdr as u16, 4, &mut buf).await.unwrap();
+        assert!(v.press_hold.is_none(), "the release consumed the hold");
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::SelectSquad(2)],
+            "and the deferred click ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_press_on_a_row_with_no_identity_is_not_deferred() {
+        // A spacer has nothing to re-check after a layout push, so it must not
+        // latch at all - its press keeps the pre-hold behavior rather than
+        // deferring a click that can never be validated.
+        let v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        let blank = v
+            .display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Blank))
+            .expect("two squads put a spacer between the groups");
+        assert!(
+            v.press_hold_row_at(blank as u16, 4).is_none(),
+            "a spacer arms no hold"
         );
     }
 
