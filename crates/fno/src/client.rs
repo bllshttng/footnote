@@ -8360,6 +8360,14 @@ enum NeedsOverlayRow {
 }
 
 impl NeedsOverlayRow {
+    fn label(&self) -> &str {
+        match self {
+            Self::Mine(item) => &item.text,
+            Self::Question(q) => q.ask.as_deref().unwrap_or(&q.question),
+            Self::Need(row) => &row.name,
+        }
+    }
+
     fn id(&self) -> NeedsOverlayId {
         match self {
             Self::Mine(item) => NeedsOverlayId::Mine(item.n),
