@@ -89,6 +89,51 @@ def test_stale_scope_file_without_a_live_crown_resolves_nothing(tmp_path):
     ) is None
 
 
+def test_coronation_refreshes_scope_manifest_for_a_successor(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    arm = getattr(state, "arm_king_manifest", None)
+    assert arm is not None, "coronation manifest arming is missing"
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+    state_root = tmp_path / ".fno"
+
+    first = arm("x-f3d0", "old-session", state_root=state_root)
+    first_id = parse_manifest(first)["fno_id"]
+    second = arm("x-f3d0", "new-session", state_root=state_root)
+
+    assert second == first
+    fields = parse_manifest(second)
+    assert fields["harness_session_id"] == "new-session"
+    assert fields["fno_id"] != first_id
+
+
+def test_disabled_king_loop_arms_no_manifest(monkeypatch, tmp_path):
+    import fno.king.state as state
+
+    arm = getattr(state, "arm_king_manifest", None)
+    assert arm is not None, "coronation manifest arming is missing"
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: False)
+
+    assert arm("x-f3d0", "session", state_root=tmp_path / ".fno") is None
+    assert not (tmp_path / ".fno" / "kings" / "x-f3d0.md").exists()
+
+
+def test_best_effort_cleanup_removes_only_the_named_scope(tmp_path):
+    import fno.king.state as state
+
+    cleanup = getattr(state, "remove_king_manifest", None)
+    assert cleanup is not None, "best-effort crown cleanup is missing"
+    root = tmp_path / ".fno"
+    first = state.king_manifest_path("alpha", state_root=root)
+    second = state.king_manifest_path("beta", state_root=root)
+    write_manifest(first, scope="alpha", harness_session_id="a")
+    write_manifest(second, scope="beta", harness_session_id="b")
+
+    assert cleanup("alpha", state_root=root) is True
+    assert not first.exists()
+    assert second.exists()
+
+
 def test_init_writes_a_manifest_carrying_the_fields_the_loop_reads(tmp_path):
     path = tmp_path / "king-state.md"
     write_manifest(path, scope="board drain", harness_session_id="sess-1")

@@ -92,6 +92,9 @@ def _row(name: str) -> AgentEntry:
 
 
 def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
+    import fno.king.state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
     # Seat the grantor as a registered king over epic-x; the spawn is then a
     # succession (it hands its own scope to the heir). An agent identity with no
@@ -127,6 +130,10 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     # Provenance, not self-declaration: the grantor is the session that spawned it.
     assert row.crown_grantor == "parent-sess-abc"
     assert row.crown_label == "L2 epic-x"
+    manifest = bg_home / ".fno" / "kings" / "epic-x.md"
+    assert king_state.parse_manifest(manifest)["harness_session_id"] == (
+        row.harness_session_id or row.short_id
+    )
 
 
 def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:

@@ -1710,6 +1710,15 @@ def _claude_create_path(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
                 crown_declined = True
+        if entry.crown_level is not None and entry.crown_scope:
+            from fno.king.state import arm_king_manifest
+
+            arm_king_manifest(
+                entry.crown_scope,
+                entry.harness_session_id or entry.short_id or "",
+                owner_pid=entry.pid,
+                owner_cwd=entry.cwd,
+            )
         if revive:
             return [entry if e.name == name else e for e in entries]
         return entries + [entry]
@@ -3886,6 +3895,11 @@ def rm_agent(
                     "with `fno agents list --json` and rm by the exact `name` field.",
                     exit_code=12,
                 )
+
+            if existing.crown_scope:
+                from fno.king.state import remove_king_manifest
+
+                remove_king_manifest(existing.crown_scope)
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
