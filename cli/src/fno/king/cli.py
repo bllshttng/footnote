@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -124,6 +125,9 @@ def board_cmd(
         help="Instead of reading the board, ask whether a king walk terminated recently.",
     ),
     since: str = typer.Option("24h", "--since", help="Window for --last-run (e.g. 24h, 90m, 7d)."),
+    state: Optional[Path] = typer.Option(
+        None, "--state", hidden=True, help="King manifest whose scope bounds the board."
+    ),
 ) -> None:
     """Report every queue that would keep a king working.
 
@@ -145,7 +149,34 @@ def board_cmd(
         typer.echo(f"last king walk within {since}: {'yes' if fresh else 'no'}")
         raise typer.Exit(0 if fresh else 1)
 
-    board = read_board()
+    scope = None
+    if state is not None:
+        from fno.king.state import parse_manifest
+
+        scope = parse_manifest(state).get("scope")
+        if not scope:
+            board = {
+                "actionable": 1,
+                "unreadable": 1,
+                "queues": [
+                    {
+                        "name": "scope",
+                        "source": str(state),
+                        "status": "unreadable",
+                        "error": "king manifest has no scope",
+                        "count": None,
+                        "rows": [],
+                        "actionable": True,
+                        "note": "",
+                    }
+                ],
+                "warnings": [],
+                "exit_code": 1,
+            }
+        else:
+            board = read_board(scope=scope)
+    else:
+        board = read_board()
     if as_json:
         typer.echo(json.dumps(board, indent=2))
     else:

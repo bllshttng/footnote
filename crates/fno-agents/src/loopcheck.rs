@@ -9537,14 +9537,19 @@ pub(crate) fn parse_king_board(stdout: &str) -> Option<KingBoard> {
     })
 }
 
-pub(crate) fn read_king_board(fno_bin: &str, cwd: &Path) -> Result<KingBoard, String> {
+pub(crate) fn read_king_board(
+    fno_bin: &str,
+    cwd: &Path,
+    state_path: &Path,
+) -> Result<KingBoard, String> {
     // The board's own exit code is non-zero when any queue is unreadable, and
     // it still prints a full payload in that case. So the payload is parsed
     // regardless of that exit code; only an absent or unparseable one is a read
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
     let output = Command::new(fno_bin)
-        .args(["inbox", "board", "--json"])
+        .args(["inbox", "board", "--json", "--state"])
+        .arg(state_path)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()
@@ -9777,7 +9782,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let history = king_fire_history(&project_events, &session_id);
     let dry = history.dry;
 
-    let board = match read_king_board(&parsed.fno_bin, &parsed.cwd) {
+    let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
         Err(e) => {
             // Blind is not clean. Block, but let the dry-fire counter below
