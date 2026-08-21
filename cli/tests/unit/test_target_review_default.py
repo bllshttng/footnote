@@ -4,7 +4,7 @@ AC11-HP: no `config.review.reviewers` -> the invoking agent does an advisory
 self-review of its own diff and no six-agent sigma panel is dispatched. The
 self-review is honest about what an in-session agent can actually do: it reads
 its changed files on the main thread. The harness review verb is self-servable
-now (Skill tool / `/review`, or `fno mail send '<verb>' --to-self --raw`), and
+now (Skill tool / `/review`, or `fno agents mail send '<verb>' --to-self --raw`), and
 the OBLIGATION to run one on a code payload is enforced at the stop gate - this
 function decides only the advisory pre-ship step, not that obligation.
 AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on

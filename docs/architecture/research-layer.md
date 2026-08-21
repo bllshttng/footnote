@@ -33,7 +33,7 @@ One JSON line per source at `~/.fno/notes/research/<slug>.sources.jsonl`. The sc
 
 - `verified` is `true` **only** after a successful text fetch produced a content `hash`.
 - A non-text (PDF/image), 404, timeout, or SSRF-blocked source is recorded `verified=false` with a `reason` and never aborts the round (Group 2's dead-URL assertion catches it).
-- Line-append is the write unit; a single writer is guaranteed per topic by a `fno claim` on `node:research:<slug>`.
+- Line-append is the write unit; a single writer is guaranteed per topic by a `fno agents claim` on `node:research:<slug>`.
 
 ## Boundaries (Group 1)
 

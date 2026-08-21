@@ -444,7 +444,7 @@ def _write_manifest(root: Path, *, claim_key: str, holder: str) -> Path:
 def test_a_held_claim_with_no_target_init_reads_unproven(claims_tmp):
     """AC6-HP: a hand-acquired node claim has no worker behind it.
 
-    `fno backlog next --claim <holder> --external` and a bare `fno claim
+    `fno backlog next --claim <holder> --external` and a bare `fno agents claim
     acquire` both write this key with nobody launched. Calling that a live
     worker tells a king the opposite of the truth at the moment it decides
     whether to staff the node.

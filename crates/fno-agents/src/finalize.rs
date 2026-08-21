@@ -905,7 +905,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         "postmortem_path": postmortem_path,
         "terminal_stop_marked": terminal_stop_marked,
         "graph_node_id": m.graph_node_id,
-        // Re-homed from `fno worker ship`'s return dict (x-1951): the fact now
+        // Re-homed from `fno agents worker ship`'s return dict (x-1951): the fact now
         // belongs to the terminal that authorized it, not to PR creation.
         "auto_merge_armed": auto_merge_armed,
         // Provenance (x-9d11): `unknown` when the manifest predates the field,
@@ -1861,7 +1861,7 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
 
 /// Whether this terminal fire should arm GitHub's native auto-merge (x-1951).
 ///
-/// Auto-merge used to be armed by `fno worker ship` at PR-CREATION time, gated
+/// Auto-merge used to be armed by `fno agents worker ship` at PR-CREATION time, gated
 /// only on the manifest's posture. That pre-authorized a merge before any gate
 /// had run: from the moment `--auto` is set GitHub owns the timing and fires the
 /// instant ITS OWN branch protections pass, so footnote is no longer in the

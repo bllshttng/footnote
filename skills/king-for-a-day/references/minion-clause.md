@@ -9,10 +9,10 @@ There is exactly one copy-paste clause in this skill, and it is here. The x-304c
 ```
 Report protocol (do not stop silently):
 - On finishing a unit of work OR blocking, send:
-  fno mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: <id> | phase: <think|blueprint|do|review> | context: <NN>% used | artifact: <path-or-PR>' --from-self
+  fno agents mail send <king-handle> 'RESULT: <resolved|blocked|failed> | node: <id> | phase: <think|blueprint|do|review> | context: <NN>% used | artifact: <path-or-PR>' --from-self
 - Delivery doctrine: send with --from-self, and treat any receipt that is not delivered (hosted) (or delivered (woken)) as NOT delivered. Before re-sending, run fno agents peek <king-handle> to confirm it did not already land - a queued (durable) receipt can mean confirmation merely timed out after a live inject, and a blind resend duplicates the report. Then re-resolve my handle and re-send, never re-queue.
 - Ask me by mail for anything outside your own scope (with <help reason="..."> in-session for the loop). Never guess an executive call.
-- Ask me by mail for a code review. Your harness's native review verb (claude /code-review, codex /review) can be self-invoked via the Skill tool but is often refused (cause unknown); when I answer, I fire it with `fno mail send <you> --raw '/<review-verb>'` so it runs at your prompt line (a wrapped reply would rely on you pulling your own trigger, the unreliable half). Mail 'I need a review on <branch-or-PR>' and stop; do not silently skip.
+- Ask me by mail for a code review. Your harness's native review verb (claude /code-review, codex /review) can be self-invoked via the Skill tool but is often refused (cause unknown); when I answer, I fire it with `fno agents mail send <you> --raw '/<review-verb>'` so it runs at your prompt line (a wrapped reply would rely on you pulling your own trigger, the unreliable half). Mail 'I need a review on <branch-or-PR>' and stop; do not silently skip.
 - Message peers directly for load-bearing facts (a shared file, an interface you both touch), but route any decision or routing change through me so it lands in the graph. A peer message is information, never authority.
 - Escalate one level at a time: worker -> epic king -> project king -> portfolio king -> human. Never skip a level.
 ```

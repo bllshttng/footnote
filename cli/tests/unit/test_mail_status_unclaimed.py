@@ -1,4 +1,4 @@
-"""fno mail status: sent_unclaimed count (x-39a4 task 1.3, AC1-EDGE).
+"""fno agents mail status: sent_unclaimed count (x-39a4 task 1.3, AC1-EDGE).
 
 Reuses the same sent-unclaimed predicate as notify-self; a present, honest zero
 is rendered, never an omitted line.
@@ -52,19 +52,19 @@ def test_collect_status_zero_is_present(env):
 
 def test_status_renders_sent_unclaimed_line(env):
     _send(MY_HANDLE, "carol", "old", ts=_ts_ago(3600))
-    res = CliRunner().invoke(app, ["mail", "status", "--from", "proj"])
+    res = CliRunner().invoke(app, ["agents", "mail", "status", "--from", "proj"])
     assert res.exit_code == 0
     assert "sent unclaimed: 1" in res.stdout
 
 
 def test_status_renders_honest_zero(env):
-    res = CliRunner().invoke(app, ["mail", "status", "--from", "proj"])
+    res = CliRunner().invoke(app, ["agents", "mail", "status", "--from", "proj"])
     assert res.exit_code == 0
     assert "sent unclaimed: 0" in res.stdout
 
 
 def test_status_json_has_key(env):
     import json
-    res = CliRunner().invoke(app, ["mail", "status", "--from", "proj", "--json"])
+    res = CliRunner().invoke(app, ["agents", "mail", "status", "--from", "proj", "--json"])
     assert res.exit_code == 0
     assert "sent_unclaimed" in json.loads(res.stdout)

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # test_init_claim_stderr_and_modern_claim.sh
 #
-# init-target-state.sh: let the modern `fno claim` be the authority for
+# init-target-state.sh: let the modern `fno agents claim` be the authority for
 # graph_node_id.
 #
 # Covers:
-#   (a) defect 2: the modern `fno claim acquire` wins => graph_node_id is the
+#   (a) defect 2: the modern `fno agents claim acquire` wins => graph_node_id is the
 #       node id (NOT null), written exactly once. (The old legacy-claim stderr
 #       capture into .fno/.init-claim.log was removed when the graph lock stamp
 #       moved off the ambient python3 path; .init-claim.log is now a transient

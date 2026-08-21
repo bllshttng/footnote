@@ -81,7 +81,7 @@ Protected roles still validate discovery but remain on their primary model, and 
 
 ## Inspection
 
-The hidden `fno roles ls`, `fno roles show`, and `fno roles resolve` commands inspect JSON definitions and emit stable text or JSON.
+The hidden `fno agents roles ls`, `fno agents roles show`, and `fno agents roles resolve` commands inspect JSON definitions and emit stable text or JSON.
 By default, discovery reads layer directories beneath `FNO_ROLES_ROOT`, or the repository-root `.fno/roles` when the environment variable is unset.
 An unset conventional root means the feature is absent, while an explicitly configured missing root is an attributed configuration refusal.
 Inspection may also receive an explicit root or repeatable `--source layer=path` inputs.

@@ -226,7 +226,7 @@ class LiveCensus:
     def slot_count(self) -> int:
         """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): live fno
         registry rows + headless slot claims. Counted straight from the
-        registry, NOT by filtering the display union — a bg/adopted fno worker
+        registry, NOT by filtering the display union — a bg/adopted fno agents worker
         is display-deduped into its roster row (``source == "claude"``) but is
         still fno work and must hold a slot, exactly as the Rust gate counts it.
         The claude roster's non-work sessions (claude-mem observers, resident

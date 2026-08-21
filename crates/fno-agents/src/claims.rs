@@ -1218,7 +1218,7 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
             Err(ReadError::GoneAway) => continue, // released under us; retry
             Err(ReadError::Corrupted(e)) => {
                 // Refuse to reclaim what we cannot verify; leave the file for
-                // `fno claim release --force`.
+                // `fno agents claim release --force`.
                 return AcquireOutcome::Error(e);
             }
         };
@@ -1686,7 +1686,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 
 /// The durable session pid: the nearest harness ancestor of THIS process.
 ///
-/// Delegates to `fno claim session-pid`, the one implementation of the walk
+/// Delegates to `fno agents claim session-pid`, the one implementation of the walk
 /// (`cli/src/fno/claims/session_pid.py`). `fno do target init` already shells the
 /// same verb to acquire, so re-implementing the ancestry scan here would put two
 /// producers on one answer and let them drift.
@@ -1698,7 +1698,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
 fn durable_session_pid() -> Option<i32> {
     let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
     let mut child = std::process::Command::new(&fno)
-        .args(["claim", "session-pid", "--from-pid"])
+        .args(["agents", "claim", "session-pid", "--from-pid"])
         .arg(std::process::id().to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

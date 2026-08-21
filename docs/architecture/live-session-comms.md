@@ -47,7 +47,7 @@ degrades to existence-only on macOS. `--no-discovered` skips the scan.
 
 ### US2: send by handle
 
-`fno mail send <handle> <msg>` accepts a discovered handle (alias or hex
+`fno agents mail send <handle> <msg>` accepts a discovered handle (alias or hex
 short-id), not just a registered agent name. On the unknown-agent path only,
 `discover.resolve_or_suggest` maps the handle to its session's project and the
 send rides the EXISTING `--to-project` durable bus (Locked Decision 2:

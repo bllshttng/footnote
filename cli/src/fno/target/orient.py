@@ -162,7 +162,7 @@ def _claim_state(claim_key: str) -> Optional[str]:
         from fno.claims.io import claims_root_for
 
         # node:/dispatch:/... keys live at the GLOBAL claims root, not the
-        # per-repo default; route there (the same helper `fno claim status` uses)
+        # per-repo default; route there (the same helper `fno agents claim status` uses)
         # or a node claim always reads `free` from a worktree checkout.
         state = claim_status(claim_key, root=claims_root_for(claim_key)).get("state")
         return str(state or "") or None
@@ -592,7 +592,7 @@ def _self_review_clause(project_root: Optional[Path] = None) -> str:
         "`bash skills/review/scripts/emit-attestation.sh code-review`"
     )
     if s.substrate != "headless":
-        clause += f"; refused? fno mail send '{verb}' --to-self --raw"
+        clause += f"; refused? fno agents mail send '{verb}' --to-self --raw"
     return clause
 
 

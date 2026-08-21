@@ -3,7 +3,7 @@
 fno owns state directories outside the worker's cwd - the claim store, the
 graph, the ledger - and every harness sandboxes writes to the cwd by default.
 So a worker on a bounded posture silently holds no claim, and
-``fno claim status node:<id>`` answers ``free`` while that worker is live. That
+``fno agents claim status node:<id>`` answers ``free`` while that worker is live. That
 is a duplicate-dispatch trap the standing "check the claim first" rule cannot
 catch, because the check returns free.
 

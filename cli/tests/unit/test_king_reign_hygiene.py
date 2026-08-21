@@ -67,7 +67,7 @@ PRWATCH_RE = re.compile(r"\bpr-watch\s+status\b")
 # dispatch, or stating a ruling. Kickoff fan-out mail is excluded by ordering
 # (check 2 only counts rulings after the first abdication).
 RULING_CMD_RE = re.compile(
-    r"\bfno (?:mail send\b|backlog update\b.*--dispatch-(?:verb|brief))"
+    r"\bfno (?:agents mail send\b|backlog update\b.*--dispatch-(?:verb|brief))"
 )
 RULING_TEXT_RE = re.compile(
     r"\b(Ruling:|I (?:approve|revise|rule|ruled)|DOCTRINE|AMENDMENT|SCOPE CHANGE)\b",

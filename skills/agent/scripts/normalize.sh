@@ -745,11 +745,11 @@ fi
 # Command surface (slash|codex-skill|prose) from the harness-map normalizer
 # (fno.agents.harness_map), the single source both dispatch surfaces route
 # through - so /agent spawn never re-encodes the per-harness spelling and can't
-# drift from `/target bg`. `fno dispatch resolve` is authoritative; a static
+# drift from `/target bg`. `fno agents dispatch resolve` is authoritative; a static
 # fallback keeps a spawn working if fno is unreachable (mirrors resolve_project).
 resolve_command_surface() {
   local _prov="$1" _line
-  _line="$(fno dispatch resolve --harness "$_prov" 2>/dev/null | sed -n 's/^command_surface=//p' | head -1)"
+  _line="$(fno agents dispatch resolve --harness "$_prov" 2>/dev/null | sed -n 's/^command_surface=//p' | head -1)"
   if [[ -n "$_line" ]]; then printf '%s' "$_line"; return 0; fi
   # Static mirror of fno.agents.harness_map (a python test asserts parity):
   # opencode's fno plugin exposes `/fno:verb` (palette + `run --command`), so it

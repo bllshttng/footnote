@@ -255,7 +255,7 @@ def test_brief_levers_exist_on_the_real_cli(command, flags):
 def test_skill_carries_the_auto_convene_and_report_contract():
     text = SKILL.read_text()
     assert "Auto-convene" in text
-    assert "fno mail send" in text
+    assert "fno agents mail send" in text
     assert "Net mint rate" in text
 
 

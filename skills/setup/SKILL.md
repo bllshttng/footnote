@@ -139,7 +139,7 @@ This block is written as a single `config.work.workspaces.<slug>` map; if `fno
 config set` cannot express the nested list in one call, write the `config.work`
 block directly to the target settings file (it is the one structural
 exception), then re-run `fno config doctor` to confirm it validates. The `name`
-field under each project is the cross-project routing identity (what `fno mail
+field under each project is the cross-project routing identity (what `fno agents mail
 --to-project <name>` uses); it is distinct from `config.project.id`.
 
 ## Step 4: Post-merge parking-lot (per repo)

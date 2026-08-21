@@ -14,9 +14,9 @@ Really, I built this to ship my own projects faster. One of them became a busine
 
 fno has its own words for its own pieces, used everywhere in the codebase except this file, until now.
 
-A **citizen** is a session `fno agents spawn` creates: a row in the registry, addressable by `fno mail`, and surviving the session that spawned it. A citizen spawned against a backlog node also holds that node's claim; an ad-hoc citizen spawned without one does not.
+A **citizen** is a session `fno agents spawn` creates: a row in the registry, addressable by `fno agents mail`, and surviving the session that spawned it. A citizen spawned against a backlog node also holds that node's claim; an ad-hoc citizen spawned without one does not.
 A **limb** is the harness's own subagent, Claude's Agent tool or Codex's task tool: nested inside its parent, gone when its parent's turn ends, visible but not addressable.
-The **mesh** is the whole set of citizens working a backlog together, coordinating over `fno mail` instead of one shared context window.
+The **mesh** is the whole set of citizens working a backlog together, coordinating over `fno agents mail` instead of one shared context window.
 A **king** is a session bestowed authority over one scope, a portfolio of projects, one project, or one epic, for one reign; the crown expires on exit, and the graph it leaves behind is what outlives it.
 The **crown** is that authority itself, three levels deep at most, and a session holding no crown is a worker by default.
 

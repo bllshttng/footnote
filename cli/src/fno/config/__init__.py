@@ -1367,7 +1367,7 @@ class InboxBlock(BaseModel):
     """Cross-session mail delivery-honesty settings (nested under 'config.inbox').
 
     ``unclaimed_ttl`` is the age (seconds) past which a sent-but-unclaimed bus
-    message is surfaced back to its sender (turn-boundary nudge + ``fno mail
+    message is surfaced back to its sender (turn-boundary nudge + ``fno agents mail
     status``). Advisory-only, so a short default is low-harm; 1800s (30m) is the
     locked default (x-39a4). Non-negative.
     """
@@ -1503,7 +1503,7 @@ class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
     Per-environment overlay of the in-tree harness-capability map
-    (`fno.agents.harness_map`): the shared `fno dispatch resolve` resolver reads
+    (`fno.agents.harness_map`): the shared `fno agents dispatch resolve` resolver reads
     these as the config rung between an explicit flag and the built-in default.
     All three are empty ("") = unset, so a fresh install resolves exactly as the
     built-ins (harness=claude, per-harness substrate, `/target --no-merge {id}`).
@@ -1864,7 +1864,7 @@ class AutonomyBlock(BaseModel):
     Explicitly NOT a per-dispatcher lever (Alternative A in the design doc,
     rejected): nine levers multiply the state an operator must hold and
     guarantee some subset goes stale, which is the same failure with more
-    surface. This is the ONE switch; detail belongs in ``fno autonomy
+    surface. This is the ONE switch; detail belongs in ``fno agents autonomy
     status``, not in a second layer of configuration.
     """
 
@@ -2291,7 +2291,7 @@ class GroomBlock(BaseModel):
 
 
 class RestartBlock(BaseModel):
-    """`fno restart` worker-revival settings (nested under 'config.restart').
+    """`fno agents restart` worker-revival settings (nested under 'config.restart').
 
     x-aaaf wave 2: `_revive_orphans` (restart.py:90) - respawning claude
     workers orphaned by a killed mux server - previously had only a per-run

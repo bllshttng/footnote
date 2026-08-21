@@ -60,7 +60,7 @@ All test scripts follow the same convention:
 - Auto-included shell steps from `_SMOKE_HARNESS_GLOBS` in `cli/src/fno/test_cmd.py`: root `tests/*.sh`, `tests/{hooks,lib,target,skills,events,lint}/*.sh`, `scripts/tests/*.sh`, and `skills/*/tests/*.sh`.
 - The pytest step is fail-fast: while it is red, the shell steps never run.
 
-Two shell trees are NOT in the smoke globs and never run unless invoked directly: `cli/tests/smoke/*.sh` and `cli/tests/scenarios/*.sh`. These call verbs (`fno backlog new`, `fno mail send`, and friends) that the pytest suite does not exercise.
+Two shell trees are NOT in the smoke globs and never run unless invoked directly: `cli/tests/smoke/*.sh` and `cli/tests/scenarios/*.sh`. These call verbs (`fno backlog new`, `fno agents mail send`, and friends) that the pytest suite does not exercise.
 
 When you kill, rename, or nest a CLI verb, run the shell layer explicitly: `bash cli/tests/smoke/*.sh`, `bash cli/tests/scenarios/*.sh`, and root `tests/*.sh`. When a verb surface changes, a green `fno doctor test smoke` does not prove the shell layer still resolves. A red pytest step can stop fail-fast before shell steps. This happened on a PR that passed 12525 pytest cases while two shell tests still invoked removed verbs.
 

@@ -690,7 +690,7 @@ def _write_render_best_effort(target: Path, content: str) -> bool:
         print(
             f"warning: markdown render write failed for {target} "
             f"({type(exc).__name__}: {exc}); the message is durable on the bus log, "
-            f"regenerate the render with `fno mail rebuild-render`",
+            f"regenerate the render with `fno agents mail rebuild-render`",
             file=sys.stderr,
         )
         return False
@@ -728,8 +728,8 @@ def post_inbox_message(
 ) -> PostResult:
     """Post a project-addressed inbox message (the durable write path).
 
-    Pure data layer (no Typer): reproduces ``fno mail send`` semantics so
-    ``fno mail send --to-project`` can carry the inbox kinds the recipient
+    Pure data layer (no Typer): reproduces ``fno agents mail send`` semantics so
+    ``fno agents mail send --to-project`` can carry the inbox kinds the recipient
     drain dispatches on (heads-up -> triage, question -> wake-signal, fyi /
     fyi+persist). Validation raises ``ValueError``; the caller maps it to a
     CLI exit. With ``reply_to`` set it appends to the matching thread, else
@@ -976,7 +976,7 @@ def append_to_thread(
                 print(
                     f"warning: markdown render update failed for {thread_path} "
                     f"({type(exc).__name__}: {exc}); the reply is durable on the "
-                    f"bus log, regenerate with `fno mail rebuild-render`",
+                    f"bus log, regenerate with `fno agents mail rebuild-render`",
                     file=sys.stderr,
                 )
     finally:
@@ -1255,7 +1255,7 @@ def migrate_md_threads_to_bus(
     Every message in every recipient's md threads that is not already in the log
     is appended as an envelope (root messages thread under their own id; appended
     messages correlate via ``in_reply_to`` to the thread root). Returns counts so
-    a caller (the ``fno mail migrate-bus`` verb) can report what moved.
+    a caller (the ``fno agents mail migrate-bus`` verb) can report what moved.
     """
     from fno.bus.log import Envelope, append as _bus_append, iter_messages
 

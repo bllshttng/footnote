@@ -33,7 +33,7 @@ emitter.
 | `claude_session_uuid` field | `registry.py` `AgentEntry`, `state.rs` `RegistryEntry` | The full session UUID = the `--resume` target, distinct from the 8-hex `claude_short_id`/jobId (a 32-bit prefix, not collision-proof). Additive-optional, round-trips both languages. |
 | `resolve_session_uuid` | `_claude_session_registry.py` | jobId -> full UUID, reading `sessionId` from `~/.claude/sessions/<pid>.json` REGARDLESS of socket state (an idle/socket-null session is exactly the resume target; `locate_session` skips those). |
 | MCP reply-poll decoupling | `claude.py` `ask_followup_via_mcp` | Derives the jobs-dir directly from the short-id instead of via `locate_session`, so an idle session is not falsely orphaned. The MCP send routes through the sidecar and the reply is polled from the jobs-dir; neither needs the (dead) unix socket. |
-| Single-writer claim guard | `claude.py` `acquire_session_writer_claim` / `release_session_writer_claim` | Before respawn: (1) refuse if the bg session is held live by another process (`locate_session` + `liveness_probe`); (2) acquire `fno claim session:<uuid>` (O_CREAT\|O_EXCL) so two concurrent adopts cannot both respawn one transcript. `claude --resume` does not self-guard. Reuses the existing `fno claim` primitive; session claims are host-global. |
+| Single-writer claim guard | `claude.py` `acquire_session_writer_claim` / `release_session_writer_claim` | Before respawn: (1) refuse if the bg session is held live by another process (`locate_session` + `liveness_probe`); (2) acquire `fno agents claim session:<uuid>` (O_CREAT\|O_EXCL) so two concurrent adopts cannot both respawn one transcript. `claude --resume` does not self-guard. Reuses the existing `fno agents claim` primitive; session claims are host-global. |
 | Frame parser | `stream_worker.rs` `parse_frame` | The stream-json discriminator: System / StreamEvent / Assistant / Result / UserEcho / Other / Malformed. A `--replay-user-messages` echo (`type:user`) is a DELIVERY RECEIPT, never the reply; a malformed line is skipped (never fatal). Pure + total. |
 | Per-session stream worker | `stream_worker.rs` `StreamSession` + `run` | Owns the `claude -p --resume` child over stdin/stdout pipes spawned FROM THE RECORDED CWD (resume is cwd-scoped). A background thread parses stdout into a bounded frame log (gap-on-overflow); stdin is mutex-guarded so a turn never interleaves. Serves non-blocking RPCs over `<short_id>/worker.sock`. |
 | Worker `--stream` mode | `bin/worker.rs` | Routes `fno-agents-worker --stream ...` to `stream_worker::run`. |
@@ -80,7 +80,7 @@ The substrate above is now driven by work that has since landed:
   denied outside the canonicalized session cwd, and otherwise only bare
   `permissions.allow` rules pass.
 - **Single-writer claim PID anchor** - the worker re-acquires its
-  `session:<uuid>` claim with its own long-lived PID on startup (`fno claim
+  `session:<uuid>` claim with its own long-lived PID on startup (`fno agents claim
   acquire --pid`), so PID-liveness tracks the actual writer instead of the
   ephemeral `fno` process the daemon shelled pre-spawn.
 

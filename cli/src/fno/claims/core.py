@@ -220,7 +220,7 @@ def _make_claim(
         reason=reason,
         # x-3e70: tag the claim with the acquiring harness so the dispatch guard
         # can read a foreign owner off the claim. This is the PRODUCTION writer
-        # (`fno claim` forwards to this Python CLI), kept in lockstep with the
+        # (`fno agents claim` forwards to this Python CLI), kept in lockstep with the
         # Rust make_claim resolver via the shared harness_identity markers.
         # An explicit `harness` wins over ambient resolution so callers can pin
         # the owning harness deterministically.
@@ -633,7 +633,7 @@ def compare_and_rebind(
             )
         except ClaimCorrupted:
             raise RebindRefused(
-                "claim corrupted; cannot verify ownership (use `fno claim release --force`)",
+                "claim corrupted; cannot verify ownership (use `fno agents claim release --force`)",
                 state="corrupted",
             )
 
@@ -650,7 +650,7 @@ def compare_and_rebind(
         # ONLY a launch-window holder may be replaced. Naming the prior holder
         # is the proof, and for `spawn-handover:<worker>` that proof is real: it
         # is minted per worker and travels only in that worker's environment.
-        # Every other holder is PUBLISHED by `fno claim status`, so without this
+        # Every other holder is PUBLISHED by `fno agents claim status`, so without this
         # anyone could read a holder off the store and hand the node to
         # themselves - taking a running owner's claim, which `ClaimHeldByOther`
         # had always refused.
@@ -800,7 +800,7 @@ def compare_and_rebind(
 #: prefix as a replaceable prior holder, which is why the constant lives here
 #: rather than in the command module that re-exports it.
 #:
-#: WHAT THIS IS NOT: a secret. `fno claim status` publishes every holder, so
+#: WHAT THIS IS NOT: a secret. `fno agents claim status` publishes every holder, so
 #: naming one back proves nothing about who is asking. What the prefix restricts
 #: is the BLAST RADIUS - only a launch-window claim can be taken over this way,
 #: never a working session's `target-session:` claim, which `ClaimHeldByOther`
@@ -952,7 +952,7 @@ def _reanchor_pid_for(existing: Claim) -> Optional[int]:
     exactly as today.
 
     THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
-    by its holder string and nothing else, and `fno claim status` publishes that
+    by its holder string and nothing else, and `fno agents claim status` publishes that
     string. So a different session on this machine that refreshes under a
     published holder re-anchors the claim to ITS ancestor, and the claim then
     reads LIVE until that session ends instead of SUSPECT.
@@ -1350,7 +1350,7 @@ def sweep_verdict(
 
 
 def _default_reap_roots() -> list[Path]:
-    """Both claims roots swept by a bare ``fno claim reap`` (AC2).
+    """Both claims roots swept by a bare ``fno agents claim reap`` (AC2).
 
     Global node claims live at ``claims_dir(global_claims_root())``
     (``~/.fno/claims`` by default); a repo's own root is

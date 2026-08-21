@@ -294,7 +294,7 @@ def menu_caps() -> None:
         )
 
     # Every group sub-app is capped, INCLUDING hidden top-level ones: opening
-    # `fno mail --help` renders mail's own menu even though `mail` is hidden from
+    # `fno agents mail --help` renders mail's own menu even though `mail` is hidden from
     # the top-level surface, so that menu must stay curated too. Iterate the whole
     # registry, not just the advertised entries. Dedupe by import target so an
     # alias (e.g. `graph` -> `backlog`) is checked once.

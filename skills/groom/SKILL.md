@@ -81,7 +81,7 @@ Do this at most once per run, and only for a track where the ready depth is real
 Finish by mailing one screen - if it does not fit on a screen, you are reporting too much.
 
 ```bash
-fno mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-file <report>
+fno agents mail send --to-project fno --kind fyi "groom <YYYY-MM-DD>" --body-file <report>
 ```
 
 The report carries, in this order:

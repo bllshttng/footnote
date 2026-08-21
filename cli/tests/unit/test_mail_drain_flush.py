@@ -1,4 +1,4 @@
-"""`fno mail drain-self` must flush the bodies before it advances the cursor.
+"""`fno agents mail drain-self` must flush the bodies before it advances the cursor.
 
 The SessionStart drain hook reads drain-self through a command substitution, so
 stdout is a pipe and therefore block-buffered. `print` alone leaves the bodies in

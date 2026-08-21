@@ -185,24 +185,24 @@ typical hourly invocation is:
 boundaries. Same command works under `cron`, `launchd`, or GitHub
 Actions schedules - non-zero exit pages a monitoring tool.
 
-## `fno mail` (cross-project messaging)
+## `fno agents mail` (cross-project messaging)
 
 Each agent owns a folder at `~/your-vault/internal/agents/{project}/` with `inbox.md`
 as the live inbox inside it. Agents send messages to other agents' inboxes, read
 their own inbox at the top of every megawalk iteration, and ack each message after handling.
 
 Set `project: <name>` in your `.fno/config.toml` to identify the
-sender. Without this field, `fno mail` errors with the fix string.
+sender. Without this field, `fno agents mail` errors with the fix string.
 
 ### Verbs
 
-- `fno mail send --to-project <project> --kind <kind> --body "..."` - send a message
-- `fno mail unread [--json]` - list unread messages in own inbox
-- `fno mail ack <msg-id> [--triaged-into ab-...]` - mark a message handled
-- `fno mail reply --to <msg-id> --kind <kind> --body "..."` - reply to a message
-- `fno mail list [--all]` - list all messages in own inbox
-- `fno mail lint [<project>]` - find malformed messages
-- `fno mail triage <msg-id>` - LLM triage for heads-up kind (returns JSON plan)
+- `fno agents mail send --to-project <project> --kind <kind> --body "..."` - send a message
+- `fno agents mail unread [--json]` - list unread messages in own inbox
+- `fno agents mail ack <msg-id> [--triaged-into ab-...]` - mark a message handled
+- `fno agents mail reply --to <msg-id> --kind <kind> --body "..."` - reply to a message
+- `fno agents mail list [--all]` - list all messages in own inbox
+- `fno agents mail lint [<project>]` - find malformed messages
+- `fno agents mail triage <msg-id>` - LLM triage for heads-up kind (returns JSON plan)
 
 ### Message kinds
 
@@ -216,7 +216,7 @@ sender. Without this field, `fno mail` errors with the fix string.
 
 ### Cross-project behavior
 
-`fno mail` writes to the recipient's inbox file. Each agent reads only its
+`fno agents mail` writes to the recipient's inbox file. Each agent reads only its
 own inbox. Replies go to the original sender's inbox with `reply_to:` set.
 
 The `com.fno.backlog-sync` launchd job already mirrors
@@ -231,7 +231,7 @@ the obsidian vault, so no separate sync is needed.
 ## `fno whoami` / `fno status` (self-introspection)
 
 Two read-only top-level commands that give an agent a curated view of its
-own operating context. Distinct from `fno mail` (cross-agent messaging) and
+own operating context. Distinct from `fno agents mail` (cross-agent messaging) and
 from `fno agents` (the dispatch mesh); these are `man self` for the agent in
 its current operating layer. (Formerly `fno agent whoami` / `fno agent status`;
 the `fno agent` singular namespace was retired in ab-12dd2a5d when the
@@ -281,7 +281,7 @@ Each project must declare its identity for cross-project messaging:
 project: acme-web
 ```
 
-Without this, `fno mail` cannot resolve the sender. CLI errors loudly.
+Without this, `fno agents mail` cannot resolve the sender. CLI errors loudly.
 
 ### Inbox rotation (`config.inbox.*`)
 

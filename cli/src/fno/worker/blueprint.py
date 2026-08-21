@@ -1,4 +1,4 @@
-"""fno worker blueprint - signal that LLM work is needed.
+"""fno agents worker blueprint - signal that LLM work is needed.
 
 The CLI does NOT write feature code. It emits a dispatch action so the
 skill layer can invoke the appropriate Agent tool, then resume via

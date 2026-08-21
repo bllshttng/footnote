@@ -2055,7 +2055,7 @@ def _mux_pane_alive(
 #: either signal fires, so only the genuinely ambiguous case waits it out.
 #:
 #: CEILING, and it is not arbitrary: `run_dispatch_one` in crates/fno/src/
-#: server.rs kills the whole `fno dispatch one` subprocess after 20s, and that
+#: server.rs kills the whole `fno agents dispatch one` subprocess after 20s, and that
 #: budget also has to cover process start, node selection, and pane creation. A
 #: window at or near 20s would get the subprocess killed BEFORE the registry
 #: append, leaving a live pane with no row - the very orphan this change exists
@@ -3059,7 +3059,7 @@ def dispatch_spawn_pane(
         #: so the append can drop the corpse in the same transaction.
         replaced_terminal: Optional[str] = None
         # A PROVED-DEAD row does not own the name. It will never act again, so
-        # holding the name hostage only deadlocks the caller: `fno dispatch one`
+        # holding the name hostage only deadlocks the caller: `fno agents dispatch one`
         # releases its claim and lane on failure and retries under the SAME
         # deterministic worker name, so a status-blind guard turns one dead pane
         # into a permanently failed node until a human runs `fno agents rm`.

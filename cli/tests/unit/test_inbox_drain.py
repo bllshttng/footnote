@@ -250,7 +250,7 @@ def test_resolve_memory_dir_falls_back_when_no_worktree(tmp_path, monkeypatch):
 
 
 def test_send_kind_drains_with_fyi_semantics(inbox_root, repo_root):
-    """codex #459 P1: kind=send threads (from `fno mail send`) must drain
+    """codex #459 P1: kind=send threads (from `fno agents mail send`) must drain
     (fyi semantics: surface + mark read), not loop forever as unknown_kind."""
     from fno.inbox.drain import drain_inbox
     from fno.inbox.store import write_new_thread, Kind, read_unread_threads

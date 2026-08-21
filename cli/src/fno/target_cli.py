@@ -1775,7 +1775,7 @@ def _maybe_dispatch_work_start() -> None:
     """A2 (x-122a): fire a ``work-start`` context /think after a node is claimed.
 
     Runs right after the init script returns success - the authoritative
-    ``fno claim acquire node:<id>`` has completed and the manifest is written, so
+    ``fno agents claim acquire node:<id>`` has completed and the manifest is written, so
     this is the "node enters work" moment (Claude's Discretion 4). Reads the
     claimed ``graph_node_id`` back from the manifest (``null`` => no node claimed
     => nothing to dispatch) and routes the durable node through
@@ -2657,7 +2657,7 @@ def _reacquire_node_claim(
             f"fno do target start: cannot re-acquire {key}: "
             f"{type(exc).__name__}: {exc}. The claim state is unreadable or "
             f"corrupt; refusing to risk a duplicate claim. Clear it "
-            f"(fno claim release {key} --force -R <why>) and retry.",
+            f"(fno agents claim release {key} --force -R <why>) and retry.",
             err=True,
         )
         raise typer.Exit(code=1)

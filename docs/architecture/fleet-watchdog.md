@@ -75,7 +75,7 @@ The question half asks in front of every terminal marker. It does not delete a s
 
 Retire reads `origin` directly, the same raw field the reap protectors read. That field is written once, at row birth. Every path that creates a registry row states what it made. The spawn sites write `spawn`. `register_existing_session` takes the caller's word. The harness-store healer writes `adopted`. Retire acts on the positive `spawn` and nothing else, so a row with no marker answers unknown and no lane acts on it. There is no second derived flag beside `origin`. One field answers both lanes, so they cannot come to disagree about who owns a session.
 
-Reading the absence instead was wrong twice. A row written before the field existed carries nothing. An operator's own terminal adopted from the claude store is routinely one of those. Keying on `status == "orphaned"` did not cover them. `status` is a liveness stamp. One `fno mail send` flips it to `live`.
+Reading the absence instead was wrong twice. A row written before the field existed carries nothing. An operator's own terminal adopted from the claude store is routinely one of those. Keying on `status == "orphaned"` did not cover them. `status` is a liveness stamp. One `fno agents mail send` flips it to `live`.
 
 Retire sits above `stale`, and only `working` is in both lanes. A `working` row quiet past the ceiling used to escalate as "needs a human". If its tail closes a promise and owes no question, there is nothing for a human to decide, so retire stops it instead. That is an action, not the silence the earlier ordering bug produced. A row that owes an answer still escalates, because the question read refuses first.
 

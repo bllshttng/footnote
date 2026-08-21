@@ -8001,14 +8001,15 @@ fn an_unknown_driver_is_refused_rather_than_run_against_the_wrong_gate() {
     );
 }
 
-/// A mock `fno` that answers `king board --json` and LOGS every `king escalate`
+/// A mock `fno` that answers `inbox board --json` and LOGS every
+/// `agents king escalate`
 /// argv, so a test can read back which paths escalated and over what.
 fn king_escalate_bin(dir: &Path, payload: &str, log: &Path) -> PathBuf {
     make_script(
         dir,
         "fno-king-escalate-mock",
         &format!(
-            "if [ \"$1\" = \"king\" ] && [ \"$2\" = \"escalate\" ]; then\n\
+            "if [ \"$1\" = \"agents\" ] && [ \"$2\" = \"king\" ] && [ \"$3\" = \"escalate\" ]; then\n\
              \x20 echo \"$*\" >> {log}\n\
              \x20 echo q-mock\n\
              \x20 exit 0\n\

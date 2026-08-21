@@ -199,10 +199,10 @@ From a clone, the full refresh has three steps. `fno doctor update` refreshes th
 ```bash
 git pull
 fno doctor update          # reinstall the Python CLI + cargo binaries (fno mux + fno-agents) from source
-fno restart --mux   # restart the daemon AND the mux server onto the fresh binaries
+fno agents restart --mux   # restart the daemon AND the mux server onto the fresh binaries
 ```
 
-`fno restart` on its own restarts only the agents daemon (PTY workers survive). The `--mux` flag also restarts the mux server, which is **destructive** - it ends live mux sessions - so it is opt-in; reattach afterward. `fno doctor` flags a running mux server that predates the installed binary and reminds you to run it. In a running Claude Code session, bump the plugin (or relaunch) to pick up new skills/hooks after a pull.
+`fno agents restart` on its own restarts only the agents daemon (PTY workers survive). The `--mux` flag also restarts the mux server, which is **destructive** - it ends live mux sessions - so it is opt-in; reattach afterward. `fno doctor` flags a running mux server that predates the installed binary and reminds you to run it. In a running Claude Code session, bump the plugin (or relaunch) to pick up new skills/hooks after a pull.
 
 - [Target pipeline](guides/target.md) - the full autonomous loop: flags, gates, cross-project, resume
 - [Think and plan](guides/think-and-plan.md) - design exploration and planning

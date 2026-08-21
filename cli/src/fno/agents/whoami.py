@@ -1,7 +1,7 @@
 """fno.agents.whoami — "what is MY registered mesh name?" (read-only).
 
 A mesh-spawned worker has no clean way to learn its OWN registered name —
-the derived-name peers use to address it via ``fno mail send <name>``. The
+the derived-name peers use to address it via ``fno agents mail send <name>``. The
 spawn path injects ``FNO_AGENT_SELF`` / ``FNO_AGENT_HARNESS`` (and, on
 follow-up paths, ``FNO_AGENT_SESSION``) into every spawned agent's env
 (see :mod:`fno.agents.context`), but nothing surfaces that identity back.

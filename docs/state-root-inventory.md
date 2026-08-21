@@ -80,7 +80,7 @@ One file per session, per day, or per throttle window.
 | `.path-migration-done` | `setup/migrate_paths.py` | one-shot sentinel |
 | `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
-| `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno mail hold --off`, and by the turn-boundary tidy in `fno mail notify-self` |
+| `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
 | `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
 | `bin/github-cli/gh`, `gh.pre-fno` | `setup/github_cli.py` via `paths.github_cli_proxy_dir()` | permanent proxy; one backup is retained only when an unrelated wrapper was present |
 
@@ -143,7 +143,7 @@ Not state-root writers, listed here because they are the other family of session
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
-| `.fno/king-state.md` | `cli/src/fno/king/state.py` via `fno king init` | write-once per king session; deleted when the crown expires |
+| `.fno/king-state.md` | `cli/src/fno/king/state.py` via `fno agents king init` | write-once per king session; deleted when the crown expires |
 
 Both are write-once after init. Both gate a stop hook.
 

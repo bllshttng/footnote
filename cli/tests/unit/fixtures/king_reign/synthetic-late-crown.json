@@ -3,7 +3,7 @@
   "entries": [
     {"index": 0, "kind": "tool_use", "tool": "Bash", "target": "fno do pr watch status --json"},
     {"index": 1, "kind": "assistant_text", "text": "Crown: level 0, scope fno. Issuing the first ruling now."},
-    {"index": 2, "kind": "tool_use", "tool": "Bash", "target": "fno mail send worker-1 \"Ruling: approved, proceed to blueprint\""},
+    {"index": 2, "kind": "tool_use", "tool": "Bash", "target": "fno agents mail send worker-1 \"Ruling: approved, proceed to blueprint\""},
     {"index": 3, "kind": "tool_use", "tool": "Bash", "target": "fno agents crown king-synth --scope fno --level 0"}
   ]
 }

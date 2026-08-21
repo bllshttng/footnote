@@ -170,7 +170,7 @@ Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
 In a Codex task, `CODEX_THREAD_ID` is the durable session identity. footnote prefers it
 when creating target manifests, node claims, graph provenance, and follow-on dispatch
 context. The shared SessionStart wrapper also registers that thread for addressable
-`fno mail` delivery. If Codex does not provide it, the shared harness resolver falls
+`fno agents mail` delivery. If Codex does not provide it, the shared harness resolver falls
 back to the other supported session markers and finally the existing generated
 target-session id.
 

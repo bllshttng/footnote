@@ -6,11 +6,11 @@
 
 Use this guide when you have an orchestrator (script, LLM session, CI job) that needs to hand work to a long-running Claude agent and read back the response without managing the session id, socket, or attach lifecycle yourself.
 
-## ask vs `fno mail send` (two contracts, not two spellings)
+## ask vs `fno agents mail send` (two contracts, not two spellings)
 
 Both lanes inject the message into the live session the same way; everything after delivery differs. Neither is a wrapper over the other, so retiring either would delete a contract, not deduplicate a path.
 
-| | `fno agents ask <name> "..."` | `fno mail send <name> "..."` |
+| | `fno agents ask <name> "..."` | `fno agents mail send <name> "..."` |
 |---|---|---|
 | Contract | synchronous request-reply | asynchronous fire-and-receipt |
 | Returns | the recipient's REPLY on stdout (pipeable) | a delivery receipt (`delivered (hosted)` / `queued (durable)`) |

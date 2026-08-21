@@ -35,17 +35,28 @@ class Move(NamedTuple):
     kind: str
     to: str
     permanent_leaves: frozenset[str] = frozenset()
+    leaf_destinations: tuple[tuple[str, str], ...] = ()
 
 
 VERB_MOVES: dict[str, Move] = {
     "approvals": Move(kind="deprecated", to="inbox approvals"),
+    "autonomy": Move(kind="deprecated", to="agents autonomy"),
     "bundle": Move(kind="deprecated", to="doctor bundle"),
     "codemap": Move(kind="deprecated", to="doctor codemap"),
+    "claim": Move(kind="deprecated", to="agents claim"),
     "delivery": Move(kind="deprecated", to="do delivery"),
+    "dispatch": Move(kind="deprecated", to="agents dispatch"),
     "evals": Move(kind="deprecated", to="doctor evals"),
     "event": Move(kind="deprecated", to="doctor event"),
+    "king": Move(
+        kind="deprecated",
+        to="agents king",
+        leaf_destinations=(("board", "inbox board"),),
+    ),
     "lint": Move(kind="deprecated", to="doctor lint"),
     "loops": Move(kind="deprecated", to="do loops"),
+    "mail": Move(kind="deprecated", to="agents mail"),
+    "mcp": Move(kind="deprecated", to="agents mcp"),
     "notify": Move(kind="deprecated", to="inbox notify"),
     "observer": Move(kind="deprecated", to="doctor observer"),
     "outstanding": Move(kind="deprecated", to="inbox outstanding"),
@@ -58,8 +69,10 @@ VERB_MOVES: dict[str, Move] = {
     ),
     "pr-watch": Move(kind="deprecated", to="do pr watch"),
     "research": Move(kind="deprecated", to="do research"),
+    "restart": Move(kind="deprecated", to="agents restart"),
     "resume": Move(kind="deprecated", to="do resume"),
     "review": Move(kind="deprecated", to="do review"),
+    "roles": Move(kind="deprecated", to="agents roles"),
     "state": Move(kind="deprecated", to="do state"),
     "status-fanout": Move(kind="deprecated", to="doctor event fanout"),
     "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
@@ -68,6 +81,7 @@ VERB_MOVES: dict[str, Move] = {
     "test": Move(kind="deprecated", to="doctor test"),
     "think": Move(kind="deprecated", to="do think"),
     "update": Move(kind="deprecated", to="doctor update"),
+    "worker": Move(kind="deprecated", to="agents worker"),
 }
 
 
@@ -76,16 +90,28 @@ def move_for(verb: str) -> Move | None:
     return VERB_MOVES.get(verb)
 
 
-def destination_is_registered(move: Move, roots: Collection[str]) -> bool:
+def _destination(rest: list[str], move: Move) -> str:
+    if rest:
+        for leaf, destination in move.leaf_destinations:
+            if rest[0] == leaf:
+                return destination
+    return move.to
+
+
+def destination_is_registered(
+    move: Move, roots: Collection[str], rest: list[str] | None = None
+) -> bool:
     """Whether a move's top-level destination exists in this registry."""
-    return move.to.split(maxsplit=1)[0] in roots
+    return _destination(rest or [], move).split(maxsplit=1)[0] in roots
 
 
 def forwarding_args(rest: list[str], move: Move) -> list[str] | None:
     """Destination argv, or None when a post-expiry sibling is retired."""
     if move.kind == "leaf-alias" and (not rest or rest[0] not in move.permanent_leaves):
         return None
-    return [*move.to.split(), *rest]
+    destination = _destination(rest, move)
+    residual = rest[1:] if rest and destination != move.to else rest
+    return [*destination.split(), *residual]
 
 
 def deprecation_line(verb: str, rest: list[str], move: Move) -> str | None:
@@ -104,6 +130,9 @@ def deprecation_line(verb: str, rest: list[str], move: Move) -> str | None:
         return None
     if rest and rest[0] in move.permanent_leaves:
         return None
+    destination = _destination(rest, move)
+    if destination != move.to:
+        return f"fno {verb} {rest[0]} is now fno {destination}"
     if move.permanent_leaves and rest and not rest[0].startswith("-"):
         return f"fno {verb} {rest[0]} is now fno {move.to} {rest[0]}"
     return f"fno {verb} is now fno {move.to}"

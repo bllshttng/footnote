@@ -3500,7 +3500,7 @@ pub async fn run_report(rest: &[String], home: &AgentsHome) -> i32 {
 /// of the protocol through it, and (b) an ops escape hatch when the Python
 /// CLI is unavailable. It is deliberately HIDDEN — dispatched via `matches!`
 /// in `bin/client.rs` (the `mail-inject` pattern) so it stays out of
-/// `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`; `fno claim` remains the only
+/// `CLIENT_VERB_USAGE` / `RUST_CLIENT_VERBS`; `fno agents claim` remains the only
 /// operator CLI for claims.
 ///
 /// Output is one JSON object on stdout. Exit codes: 0 success, 1 held by
@@ -3622,7 +3622,7 @@ pub fn run_claim(args: &[String]) -> i32 {
         }
         "status" => {
             let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
-            // Mirror the `fno claim status -J` dict shape so the compat
+            // Mirror the `fno agents claim status -J` dict shape so the compat
             // matrix can diff the two implementations field-by-field.
             let mut out = serde_json::Map::new();
             out.insert("key".into(), Value::String(key));

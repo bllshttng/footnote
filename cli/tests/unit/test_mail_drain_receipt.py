@@ -103,7 +103,7 @@ def test_send_failed_post_mint_carries_msg_id(runner, tmp_path, monkeypatch):
 
     monkeypatch.setattr("fno.inbox.store.write_new_thread", _boom)
 
-    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 12, f"exit={res.exit_code} out={res.output!r}"
 
     failed = [e for e in events if e.get("kind") == "agent_send_failed"]
@@ -137,7 +137,7 @@ def test_send_failed_pre_mint_carries_no_msg_id(runner, tmp_path, monkeypatch):
         monkeypatch.setenv(env, str(empty))
     events = _capture_events(monkeypatch)
 
-    res = runner.invoke(app, ["mail", "send", "nope-9f3c", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "nope-9f3c", "hi", "--from-name", "web"])
     assert res.exit_code == 16, f"exit={res.exit_code} out={res.output!r}"
 
     failed = [e for e in events if e.get("kind") == "agent_send_failed"]
@@ -294,7 +294,7 @@ def test_sweep_legacy_message_without_marker_still_escalates(tmp_path, monkeypat
 
 
 def test_manual_ack_emits_drain_marker(tmp_path, monkeypatch):
-    """The manual `fno mail ack` path consumes mail by advancing the cursor; it
+    """The manual `fno agents mail ack` path consumes mail by advancing the cursor; it
     must emit agent_mail_drained too, or those messages leave unread with no
     terminal event -- the same accounting gap drain-self closes."""
     from fno.inbox.store import write_new_thread

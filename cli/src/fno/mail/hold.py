@@ -83,7 +83,7 @@ def read(handle: str) -> Optional[Hold]:
     Never raises. The catch is deliberately broad because resolving the
     directory runs the whole path resolver, which loads settings and can fail
     in ways a file read cannot - a narrow ``(OSError, ValueError)`` here let an
-    ``AttributeError`` from the resolver escape into ``fno mail notify-self``,
+    ``AttributeError`` from the resolver escape into ``fno agents mail notify-self``,
     which runs on every ``UserPromptSubmit``. Busy mode must never be able to
     break the turn-boundary render: an unreadable clock means the mail flows.
     """
@@ -160,7 +160,7 @@ def extend(handle: str) -> Optional[Hold]:
 
     Returns None when there is no live timed hold to extend (no clock, a
     permanent policy, or one already lapsed). This is the idle re-arm: the
-    caller is ``fno mail notify-self``, which fires on every
+    caller is ``fno agents mail notify-self``, which fires on every
     ``UserPromptSubmit``, so "the operator typed" restarts the idle window
     without any new hook.
     """
@@ -192,7 +192,7 @@ def lapsed(handle) -> bool:
     The fear that argument answers - a hold whose timer died holding mail
     forever - does not describe this design. Held mail is durable on the bus.
     It surfaces at the recipient's next SessionStart or turn boundary, and
-    ``fno mail notify-self`` tidies the stale flag when it gets there. So a
+    ``fno agents mail notify-self`` tidies the stale flag when it gets there. So a
     lost clock costs a stall bounded by the operator's next prompt, never a
     lost message. Auto-expire stays a safety property by having two carriers
     that do not depend on this file surviving: the detached release timer, and
@@ -327,7 +327,7 @@ def addresses(entry) -> tuple:
 
     ONE matching rule, shared by the resolver, the policy write, and the
     delivery gate's expiry check. The canonical handle is in here because every
-    WRITER keys by it: ``fno mail hold`` arms at ``canonical_handle(session_id)``
+    WRITER keys by it: ``fno agents mail hold`` arms at ``canonical_handle(session_id)``
     and the release and the turn-boundary tidy read the same key. For a claude
     row that also happens to be ``short_id``, which is how the omission stayed
     invisible. A codex ``short_id`` is a daemon worker key and its
@@ -447,7 +447,7 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
     total = sum(count for _, count, _ in survivors)
     minutes = max(1, math.ceil(held_for_s / 60)) if held_for_s else 0
     lines = [
-        f"[fno mail] busy mode ended after ~{minutes}m. "
+        f"[fno agents mail] busy mode ended after ~{minutes}m. "
         f"{total} message(s) held for {handle}:"
     ]
     for message, count, _ids in survivors:
@@ -458,7 +458,7 @@ def render_digest(handle: str, survivors: list, held_for_s: int) -> str:
             f"---{suffix}"
         )
         lines.append((getattr(message, "body", "") or "").rstrip("\n"))
-    lines.append('\n[fno mail] to answer one: fno mail reply --to <id> --body "..."')
+    lines.append('\n[fno agents mail] to answer one: fno agents mail reply --to <id> --body "..."')
     return "\n".join(lines)
 
 

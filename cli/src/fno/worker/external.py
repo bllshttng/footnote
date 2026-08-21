@@ -1,4 +1,4 @@
-"""fno worker external - poll for external review status on a PR.
+"""fno agents worker external - poll for external review status on a PR.
 
 Migrated from worker/review.py. The polling function is renamed
 ``external_review`` to distinguish it from the internal orchestrator

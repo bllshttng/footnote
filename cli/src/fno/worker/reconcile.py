@@ -1,4 +1,4 @@
-"""fno worker reconcile - detect merged/orphaned/closed PRs.
+"""fno agents worker reconcile - detect merged/orphaned/closed PRs.
 
 Updates state + graph atomically. Does NOT auto-close orphaned PRs.
 """

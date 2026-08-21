@@ -64,7 +64,7 @@ def emitted_events(monkeypatch):
 
 
 def _unread_count(runner, name: str) -> int:
-    res = runner.invoke(app, ["mail", "unread", "--name", name, "--json"])
+    res = runner.invoke(app, ["agents", "mail", "unread", "--name", name, "--json"])
     assert res.exit_code == 0, res.output
     return len(json.loads(res.stdout.strip().splitlines()[-1]))
 

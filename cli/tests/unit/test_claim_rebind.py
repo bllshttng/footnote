@@ -213,7 +213,7 @@ def test_rebind_ttl_window_does_not_compound(tmp_path):
 
 def test_a_live_handover_needs_a_launch_window_holder(tmp_path):
     """Naming the prior holder is the proof, and it is only proof for a holder
-    that is not published. `fno claim status` prints every other one, so without
+    that is not published. `fno agents claim status` prints every other one, so without
     this gate anyone could read a live worker's holder off the store and hand
     the node to themselves - taking a running owner's claim."""
     prior = _claim(os.getpid(), now_ms(), expires_at=now_ms() + 60_000,

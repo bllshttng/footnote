@@ -83,7 +83,7 @@ export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_REPO_ROOT="$SBX"
 # Ambient harness identity is a FIXTURE, not something inherited. The hook asks
-# `fno mail send --to-self`, which derives its recipient from these markers, so a
+# `fno agents mail send --to-self`, which derives its recipient from these markers, so a
 # developer machine leaked the REAL session id in and CI (which has none) took a
 # different branch than the local run: the local pass was environment-dependent.
 # Pin it to the fixture session and scrub every other family, since --to-self
@@ -399,7 +399,7 @@ assert_contains "gate: no path -> names the operator" "$OUT" 'ask your operator 
 # The needle is the PRESCRIPTION, not the substring: this branch legitimately
 # quotes the `--to-self --raw --check` command it ran, so a bare '--to-self --raw'
 # needle fails on the diagnostic rather than on advice to self-inject.
-assert_absent   "gate: no path -> prescribes no self-inject" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
+assert_absent   "gate: no path -> prescribes no self-inject" "$OUT" "fno agents mail send '/compact <brief-path>' --to-self --raw"
 # The reason a session must not read as a liveness verdict, stated where it is read.
 assert_contains "gate: miss is not a death claim" "$OUT" 'NOT a claim that you are dead'
 
@@ -427,7 +427,7 @@ unshim() { PATH="$OLD_PATH"; rm -rf "$SHIMDIR"; }
 check_shim 'injectable: control.sock (a paste can still refuse a busy prompt)' 0
 run_hook "$(payload "$SBX/t.jsonl")"
 unshim
-assert_contains "gate: path -> prescribes the front door" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
+assert_contains "gate: path -> prescribes the front door" "$OUT" "fno agents mail send '/compact <brief-path>' --to-self --raw"
 assert_absent   "gate: path -> no operator fallback"      "$OUT" 'ask your operator to type'
 # A path is not a landing, and the text must not promise one.
 assert_contains "gate: path is not a landing" "$OUT" 'A path is not a landing'

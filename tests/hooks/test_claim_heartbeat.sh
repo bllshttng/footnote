@@ -6,10 +6,10 @@
 # to at most once per window. It must never block a tool call.
 #
 # Tests (stubbed `fno` on PATH):
-#   T1  AC3-HP    holder == us, aged stamp   -> `fno claim refresh` is called
+#   T1  AC3-HP    holder == us, aged stamp   -> `fno agents claim refresh` is called
 #   T2  AC3-EDGE  holder == other session    -> refresh NOT called
 #   T3  AC3-ERR   refresh returns non-zero   -> hook still exits 0
-#   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno claim status` NOT called
+#   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno agents claim status` NOT called
 #   T5           no manifest                 -> stamps activity, `fno` never called
 #   T6  AC3-UI    not-holder no-op is silent -> no stdout
 #   T7/T8         Claude owner identity match/mismatch

@@ -1,4 +1,4 @@
-"""The style gate on ``fno mail send``.
+"""The style gate on ``fno agents mail send``.
 
 Two claims, tested two ways:
 
@@ -7,7 +7,7 @@ Two claims, tested two ways:
    ``cli/src/fno/mail/cli.py``: a new body-cap call without a paired style check
    fails this test rather than a review. This is NOT a snapshot of today's
    callers (that would pass forever); it is a relation between two calls.
-2. DYNAMIC: a subprocess ``fno mail send`` with a violating body exits 1 and
+2. DYNAMIC: a subprocess ``fno agents mail send`` with a violating body exits 1 and
    names the rule, before any delivery. The escape (``--style-exception``) and
    the kill switch (``FNO_STYLE_ENFORCE=0``) let a violating body through.
 """
@@ -24,7 +24,7 @@ STYLE_REFUSED = "message blocked by the style rules"
 
 
 def _run(args: list[str], env_extra: dict[str, str], tmp_path: Path):
-    """Run ``fno mail send`` in a sandboxed state dir; return the CompletedProcess."""
+    """Run ``fno agents mail send`` in a sandboxed state dir; return the CompletedProcess."""
     state = tmp_path / ".fno"
     (state / "agents").mkdir(parents=True, exist_ok=True)
     settings = state / "settings.yaml"

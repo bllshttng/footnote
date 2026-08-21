@@ -3,7 +3,7 @@
 Pure-mechanical, fail-open. After a PR merges, bring the CANONICAL checkout and
 its installed tooling up to the merged HEAD by running the project's configured
 ``config.post_merge.sync_command`` (footnote example:
-``git checkout main && git pull origin main && fno doctor update && fno restart``).
+``git checkout main && git pull origin main && fno doctor update && fno agents restart``).
 
 Load-bearing constraints, each with its own guard below:
 
@@ -16,7 +16,7 @@ Load-bearing constraints, each with its own guard below:
   list and SHA come from ``gh pr view``, never a local ``git diff``.
 - **Exactly-once per merge SHA.** A ``.fno/post-merge-synced/<sha>`` marker
   (written only on success) is the cross-session record; a single-flight claim
-  serializes concurrent runs so two ``fno restart``s never overlap.
+  serializes concurrent runs so two ``fno agents restart``s never overlap.
 
 Every outcome prints a status line (AC1-UI); no outcome is silent. A failure
 also surfaces the command that ran plus its captured stdout/stderr - the exit
@@ -45,7 +45,7 @@ _SYNC_CLAIM_TTL_MS = 30 * 60 * 1000
 # would wedge the daemon this feature exists to work around. `timeout(1)` is
 # absent on stock macOS, so the bound is _proc.run's own, never a shell wrapper.
 _CATCHUP_PROBE_TIMEOUT_S = 30.0
-# Bound sync_command itself (x-adf9): a trailing `fno restart` detaches a
+# Bound sync_command itself (x-adf9): a trailing `fno agents restart` detaches a
 # daemon; the closed pipes detach it cleanly, and this timeout is the backstop
 # for a genuinely stuck command. Generous (pull + update + restart can be slow)
 # and well inside the 30m single-flight claim TTL.
@@ -167,7 +167,7 @@ def run_sync_canonical(
     # 5. Single-flight lock (canonical-scoped, TTL-live).
     from fno import claims
 
-    # Canonical-wide, NOT per-SHA. The claim's job is that two `fno restart`s
+    # Canonical-wide, NOT per-SHA. The claim's job is that two `fno agents restart`s
     # never overlap in one checkout, and a per-SHA key does not deliver that: a
     # catch-up for one merge and a merge-time sync for another take different
     # locks and pull, update, and restart concurrently. Exactly-once-per-SHA is
@@ -625,7 +625,7 @@ def _default_shell_runner(command: str, cwd: str) -> Result:
     """Run ``command`` via a login shell in ``cwd``; return its captured result.
 
     Output is captured to temp FILES, never ``subprocess.PIPE`` (x-adf9): a
-    ``sync_command`` ending in ``fno restart`` detaches a daemon that INHERITS
+    ``sync_command`` ending in ``fno agents restart`` detaches a daemon that INHERITS
     the child's stdout/stderr and never closes them, and with PIPE the parent's
     ``communicate()`` would block on the EOF that live daemon never sends (the
     wedge this runner exists to avoid). A plain file has no EOF-reader, so the

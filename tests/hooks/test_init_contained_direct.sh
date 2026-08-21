@@ -239,7 +239,7 @@ grep -q "claim release FAILED" "$TMP_RELFAIL/err.log" \
   || fail "post-claim/relfail: swallowed the failure and claimed success (got: $(cat "$TMP_RELFAIL/err.log"))"
 pass "post-claim/relfail: the failed release is reported, not hidden"
 
-grep -q "fno claim release" "$TMP_RELFAIL/err.log" \
+grep -q "fno agents claim release" "$TMP_RELFAIL/err.log" \
   || fail "post-claim/relfail: no recovery command offered for the stranded claim"
 pass "post-claim/relfail: names the command that frees the stranded claim"
 

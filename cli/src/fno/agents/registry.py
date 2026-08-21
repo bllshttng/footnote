@@ -356,7 +356,7 @@ class AgentEntry:
     # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
     # pane``); ``None`` for daemon-worker, bg-thread, and headless rows. The
     # Python spawn back half writes it; the mux server's sideline reader and
-    # ``fno mail`` live-inject dispatch on it (a row carries exactly ONE live
+    # ``fno agents mail`` live-inject dispatch on it (a row carries exactly ONE live
     # ref - mux XOR worker XOR bg - enforced by ``write_registry``). Mirrors
     # Rust ``RegistryEntry.mux: Option<MuxRef>`` (X3); gated by the v6 schema
     # bump so a pre-mux reader rejects instead of silently dropping the ref.
@@ -410,7 +410,7 @@ class AgentEntry:
     # v14 (x-e21e): this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
     # mail to this session never prompt-line injects and always takes the
     # durable bus (the recipient surfaces it at its turn boundary via
-    # ``fno mail notify-self``); ``None`` is the default injectable policy every
+    # ``fno agents mail notify-self``); ``None`` is the default injectable policy every
     # worker keeps. A DELIVERY-POLICY fact, never a liveness verdict - the same
     # distinction that renamed NOT_INJECTABLE off "not-live"
     # (crates/fno-agents/src/mail_inject.rs): a bus-only session may be alive
@@ -1323,7 +1323,7 @@ def register_existing_session(
 
     The bus epic's spawn/host paths create registry rows; this is the
     missing seam for a session a human started by hand (e.g. a ``claude``
-    SessionStart hook). After registration a peer can ``fno mail send``
+    SessionStart hook). After registration a peer can ``fno agents mail send``
     to the row's name; with no live transport the send demotes to the
     durable queue, which the session's own inbox-wake hook surfaces (US7).
 
@@ -1448,7 +1448,7 @@ def register_existing_session(
                 # routinely an operator's terminal no SessionStart hook had
                 # registered yet. Refusing the later hook froze those rows at
                 # `adopted`, and `_recipient_is_attended` requires exactly
-                # `operator`, so `fno mail send` stopped escalating questions to
+                # `operator`, so `fno agents mail send` stopped escalating questions to
                 # that human permanently and said nothing. The upgrade also
                 # makes the retire lane STRICTER, since `operator` answers
                 # `spawned=False` where `adopted` answers unknown, and both

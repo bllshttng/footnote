@@ -1,4 +1,4 @@
-"""``fno agents peek <handle>`` — the read-only twin of ``fno mail send``.
+"""``fno agents peek <handle>`` — the read-only twin of ``fno agents mail send``.
 
 **peek output is NOT a liveness signal.** A transcript is a file, and a dead
 session's file still reads fine, so recent-looking content here proves only that

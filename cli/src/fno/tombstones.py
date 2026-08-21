@@ -65,10 +65,6 @@ TOMBSTONES: dict[str, str] = {
     # zero is a candidate, not a ruling: `loops resume-all` also scored zero and
     # STAYS, because it is the only release for the `pause-all` kill switch and
     # deleting it would strand a paused fleet.
-    "agents mcp": (
-        "`fno mcp` - the same Typer app. `agents mcp` was a second registration "
-        "of it, and the Rust daemon's deliver_envelope shells the top-level path"
-    ),
     # Removed from BOTH fronts (Python routing table and client.rs dispatch).
     # Half-removing would have left `fno agents push-channel` auto-routing to
     # the binary while leaving the enumerated surface, which is the invisible
@@ -126,11 +122,11 @@ TOMBSTONES: dict[str, str] = {
         "failure-prone, and the idea pile, not the deferred pile"
     ),
     "claim incarnation-fence": (
-        "`fno claim status <key>` - it reports the live holder, which is the "
+        "`fno agents claim status <key>` - it reports the live holder, which is the "
         "only ownership truth the fence was checking"
     ),
     "claim lane-count": (
-        "`fno claim list` - it shows the live claims this counted"
+        "`fno agents claim list` - it shows the live claims this counted"
     ),
     "resume receipt version": (
         "nothing - the schema version had no reader; "
@@ -164,16 +160,16 @@ TOMBSTONES: dict[str, str] = {
     # capability is unchanged and the collapse is mechanical, so each of these
     # names the exact replacement invocation rather than a nearby verb.
     "claim force-release": (
-        "`fno claim release <key> --force -R <why>` - the same administrative "
+        "`fno agents claim release <key> --force -R <why>` - the same administrative "
         "drop, including the archive to .expired/. `--force` refuses without "
         "`--reason`, as the old verb did"
     ),
     "claim lane-acquire": (
-        "`fno claim acquire --lane <id> --max-lanes <n>` - the same lane slot, "
+        "`fno agents claim acquire --lane <id> --max-lanes <n>` - the same lane slot, "
         "same exit 1 when the cap is full"
     ),
     "claim lane-release": (
-        "`fno claim release --lane <id>` - the same lane slot release, still "
+        "`fno agents claim release --lane <id>` - the same lane slot release, still "
         "silent success when the lane holds none"
     ),
     "target resume-bind": (

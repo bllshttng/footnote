@@ -1,4 +1,4 @@
-"""`fno mcp` CLI: thin wrappers over the MCP sidecar client.
+"""`fno agents mcp` CLI: thin wrappers over the MCP sidecar client.
 
 Currently one verb, ``send``, used by the fno-agents daemon's push-channel
 delivery leg to hand an envelope to a registered channel server. The envelope is

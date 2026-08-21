@@ -9408,7 +9408,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
 // probes. A king has no PR, so pointing the target driver at one can never
 // reach a clean terminal state; it burns to NoProgress or Budget while looking
 // like it is working. This arm asks the king's question instead, which is
-// whether the board is clean, and reads that answer from `fno king board`
+// whether the board is clean, and reads that answer from `fno inbox board`
 // rather than deciding anything itself.
 //
 // It is deliberately self-contained. The target arm below is untouched, which
@@ -9460,7 +9460,7 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     }
 }
 
-/// What `fno king board --json` answered, or why it could not be read.
+/// What `fno inbox board --json` answered, or why it could not be read.
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     /// The first row of the first actionable non-empty queue, for the block
@@ -9544,11 +9544,11 @@ pub(crate) fn read_king_board(fno_bin: &str, cwd: &Path) -> Result<KingBoard, St
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
     let output = Command::new(fno_bin)
-        .args(["king", "board", "--json"])
+        .args(["inbox", "board", "--json"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run {fno_bin} king board: {e}"))?;
+        .map_err(|e| format!("cannot run {fno_bin} inbox board: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_king_board(&stdout).ok_or_else(|| {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -9821,7 +9821,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         return terminate(TerminationReason::NoWork, message, 0, dry, &[]);
     }
 
-    // The ceiling `fno king init --max-iterations` advertises. Before this it
+    // The ceiling `fno agents king init --max-iterations` advertises. Before this it
     // was parsed into the manifest and read by nothing, so the help string
     // promised a bound that did not exist, which is worse than no flag. Checked
     // AFTER NoWork so a clean board still exits clean, and before NoProgress so
@@ -16814,11 +16814,11 @@ mod done_probe_tests {
 
     #[test]
     fn parses_block_list() {
-        let doc = fm("done_probes:\n  - \"fno mail list --since 24h | grep -q groom\"\n  - 'echo ok'\nstatus: ready");
+        let doc = fm("done_probes:\n  - \"fno agents mail list --since 24h | grep -q groom\"\n  - 'echo ok'\nstatus: ready");
         assert_eq!(
             probes_of(&doc),
             vec![
-                "fno mail list --since 24h | grep -q groom".to_string(),
+                "fno agents mail list --since 24h | grep -q groom".to_string(),
                 "echo ok".to_string()
             ]
         );

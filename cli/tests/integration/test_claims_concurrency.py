@@ -1,4 +1,4 @@
-"""Multi-process integration tests for fno claim concurrency.
+"""Multi-process integration tests for fno agents claim concurrency.
 
 Uses multiprocessing.Process to drive real-process contention on the same
 filesystem path, matching the pattern from PR #278 (memory:

@@ -241,7 +241,7 @@ def test_writeahead_writes_durable_for_asleep_recipient(runner, tmp_path, monkey
         "fno.agents.dispatch._registered_family1_state", lambda _e: "asleep"
     )
 
-    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
 
     unread = scan_unread(recipient)
@@ -282,7 +282,7 @@ def test_live_recipient_hosted_writes_audit_only_outbox_row(
 
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", _deliver)
 
-    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
 
     rows = list(iter_messages())
@@ -349,7 +349,7 @@ def test_live_recipient_live_miss_writes_durable(runner, tmp_path, monkeypatch):
     )
     monkeypatch.setattr("fno.agents.dispatch._deliver_live", lambda *_a, **_k: False)
 
-    res = runner.invoke(app, ["mail", "send", "red", "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["agents", "mail", "send", "red", "hi", "--from-name", "web"])
     assert res.exit_code == 0, f"exit={res.exit_code} out={res.output!r}"
 
     unread = scan_unread(recipient)

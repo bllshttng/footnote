@@ -71,8 +71,8 @@ A worktree is tied to a work claim.
 Before you do manual work in a node, check no other session already holds it:
 
 ```bash
-fno claim status node:<id>
-fno claim list
+fno agents claim status node:<id>
+fno agents claim list
 ```
 
 A `live` claim means a session is active on it.

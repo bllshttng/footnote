@@ -2,7 +2,7 @@
 
 Seven rules, checked at the tool boundary. ``docs/style-rules.md`` is the
 normative statement; this module is the mechanism. Pure: no filesystem, no
-state, no network. ``fno mail send`` and the hand-run ``fno doctor lint style``
+state, no network. ``fno agents mail send`` and the hand-run ``fno doctor lint style``
 surfaces route through :func:`check`.
 
 Code does not count against a sentence. A masking pass runs before any rule

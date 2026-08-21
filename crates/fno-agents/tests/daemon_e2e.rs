@@ -1593,7 +1593,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
 }
 
 /// AC7-ERR + AC8-HP: the mail-delivery name lookup (agent.switchboard_v2,
-/// the handler behind `fno mail send`) reports an unreadable registry as an
+/// the handler behind `fno agents mail send`) reports an unreadable registry as an
 /// internal read failure -- never `AgentNotFound` for a name its raw rows
 /// demonstrably carry. A readable registry that genuinely lacks the name
 /// still returns `AgentNotFound`.

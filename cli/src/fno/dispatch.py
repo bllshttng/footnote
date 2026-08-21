@@ -1,4 +1,4 @@
-"""fno dispatch: grab one ready node into a mux pane (x-6f77).
+"""fno agents dispatch: grab one ready node into a mux pane (x-6f77).
 
 The mux's ``leader+g`` ("grab work") shells here. One verb, one JSON verdict,
 so the Rust caller renders a notice from a single exec instead of stitching
@@ -127,7 +127,7 @@ def cmd_resolve(
     Pure by default: reads the harness-capability map + config.dispatch, resolves
     nothing at runtime, never spawns or claims. ``--autonomous`` adds ONE runtime
     read - the shared quota route decision - so the shell dispatchers converge on
-    the same seam as `backlog advance` and `fno dispatch` instead of routing
+    the same seam as `backlog advance` and `fno agents dispatch` instead of routing
     around it. Exit 0 on a resolved tuple; exit 2 naming the harness and the map
     when it cannot resolve (unknown harness, bad substrate, empty/unsubstituted
     command).

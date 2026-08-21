@@ -118,7 +118,7 @@ The value is a discriminated object, and the five kinds never collapse into one 
 fno agents list --json | jq -r '.agents[] | "\(.name)\t\(.harness)\t\(.observed_model.model // .observed_model.kind)"'
 ```
 
-`address` is the one field in the row you can send mail to: the first eight of the session id, the same string `fno mail drain-self` computes for itself.
+`address` is the one field in the row you can send mail to: the first eight of the session id, the same string `fno agents mail drain-self` computes for itself.
 Every other identifier names something else.
 `name` is a spawn label, `short_id` is a transport key that is `null` for most rows, `session_id` is a resume target, and the discovered lane's `LABEL` is a friendly alias.
 A reader with no address column copies `name`, and a name-lane durable write queues under a key no drain reads; that is the largest still-growing category of stranded mail on the bus.
@@ -174,7 +174,7 @@ fno agents list --json | jq -r '
 fno agents whoami
 ```
 
-Answers the one question `list` cannot: *what is MY registered name* — the handle peers use to address you via `fno mail send <name>`. A worker that lost track of its name after a compaction has a native answer instead of grepping `list` for its own session.
+Answers the one question `list` cannot: *what is MY registered name* — the handle peers use to address you via `fno agents mail send <name>`. A worker that lost track of its name after a compaction has a native answer instead of grepping `list` for its own session.
 
 It resolves identity with a process-tree prover. A proven harness marker wins over inherited markers. If multiple harness families are present and no marker is proven, the command refuses instead of guessing. It exits 4. The refusal names the markers and prints a `find ~/.codex/sessions ~/.claude/projects -name '*<id>*'` lookup. With one marker, behavior remains unchanged. The command then enriches the name from the registry row and the local target session.
 

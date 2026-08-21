@@ -1,7 +1,7 @@
 """Tests for the single-writer session claim guard (Task 1.2).
 
 Before respawning an idle claude session into the stream-json host lane, the
-daemon must hold an atomic `fno claim session:<uuid>` so two concurrent adopts
+daemon must hold an atomic `fno agents claim session:<uuid>` so two concurrent adopts
 cannot both respawn the same transcript (double-writer = corruption), AND it
 must refuse to adopt a session id currently held LIVE by another process
 (a human interactive TUI / another writer) - `claude --resume` does not

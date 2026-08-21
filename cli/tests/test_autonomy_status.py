@@ -1,4 +1,4 @@
-"""fno autonomy status - x-aaaf wave 1 task 1.3.
+"""fno agents autonomy status - x-aaaf wave 1 task 1.3.
 
 Covers AC1-HP (every spawner appears with trigger/gate/value/rank) and
 AC9-ERR (a repo with no fno config at all still prints defaults and exits 0).
@@ -26,7 +26,7 @@ def _cli():
     """Build the same group shape production gets via get_group_from_info()
     (see fno._lazy_group): a bare typer.Typer with one command collapses
     into a top-level command under plain get_command(), which would silently
-    change `fno autonomy status` into `fno autonomy`. Returns a plain
+    change `fno agents autonomy status` into `fno agents autonomy`. Returns a plain
     click.Group, so it is invoked with click's own CliRunner (typer's
     CliRunner.invoke expects a typer.Typer, not an already-converted Group)."""
     return typer.main.get_group_from_info(

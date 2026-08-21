@@ -1,4 +1,4 @@
-//! `mail-inject`: the one-shot LIVE-DELIVERY verb `fno mail send` calls to inject
+//! `mail-inject`: the one-shot LIVE-DELIVERY verb `fno agents mail send` calls to inject
 //! an a2a turn into a LIVE adopted `claude --bg` session over the daemon
 //! `control.sock`. Python's `_deliver_live` runs it as a binary subprocess and
 //! falls back to the durable bus queue ONLY when this reports not-delivered
@@ -393,7 +393,7 @@ fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static 
 /// JSON `reason` token.
 ///
 /// The SINGLE control.sock wire implementation (Locked Decision 1, node
-/// x-2681): both the `mail-inject` verb (`fno mail send`) and the Rust ask-lane
+/// x-2681): both the `mail-inject` verb (`fno agents mail send`) and the Rust ask-lane
 /// fallback (`claude_ask::ask_followup`) deliver through here, so the wire
 /// contract lives in one place and can never drift. `text` is injected verbatim
 /// -- a dumb transport; callers wrap it in the `<fno_mail>` /
@@ -450,7 +450,7 @@ pub fn deliver_via_control_sock(
 /// Read a brevity-cap env knob as an int, falling back to `default` when unset or
 /// non-numeric. Mirrors Python `_cap_env_int` (cli/src/fno/mail/cli.py): the SAME
 /// knob name governs BOTH front doors onto this transport, so the thresholds
-/// cannot drift between the Python `fno mail send --raw` entry and this binary.
+/// cannot drift between the Python `fno agents mail send --raw` entry and this binary.
 /// Trims surrounding whitespace because Python `int()` does (`int(" 4000 ")` ==
 /// 4000); without it, a value with stray whitespace would parse on one door and
 /// fall back to the default on the other, drifting the threshold.
@@ -589,7 +589,7 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
 /// Refuse an unframed payload that is not a single prompt-line command. The
 /// invariant this door pins: every unframed payload delivered here is a
 /// prompt-line command, never authored prose. Prose is style-checked and wrapped
-/// by `fno mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is
+/// by `fno agents mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is
 /// framed and skipped. The predicate mirrors the Python guard in `_raw_send`
 /// (`cli/src/fno/mail/cli.py`), which sat on ONE of the two paths onto the
 /// transport; this moves it into the shared door so a direct binary call piping
@@ -604,7 +604,7 @@ fn command_only_decision(text: &str) -> Option<i32> {
     if !trimmed.starts_with('/') {
         eprintln!(
             "mail-inject: an unframed payload must start with / (a prompt-line command). \
-             Prose belongs in `fno mail send`, which style-checks it."
+             Prose belongs in `fno agents mail send`, which style-checks it."
         );
         return Some(1);
     }
@@ -762,7 +762,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return emit(false, "io-error");
     }
 
-    // Brevity cap on UNWRAPPED bodies only (body_cap_decision). `fno mail send
+    // Brevity cap on UNWRAPPED bodies only (body_cap_decision). `fno agents mail send
     // --raw` does not cap in Python, so this binary is its sole cap; a direct
     // binary call is the other unwrapped door. Framed envelopes are skipped: a
     // `<fno_mail>` body is already Python-capped before wrapping, and a

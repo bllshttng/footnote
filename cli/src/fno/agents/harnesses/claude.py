@@ -1134,7 +1134,7 @@ def _ask_via_control_sock(
     socket-null session over the daemon ``control.sock`` (the tested Rust
     ``mail-inject`` verb), then collect the reply from the bg jobs-dir.
 
-    Reuses the SAME single wire vehicle as ``fno mail send`` -- Python never
+    Reuses the SAME single wire vehicle as ``fno agents mail send`` -- Python never
     opens ``control.sock``. The message is wrapped in the cross-session-message
     container so the recipient reads it as a peer turn, matching the socket
     path's framing.
@@ -1818,9 +1818,9 @@ def claude_logs_reachable(short_id: str, *, timeout: float = 10.0) -> bool:
 # transcript would corrupt it. Two guards, in order:
 #   1. Liveness: refuse if the bg session's supervisor is reachable (a human
 #      interactive TUI / another writer is using it right now).
-#   2. Atomic claim: acquire `fno claim session:<uuid>` (O_CREAT|O_EXCL) so two
+#   2. Atomic claim: acquire `fno agents claim session:<uuid>` (O_CREAT|O_EXCL) so two
 #      concurrent adopts cannot both respawn the same transcript.
-# Reuses the existing `fno claim` primitive (no new substrate). Session claims
+# Reuses the existing `fno agents claim` primitive (no new substrate). Session claims
 # are host-global (a session is host-wide, not project-scoped), so they live
 # under `global_claims_root()` (~/.fno/claims).
 
@@ -1908,7 +1908,7 @@ def acquire_session_writer_claim(
         # sustained concurrent access to the SAME key): same "cannot be
         # acquired right now" semantic as ClaimHeldByOther above, so callers
         # that only catch SessionWriterClaimError (_acquire_rung2_guard) still
-        # degrade safely instead of an uncaught traceback aborting `fno mail
+        # degrade safely instead of an uncaught traceback aborting `fno agents mail
         # send` before its durable fallback can queue the message.
         raise SessionWriterClaimError(
             session_uuid,

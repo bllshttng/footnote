@@ -123,7 +123,7 @@ _STRIP = "".join(c for c in string.punctuation if c not in "-|")
 PREFIXES = {"fno", "fno-py", "fno-agents"}
 
 # Positive controls: a sweep where these do not fire is broken, not changed.
-CONTROLS = {"agents spawn": 100, "mail send": 100, "do": 25, "backlog next": 25}
+CONTROLS = {"agents spawn": 100, "do": 25, "backlog next": 25}
 
 # One control set per SIGNAL, not one per tool. The AST walk and the cli/src
 # text sweep answer the same question by different means, so a single shared
@@ -132,9 +132,12 @@ CONTROLS = {"agents spawn": 100, "mail send": 100, "do": 25, "backlog next": 25}
 # shape that turns a correct sweep into a wrong deletion. Each floor below is a
 # verb whose argv is built as a list literal in cli/src, verified by hand:
 #   agents spawn  cli/src/fno/evals/runner.py, cli/src/fno/observer/cli.py
-#   mail send     cli/src/fno/events/cli.py
 #   backlog done  cli/src/fno/graph/cli.py
-AST_CONTROLS = {"agents spawn": 2, "mail send": 1, "backlog done": 1}
+# `agents mail send` now sits behind the argument-dispatched `agents` action,
+# so the collapsed inventory deliberately credits that call to `agents`; it can
+# no longer prove the leaf-specific AST walk. The two independent controls
+# below still pin a nested list-literal call and a kept agents leaf.
+AST_CONTROLS = {"agents spawn": 2, "backlog done": 1}
 INTERNAL_TEXT_CONTROLS = {"agents spawn": 20, "do": 20, "backlog update": 10}
 
 # Verbs reachable ONLY through shell command substitution, where the binary
@@ -152,7 +155,7 @@ SUBSTITUTION_CONTROLS = {
     "variable-binary": {"do": 1},
 }
 
-# The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["claim",
+# The FOURTH shape: a Rust argv ARRAY. `Command::new(fno_bin()).args(["agents", "claim",
 # "sweep", "--json"])` puts no binary token beside the verb, so the tokenizer
 # above credits nothing and a live verb scores zero.
 #
@@ -485,8 +488,8 @@ def _leading_consts(elts) -> list[str]:
                 break
             continue
         # The binary name is not part of the verb path. Written literally
-        # (``["fno", "mail", "send", ...]``) it must be dropped, or the path
-        # resolves as ``fno mail send`` and matches no leaf - which reads as
+        # (``["fno", "agents", "mail", "send", ...]``) it must be dropped, or the path
+        # resolves as ``fno agents agents mail`` and matches no leaf - which reads as
         # "no internal caller" for a verb that plainly has one.
         if not out and s in PREFIXES:
             continue

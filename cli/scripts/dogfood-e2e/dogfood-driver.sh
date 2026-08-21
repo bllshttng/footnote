@@ -99,7 +99,7 @@ echo "SESSION: $slug" >> "$LOG_FILE"
 # ---- Step 4: Worker blueprint (LLM dispatch - always reports skill_dispatch_required in CLI v0) ----
 log "--- Step 4: worker blueprint ---"
 if [[ "$DRY_RUN" == "true" ]]; then
-  log "DRY-RUN: skipping real worker blueprint (would call: fno worker blueprint --plan $plan_path)"
+  log "DRY-RUN: skipping real worker blueprint (would call: fno agents worker blueprint --plan $plan_path)"
   blueprint_out='{"action":"llm_blueprint","plan_path":"'"$plan_path"'","current_phase":"blueprint","dry_run":true}'
   log "blueprint (simulated): $blueprint_out"
   echo "BLUEPRINT: $blueprint_out" >> "$LOG_FILE"

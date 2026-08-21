@@ -8,7 +8,7 @@ description: Join this session to the fno mesh so other sessions can message you
 Register THIS session in the fno roster so peer sessions can discover and message
 it. A session a human started by hand (not one `fno agents spawn` created) has no
 roster row until you run this. Afterward a peer reaches you with
-`fno mail send <your-handle>` - live if you are running, durable-queued and
+`fno agents mail send <your-handle>` - live if you are running, durable-queued and
 drained at your next SessionStart if not.
 
 Run it, then report the resulting handle back to the user:

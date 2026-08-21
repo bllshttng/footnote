@@ -391,7 +391,7 @@ A probe is what forces that last mile before the session can claim done.
 
 ```yaml
 done_probes:
-  - "fno mail list --kind report --since 24h | grep -q groom"
+  - "fno agents mail list --kind report --since 24h | grep -q groom"
 ```
 
 **Assert freshness, never bare existence.**
@@ -564,7 +564,7 @@ the dedup list:
 
 ```bash
 if [[ "<peer>" not in messaged_peers ]]; then
-  if fno mail send --to-project <peer> --kind heads-up \
+  if fno agents mail send --to-project <peer> --kind heads-up \
        --body "spec'd: <PLAN-TITLE>; touches surface <SURFACE-NAME>; ETA: <PLAN-TIMESTAMP>; plan: <PLAN-PATH>"; then
     append_peer_to_messaged_peers "<peer>"  # in plan frontmatter
   else

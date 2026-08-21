@@ -306,15 +306,15 @@ compact_instruction() {
     # neither verdict and lands on the unmeasurable branch.
     local out=""
     if command -v fno >/dev/null 2>&1; then
-        out=$(with_timeout 5 fno mail send '/compact' --to-self --raw --check 2>/dev/null || true)
+        out=$(with_timeout 5 fno agents mail send '/compact' --to-self --raw --check 2>/dev/null || true)
     fi
     local _ask="ask your operator to type /compact <brief-path> at your prompt, and say in one line what to preserve"
     if [[ "$out" == injectable:* ]]; then
-        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session HAS an injection path (measured just now: ${out}), so fire it at your own prompt line: fno mail send '/compact <brief-path>' --to-self --raw   (the leading slash is load-bearing, and the brief path matters: a bare /compact at exhausted context has no headroom left to summarize). A path is not a landing - if the receipt comes back unconfirmed, read your own prompt before assuming either way, and never re-send."
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session HAS an injection path (measured just now: ${out}), so fire it at your own prompt line: fno agents mail send '/compact <brief-path>' --to-self --raw   (the leading slash is load-bearing, and the brief path matters: a bare /compact at exhausted context has no headroom left to summarize). A path is not a landing - if the receipt comes back unconfirmed, read your own prompt before assuming either way, and never re-send."
     elif [[ "$out" == not-injectable:* ]]; then
-        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session has NO injection path: 'fno mail send /compact --to-self --raw --check' answered ${out}. That means no registry row, a non-keystroke lane, a guarded mux pane (which refuses a mid-turn recipient, and you are mid-turn), or no control socket to write into. It is NOT a claim that you are dead. You cannot fire the verb yourself, so ${_ask}. On whether /fno-me would help: it adds the registry row this check needs FIRST, and nothing else - it creates no daemon roster entry and no control socket - so it flips this answer only for a session that already had those and merely lacked a row. Read the reason above rather than guessing which case you are."
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session has NO injection path: 'fno agents mail send /compact --to-self --raw --check' answered ${out}. That means no registry row, a non-keystroke lane, a guarded mux pane (which refuses a mid-turn recipient, and you are mid-turn), or no control socket to write into. It is NOT a claim that you are dead. You cannot fire the verb yourself, so ${_ask}. On whether /fno-me would help: it adds the registry row this check needs FIRST, and nothing else - it creates no daemon roster entry and no control socket - so it flips this answer only for a session that already had those and merely lacked a row. Read the reason above rather than guessing which case you are."
     else
-        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and whether you can inject it at your own prompt line could not be measured here (no fno on PATH, or the check timed out), so this nudge will not claim you have a path. Either ${_ask}, or check for yourself with 'fno mail send /compact --to-self --raw --check' and fire it if that says injectable."
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and whether you can inject it at your own prompt line could not be measured here (no fno on PATH, or the check timed out), so this nudge will not claim you have a path. Either ${_ask}, or check for yourself with 'fno agents mail send /compact --to-self --raw --check' and fire it if that says injectable."
     fi
 }
 

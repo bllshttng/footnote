@@ -186,7 +186,7 @@ def _envelope(node: dict, tag: str, details_block: str, tail_block: str) -> str:
 
     body = [f"<fno_spawn {' '.join(attrs)}>"]
     if handle:
-        body.append(f"reply: fno mail send {handle}")
+        body.append(f"reply: fno agents mail send {handle}")
     title = node.get("title")
     if isinstance(title, str) and title.strip():
         body.append(f"title: {title.strip()}")

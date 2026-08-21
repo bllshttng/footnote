@@ -25,7 +25,7 @@ Absorbed bugs, each verified in this PR's tests:
 - x-fb99 - ``parking_lot_path`` is resolved against the CANONICAL root, never a
   worktree cwd that may carry a stale override.
 - x-adf9 - canonical-sync pipes are closed + timeouted (see
-  ``_sync_canonical._default_shell_runner``) so a trailing ``fno restart``
+  ``_sync_canonical._default_shell_runner``) so a trailing ``fno agents restart``
   detached daemon cannot hold the pipe and wedge the ritual.
 - x-0d66 - the advance leg runs bounded with streamed progress lines instead of
   hanging silent for minutes.
@@ -208,7 +208,7 @@ def _session_holder() -> str:
     sid = current_session_id() or ""
     if not sid:
         try:
-            r = _run([*fno_py_cmd(), "claim", "session-pid"], timeout=10.0)
+            r = _run([*fno_py_cmd(), "agents", "claim", "session-pid"], timeout=10.0)
             if r.ok:
                 sid = r.stdout.strip()
         except (ToolMissing, subprocess.SubprocessError):
@@ -353,7 +353,7 @@ class Ritual:
         """Step 0.5: refuse if another runner owns this PR's ritual."""
         key = f"reconcile:pr-{self.ctx.pr}"
         try:
-            r = self.runner([*fno_py_cmd(), "claim", "acquire", key,
+            r = self.runner([*fno_py_cmd(), "agents", "claim", "acquire", key,
                              "--holder", self.ctx.holder, "--ttl", _CLAIM_TTL],
                             timeout=15.0)
         except (ToolMissing, subprocess.SubprocessError) as exc:
@@ -376,7 +376,7 @@ class Ritual:
             return
         key = f"reconcile:pr-{self.ctx.pr}"
         try:
-            self.runner([*fno_py_cmd(), "claim", "release", key,
+            self.runner([*fno_py_cmd(), "agents", "claim", "release", key,
                          "--holder", self.ctx.holder], timeout=15.0)
         except (ToolMissing, subprocess.SubprocessError):
             pass  # TTL reaps it

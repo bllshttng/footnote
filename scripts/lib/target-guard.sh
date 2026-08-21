@@ -19,7 +19,7 @@
 
 # The claim's own `state`, never a substring match on the whole payload.
 #
-# `fno claim status` on a node key can append `roster_workers`, and every entry
+# `fno agents claim status` on a node key can append `roster_workers`, and every entry
 # in it carries its own `"state"` - one of which can read `live` for a worker
 # that is merely CO-RESIDENT in the tree. A `grep`-shaped test then answered
 # "this claim is live" from somebody else's row. jq reads the top-level key and
@@ -64,7 +64,7 @@ target_state_field() {
 # wrapper pid, dead ~1s after init returns per claims/session_pid.py — it reads a
 # live session as inactive). The claim is acquired with the DURABLE session pid
 # (nearest claude ancestor) + TTL, so its liveness is the real signal. We delegate
-# to `fno claim status` so this never diverges from the canonical classify().
+# to `fno agents claim status` so this never diverges from the canonical classify().
 target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1
@@ -97,10 +97,10 @@ target_is_active() {
     # The || falls back to the unflagged call: --no-roster is new, this runs
     # against the DEPLOYED fno, and an older binary rejects an unknown option
     # with empty stdout - which this gate would read as "no claim".
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null || true)
+    claim_json=$(fno agents claim status "$claim_key" -J --no-roster 2>/dev/null || true)
     # Keyed on EMPTY OUTPUT, never on the exit code: an `||` chain would one day
     # run both calls and concatenate two JSON objects into one string.
-    [ -n "$claim_json" ] || claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    [ -n "$claim_json" ] || claim_json=$(fno agents claim status "$claim_key" -J 2>/dev/null || true)
     [[ -n "$claim_json" ]] || return 0
     case "$(_target_guard_state "$claim_json")" in
         live|suspect) return 0 ;;
@@ -138,9 +138,9 @@ target_claim_is_live() {
     # would answer live from a partial one. Only the unknown-flag shape retries:
     # non-zero AND no output at all.
     local rc
-    claim_json=$(fno claim status "$claim_key" -J --no-roster 2>/dev/null); rc=$?
+    claim_json=$(fno agents claim status "$claim_key" -J --no-roster 2>/dev/null); rc=$?
     if [ "$rc" -ne 0 ] && [ -z "$claim_json" ]; then
-        claim_json=$(fno claim status "$claim_key" -J 2>/dev/null); rc=$?
+        claim_json=$(fno agents claim status "$claim_key" -J 2>/dev/null); rc=$?
     fi
     [ "$rc" -eq 0 ] || return 1
     case "$(_target_guard_state "$claim_json")" in

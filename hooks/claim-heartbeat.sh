@@ -18,7 +18,7 @@
 #
 # Never blocks the tool call: silent no-op on not-holder / throttled / no
 # manifest; a refresh error logs to stderr and still exits 0. Touches the claim
-# lockfile only (via `fno claim refresh`) - never the immutable manifest.
+# lockfile only (via `fno agents claim refresh`) - never the immutable manifest.
 # `refresh_claim` takes the same per-key recovery mutex as `reap`/`acquire`
 # (closes a resurrection race - see core.py), so on rare contention with a
 # concurrent reap sweep or acquire on the SAME key this call can wait up to
@@ -79,7 +79,7 @@ THROTTLE="${FNO_CLAIM_HEARTBEAT_THROTTLE:-1200}"  # 20 min
 # Separate from claim TTL: a 30s stamp stays fresh inside the 120s peer window.
 LIVE_THROTTLE=30
 
-# Re-arm to the node claim's canonical 2h window. `fno claim refresh` with no
+# Re-arm to the node claim's canonical 2h window. `fno agents claim refresh` with no
 # --ttl defaults to MIN_TTL (1 min) and does NOT guard against shortening, so an
 # omitted ttl would SHRINK the very claim we mean to keep alive. 2h matches the
 # init acquire window; refreshing to now+2h always extends a live (<=2h-left)
@@ -265,10 +265,10 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
     _handover_status_json() {
       local status_json
       status_json="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-        fno claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
+        fno agents claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
       [[ -n "$status_json" ]] || status_json="$(with_timeout \
         "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
-        fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+        fno agents claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
       printf '%s' "$status_json"
     }
     _HANDOVER_STATUS="$(_handover_status_json)"
@@ -296,7 +296,7 @@ if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
       if [[ ! "$_RECORDED_HANDOVER_EXPIRES" =~ ^[0-9]+$ ]]; then
         echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE (missing deadline); refresh remains due" >&2
       elif with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
-        fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
+        fno agents claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
         --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
         _HANDOVER_AFTER="$(_handover_status_json)"
         _HANDOVER_AFTER_VALID="$(printf '%s' "$_HANDOVER_AFTER" | jq -r '
@@ -397,7 +397,7 @@ command -v fno >/dev/null 2>&1 || exit 0   # no CLI -> silent no-op
 # stops refreshing and its claim expires underneath it. Fall back to the
 # unflagged call, which every version understands, and pay the cross-check
 # rather than lose the heartbeat.
-# Keyed on EMPTY OUTPUT, not on the exit code. `fno claim status` happens to
+# Keyed on EMPTY OUTPUT, not on the exit code. `fno agents claim status` happens to
 # exit 0 for every state today, but its own docstring says the exit code
 # reflects state, so an `||` here would one day run BOTH calls and print two
 # JSON objects. `jq .holder` then emits two lines, the gate below never matches,
@@ -412,9 +412,9 @@ _STATUS_TIMEOUT="${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}"
 _status_json() {
   local out
   out="$(with_timeout "$_STATUS_TIMEOUT" \
-    fno claim status "node:$NODE_ID" --json --no-roster 2>/dev/null)"
+    fno agents claim status "node:$NODE_ID" --json --no-roster 2>/dev/null)"
   [ -n "$out" ] || out="$(with_timeout "$_STATUS_TIMEOUT" \
-    fno claim status "node:$NODE_ID" --json 2>/dev/null)"
+    fno agents claim status "node:$NODE_ID" --json 2>/dev/null)"
   printf '%s' "$out"
 }
 HOLDER="$(_status_json | jq -r '.holder // empty' 2>/dev/null)"
@@ -428,7 +428,7 @@ fi
 # REFRESH_TIMEOUT.
 REFRESH_TIMEOUT="${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}"
 if ! with_timeout "$REFRESH_TIMEOUT" \
-    fno claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" \
+    fno agents claim refresh "node:$NODE_ID" --holder "$CLAIM_HOLDER" --ttl "$HEARTBEAT_TTL" \
     >/dev/null 2>&1; then
   echo "claim-heartbeat: refresh failed or timed out for node:$NODE_ID (non-fatal)" >&2
 fi

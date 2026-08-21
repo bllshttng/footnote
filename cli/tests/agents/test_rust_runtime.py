@@ -282,17 +282,17 @@ def test_shared_verbs_and_ask_all_auto_route() -> None:
     3.1), and ``ask`` (the last holdout — claude ab-cc926b4e, codex ab-0429c6e1,
     gemini ab-73da4ac2).
 
-    Messaging (send/inbox/ack) moved out of ``fno agents`` into ``fno mail``
-    (ab-cee91152), so they are no longer agents verbs at all - not in
+    Messaging (send/inbox/ack) moved into the ``fno agents mail`` subgroup
+    (ab-cee91152), so they are not direct agents verbs - not in
     ``PYTHON_AGENT_VERBS`` nor ``AUTO_ROUTE_VERBS``.
     """
     for v in ("stop", "rm", "list", "reconcile", "ask"):
         assert v in rr.AUTO_ROUTE_VERBS, f"{v} must auto-route"
         assert v not in rr.PYTHON_AGENT_VERBS, f"{v} must not be in PYTHON_AGENT_VERBS"
-    # send/inbox/ack are no longer agents verbs (moved to `fno mail`).
+    # send/inbox/ack are not direct agents verbs (they live under `agents mail`).
     for v in ("send", "inbox", "ack"):
-        assert v not in rr.PYTHON_AGENT_VERBS, f"{v} moved to fno mail; not an agents verb"
-        assert v not in rr.AUTO_ROUTE_VERBS, f"{v} moved to fno mail; not an agents verb"
+        assert v not in rr.PYTHON_AGENT_VERBS, f"{v} is nested under fno agents mail"
+        assert v not in rr.AUTO_ROUTE_VERBS, f"{v} is nested under fno agents mail"
 
 
 def test_auto_falls_back_to_python_without_installed_binary(monkeypatch) -> None:
@@ -412,11 +412,12 @@ def test_python_agent_verbs_match_registered_commands() -> None:
         # a Rust client port.
         "spawn",
     }
-    python_owned = registered - rust_parity_verbs
+    lazy_python_owned = set(rr.FOLDED_AGENT_SUBCOMMANDS) & set(rr.RUST_CLIENT_VERBS)
+    python_owned = (registered - rust_parity_verbs) | lazy_python_owned
     assert python_owned == set(rr.PYTHON_AGENT_VERBS), (
         "PYTHON_AGENT_VERBS is out of sync with the agents_app commands.\n"
         f"  only registered (excl. rust-parity): {sorted(python_owned - set(rr.PYTHON_AGENT_VERBS))}\n"
-        f"  only in PYTHON_AGENT_VERBS: {sorted(set(rr.PYTHON_AGENT_VERBS) - registered)}"
+        f"  only in PYTHON_AGENT_VERBS: {sorted(set(rr.PYTHON_AGENT_VERBS) - python_owned)}"
     )
     # All rust-parity verbs must auto-route (not be in PYTHON_AGENT_VERBS).
     for v in rust_parity_verbs:
@@ -669,7 +670,7 @@ def test_rust_only_verb_help_covers_unregistered_verbs() -> None:
     from fno.agents.cli import agents_app
 
     registered = {cmd.name for cmd in agents_app.registered_commands}
-    expected = set(rr.RUST_CLIENT_VERBS) - registered
+    expected = set(rr.RUST_CLIENT_VERBS) - registered - set(rr.PYTHON_AGENT_VERBS)
     assert set(rr.RUST_ONLY_VERB_HELP) == expected, (
         "RUST_ONLY_VERB_HELP is out of sync with the Rust-only verb set.\n"
         f"  missing a help entry: {sorted(expected - set(rr.RUST_ONLY_VERB_HELP))}\n"
@@ -696,7 +697,7 @@ def test_rust_only_verb_python_mode_emits_legible_message(monkeypatch) -> None:
     from fno.cli import app
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "python")
-    result = CliRunner().invoke(app, ["agents", "restart"])
+    result = CliRunner().invoke(app, ["agents", "status"])
     assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
     assert "no Python implementation" in result.output
     assert "No such command" not in result.output
@@ -708,7 +709,7 @@ def test_rust_only_verb_no_binary_emits_install_hint(monkeypatch) -> None:
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
-    result = CliRunner().invoke(app, ["agents", "restart"])
+    result = CliRunner().invoke(app, ["agents", "status"])
     assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
     assert "Rust runtime" in result.output
     assert "No such command" not in result.output

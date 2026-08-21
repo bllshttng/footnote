@@ -69,7 +69,7 @@ echo "TMP=$TMP"
 # Step 1: fno sends a question to acme-web
 echo ""
 echo "--- Step 1: fno sends question to acme-web ---"
-SEND_Q_OUT=$(cd "$FNO_DIR" && run_fno mail send \
+SEND_Q_OUT=$(cd "$FNO_DIR" && run_fno agents mail send \
     --to-project acme-web \
     --kind question \
     --ref-node ab-abc12345 \
@@ -90,7 +90,7 @@ echo "Captured MSG_Q=$MSG_Q"
 # 2a: verify question is in web's unread
 echo ""
 echo "--- Step 2a: acme-web sees the question in unread ---"
-UNREAD_JSON=$(cd "$WEB_DIR" && run_fno mail unread --json --name acme-web)
+UNREAD_JSON=$(cd "$WEB_DIR" && run_fno agents mail unread --json --name acme-web)
 if ! echo "$UNREAD_JSON" | python3 -c "
 import json, sys
 msgs = json.load(sys.stdin)
@@ -108,7 +108,7 @@ ANSWER_BODY="silent-failure-hunter HIGH on swallow_errors_in_dispatch.py; that f
 # 2c: reply with kind=answer (routes to fno inbox)
 echo ""
 echo "--- Step 2c: acme-web replies with kind=answer ---"
-REPLY_OUT=$(cd "$WEB_DIR" && run_fno mail reply \
+REPLY_OUT=$(cd "$WEB_DIR" && run_fno agents mail reply \
     --to "$MSG_Q" \
     --kind answer \
     --body "$ANSWER_BODY" \
@@ -125,7 +125,7 @@ echo "Captured MSG_A=$MSG_A"
 # 2d: ack the original question in acme-web's inbox
 echo ""
 echo "--- Step 2d: acme-web acks the question ---"
-cd "$WEB_DIR" && run_fno mail ack "$MSG_Q" --name acme-web
+cd "$WEB_DIR" && run_fno agents mail ack "$MSG_Q" --name acme-web
 
 # Step 3: Verify fno's inbox has the answer with correct chain
 echo ""
@@ -136,7 +136,7 @@ if [ ! -f "$FNO_INBOX" ]; then
     exit 1
 fi
 
-LIST_ABILITIES_JSON=$(cd "$FNO_DIR" && run_fno mail list --all --json --from fno)
+LIST_ABILITIES_JSON=$(cd "$FNO_DIR" && run_fno agents mail list --all --json --from fno)
 python3 -c "
 import json, sys
 msgs = json.load(sys.stdin)
@@ -163,7 +163,7 @@ print('OK: answer in fno inbox with correct reply_to chain')
 # Step 4: Verify acme-web's inbox has MSG_Q with status:read
 echo ""
 echo "--- Step 4: verify acme-web question is acked ---"
-LIST_WEB_JSON=$(cd "$WEB_DIR" && run_fno mail list --all --json --from acme-web)
+LIST_WEB_JSON=$(cd "$WEB_DIR" && run_fno agents mail list --all --json --from acme-web)
 python3 -c "
 import json, sys
 msgs = json.load(sys.stdin)
@@ -203,7 +203,7 @@ if ! grep -q "auto_generated: true" "$MEMORY_FILE"; then
 fi
 echo "OK: memory file written at $MEMORY_FILE"
 
-LESSON_OUT=$(cd "$FNO_DIR" && run_fno mail send \
+LESSON_OUT=$(cd "$FNO_DIR" && run_fno agents mail send \
     --to-project acme-web \
     --kind fyi --persist memory \
     --reply-to "$MSG_A" \
@@ -221,7 +221,7 @@ echo "Captured MSG_L=$MSG_L"
 # Step 6: Verify acme-web has the lesson with correct reply_to
 echo ""
 echo "--- Step 6: verify lesson in acme-web inbox with reply_to chain ---"
-LIST_WEB2_JSON=$(cd "$WEB_DIR" && run_fno mail list --all --json --from acme-web)
+LIST_WEB2_JSON=$(cd "$WEB_DIR" && run_fno agents mail list --all --json --from acme-web)
 python3 -c "
 import json, sys
 msgs = json.load(sys.stdin)
@@ -269,8 +269,8 @@ fno_msgs = json.load(open('$INBOX_ROOT/fno.md'.replace('.md', '.md')))
 " 2>/dev/null || true
 
 # Count messages in each inbox file via fno list
-FNO_COUNT=$(cd "$FNO_DIR" && run_fno mail list --all --json --from fno | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
-WEB_COUNT=$(cd "$WEB_DIR" && run_fno mail list --all --json --from acme-web | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+FNO_COUNT=$(cd "$FNO_DIR" && run_fno agents mail list --all --json --from fno | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+WEB_COUNT=$(cd "$WEB_DIR" && run_fno agents mail list --all --json --from acme-web | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 TOTAL=$((FNO_COUNT + WEB_COUNT))
 
 echo "fno inbox: $FNO_COUNT messages"

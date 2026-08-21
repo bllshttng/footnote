@@ -101,7 +101,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # So the manifest must NAME this session. An id that is missing on either
     # side proves nothing, and the safe reading of "cannot prove it" is to let
     # the session go: a stale manifest outliving its king must not capture a
-    # stranger. `fno king init` refuses to write an unattributable manifest, so
+    # stranger. `fno agents king init` refuses to write an unattributable manifest, so
     # a real king always has an id to match.
     KING_HARNESS_ID=""
     if [[ -f "$KING_STATE_FILE" ]]; then
@@ -340,7 +340,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
             _REL_KEY="$(sed -n 's/^target_claim_key:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
             _REL_HOLDER="$(sed -n 's/^target_claim_holder:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
             if [[ "$_REL_KEY" == node:* && -n "$_REL_HOLDER" ]]; then
-                FNO_CLAIMS_ROOT="$HOME" fno claim release "$_REL_KEY" \
+                FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$_REL_KEY" \
                     --holder "$_REL_HOLDER" --stamp-do \
                     >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
             fi
@@ -395,7 +395,7 @@ if [[ -z "$TERMINATION_REASON" && -f "$STATE_FILE" ]]; then
     _TC_HOLDER="$(sed -n 's/^target_claim_holder:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
     _TC_TTL="$(sed -n 's/^target_claim_ttl:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
     if [[ "$_TC_KEY" == node:* && -n "$_TC_HOLDER" ]]; then
-        FNO_CLAIMS_ROOT="$HOME" fno claim refresh "$_TC_KEY" \
+        FNO_CLAIMS_ROOT="$HOME" fno agents claim refresh "$_TC_KEY" \
             --holder "$_TC_HOLDER" --ttl "${_TC_TTL:-2h}" \
             >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
     fi

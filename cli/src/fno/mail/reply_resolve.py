@@ -1,5 +1,5 @@
 """Recover the sender of a live-injected ``<fno_mail id="...">`` from the invoking
-session's OWN transcript when ``fno mail reply --to <id>`` cannot find a bus row.
+session's OWN transcript when ``fno agents mail reply --to <id>`` cannot find a bus row.
 
 Current hosted delivery appends an audit-only bus record, but legacy deliveries
 and a nonretryable audit-append failure can still leave the transcript as the only

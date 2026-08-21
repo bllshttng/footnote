@@ -1,4 +1,4 @@
-"""fno worker review - internal sigma-review orchestrator entrypoint.
+"""fno agents worker review - internal sigma-review orchestrator entrypoint.
 
 Dispatches orchestrate_review_parallel (6-agent sigma panel), passes
 findings through score_findings, and writes a gate-schema-compliant

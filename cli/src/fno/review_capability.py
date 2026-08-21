@@ -595,7 +595,7 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     It is advisory (never gates the promise on its own) and dispatches no sigma
     panel. A session that wants a real automated review self-invokes its
     harness's verb (Claude `/code-review`, codex `/review`) or the
-    `fno mail send '<verb>' --to-self --raw` fallback, both self-servable now;
+    `fno agents mail send '<verb>' --to-self --raw` fallback, both self-servable now;
     the obligation to run one on a code payload is enforced at the stop gate
     (loopcheck.rs), not by this pre-ship step. Sigma is opt-in via
     `reviewers: [sigma]`.

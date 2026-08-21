@@ -260,7 +260,7 @@ fi
 
 # 6. cross-harness mail drain (US5) — deliver this session's own a2a
 #    mail. Drains the durable bus for messages addressed to this session's
-#    <short-id> handle so a codex/gemini session RECEIVES `fno mail send`,
+#    <short-id> handle so a codex/gemini session RECEIVES `fno agents mail send`,
 #    not just becomes addressable. Silent when empty / no harness identity.
 mail_content=""
 if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then

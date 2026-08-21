@@ -149,7 +149,7 @@ def default_name_map_path() -> Path:
 # Codex's transcript store is a structural mirror of claude's projects store,
 # one directory over: rollout jsonl under ``~/.codex/sessions/YYYY/MM/DD/`` whose
 # first line is a ``session_meta`` record carrying the session id + cwd verbatim.
-# Reading it makes a hand-started codex session ``fno mail``-able even when it
+# Reading it makes a hand-started codex session ``fno agents mail``-able even when it
 # never ran the SessionStart register hook ("whether fno-spawned or not").
 CODEX_SESSIONS_DIR_ENV = "FNO_CODEX_SESSIONS_DIR"
 _CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS = 12.0
@@ -725,7 +725,7 @@ def _discover_from_registry(
             # session_id keeps the full uuid for dedup/canonical identity, but
             # short_id MUST be the authoritative jobId -- the stored short and
             # the uuid's first 8 hex can differ, and the jobId is what
-            # `fno mail send <short>` and mail-inject key on.
+            # `fno agents mail send <short>` and mail-inject key on.
             # Canonical harness_session_id leads (x-ec59): a row whose only
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
@@ -2062,7 +2062,7 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         return [], True
     if not isinstance(workers, dict):
         # A type-drifted roster is unreadable, not empty. Calling .values() on
-        # a list here would raise straight out through `fno mail send`.
+        # a list here would raise straight out through `fno agents mail send`.
         return [], False
     hits: _Hits = []
     seen: set[str] = set()
@@ -2072,7 +2072,7 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
         sid = row.get("sessionId")
         if not isinstance(sid, str):
             # A type-drifted leaf must not reach _token_matches, which would
-            # call .lower() on it and raise straight out of `fno mail send`.
+            # call .lower() on it and raise straight out of `fno agents mail send`.
             continue
         if _token_matches(token, sid) and sid not in seen:
             seen.add(sid)

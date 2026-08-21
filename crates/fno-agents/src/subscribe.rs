@@ -52,7 +52,7 @@ pub struct Transition {
 pub fn classify(v: &Value) -> Option<Transition> {
     // Unified envelope (x-2901): `type` + payload under `data`. The `kind`/flat
     // fallback covers the mixed-binary window (an old daemon binary keeps writing
-    // the retired shape until `fno restart`) and rotated events.jsonl.1 history.
+    // the retired shape until `fno agents restart`) and rotated events.jsonl.1 history.
     // Removal criterion: drop the `.or_else(kind)`/flat fallback once the daemon
     // fleet has restarted on the post-x-2901 binary and no rotated file carries a
     // `kind` line.

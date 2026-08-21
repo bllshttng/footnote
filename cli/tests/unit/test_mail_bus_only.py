@@ -110,7 +110,7 @@ def _drain_as(runner, monkeypatch, session_id):
     for marker, _harness in HARNESS_SESSION_MARKERS:
         monkeypatch.delenv(marker, raising=False)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
-    res = runner.invoke(app, ["mail", "drain-self", "--json"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout.strip().splitlines()[-1])
 

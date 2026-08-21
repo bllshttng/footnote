@@ -58,7 +58,7 @@ The answer is the codebase's existing bridge-token pattern, identical to `skills
 - The spawned worker acquires `node:<id>` cleanly on its own `fno do target init` (it is free at that point - `advance` never holds `node:<id>`). Once the worker owns `node:<id>`, the `dispatch:<id>` reservation expires harmlessly by TTL.
 - `advance` honors a live `walker:<root>` (a megawalk owns the project) and skips, so a merge landing mid-walk never produces a second worker (AC2-EDGE).
 
-Claim roots are routed like the `fno claim` CLI's `_node_aware_root`: `node:<id>` lives in the global (`$HOME`) claims root; `walker:<root>` and `dispatch:<id>` use the canonical-repo-root claims dir. The walker key is `walker:<canonical_repo_root>`, byte-identical to the key the Rust megawalk loop writes.
+Claim roots are routed like the `fno agents claim` CLI's `_node_aware_root`: `node:<id>` lives in the global (`$HOME`) claims root; `walker:<root>` and `dispatch:<id>` use the canonical-repo-root claims dir. The walker key is `walker:<canonical_repo_root>`, byte-identical to the key the Rust megawalk loop writes.
 
 ## Enable resolution
 
@@ -71,7 +71,7 @@ Opt-in, default off (Locked Decision 3). `auto_continue_enabled()` resolves, hig
 
 A malformed `config.auto_continue` block (a non-boolean `enabled`, or a scalar where the block should be a mapping) degrades to disabled rather than raising out of the settings load (AC2-ERR), and any settings-read failure in the resolver is swallowed to `False`.
 
-**The campaign-arm marker file is gone (removed 2026-08).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer, `skills/megawalk`, is deleted. The marker had no writer and no expiry, and it silently outranked the live config key - the motivating incident for `fno autonomy status`. The env var above stays the highest-precedence explicit override. A persistent campaign arm has no replacement mechanism today.
+**The campaign-arm marker file is gone (removed 2026-08).** A prior rank read `.fno/.auto-continue-armed`, written by `/megawalk auto-continue`. Its writer, `skills/megawalk`, is deleted. The marker had no writer and no expiry, and it silently outranked the live config key - the motivating incident for `fno agents autonomy status`. The env var above stays the highest-precedence explicit override. A persistent campaign arm has no replacement mechanism today.
 
 ## Triggers
 
@@ -84,7 +84,7 @@ Both triggers observing one merge dispatch the successor at most once: the `disp
 
 ## Dispatch mechanics
 
-The worker spawn routes through the shared resolver (`fno.agents.harness_map.resolve_dispatch`, the same one `fno dispatch resolve` and `dispatch-node.sh` use), not a hardcoded `/target` f-string. The resolver returns the substrate (`bg` for claude, `headless` for codex/others) and the per-harness-normalized command. `_spawn_worker` spawns exactly that. A node's `dispatch_verb`/`dispatch_brief` route the verb path (`/think <id>`, brief on `TARGET_BRIEF` env). With no verb the builtin `/target` is used.
+The worker spawn routes through the shared resolver (`fno.agents.harness_map.resolve_dispatch`, the same one `fno agents dispatch resolve` and `dispatch-node.sh` use), not a hardcoded `/target` f-string. The resolver returns the substrate (`bg` for claude, `headless` for codex/others) and the per-harness-normalized command. `_spawn_worker` spawns exactly that. A node's `dispatch_verb`/`dispatch_brief` route the verb path (`/think <id>`, brief on `TARGET_BRIEF` env). With no verb the builtin `/target` is used.
 
 `no-merge` stays a launcher decision, never baked into a node verb. The default builtin bakes it. `config.auto_merge.grant="dispatch"` routes the `/target` verb path instead, omitting the flag and preserving the configured merge posture. The legacy `dispatch.auto_merge` bool reads as the grant for one release. The agent is named `target-<full-node-id>-<slug>`. Its cwd resolves to the node's recorded root (`--cwd`) or canonical main (`--fresh`). Subscription lane only (`fno agents spawn`), never `-p` / API credit.
 
@@ -105,11 +105,11 @@ The decision itself is not `advance`'s.
 Three autonomous entry points consume it, so identical node, config, and quota fixtures resolve to the identical destination on every path:
 
 - `backlog advance` (the active backlog and the merge trigger route through it) calls the selector directly.
-- `fno dispatch` calls it directly.
-- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg` and blueprint auto-launch) is a shell rung and cannot import Python, so it reaches the same seam through `fno dispatch resolve --autonomous`.
+- `fno agents dispatch` calls it directly.
+- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg` and blueprint auto-launch) is a shell rung and cannot import Python, so it reaches the same seam through `fno agents dispatch resolve --autonomous`.
 
 That flag is the whole reason the shell rung is not a fourth, divergent policy.
-Bare `fno dispatch resolve` is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that called only the bare verb would sit on a walled account while an idle harness waited.
+Bare `fno agents dispatch resolve` is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that called only the bare verb would sit on a walled account while an idle harness waited.
 `--autonomous` folds the route decision into the same tuple: on a cutover the returned `harness`, `substrate`, and `command` are already the destination's, and `route_action` / `route_account` / `route_source` / `route_retry_at` carry the verdict.
 The destination's credentials never cross that boundary - only its record id does, which `fno agents spawn --dispatch-account <record>` resolves on the other side.
 That flag exists because `--account` is operator intent and claude-only by contract, while a cutover's whole point is landing on another harness.

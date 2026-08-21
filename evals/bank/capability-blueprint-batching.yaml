@@ -29,7 +29,7 @@ prompt: |
   3. x-9c21 - "fno pr status misreports a conflicting PR as pending" -
      `cli/src/fno/pr/status.py`: a CONFLICTING PR runs zero CI, but status
      reports `pending` instead of naming the conflict.
-  4. x-4b18 - "fno mail reply drops the thread id on a durable-queue reply" -
+  4. x-4b18 - "fno agents mail reply drops the thread id on a durable-queue reply" -
      `cli/src/fno/mail/reply.py`: replying to a message drained from the
      durable queue (not live-injected) loses the original thread id.
   5. x-e502 - "fno backlog rank --top does not clear a stale rank suffix" -

@@ -438,7 +438,7 @@ class LazyTypeGroup(typer.core.TyperGroup):
                     raise click.UsageError(
                         f"fno {args[0]}{leaf} was removed; use fno {move.to}{leaf}"
                     )
-                if destination_is_registered(move, roots):
+                if destination_is_registered(move, roots, args[1:]):
                     line = deprecation_line(args[0], args[1:], move)
                     if line is not None:
                         print(line, file=sys.stderr)

@@ -425,7 +425,7 @@ def test_unknown_orphan_guard_survives_the_caller_dying(revive_ready, monkeypatc
     monkeypatch.setattr(claude_mod, "bg_create", _timeout)
     assert _spawn_resume().exit_code == 1
 
-    # Rewrite the holder's pid to a dead one: the acquiring `fno mail send` has
+    # Rewrite the holder's pid to a dead one: the acquiring `fno agents mail send` has
     # exited, which is exactly when the old lifetime stopped guarding anything.
     root = global_claims_root()
     path = root / "claims" / f"{CLAIM_KEY.replace(':', '_')}.yaml"
@@ -456,7 +456,7 @@ def test_claim_substrate_fault_fails_closed(revive_ready, monkeypatch):
     """A corrupt claim file raises ClaimCorrupted, which is neither
     SessionWriterClaimError nor the OSError/RuntimeError wake_and_deliver
     catches. It must surface as exit 11 (writer-possibly-live) rather than
-    propagate and abort `fno mail send` before its durable fallback runs."""
+    propagate and abort `fno agents mail send` before its durable fallback runs."""
     from fno.agents.harnesses import claude as claude_mod
     from fno.claims.io import ClaimCorrupted
 

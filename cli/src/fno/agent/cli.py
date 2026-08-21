@@ -80,7 +80,7 @@ def _mail_unread_count(
 ) -> int:
     """Total unread bus messages across every durable address this session
     answers to - canonical handle, mesh name (registered-agent send lane), and
-    project inbox (project lane) - the same cursor scan ``fno mail unread`` runs,
+    project inbox (project lane) - the same cursor scan ``fno agents mail unread`` runs,
     deduped. Counting only the handle would leave the mesh-name and project
     dead-letter lanes invisible, which is what this surface exists to expose.
 

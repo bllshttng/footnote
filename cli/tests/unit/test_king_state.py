@@ -171,7 +171,7 @@ def test_an_unparseable_window_is_refused():
 
 
 def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1"):
-    """Run `fno king init` in tmp_path and return (exit_code, stderr)."""
+    """Run `fno agents king init` in tmp_path and return (exit_code, stderr)."""
     import fno.king.state as state
     from typer.testing import CliRunner
 
@@ -193,7 +193,7 @@ def test_a_disabled_king_loop_writes_no_manifest(monkeypatch, tmp_path):
     Every arm - the stop hook, `loop-check --driver king`, and `KingQueue` -
     arms on this manifest existing. So the manifest is the one chokepoint where
     the flag can gate all three. Before this, the flag was read ONLY by
-    `fno autonomy status`: the corpus's "guard on one of N reachable paths"
+    `fno agents autonomy status`: the corpus's "guard on one of N reachable paths"
     with N of zero, and a default-off king still held sessions open.
     """
     code, _ = _init(monkeypatch, tmp_path, enabled=False)

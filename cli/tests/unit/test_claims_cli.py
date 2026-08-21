@@ -1,4 +1,4 @@
-"""Typer CliRunner tests for the fno claim CLI surface."""
+"""Typer CliRunner tests for the fno agents claim CLI surface."""
 from __future__ import annotations
 
 import json
@@ -197,7 +197,7 @@ def test_acquire_invalid_ttl_format(cwd_tmp):
 
 def test_acquire_pid_flag_anchors_liveness_to_given_pid(cwd_tmp):
     """--pid pins PID-liveness to a long-lived owner instead of this process
-    (ab-6d5afbde: the daemon's stream-claim shelled `fno claim acquire`, whose
+    (ab-6d5afbde: the daemon's stream-claim shelled `fno agents claim acquire`, whose
     ephemeral PID died at once and read the claim stale on write)."""
     result = runner.invoke(
         cli, ["acquire", "session:uuid-x", "--holder", "stream:sw7", "--pid", "99999", "--json"]
@@ -257,7 +257,7 @@ def test_list_no_prefix_sees_global_claims_from_different_cwd(tmp_path, monkeypa
     when cwd's local claims dir is a different, empty directory.
 
     Regression for the bug measured 2026-08-14: 573 claim files on disk under
-    ~/.fno/claims, but `fno claim list` printed "no claims" because it only
+    ~/.fno/claims, but `fno agents claim list` printed "no claims" because it only
     scanned cwd's local root - global-id claims (node:/dispatch:/session:)
     never live there, so an unscoped call saw nothing.
     """
@@ -419,7 +419,7 @@ def test_refresh_missing_exits_3(cwd_tmp):
 # ---------------------------------------------------------------------------
 
 def test_status_node_key_finds_global_claim_without_env(tmp_path, monkeypatch):
-    """`fno claim status node:<id>` from a project cwd, with no
+    """`fno agents claim status node:<id>` from a project cwd, with no
     FNO_CLAIMS_ROOT exported, must find a node claim written to the
     global root (~/.fno/claims) - the operator runbook path."""
     from fno.claims.core import acquire_claim
@@ -443,7 +443,7 @@ def test_status_node_key_finds_global_claim_without_env(tmp_path, monkeypatch):
 
 
 def test_list_node_prefix_finds_global_claims_without_env(tmp_path, monkeypatch):
-    """`fno claim list --prefix node:` resolves the global root too."""
+    """`fno agents claim list --prefix node:` resolves the global root too."""
     from fno.claims.core import acquire_claim
 
     home = tmp_path / "home"

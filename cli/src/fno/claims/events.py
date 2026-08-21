@@ -159,7 +159,7 @@ def emit_claim_reaped(claim: Claim, *, root: str, age_ms: int) -> None:
 
 
 def emit_claim_reap_swept(summary: dict[str, Any]) -> None:
-    """One `fno claim reap --apply` run completed, including a run that
+    """One `fno agents claim reap --apply` run completed, including a run that
     reaped nothing - a silent sweep and a dead sweep must not look the
     same. Callers must not invoke this for a dry-run (reap_dead_claims
     itself gates on `apply`): a dry-run promises no writes, and this event

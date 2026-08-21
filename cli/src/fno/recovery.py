@@ -46,7 +46,7 @@ footnote bg session missing from the registry) stays the safe failure.
 
 Transcript truth owns liveness (``session_truth``; frozen ``state.json`` is
 phase metadata only). The socket write is the shipped
-``harnesses.claude.send_to_session`` (same transport as ``fno mail`` /
+``harnesses.claude.send_to_session`` (same transport as ``fno agents mail`` /
 dispatch); the state read is ``_claude_session_registry``.
 
 The held-socket resume is intentionally NOT replaced here by a speculative
@@ -918,7 +918,7 @@ def _release_lane_slot(node: str, cwd: str) -> None:
     log = logging.getLogger(__name__)
     try:
         rel = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "claim", "release", "--lane", node],
+            [*_subprocess_util.fno_py_cmd(), "agents", "claim", "release", "--lane", node],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )
         if rel.returncode != 0:
@@ -981,7 +981,7 @@ def _redispatch(
     call, not a naming change.
 
     Ordered reuse-first sequence (x-370f residual 1): stop the worker, then
-    ``fno claim force-release`` the node claim (the verified reliability gap —
+    ``fno agents claim force-release`` the node claim (the verified reliability gap —
     ``stop`` alone does NOT free the claim, per the auto-continue-wedge finding,
     so without this the respawn's ``target init`` refuses on the held claim and
     the node goes claimed-but-idle), then spawn via the canonical shape. A
@@ -1042,7 +1042,7 @@ def _redispatch(
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
         rel = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "claim", "release", f"node:{node}", "--force",
+            [*_subprocess_util.fno_py_cmd(), "agents", "claim", "release", f"node:{node}", "--force",
              "-R", f"failover respawn {candidate.short_id}"],
             cwd=cwd, capture_output=True, timeout=30, check=False,
         )

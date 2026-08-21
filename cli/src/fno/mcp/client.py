@@ -9,7 +9,7 @@ channel server connection.
 Operations (single-shot, sync SOCK_STREAM with bounded timeout):
 
 - :func:`ping` — confirm the sidecar is up.
-- :func:`status` — return the JSON for ``fno mcp status``.
+- :func:`status` — return the JSON for ``fno agents mcp status``.
 - :func:`send_to_channel` — deliver one envelope to one session.
 
 Lazy-start behavior: every call optionally lazy-spawns the sidecar if
@@ -20,7 +20,7 @@ down and we tried to fix it but failed".
 Spec references:
 
 - LD3 (lazy-start / lazy-exit), LD5 (Unix-socket sidecar),
-  LD17 (``fno mcp restart`` scope = sidecar only),
+  LD17 (``fno agents mcp restart`` scope = sidecar only),
 - AC3-EDGE (first call lazy-starts), AC3-FR (lazy-start failure
   falls back cleanly), AC3-MIDBIND (stale socket from mid-bind-crash).
 """
@@ -271,7 +271,7 @@ def status(
     sock_path: Optional[Path] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> Dict[str, Any]:
-    """Return the full sidecar status (``fno mcp status`` JSON shape)."""
+    """Return the full sidecar status (``fno agents mcp status`` JSON shape)."""
     sock_path = sock_path or socket_path()
     return _rpc_once(sock_path, {"op": "status"}, timeout=timeout)
 

@@ -1,7 +1,7 @@
 """Auto-stamp the invoking session's own identity + model into a2a envelopes (x-605c).
 
 The a2a reply protocol is: an agent reads ``<fno_mail from=H ...>`` and runs
-``fno mail send H``. For that return leg to resolve, the OUTBOUND envelope must
+``fno agents mail send H``. For that return leg to resolve, the OUTBOUND envelope must
 carry a truthful ``from`` (the sender's canonical handle) and ``model`` (its real
 model), not the historical ``from="fno" model="unknown"`` placeholders. Both are
 resolved from the invoking process's ambient harness identity and its own

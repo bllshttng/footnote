@@ -83,7 +83,7 @@ enabled = false
 # vision = <unset>   # optional; no default
 
 [inbox]
-# Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`).
+# Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).
 unclaimed_ttl = 1800
 
 [blueprint]
@@ -125,7 +125,7 @@ max_nodes = 3
 enabled = true
 # Whether a post-merge watcher self-reaps.
 self_reap = false
-# Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno doctor update && fno restart`). Unset = off.
+# Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno doctor update && fno agents restart`). Unset = off.
 # sync_command = <unset>   # optional; no default
 # Repo-relative fnmatch globs gating the canonical sync (empty = always run; e.g. `["cli/**", "crates/**"]` skips a docs-only merge).
 sync_paths = []
@@ -381,7 +381,7 @@ graphql_min_remaining = 200
 enabled = true
 
 [restart]
-# Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true.
+# Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true.
 enabled = true
 
 [evals]

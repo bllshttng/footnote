@@ -1,6 +1,6 @@
 """A reply must survive an unreadable registry, because its handle was never typed.
 
-`fno mail reply` exists so a worker never re-types a handle: the address comes
+`fno agents mail reply` exists so a worker never re-types a handle: the address comes
 off the answered message. Validating that handle against a store this reader
 cannot parse defeats the one verb built for the case.
 
@@ -109,7 +109,7 @@ def test_reply_delivers_though_the_registry_is_torn(
     _seed_torn_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code == 0, result.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
@@ -125,7 +125,7 @@ def test_the_refusal_never_names_the_handle_as_the_problem(
     _seed_torn_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert "cannot be checked uniquely" not in result.output
 
@@ -140,7 +140,7 @@ def test_the_reported_incident_end_to_end(runner, mailbox, monkeypatch, tmp_path
     _seed_source_ahead_registry(tmp_path)
     msg = _seed_inbound(from_=SENDER)
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code == 0, result.output
     assert [m.to for m in _bus_msgs() if m.in_reply_to == msg] == [SENDER]
@@ -162,7 +162,7 @@ def test_an_ambiguous_handle_is_still_refused(runner, mailbox, monkeypatch, tmp_
         lambda *_a, **_k: (None, ["sid-one", "sid-two"]),
     )
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code != 0
     assert "ambiguous" in result.output
@@ -190,7 +190,7 @@ def test_a_lone_visible_candidate_still_refuses(runner, mailbox, monkeypatch, tm
     monkeypatch.setattr(discover_mod, "resolve_or_suggest", lambda *_a, **_k: (None, []))
     monkeypatch.setattr(discover_mod, "resolve_reachable", _raise)
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code != 0
     assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
@@ -212,6 +212,6 @@ def test_a_session_lane_alias_still_refuses_on_an_unreadable_store(
         to_kind="session",
     ).thread_id
 
-    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    result = runner.invoke(app, ["agents", "mail", "reply", "--to", msg, "--body", "ack"])
 
     assert result.exit_code != 0

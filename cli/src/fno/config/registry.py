@@ -66,7 +66,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.inbox.* ---
     "inbox.unclaimed_ttl": Meta(
         "advanced",
-        "Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno mail status`).",
+        "Seconds past which a sent-but-unclaimed bus message is surfaced back to its sender (turn-boundary nudge + `fno agents mail status`).",
         default_source="default",
     ),
     # --- config.obsidian.* (a real decision) ---
@@ -121,7 +121,7 @@ FIELD_META: dict[str, Meta] = {
     "post_merge.sync_command": Meta(
         "advanced",
         "Canonical-sync incantation run via `bash -lc` after a merge (e.g. "
-        "`git checkout main && git pull && fno doctor update && fno restart`). Unset = off.",
+        "`git checkout main && git pull && fno doctor update && fno agents restart`). Unset = off.",
     ),
     "post_merge.sync_paths": Meta(
         "advanced",
@@ -251,7 +251,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.spawn_permission_mode": Meta("advanced", "Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit \"\" (forward nothing) or \"default\" (prompt positively). Claude-native, fail-closed at the spawn seam.", default_source="default"),
     "agents.codex.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless codex workers."),
     "agents.gemini.headless_yolo": Meta("advanced", "Use full-yolo (drop sandbox) for headless gemini workers."),
-    # --- config.dispatch.* (harness-capability map overlay; `fno dispatch resolve`) ---
+    # --- config.dispatch.* (harness-capability map overlay; `fno agents dispatch resolve`) ---
     "dispatch.harness": Meta("advanced", "Default dispatch harness (claude|codex|gemini|agy|opencode); empty = claude. Overlays the harness-capability map.", default_source="default"),
     "dispatch.substrate": Meta("advanced", "Default dispatch substrate (bg|headless|pane); empty = per-harness default (claude=bg, else headless).", default_source="default"),
     "dispatch.command": Meta("advanced", "Dispatch command template with a single {id}. Empty = '/target --no-merge {id}'. Written in canonical claude slash syntax and normalized per-harness at resolve. A leading /verb becomes $fno:verb on codex and /fno:verb on opencode. The deprecated gemini is refused. A non-slash template passes through literally.", default_source="default"),
@@ -388,7 +388,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.groom.* ---
     "groom.enabled": Meta("never", "Enable the daily backlog-grooming worker spawn (fno backlog groom). Defaults true."),
     # --- config.restart.* ---
-    "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno restart --mux` kills a server. Defaults true."),
+    "restart.enabled": Meta("never", "Enable crash-recovery worker revival after `fno agents restart --mux` kills a server. Defaults true."),
     # --- config.evals.* ---
     "evals.enabled": Meta("never", "Enable the headless eval-suite grading-worker spawn. Defaults true."),
     # --- config.recovery.* ---

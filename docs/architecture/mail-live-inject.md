@@ -1,6 +1,6 @@
 # Architecture: live-inject-first a2a delivery and the `<fno_mail>` envelope
 
-`fno mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback. This is the unification that sits on top of the G1 substrate: one send interface, one wire envelope, one live primitive per provider, with the durable bus demoted from a peer system to the offline pending-queue.
+`fno agents mail send` delivers an agent-to-agent message to a LIVE recipient first and queues the durable bus only as a fallback. This is the unification that sits on top of the G1 substrate: one send interface, one wire envelope, one live primitive per provider, with the durable bus demoted from a peer system to the offline pending-queue.
 
 ## The delivery model
 
@@ -73,7 +73,7 @@ No stdin read, no attach, no keystroke, no audit record.
 Both it and the real send resolve through one `resolve_target`, so the probe cannot say yes where the send would say no.
 It is claude-only: the codex lane submits a turn with no prompt line, so a slash payload never fires there and there is no keystroke path to probe.
 
-The front door is `fno mail send '<payload>' --to-self --raw --check`, which additionally checks the preconditions Python owns (a registry row, a keystroke lane) and picks the right lane before probing.
+The front door is `fno agents mail send '<payload>' --to-self --raw --check`, which additionally checks the preconditions Python owns (a registry row, a keystroke lane) and picks the right lane before probing.
 It answers on three exits, not two: 0 `injectable: <lane>`, 1 `not-injectable: <reason>`, 3 `unmeasurable: <reason>` when the evidence could not be read (an unreadable registry, or a `fno-agents` binary absent or too old to carry `--probe`).
 `unmeasurable` is deliberately not folded into `not-injectable`: "I resolved and found no path" and "I could not resolve" are different claims, and a caller gating advice has to tell them apart.
 Gate on it before you TELL a session to self-inject anything.
@@ -89,7 +89,7 @@ It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it 
 
 `fno-agents mail-inject --harness codex --session <threadId>` (`crates/fno-agents/src/codex_inject.rs`) is the codex sibling of the claude path, called by Python's `_mail_inject_codex`. It connects to the codex app-server daemon socket `$CODEX_HOME/app-server-control/app-server-control.sock`, speaks JSON-RPC text frames over a WebSocket over that Unix socket (the same transport as `logs_client.rs`), does the `initialize`/`initialized` handshake, then sends `turn/start` with the `<fno_mail>` text injected verbatim. Unlike the claude path there is no growth-poll: the `turn/start` RESPONSE is the confirmation. `.result.turn.id` present -> `delivered`; a "thread not found" error -> `thread-not-loaded` (session embedded / not attached) -> durable fallback; socket absent -> `no-daemon`.
 
-**Daemon prerequisite (why it can be a no-op).** A default `codex` TUI runs its app-server IN-PROCESS with no socket on disk, so nothing can inject into it. The socket exists only when a codex app-server daemon is running: install the standalone codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`) and run `codex app-server daemon start` (needs a ChatGPT login) BEFORE launching the codex TUIs, which then auto-attach to it. Absent that daemon, `--harness codex` returns `no-daemon` and `fno mail send` writes the durable floor (drained at the recipient's next SessionStart via `mail drain-self`). End-to-end verification therefore requires the operator's daemon; the wire builders and response classifier are unit-tested correct-by-construction without one.
+**Daemon prerequisite (why it can be a no-op).** A default `codex` TUI runs its app-server IN-PROCESS with no socket on disk, so nothing can inject into it. The socket exists only when a codex app-server daemon is running: install the standalone codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`) and run `codex app-server daemon start` (needs a ChatGPT login) BEFORE launching the codex TUIs, which then auto-attach to it. Absent that daemon, `--harness codex` returns `no-daemon` and `fno agents mail send` writes the durable floor (drained at the recipient's next SessionStart via `mail drain-self`). End-to-end verification therefore requires the operator's daemon; the wire builders and response classifier are unit-tested correct-by-construction without one.
 
 ### Confirm-by-growth is best-effort
 
@@ -119,7 +119,7 @@ The relay graph spans harnesses (claude -> codex, codex -> gemini, ...), not jus
 
 ## Durable body carries the same envelope
 
-The durable fallback stores the `<fno_mail>`-wrapped body, the SAME envelope the live path injects, so a delivered message carries one consistent wire form across the live and durable paths and `grep <fno_mail>` reconstructs durable history too (not just live transcripts). The wrapped body round-trips through the per-recipient markdown render unchanged, so `mark_thread_read` does not strip it. A consequence: `fno mail unread` summaries (`body.split("\n")[0]`) surface the open tag rather than a content preview; that tag is a recognizable a2a marker (it names the `from` sender), which is the point of keeping it legible.
+The durable fallback stores the `<fno_mail>`-wrapped body, the SAME envelope the live path injects, so a delivered message carries one consistent wire form across the live and durable paths and `grep <fno_mail>` reconstructs durable history too (not just live transcripts). The wrapped body round-trips through the per-recipient markdown render unchanged, so `mark_thread_read` does not strip it. A consequence: `fno agents mail unread` summaries (`body.split("\n")[0]`) surface the open tag rather than a content preview; that tag is a recognizable a2a marker (it names the `from` sender), which is the point of keeping it legible.
 
 ## What did NOT change
 

@@ -336,7 +336,7 @@ def _queue_grace_seconds(lock_timeout: float) -> float:
     It does NOT cover every holder. The same flock spans a synchronous
     switchboard hop, whose read budget is `_SWITCHBOARD_READ_TIMEOUT` (130s),
     so a sender queued behind an A2A hop still exhausts this window and takes
-    the exit-11 arm. Sizing for 130s would make a routine `fno mail send`
+    the exit-11 arm. Sizing for 130s would make a routine `fno agents mail send`
     block over two minutes before saying anything, which is a worse trade than
     the loud refusal. Narrowing the flock to the registry mutation is the real
     fix; it is tracked separately, for the reason the block comment in
@@ -1399,7 +1399,7 @@ def _claude_create_path(
             # Fail closed on a claim-substrate fault (a corrupt claim file raises
             # ClaimCorrupted, which is neither SessionWriterClaimError nor the
             # OSError/RuntimeError wake_and_deliver catches). Left to propagate it
-            # would abort `fno mail send` before the durable fallback queues the
+            # would abort `fno agents mail send` before the durable fallback queues the
             # message; exit 11 demotes to "writer possibly live" instead, which is
             # the safe answer when we cannot establish single-writer safety.
             raise DispatchAskError(
@@ -5258,7 +5258,7 @@ def _kickoff_background_relay(
     immediately (ab-3bd520ab).
 
     The relay is autonomous — no human waits on it — so blocking the
-    ``fno mail send`` caller for up to ``turn_ceiling × 130s`` was pure
+    ``fno agents mail send`` caller for up to ``turn_ceiling × 130s`` was pure
     latency. The send's actual delivery (hop 1: B received the message) already
     happened synchronously in :func:`_switchboard_exchange`; this only continues
     the autonomous A<->B exchange. Double-fork + ``setsid`` so the relay outlives
@@ -5606,7 +5606,7 @@ def _build_mail_ctx(
     to ``"unknown"`` -- never fabricated.
 
     ``to`` and ``node`` are OPTIONAL envelope attributes (omitted when None).
-    ``to`` is the recipient's short id -- set for a directed ``fno mail send`` so
+    ``to`` is the recipient's short id -- set for a directed ``fno agents mail send`` so
     the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
     backlog node) stays None: dispatch has no truthful source for it today."""
     from fno.agents.self_stamp import resolve_self_model
@@ -6064,7 +6064,7 @@ def _hold_lapsed_for(entry) -> bool:
 
     Pure read. It never mutates the registry, so it cannot deadlock a caller
     already holding the registry lock; the stale flag is tidied by the release
-    path and by ``fno mail notify-self``.
+    path and by ``fno agents mail notify-self``.
     """
     try:
         from fno.mail import hold as _hold
@@ -6374,7 +6374,7 @@ def wake_and_deliver(
     The uuid-scoped single-writer claim lives in ``_claude_create_path`` (x-7fef),
     not here: it is taken for every resume, pinned to the SPAWNED supervisor's
     pid, and outlives this process. Holding it here instead would pin liveness to
-    the short-lived ``fno mail send`` process, so the claim would guard only the
+    the short-lived ``fno agents mail send`` process, so the claim would guard only the
     probe->spawn window and go reclaimable the moment this command exits.
 
     That claim is NOT redundant with the substrate's own fail-safe. That one
@@ -6579,8 +6579,8 @@ def wake_drain_agent(
     """
     return wake_and_deliver(
         session_uuid,
-        "You were woken to drain unread fno mail addressed to you. "
-        "Run `fno mail drain-self` to process it, then stop.",
+        "You were woken to drain unread fno agents mail addressed to you. "
+        "Run `fno agents mail drain-self` to process it, then stop.",
         cwd=cwd,
     )
 
@@ -7399,7 +7399,7 @@ def dispatch_send(
                     getattr(sender_entry, "harness_session_id", None)
                     or getattr(sender_entry, "short_id", None)
                 )
-            # A `fno mail send <name>` is always directed -> stamp the selected
+            # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
             # full session id; such a row cannot safely receive durable mail.

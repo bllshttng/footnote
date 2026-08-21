@@ -74,8 +74,8 @@ touch .fno/.target-cancelled   # loop checks this sentinel between iterations
 A parked node holds its `node:<id>` claim and appears as `node_closed{close:parked}`.
 
 ```bash
-fno claim list --prefix node:                    # see held claims
-fno claim release node:<id> --force --reason "..." # release for re-dispatch
+fno agents claim list --prefix node:                    # see held claims
+fno agents claim release node:<id> --force --reason "..." # release for re-dispatch
 ```
 
 ## Selection scope and precedence
@@ -95,7 +95,7 @@ before loose work.
 | `fno megawalk watch` | Live Rich TUI at ~1Hz; reads `.fno/events.jsonl`. Ctrl-C to exit. |
 | `fno backlog next` | Show what the walker would pick next. |
 | `fno backlog status` | Overall backlog health. |
-| `fno claim list --prefix node:` | Active node claims (in-flight or parked). |
+| `fno agents claim list --prefix node:` | Active node claims (in-flight or parked). |
 
 The old `fno megawalk status / pause / resume / bootstrap / reset` subcommands were
-removed with the Python walker. Use `fno backlog` + `fno claim` instead.
+removed with the Python walker. Use `fno backlog` + `fno agents claim` instead.

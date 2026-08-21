@@ -1,6 +1,6 @@
 # Work-claim coordination
 
-This document describes the `fno claim` primitive, its on-disk format, the
+This document describes the `fno agents claim` primitive, its on-disk format, the
 key namespace, and the relationship to the older coordination paths it
 replaces.
 
@@ -104,10 +104,10 @@ is that contested or ambiguous liveness degrades to **skip**, never to
 
 The live lockfile holder is the only ownership truth: the `target_claim_*`
 manifest fields are an init-time snapshot and graph `status: claimed` names no
-holder, so all guidance compares `fno claim status` against the session's own
+holder, so all guidance compares `fno agents claim status` against the session's own
 id, never a snapshot.
 
-**A held claim proves a holder, never a worker.** A hand `fno claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch.
+**A held claim proves a holder, never a worker.** A hand `fno agents claim acquire` takes `node:<id>` with nothing launched. A `spawn-handover:` claim covers a launch window whose worker can die before it boots. So the guard reports three reasons, not two. `live-claim` means a holder AND a `fno target init` behind it. `unproven-claim` means a holder and nothing more. That is what `spawn.sh` and `dispatch-node.sh` render as "no worker has reached target init" instead of the old "live worker holds node". `suspect-claim` is unchanged. The discriminator is `_init_reached` in `cli/src/fno/agents/cli.py`. It reads two markers. The `target-session:` holder prefix is a convention, not proof, since a hand acquire writes the same string. The manifest under the dispatcher's cwd must bind `target_claim_key: node:<id>` AND name the observed holder. That holder match is the non-forgeable half. A read fault answers unproven, because an unreadable manifest must never manufacture a worker. `fno backlog next --claim H --external` needs two things to protect the node it hands out, and it had neither. It now routes through `claims_root_for`, because a `node:` lock in the cwd-default tree reads free to every dispatch surface. It also carries `EXTERNAL_SELECTION_TTL`, because selection exits as soon as it prints the node. A pid-liveness claim from a process that exits reads `stale`, and `stale` does not block a dispatch.
 
 **The reservation is taken after the launch is proven.** `cmd_spawn` runs its node guard below the resume-provider resolution. An exit on that stretch now strands neither `dispatch:<id>` nor the handover `node:<id>`. Below it the only exit is `run_gate`, whose `except BaseException` releases both. On the way out, the reservation is released whenever the substrate is a one-shot (`--once` or `--substrate headless`), as well as on a failed spawn. When the call returns, a one-shot's worker has already exited, so nobody is left to inherit it. `pane` and `bg` keep it, because their worker outlives the caller.
 
@@ -171,7 +171,7 @@ Seven event types route through the existing `events.jsonl` validator
 | `claim_released` | Holder unlinked the file |
 | `claim_refreshed` | TTL extended |
 | `claim_stale_reclaimed` | New holder took over a dead/expired claim |
-| `claim_force_overridden` | Operator override via `fno claim release --force` |
+| `claim_force_overridden` | Operator override via `fno agents claim release --force` |
 | `claim_idempotent_reacquired` | Same holder re-acquired (resume) |
 | `claim_clock_skew_rejected` | Refresh would set expires_at in the past |
 
@@ -208,7 +208,7 @@ differ from the per-walker `walker:` claim:
   it. Node claims are therefore TTL claims (`--ttl ${TARGET_CLAIM_TTL:-2h}`),
   acquired in `init-target-state.sh` and released by the stop hook. To stop a
   session that is alive but idle or suspended past its TTL from being reclaimed,
-  init ALSO records a durable session pid (`--pid`, resolved by `fno claim
+  init ALSO records a durable session pid (`--pid`, resolved by `fno agents claim
   session-pid` walking the process tree to the nearest `claude` ancestor) so the
   hybrid arm keeps the claim LIVE while that process lives. This is degrade-safe:
   if the durable pid is uncapturable, no `--pid` is recorded and the claim is
@@ -245,7 +245,7 @@ The ceiling is also what makes the abandonment probe below safe. That probe assu
 
 ### The reader is the half that covers every path
 
-No producer can reach a prose payload or a hand-started session, so `fno claim status node:<id>` cross-checks the fleet roster before it renders a `free` reading. It names its instrument in four distinct ways, and each string is produced by exactly one outcome:
+No producer can reach a prose payload or a hand-started session, so `fno agents claim status node:<id>` cross-checks the fleet roster before it renders a `free` reading. It names its instrument in four distinct ways, and each string is produced by exactly one outcome:
 
 ```
 UNCLAIMED but a live worker is on this node: <rows>
@@ -291,7 +291,7 @@ The one exception is a **launch window**. A claim held under `spawn-handover:<wo
 
 When the recorded pid is dead and the claim is local, renewal now rewrites `pid`, `host`, `machine_id` and `acquired_at` together. Reuse detection compares `create_time(pid)` against `acquired_at`. It survives **because the anchor moves with the pid**. The new anchor postdates the holder's start, and a later recycle of that pid number still reads as reused. A live recorded pid is never rewritten.
 
-The anchor is the DURABLE session pid from `fno claim session-pid`, never the renewing process. `fno-agents loop-check` exits about a second after it renews. Anchoring to it re-files the corpse under a fresh number and fixes nothing.
+The anchor is the DURABLE session pid from `fno agents claim session-pid`, never the renewing process. `fno-agents loop-check` exits about a second after it renews. Anchoring to it re-files the corpse under a fresh number and fixes nothing.
 
 ### A wedge fails, benign dedup does not
 
@@ -302,15 +302,15 @@ A refusal because a live worker holds the node is dedup: the desired end state i
 **Who holds a claim?**
 
 ```bash
-fno claim status node:ab-1234abcd      # one key
-fno claim list --prefix node:          # all node-level claims
-fno claim list --include-stale         # include dead holders
+fno agents claim status node:ab-1234abcd      # one key
+fno agents claim list --prefix node:          # all node-level claims
+fno agents claim list --include-stale         # include dead holders
 ```
 
 **A claim is stuck.** First, check whether the holder is genuinely dead:
 
 ```bash
-fno claim status node:ab-stuck
+fno agents claim status node:ab-stuck
 # state: live  holder: target-session:s-abc  pid: 12345  host: workhost
 ps -p 12345    # if "process not found", PID-liveness will reclaim on next acquire
 ```
@@ -320,7 +320,7 @@ operator killed `/target` with SIGKILL and an orphan child remains),
 force-release with an audit trail:
 
 ```bash
-fno claim release node:ab-stuck --force --reason "operator intervention; SIGKILLed target 2026-05-19"
+fno agents claim release node:ab-stuck --force --reason "operator intervention; SIGKILLed target 2026-05-19"
 ```
 
 The archived claim survives in `.fno/claims/.expired/`.
@@ -330,7 +330,7 @@ graph status against any held claim:
 
 ```bash
 fno backlog get ab-thisnode
-fno claim status node:ab-thisnode
+fno agents claim status node:ab-thisnode
 # If state=live but the graph node is "ready" rather than "in_flight",
 # the walker may have lost its in-process state and is still trying
 # to dispatch. Inspect the holder PID and walker state.
@@ -338,7 +338,7 @@ fno claim status node:ab-thisnode
 
 ## The worker must be able to write the claim store
 
-If the worker cannot create the lockfile, the claim is not mutual exclusion. Every harness sandboxes writes to the launch cwd by default. fno's state lives outside it. So a spawned worker on a bounded posture writes nothing and holds no claim. `fno claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any king reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
+If the worker cannot create the lockfile, the claim is not mutual exclusion. Every harness sandboxes writes to the launch cwd by default. fno's state lives outside it. So a spawned worker on a bounded posture writes nothing and holds no claim. `fno agents claim status node:<id>` then answers `free` while that worker is live, on its branch, doing the work. Any king reading the graph sees a free node and dispatches a second worker onto it. The standing rule "check the claim before manual node work" cannot catch this, because the check returns free.
 
 This is not one harness's problem. codex `workspace-write` is the visible case. A claude worker fails the same way. When a personal `~/.claude/settings.json` grants `permissions.additionalDirectories`, it looks fine on that maintainer's machine. The repository ships no such file, so a fresh clone reproduces it.
 
@@ -368,17 +368,17 @@ archive-then-recreate).
 
 ## Coordination today
 
-`fno claim` is the coordination primitive across target, megawalk, and
+`fno agents claim` is the coordination primitive across target, megawalk, and
 megatron. Megawalk's legacy coordination mechanisms (`megawalk-state.md`,
 `in_flight_nodes`, the PID lock) have been removed in favor of the
-`walker:` and `node:` claims. `fno claim list` + `events.jsonl` provide
+`walker:` and `node:` claims. `fno agents claim list` + `events.jsonl` provide
 observability into what is in flight.
 
 One legacy mirror remains: `/target` still writes a graph `session_id`
 onto the backlog node when it claims (alongside acquiring the `node:`
 claim), and that field independently derives the node's `claimed` status.
 A stuck target can therefore leave a node marked claimed in
-`fno backlog get` even when `fno claim list` is clean, so recovery should
+`fno backlog get` even when `fno agents claim list` is clean, so recovery should
 check both the claim and the graph node status (as the runbook above does).
 
 Deferred for separate plans:
@@ -387,7 +387,7 @@ Deferred for separate plans:
   per-project dispatcher - the commander-level `fleet:` claim is the
   load-bearing race prevention.
 - Cross-host claim coordination - intentionally out of scope.
-- Web UI / TUI for claim inspection - `fno claim list` covers it.
+- Web UI / TUI for claim inspection - `fno agents claim list` covers it.
 
 ## Agent primitives: citizens and limbs
 
@@ -400,7 +400,7 @@ not folklore, and records why the limb cannot be made fully addressable.
 ### The two primitives
 
 A **citizen** is what `fno agents spawn` produces: a row in the fno agents
-registry, discoverable by `fno agents peek`, addressable by `fno mail`,
+registry, discoverable by `fno agents peek`, addressable by `fno agents mail`,
 holding its own `node:` claim, surviving its spawner's death, and
 handoff-able to a successor king.
 Its transcript sits beside its peers at the project root as
@@ -441,7 +441,7 @@ orphans anything that must outlive its parent.
 
 The honest ceiling for a limb is **read-only visibility**, not
 addressability.
-A subagent has no input stream of its own: `fno mail send` injects as
+A subagent has no input stream of its own: `fno agents mail send` injects as
 user-shaped text into a session's input, and a limb has no input to inject
 into.
 Inventing a second delivery path for subagent mail would be exactly the

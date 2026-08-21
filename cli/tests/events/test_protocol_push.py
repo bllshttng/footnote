@@ -1,7 +1,7 @@
 """Push leg for the a2a status-breakpoint family (x-dbaf, US4).
 
 blocked + run_summary notify the parent handle when spawn lineage exists; the
-push rides `fno mail send` (durable-first), fires AFTER the durable events.jsonl
+push rides `fno agents mail send` (durable-first), fires AFTER the durable events.jsonl
 append, and silently skips when there is no lineage.
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
     assert ev["type"] == "blocked"
     # P2: parent is resolved into the durable envelope, not only the push path
     assert ev["parent"] == "claude-parent99"
-    assert sent["argv"][:3] == ["fno", "mail", "send"]
+    assert sent["argv"][:4] == ["fno", "agents", "mail", "send"]
     assert "claude-parent99" in sent["argv"]
     # message references the run so the parent can correlate
     assert any("R1" in a for a in sent["argv"])
@@ -102,7 +102,7 @@ def test_no_parent_no_push(runner, tmp_path, monkeypatch) -> None:
     result, events = _emit_blocked(runner, tmp_path, monkeypatch, parent=None, run_fn=fake_run)
     assert result.exit_code == 0, result.output
     assert events.exists()  # event still written
-    assert not any(a[:3] == ["fno", "mail", "send"] for a in calls)
+    assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
 
 
 # -- AC1-FR: a failing push loses nothing (event already durable, exit 0) --
@@ -138,5 +138,5 @@ def test_push_parent_subcommand_pushes(runner, monkeypatch) -> None:
         ["push-parent", "--type", "run_summary", "--run", "R1", "--reason", "DonePRGreen"],
     )
     assert result.exit_code == 0
-    assert sent["argv"][:3] == ["fno", "mail", "send"]
+    assert sent["argv"][:4] == ["fno", "agents", "mail", "send"]
     assert "claude-parent99" in sent["argv"]

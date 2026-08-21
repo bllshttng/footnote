@@ -1,7 +1,7 @@
 """Unit tests for claim GC (reap) and the list reader's honesty.
 
 Two things had no test before this: nothing pruned a claim whose holder died
-without releasing (so a leaked lockfile stayed forever), and `fno claim list`
+without releasing (so a leaked lockfile stayed forever), and `fno agents claim list`
 rendered a store that was 99 percent stale as an empty store. Every test here
 proves a real defect would have been caught - especially the load-bearing
 case (test_AC1_HP_kill_without_release_is_reaped), which spawns a real
@@ -598,7 +598,7 @@ class TestRefreshClaimVsReapRecoveryMutex:
 
 
 # ---------------------------------------------------------------------------
-# list_claims_with_counts / `fno claim list`: the reader must not lie
+# list_claims_with_counts / `fno agents claim list`: the reader must not lie
 # ---------------------------------------------------------------------------
 
 
@@ -641,7 +641,7 @@ class TestReaderReportsFilteredCount:
 
 
 # ---------------------------------------------------------------------------
-# `fno claim reap` CLI verb
+# `fno agents claim reap` CLI verb
 # ---------------------------------------------------------------------------
 
 

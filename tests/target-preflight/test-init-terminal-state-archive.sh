@@ -81,7 +81,7 @@ plant_claim_state() {
     } > "$dir/.fno/target-state.md"
 }
 
-# Stub `fno` on PATH so the reaper's `fno claim status <key> --json` is
+# Stub `fno` on PATH so the reaper's `fno agents claim status <key> --json` is
 # deterministic: a key containing "live" reports state live, anything else
 # reports free. No-input fresh init makes no other fno calls, so the stub need
 # not pass anything through.

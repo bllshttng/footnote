@@ -23,7 +23,7 @@ agents_app = typer.Typer(
     help=(
         "Cross-CLI agent lifecycle (claude / codex / gemini): "
         "spawn / watch / list / logs / stop. "
-        "To message a peer, use `fno mail send <name>` (or the `/mail` skill)."
+        "To message a peer, use `fno agents mail send <name>` (or the `/mail` skill)."
     ),
     no_args_is_help=True,
     # Default Rust runtime (Phase 6 W6 / cv-d28b266a): by default this group
@@ -32,12 +32,6 @@ agents_app = typer.Typer(
     # forces the binary; =python forces this Python path. See rust_runtime.py.
     cls=make_agents_group_cls(),
 )
-
-# `fno agents mcp` was the re-homed twin of the top-level `fno mcp` (x-71b6):
-# one Typer app registered under two paths, so every leaf was counted and
-# maintained twice. The Rust daemon's deliver_envelope shells the top-level
-# `fno mcp send`, which is the surviving path; the twin had no caller at all.
-
 
 class AgentStatusFilter(str, enum.Enum):
     """Rendered family-1 liveness values accepted by ``list --status``."""
@@ -78,11 +72,11 @@ def _remedy_for(key: str) -> str:
         # is the boot window and `classify_for_sweep` deliberately has no
         # one-shot arm for this key family. Naming reap here sent an operator to
         # a command that provably cannot clear what they are looking at.
-        return f"  Clear it:  fno claim release {key} --force --reason '<why>'"
+        return f"  Clear it:  fno agents claim release {key} --force --reason '<why>'"
     return (
-        f"  Clear it:  fno claim reap --apply      "
+        f"  Clear it:  fno agents claim reap --apply      "
         f"(takes it only if no live worker is on the node)\n"
-        f"  Override:  fno claim release {key} --force --reason '<why>'"
+        f"  Override:  fno agents claim release {key} --force --reason '<why>'"
     )
 
 
@@ -202,7 +196,7 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
 
     A live `node:<id>` claim proves a HOLDER exists. It does not prove a WORKER
     exists: a `spawn-handover:` claim covers a launch window whose worker can
-    die before it boots, and a hand `fno claim acquire` from a live process
+    die before it boots, and a hand `fno agents claim acquire` from a live process
     takes the key with nothing launched at all. Reporting either as a live
     worker tells a king the opposite of the truth at the moment the king
     decides whether to staff the node.
@@ -211,7 +205,7 @@ def _init_reached(node_id: str, holder: str | None, cwd: str | None) -> bool:
 
     1. The holder shape. Init acquires under `target-session:<id>`
        (``hooks/helpers/init-target-state.sh``). This is a CONVENTION, not
-       proof: `fno claim acquire --holder target-session:anything` writes the
+       proof: `fno agents claim acquire --holder target-session:anything` writes the
        same prefix, and a hand acquire is one of the cases this function exists
        to exclude. It is kept because it is the only marker that reaches a
        worker running in its own worktree, whose manifest this process cannot
@@ -532,7 +526,7 @@ def _spawn_guard_decision(
     if handover_holder:
         # THE node claim, not another reservation. dispatch:<id> is a launch-
         # window mutex on a key nobody reads: five workers were spawned with an
-        # explicit --node tonight and not one of them was visible to `fno claim
+        # explicit --node tonight and not one of them was visible to `fno agents claim
         # status node:<id>`, so four kings read those nodes as free (x-cd1e).
         #
         # --node is the only dispatch path holding the node id as a TYPED
@@ -646,7 +640,7 @@ def _release_dispatch_claims(*claims) -> None:
             print(
                 f"WARNING: could not release {key} held by {holder} ({exc}); "
                 f"it stays held until its TTL expires. Free it with: "
-                f"fno claim release {key} --holder {holder}",
+                f"fno agents claim release {key} --holder {holder}",
                 file=sys.stderr,
             )
 
@@ -1127,7 +1121,7 @@ def cmd_spawn(
         "--dispatch-account",
         help=(
             "The destination provider RECORD of an autonomous quota cutover, as "
-            "chosen by `fno dispatch resolve --autonomous`. Unlike --account "
+            "chosen by `fno agents dispatch resolve --autonomous`. Unlike --account "
             "(operator intent, claude-only) this carries the record's dispatch "
             "env for ANY harness, which is what a claude->codex cutover needs. "
             "The record id travels on argv; its credentials never do. "
@@ -2411,7 +2405,7 @@ def cmd_spawn_guard(
 
     Runs Guard 1 (the ``node:<id>`` claim probe, fail-closed) then Guard 2 (the
     create-only ``dispatch:<id>`` reservation) in one process, so the
-    probe-then-reserve window is no wider than the two ``fno claim`` shell-outs it
+    probe-then-reserve window is no wider than the two ``fno agents claim`` shell-outs it
     replaces. Both ``/target bg`` (``dispatch-node.sh``) and ``/agent spawn``
     (``spawn.sh``) call this so the two can never disagree about whether a node is
     dispatchable (x-73cc).
@@ -2608,7 +2602,7 @@ def cmd_ask(
         if res.recipient is None:
             print(
                 f"no live peer working on project {to_project!r} to ask; "
-                f"use `fno mail send --to-project {to_project} ...` to queue durable.",
+                f"use `fno agents mail send --to-project {to_project} ...` to queue durable.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
@@ -3058,7 +3052,7 @@ def cmd_logs(
 def cmd_peek(
     handle: str = typer.Argument(
         ...,
-        help="Peer handle (same as `fno mail send`: alias or bare hex short-id).",
+        help="Peer handle (same as `fno agents mail send`: alias or bare hex short-id).",
     ),
     lines: int = typer.Option(
         15, "--lines", "-n", help="Show the last N transcript records (default 15; 0 for none)."
@@ -3107,7 +3101,7 @@ def cmd_whoami(
 ) -> None:
     """Print THIS mesh worker's own registered name (+ registry enrichment).
 
-    The derived-name peers use to address you via ``fno mail send <name>``.
+    The derived-name peers use to address you via ``fno agents mail send <name>``.
     Resolves identity from ``FNO_AGENT_SELF`` (the env the spawn path
     injects), falling back to a registry row matching the active harness's
     session marker when the env is absent. Read-only: it never
@@ -3196,13 +3190,13 @@ def cmd_register(
         ),
     ),
 ) -> None:
-    """Join THIS session to the mesh roster so peers can `fno mail send` to it.
+    """Join THIS session to the mesh roster so peers can `fno agents mail send` to it.
 
     The self-service seam behind ``/fno-me``: a session a human started by hand
     has no spawn-created roster row. This resolves the ambient harness identity
     (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / ...) and writes an ``idle`` row
     named by the canonical bare ``<shortid>`` handle, the same string the
-    session self-stamps and drains, so a durable ``fno mail send`` to it lands.
+    session self-stamps and drains, so a durable ``fno agents mail send`` to it lands.
     ``fno agents whoami`` then reports ``registered: true`` via its session-id
     fallback, no ``FNO_AGENT_SELF`` env needed.
 
@@ -3300,7 +3294,7 @@ def cmd_register(
         )
         sys.stdout.write(
             f"joined the mesh as {entry.name}{policy_note} - peers can now reach you with "
-            f"`fno mail send {entry.name} \"...\"`\n"
+            f"`fno agents mail send {entry.name} \"...\"`\n"
         )
 
 

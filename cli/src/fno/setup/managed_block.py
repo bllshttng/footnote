@@ -43,7 +43,7 @@ _BODY = """\
 This repo uses the footnote delivery pipeline. Two surfaces that compose:
 
 - **`fno` CLI** - atomic state ops: `fno backlog` (the feature graph), `fno do pr`,
-  `fno mail`, `fno carveout`. Run `fno help` for the catalog.
+  `fno agents mail`, `fno carveout`. Run `fno help` for the catalog.
 - **`/fno:*` commands** - orchestration: `/fno:target` (idea -> shipped PR),
   `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`.
 

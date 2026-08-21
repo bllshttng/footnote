@@ -15,7 +15,7 @@
 //! resume that had no idea it was a king.
 //!
 //! Under that sat a larger hole. Nothing crowns a king: the `king-for-a-day`
-//! skill never calls `fno king init`, nothing deletes the manifest when a king
+//! skill never calls `fno agents king init`, nothing deletes the manifest when a king
 //! dies, and a spawn can transfer a crown with no verb to return it. Respawning
 //! needs crown, respawn and expire to exist together. That is a lifecycle, and
 //! it belongs to one node rather than to a queue bolted onto this one.
@@ -34,6 +34,7 @@ use std::process::{Command, Stdio};
 pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason: &str) -> String {
     let output = Command::new(fno_bin)
         .args([
+            "agents",
             "king",
             "escalate",
             "--stalled",
@@ -56,8 +57,8 @@ pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason
             format!("escalation FAILED: {detail}")
         }
         Err(e) => {
-            eprintln!("king: cannot run {fno_bin} king escalate: {e}");
-            format!("escalation FAILED: cannot run {fno_bin} king escalate: {e}")
+            eprintln!("king: cannot run {fno_bin} agents king escalate: {e}");
+            format!("escalation FAILED: cannot run {fno_bin} agents king escalate: {e}")
         }
     }
 }

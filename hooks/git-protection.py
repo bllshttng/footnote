@@ -975,7 +975,7 @@ def _split_lines_outside_quotes(command):
     """Split `command` on newlines that lie OUTSIDE any quoted region.
 
     A newline inside an open quote is part of ONE argument, not a command
-    boundary: `fno mail send x "...\\n...\\n..."`, a `-m` commit body, a
+    boundary: `fno agents mail send x "...\\n...\\n..."`, a `-m` commit body, a
     `--details` string. Splitting there hands the next fragment to shlex with an
     unbalanced quote, which raises, and the caller then falls back to matching
     the guarded phrase ANYWHERE in the whole command - so any message whose BODY
@@ -2181,7 +2181,7 @@ def main():
     if merge_seg is not None:
         holdref = _dispatch_hold_refusal(merge_seg)
         if holdref:
-            _emit("deny", f"[fno dispatch-hold] {holdref}")
+            _emit("deny", f"[fno agents dispatch-hold] {holdref}")
             sys.exit(0)
         # Checked BEFORE the two-factor path, so it vetoes every route that
         # would otherwise allow - including the merge-gate override marker.

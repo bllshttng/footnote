@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema",
-  "$comment": "x-2901: the W7 oneOf split-brain is retired. Both emitters (Python/fno and Rust/fno-agents) now write this single envelope {ts, type, source, data}. The legacy Rust {ts, kind, <flat>} shape is no longer valid on the wire; subscribe/digest keep a read-side kind/flat fallback for the mixed-binary + rotated-history window (an old daemon binary keeps writing kind lines until fno restart). See docs/architecture/events-schema-contract.md.",
+  "$comment": "x-2901: the W7 oneOf split-brain is retired. Both emitters (Python/fno and Rust/fno-agents) now write this single envelope {ts, type, source, data}. The legacy Rust {ts, kind, <flat>} shape is no longer valid on the wire; subscribe/digest keep a read-side kind/flat fallback for the mixed-binary + rotated-history window (an old daemon binary keeps writing kind lines until fno agents restart). See docs/architecture/events-schema-contract.md.",
   "title": "events.jsonl line (v3)",
   "description": "One line of events.jsonl. The unified Python/fno + Rust/fno-agents envelope: type (not kind), payload nested under data.",
   "type": "object",

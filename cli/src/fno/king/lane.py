@@ -1,6 +1,6 @@
 """Read the operator's own ranked lane (``my-priorities.md``).
 
-The single implementation. `fno king board` and `fno outstanding` both read
+The single implementation. `fno inbox board` and `fno outstanding` both read
 through this module, so a second parser anywhere in the tree is the drift
 this file exists to prevent.
 

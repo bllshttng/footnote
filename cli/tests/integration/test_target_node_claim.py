@@ -33,7 +33,7 @@ NODE_ID = "ab-deadbeef"  # matches ^ab-[0-9a-f]{8}$
 MOCK_ABI = """#!/usr/bin/env bash
 # Mock `fno`: log argv + the claims-root env, control claim-acquire exit code.
 echo "ARGS:$* ROOT:${FNO_CLAIMS_ROOT:-UNSET}" >> "$MOCK_ABI_LOG"
-if [[ "$1" == "claim" && "$2" == "acquire" ]]; then
+if [[ "$1" == "agents" && "$2" == "claim" && "$3" == "acquire" ]]; then
   exit "${MOCK_ABI_ACQUIRE_RC:-0}"
 fi
 # `backlog get` is how the node guard establishes that a token IS a graph node.

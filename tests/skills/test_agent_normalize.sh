@@ -41,7 +41,7 @@ STUB_SLUG="$TMP/stub-slug.sh"; printf '#!/usr/bin/env bash\necho dashless-spawn\
 export NODE_SLUG_RESOLVER="$STUB_EMPTY"
 
 # A dir with a FAILING `fno` on PATH forces normalize.sh's static command-surface
-# fallback (used when `fno dispatch resolve` is unreachable), so surface-dependent
+# fallback (used when `fno agents dispatch resolve` is unreachable), so surface-dependent
 # assertions are deterministic regardless of the installed fno's freshness (x-de43:
 # a stale installed fno reports opencode=prose, a fresh one opencode=slash).
 FBIN="$TMP/failing-fno"; mkdir -p "$FBIN"

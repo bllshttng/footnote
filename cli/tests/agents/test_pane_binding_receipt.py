@@ -737,7 +737,7 @@ def test_exit_12_still_short_circuits_without_a_listing_call() -> None:
 
 
 def test_the_binding_window_stays_under_the_dispatch_subprocess_budget() -> None:
-    """`run_dispatch_one` kills the whole `fno dispatch one` subprocess after
+    """`run_dispatch_one` kills the whole `fno agents dispatch one` subprocess after
     20s, and that budget also covers process start, selection, and pane
     creation. A window at or near 20s gets the subprocess killed BEFORE the
     registry append, leaving a live pane with no row."""

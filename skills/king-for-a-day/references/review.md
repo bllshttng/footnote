@@ -16,7 +16,7 @@ Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|bl
 ## Why the king fires the verb at all
 
 A harness-native review verb can be self-invoked via the Skill tool but is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so the king fires it directly.
-`fno mail send <teammate> --raw '/<review-verb>'` injects the verb unwrapped at the teammate's prompt line, so the REPL's slash parser runs it - **--raw IS the user invocation**, and the review runs in the teammate's OWN harness against the tree it actually built. A wrapped `fno mail send` does NOT fire the verb; it relies on the teammate pulling its own trigger. You must not have authored the diff - a king reviewing its own diff is self-review even through --raw.
+`fno agents mail send <teammate> --raw '/<review-verb>'` injects the verb unwrapped at the teammate's prompt line, so the REPL's slash parser runs it - **--raw IS the user invocation**, and the review runs in the teammate's OWN harness against the tree it actually built. A wrapped `fno agents mail send` does NOT fire the verb; it relies on the teammate pulling its own trigger. You must not have authored the diff - a king reviewing its own diff is self-review even through --raw.
 
 Two consequences fall straight out of that, and both are load-bearing:
 
@@ -79,7 +79,7 @@ What actually goes wrong: a teammate handed `opencode` as its peer has no verb t
 Send this shape. It is not a style preference: every observed firing used it, and the two attempts that were self-initiated rather than ordered were both refused.
 
 ```
-fno mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
+fno agents mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
 
     /<review-verb>
 
@@ -152,7 +152,7 @@ A teammate that waits on the App after it has already refused is waiting on a re
 A review order that never arrives looks exactly like a teammate ignoring you.
 Read the receipt literally: only `delivered (hosted)` / `delivered (woken)` is arrival.
 
-`fno mail send <name>` is the form proven to carry an order.
+`fno agents mail send <name>` is the form proven to carry an order.
 Delivery failures observed in the field include a `reply --to <id>` that printed no receipt at all and never arrived, and a `peek <handle>` that returned the CALLER's own transcript rather than the target's, which silently misleads anyone using it to verify a peer's state.
 
 When a send will not land, write the order to a file and mail the path.

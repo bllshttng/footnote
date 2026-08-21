@@ -410,7 +410,7 @@ def test_drain_self_surfaces_job_mail_for_holder(runner, isolated, monkeypatch):
     _set_identity(monkeypatch, sid)
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
-    res = runner.invoke(app, ["mail", "drain-self"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self"])
     assert res.exit_code == 0, res.output
     # CI-only failure triage (changed-smoke, ubuntu): when the job mail does
     # not surface, dump the exact legs the scan depends on so the next red run
@@ -463,7 +463,7 @@ def test_drain_self_skips_job_mail_when_not_holder(runner, isolated, monkeypatch
     _set_identity(monkeypatch, sid)
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
-    res = runner.invoke(app, ["mail", "drain-self"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self"])
     assert res.exit_code == 0, res.output
     assert "not for me" not in res.stdout
 
@@ -497,7 +497,7 @@ def test_drain_self_surfaces_both_handle_and_job_mail(runner, isolated, monkeypa
     _set_identity(monkeypatch, sid)
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
 
-    res = runner.invoke(app, ["mail", "drain-self"])
+    res = runner.invoke(app, ["agents", "mail", "drain-self"])
     assert res.exit_code == 0, res.output
     assert "handle mail" in res.stdout
     assert "job mail" in res.stdout

@@ -1,4 +1,4 @@
-"""fno mail sent / fno mail withdraw (x-0548).
+"""fno agents mail sent / fno agents mail withdraw (x-0548).
 
 A sender could see that mail was stranded and could do nothing about it: the
 count in `mail status` and the every-prompt nudge named a number and no ids, and
@@ -68,7 +68,7 @@ def _run(*args):
 
 
 # ---------------------------------------------------------------------------
-# fno mail sent
+# fno agents mail sent
 # ---------------------------------------------------------------------------
 
 
@@ -179,7 +179,7 @@ def test_sent_shows_only_my_own_outbound(env):
 
 
 # ---------------------------------------------------------------------------
-# fno mail withdraw: refusals
+# fno agents mail withdraw: refusals
 # ---------------------------------------------------------------------------
 
 

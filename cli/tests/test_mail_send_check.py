@@ -1,4 +1,4 @@
-"""``fno mail send --raw --check``: which verdict each lane deserves.
+"""``fno agents mail send --raw --check``: which verdict each lane deserves.
 
 The point of ``--check`` is that a caller can gate ADVICE on it, so a wrong yes
 is worse than no answer at all: the Stop hook that prescribes ``/compact`` reads

@@ -177,7 +177,7 @@ _SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 # An adopted session's wire `short` (v9: `short_id`) is always exactly the 8-hex
 # prefix of the session uuid. Validate it precisely (stricter than the worker
-# _SHORT_ID_RE, which also covers non-hex fno worker ids) so a malformed/non-hex
+# _SHORT_ID_RE, which also covers non-hex fno agents worker ids) so a malformed/non-hex
 # registry value is never handed to the wire boundary.
 _ATTACHED_SHORT_RE = re.compile(r"^[0-9a-fA-F]{8}$")
 
@@ -749,7 +749,7 @@ def submit_via_control_reply(session_id: str, framed: str) -> str:
     written the op:'reply' before its growth-confirm poll was cut off.
 
     This is the adopted-lane sibling of :func:`submit_via_worker`: an adopted session
-    has no ``worker.sock``, so the relay rides the SAME vehicle as ``fno mail send``
+    has no ``worker.sock``, so the relay rides the SAME vehicle as ``fno agents mail send``
     (mirrors :func:`fno.agents.dispatch._mail_inject_claude`) rather than a second
     op:'reply' client."""
     from fno import rust_binary
@@ -799,7 +799,7 @@ def deliver_attached(
     via the ``control.sock`` op:'reply' inject and capture the peer's next sentinel
     reply from the transcript -- the G3 relay re-point (epic x-07c1, node x-e027).
 
-    The adopted session has no fno worker socket; :func:`submit_via_control_reply`
+    The adopted session has no fno agents worker socket; :func:`submit_via_control_reply`
     (the ``mail-inject`` verb) is the only live handle. The hard failure is ONLY a
     NOT_SENT inject (the turn never reached the session). On CONFIRMED *or*
     UNCONFIRMED the turn may have landed -- mail-inject's growth-confirm budget is
