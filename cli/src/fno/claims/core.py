@@ -1680,6 +1680,12 @@ def _clear_lock_mirror_for_reaped(node_ids: list[str]) -> int:
     from fno.claims.io import claims_root_for
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.paths import graph_json
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        # The locked_by mirror is graph-store state; under an external
+        # tracker backend there is no graph mirror to clear.
+        return 0
 
     wanted = set(node_ids)
     cleared: list[str] = []

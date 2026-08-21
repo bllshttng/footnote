@@ -1241,6 +1241,14 @@ def _node_settlement(reading: Optional[RosterReading] = None):
     def _terminal_ids():
         if "terminal" not in cache:
             try:
+                from fno.tracker import active_backend_name
+
+                if active_backend_name() != "graph":
+                    # graph.json is not the store under an external tracker
+                    # backend; a terminal reading taken from it would be a
+                    # wrong answer, and unknown keeps.
+                    cache["terminal"] = None
+                    return None
                 from fno.graph.statuses import TERMINAL_RUNGS
                 from fno.graph.store import read_graph
                 from fno.paths import graph_json
