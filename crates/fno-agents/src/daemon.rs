@@ -434,6 +434,12 @@ pub struct GcSummary {
     /// the "stuck and invisible" case `gc.rs`'s own comments warn about;
     /// before this field it had no report at all.
     pub kept_uncorroborated: Vec<String>,
+    /// Live-idle rows the stat gate could NOT answer for, so they escalated to
+    /// the batched truth probe this sweep. One number, not a cap: the old
+    /// `DORMANT_PROBE_CAP` of 8 truncated a sweep over a large roster
+    /// silently, judging an arbitrary first eight and reporting nothing about
+    /// the rest. Reporting the spend is what replaces it.
+    pub dormant_probes_escalated: usize,
 }
 
 /// Distinct canonical repo roots the registry knows about, deduplicated.
@@ -730,11 +736,8 @@ fn newest_by_mtime(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
         .cloned()
 }
 
-/// Truth probes spent on live-idle rows per sweep. Bounded so a registry full
-/// of idle live rows cannot turn one sweep into an unbounded subprocess farm;
-/// the remainder is candidates on the next tick.
-const DORMANT_PROBE_CAP: usize = 8;
-/// Harness-session cascades per sweep, same rationale as DORMANT_PROBE_CAP.
+/// Harness-session cascades per sweep: bounded so one sweep cannot turn into an
+/// unbounded subprocess farm; the remainder is candidates on the next tick.
 const CASCADE_CAP: usize = 10;
 /// Wall-clock bound for one harness removal subprocess. A hung removal must
 /// never wedge the sweep (the operator measured a 300s+ hang on a stuck row;
@@ -1324,7 +1327,7 @@ pub fn gc_sweep(
         emitter,
         grace_for_harness,
         false,
-        &live_truth_tail_state,
+        &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
         Some(&|e, node_id, harness, session_id| reap_node_session(e, node_id, harness, session_id)),
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
@@ -1352,7 +1355,7 @@ pub fn gc_sweep_dry_run(
         &emitter,
         grace_for_harness,
         true,
-        &live_truth_tail_state,
+        &live_truth_tail_states,
         &|e| store.borrow_mut().matches(e),
         None,
         &|e| cascade_harness_session_with(&mut cascade_store.borrow_mut(), e),
@@ -1360,11 +1363,15 @@ pub fn gc_sweep_dry_run(
 }
 
 /// The dormant gate's transcript-tail read, as production runs it: the shared
-/// truth probe (`fno agents truth <handle> --json`, bounded at 5s), lowered to
-/// the state string alone. Injected into [`gc_sweep_impl`] so the decision
-/// path is unit-testable without shelling out to a real `fno`.
-fn live_truth_tail_state(handle: &str) -> Option<String> {
-    crate::claude_ask::family1_truth_probe(handle).map(|p| p.state)
+/// truth probe (`fno agents truth --handles ... --json`, bounded at 5s),
+/// lowered to the state string alone, for EVERY escalated handle in one
+/// subprocess. Injected into [`gc_sweep_impl`] so the decision path is
+/// unit-testable without shelling out to a real `fno`.
+fn live_truth_tail_states(handles: &[String]) -> std::collections::HashMap<String, String> {
+    crate::claude_ask::family1_truth_probe_many(handles)
+        .into_iter()
+        .map(|(handle, probe)| (handle, probe.state))
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -1373,7 +1380,10 @@ fn gc_sweep_impl(
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
     dry_run: bool,
-    truth_tail_state: &dyn Fn(&str) -> Option<String>,
+    // The dormant gate's tail read, BATCHED: one call for every handle the
+    // stat gate escalated, keyed by handle. A handle absent from the answer
+    // behaves exactly as `None` did on the per-row seam.
+    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
     store_matches: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
     cascade: &dyn Fn(&state::RegistryEntry) -> Option<(String, String)>,
 ) -> GcSummary {
@@ -1382,19 +1392,23 @@ fn gc_sweep_impl(
         emitter,
         grace_for_harness,
         dry_run,
-        truth_tail_state,
+        truth_tail_states,
         store_matches,
         None,
         cascade,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gc_sweep_impl_with_node_cascade(
     home: &AgentsHome,
     emitter: &EventEmitter,
     grace_for_harness: &dyn Fn(&str) -> Duration,
     dry_run: bool,
-    truth_tail_state: &dyn Fn(&str) -> Option<String>,
+    // The dormant gate's tail read, BATCHED: one call for every handle the
+    // stat gate escalated, keyed by handle. A handle absent from the answer
+    // behaves exactly as `None` did on the per-row seam.
+    truth_tail_states: &dyn Fn(&[String]) -> std::collections::HashMap<String, String>,
     // The harness-store lookup (every transcript candidate this row's own
     // store holds for its session id), injected so a sweep-level test never
     // depends on what lives in the developer's real ~/.claude / ~/.codex.
@@ -1437,12 +1451,30 @@ fn gc_sweep_impl_with_node_cascade(
     // distinguishable) and carrying a resumable handle in the reap event.
     let mut dormant_ids: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    // Truth probes spent on live-idle rows this sweep (see DORMANT_PROBE_CAP).
-    let mut dormant_probes: usize = 0;
     let mut to_stamp: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     let mut to_clear: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+
+    // PASS ONE: classify every row and stat its transcript, deciding only
+    // WHICH rows still need a truth probe spent on them. PASS TWO (below)
+    // batches those handles into one subprocess and applies the verdict.
+    //
+    // Every row is classified here; the only thing deferred is `dormant_done`,
+    // which is why the row's `GcRow` is carried forward rather than its
+    // verdict. `needs_probe` below is safe to decide here: it requires
+    // `!is_live` and the dormant gate requires `is_live`, so no row can want
+    // both.
+    struct PendingRow<'a> {
+        entry: &'a state::RegistryEntry,
+        row: crate::gc::GcRow,
+        id: String,
+        grace_secs: i64,
+        /// The handle this row escalated to the probe, when the stat gate could
+        /// not answer its liveness question from disk alone.
+        dormant_handle: Option<String>,
+    }
+    let mut pending: Vec<PendingRow> = Vec::with_capacity(registry.entries.len());
 
     for e in &registry.entries {
         let grace_secs = grace_for_harness(e.harness_name()).as_secs() as i64;
@@ -1506,35 +1538,49 @@ fn gc_sweep_impl_with_node_cascade(
         // grace window whose transcript tail POSITIVELY classifies done
         // (promise emitted). A credential-dead worker reads live too, and
         // neither alive nor dead; only the positive done reading evicts.
-        // Bounded: only idle rows are probed, and at most DORMANT_PROBE_CAP
-        // truth probes run per sweep, so a large registry cannot turn the
-        // sweep into a subprocess farm.
-        let mut dormant_done = false;
-        if is_live && dormant_probes < DORMANT_PROBE_CAP {
+        //
+        // This is the ONE call site where the probe is asked a LIVENESS
+        // question, and so the one where a stat can stand in for it: growth
+        // since the last sweep answers "is this row still advancing" directly.
+        // The list path and the refused leg ask for DISPLAY data instead
+        // (`state`, `observed_model`, the reachability triple), which no stat
+        // can supply, so they take batching alone.
+        //
+        // Bounded by the stat gate rather than a cap: only idle rows whose
+        // transcripts did not grow escalate, and pass two collapses all of
+        // them into one subprocess. The old DORMANT_PROBE_CAP of 8 silently
+        // truncated a sweep over a large roster, judging an arbitrary first
+        // eight and leaving the rest unexamined with no report of the
+        // shortfall. Removing it means every escalated row is judged this
+        // sweep, and the count spent is reported.
+        let mut dormant_handle = None;
+        if is_live {
             // The idle gate's transcript read comes from the same store index
             // (in memory after the first build), never a fresh walk.
             let transcript = store_matches(e)
                 .and_then(|m| newest_by_mtime(&m))
                 .or_else(|| e.log_path.as_deref().map(std::path::PathBuf::from));
+            // `row_idle_secs` folds the transcript's mtime into `idle`, so this
+            // gate opening already proves the transcript has been untouched for
+            // longer than grace - an hour by default, against a sweep every
+            // five seconds. That is why x-0d93's planned transcript-SIZE gate
+            // is not here: growth since the last sweep leaves an mtime seconds
+            // old, and such a row never reaches this branch at all. See
+            // `a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate`.
             if let Some(idle) = row_idle_secs(e, now, transcript.as_deref()) {
                 if idle > grace_secs {
-                    let handle = if e.short_id.is_empty() {
-                        e.name.as_str()
+                    dormant_handle = Some(if e.short_id.is_empty() {
+                        e.name.clone()
                     } else {
-                        e.short_id.as_str()
-                    };
-                    // Count the attempt, not just a successful answer: a timed-out
-                    // or unreadable probe still costs the sweep its bounded
-                    // subprocess budget, and a registry full of unresponsive
-                    // sessions would otherwise pay that cost on every idle row
-                    // with the cap never engaging (codex review, PR #889).
-                    dormant_probes += 1;
-                    if let Some(state) = truth_tail_state(handle) {
-                        dormant_done = state == "done";
-                    }
+                        e.short_id.clone()
+                    });
                 }
             }
         }
+        // Filled in by pass two from the batched probe. A row the stat gate
+        // spared, or one the probe did not answer for, keeps `false`: only a
+        // positive `done` reading evicts.
+        let dormant_done = false;
         // Built with `worktree_clean` unset so the probe decision can ask the
         // policy itself. Filled in below, before any verdict is read from it.
         let mut row = crate::gc::GcRow {
@@ -1573,6 +1619,46 @@ fn gc_sweep_impl_with_node_cascade(
         } else {
             e.short_id.clone()
         };
+        pending.push(PendingRow {
+            entry: e,
+            row,
+            id,
+            grace_secs,
+            dormant_handle,
+        });
+    }
+
+    // PASS TWO: ONE subprocess for every escalated handle, then the verdict.
+    // Duplicate handles collapse in the request and fan back out on read.
+    let escalated: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        pending
+            .iter()
+            .filter_map(|p| p.dormant_handle.clone())
+            .filter(|h| seen.insert(h.clone()))
+            .collect()
+    };
+    summary.dormant_probes_escalated = escalated.len();
+    let tails = if escalated.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        truth_tail_states(&escalated)
+    };
+
+    for p in pending {
+        let PendingRow {
+            entry: e,
+            mut row,
+            id,
+            grace_secs,
+            dormant_handle,
+        } = p;
+        // Only a POSITIVE `done` reading evicts. A handle the batch could not
+        // answer for is absent from the map and stays `false`, exactly as an
+        // unanswered per-row probe did: staleness never reaps.
+        if let Some(handle) = dormant_handle {
+            row.dormant_done = tails.get(&handle).map(|s| s == "done").unwrap_or(false);
+        }
         match crate::gc::gc_action(&row, now, grace_secs) {
             crate::gc::GcAction::Reap => {
                 to_reap.insert(e.name.clone(), e.created_at.clone());
@@ -1589,7 +1675,7 @@ fn gc_sweep_impl_with_node_cascade(
                 to_stamp.insert(e.name.clone(), e.created_at.clone());
             }
             crate::gc::GcAction::Keep => {
-                if is_live && e.exited_at.is_some() {
+                if row.is_live && e.exited_at.is_some() {
                     // Resurrected: drop the stale exit stamp so a later death
                     // starts a fresh grace clock.
                     to_clear.insert(e.name.clone(), e.created_at.clone());
@@ -2543,9 +2629,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // inline in the select arm and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Dead-row GC gate (x-ef7f): its dormant check shells one truth probe per
-    // registry row, so it gets the same one-in-flight discipline as the sweeps
-    // beside it rather than running inline in the select arm.
+    // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
+    // probe, so it gets the same one-in-flight discipline as the sweeps beside
+    // it rather than running inline in the select arm.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
     // I/O (a connect per socket candidate), so the arm spawns it and reads
@@ -2632,9 +2718,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // non-critical, so running it on the idle tick is fine.
                 // Runs off-loop under spawn_blocking behind a one-in-flight
                 // gate, like the scrape and worktree sweeps above (x-ef7f). Its
-                // dormant gate shells `fno agents truth` ONCE PER REGISTRY ROW,
-                // each child bounded at 5s and retried once on a crash, so a
-                // 28-row roster could hold this select arm for minutes at a
+                // dormant gate shells `fno agents truth` ONCE PER SWEEP: one
+                // child answers every escalated handle, bounded on the handle
+                // count and retried once on a crash. It shelled once per ROW
+                // before, each child bounded at 5s, so a 28-row roster could
+                // hold this select arm for minutes at a
                 // time. Inline, that starved accept() -- clients' connects timed
                 // out and lazy-started competing daemons, each adding rows and
                 // lengthening the next sweep -- and it starved the SIGTERM arm
@@ -4695,7 +4783,7 @@ pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
 }
 
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe)
+    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe_many)
 }
 
 /// The attention window this surface orders by. Session-truth's stall window
@@ -4744,9 +4832,12 @@ fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
     )
 }
 
+/// `agent.list`, with the truth probe injected as a BATCH seam: one call for
+/// the whole filtered page, keyed by handle. The per-row seam it replaced spent
+/// one Python interpreter cold start per row per list.
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+    F: Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
 {
     let all = req
         .params
@@ -4831,7 +4922,7 @@ where
         Ok(reg) => reg,
         Err(e) => return registry_read_failed(req.id, e),
     };
-    let classified: Vec<_> = registry
+    let filtered: Vec<_> = registry
         .entries
         .iter()
         .filter(|e| {
@@ -4854,9 +4945,32 @@ where
             }
             true
         })
+        .collect();
+    // ONE probe call for the whole page. This handler renders `state`,
+    // `observed_model` and the reachability triple into every row, so it needs
+    // a real reading per row and no stat can stand in for one: a grown
+    // transcript means the tail CHANGED, which makes the last reading stale
+    // rather than confirmed. Batching is the whole win here, and it is enough -
+    // 24 rows cost 18.7 s as per-row subprocesses and 0.8 s as one.
+    //
+    // Duplicate handles across rows collapse in the request and fan back out on
+    // read: free deduplication the per-row path never had.
+    let handles: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        filtered
+            .iter()
+            .map(|e| registry_truth_handle(e))
+            .filter(|h| seen.insert(h.clone()))
+            .collect()
+    };
+    let truths = truth_fn(&handles);
+    let classified: Vec<_> = filtered
+        .into_iter()
         .map(|e| {
-            let truth_handle = registry_truth_handle(e);
-            let truth = truth_fn(&truth_handle);
+            // A handle absent from the batch behaves exactly as a `None` probe
+            // did on the per-row path: every reader below already treats an
+            // unanswered row that way.
+            let truth = truths.get(&registry_truth_handle(e)).cloned();
             let pid_confirmed_live = e
                 .pid
                 .map(|p| pid_is_ours(p, e.pid_start_time))
@@ -8830,7 +8944,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| None,
             &|_| None,
         );
@@ -8951,7 +9065,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None, // truth tail: no live rows to probe
+            &no_tails, // truth tail: no live rows to probe
             // Session gone from its own store: the empty hit vector.
             &|e| (e.name == "gone-session").then(Vec::new),
             &|_| None, // cascade: store holds nothing to remove
@@ -8998,7 +9112,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| Some(Vec::new()),
             Some(&|entry, node_id, harness, session_id| {
                 assert_eq!(entry.name, "target-x-292e-worker");
@@ -9053,7 +9167,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| Some(Vec::new()),
             Some(&|_, _, _, _| Err("node read-back failed".into())),
             &|_| panic!("harness cascade must be skipped after node refusal"),
@@ -9103,7 +9217,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| None,
             &|_| None,
         );
@@ -9135,13 +9249,192 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|e| (e.name == "orph").then(Vec::new),
             &|_| None,
         );
         assert_eq!(second.reaped, vec!["orph".to_string()]);
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().all(|e| e.name != "orph"));
+    }
+
+    /// x-0d93: the dormant gate spends ONE subprocess per sweep, not one per
+    /// idle row, and no row is dropped by a cap.
+    ///
+    /// `DORMANT_PROBE_CAP` used to stop the sweep at 8 probes, judging an
+    /// arbitrary first eight of a large roster and reporting nothing about the
+    /// rest - a silent truncation living in production. Batching removed the
+    /// reason it existed, so all 40 rows here are judged in one sweep and the
+    /// spend is reported on the summary.
+    #[test]
+    fn gc_dormant_gate_batches_every_idle_row_into_one_call_with_no_cap() {
+        let home = tmp_home("gc-dormant-batch");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let idle_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        let rows = 40;
+        state::update_registry(&home.registry_json(), |r| {
+            for i in 0..rows {
+                let mut row = ask_row(&format!("bg-idle-{i:02}"), None);
+                row.status = AgentStatus::Live;
+                row.short_id = format!("idle{i:02}");
+                row.last_message_at = Some(idle_since.clone());
+                row.pid = Some(std::process::id());
+                r.entries.push(row);
+            }
+        })
+        .unwrap();
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|handles: &[String]| {
+                calls.borrow_mut().push(handles.to_vec());
+                // Every row answers "working": alive, so none may be evicted.
+                handles
+                    .iter()
+                    .map(|h| (h.clone(), "working".to_string()))
+                    .collect()
+            },
+            &|_| None,
+            &|_| None,
+        );
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1, "one sweep, one truth subprocess");
+        assert_eq!(calls[0].len(), rows, "no row is dropped by a cap");
+        assert_eq!(summary.dormant_probes_escalated, rows);
+        assert!(
+            summary.reaped_dormant.is_empty() && summary.reaped.is_empty(),
+            "a working tail is not a done tail"
+        );
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries.len(), rows);
+    }
+
+    /// STALENESS MUST NEVER REAP, pinned. A row can be quiet for hours and
+    /// still be alive - a worker waiting on CI is the ordinary case.
+    ///
+    /// Two ways the sweep could get this wrong, both asserted: a `working`
+    /// tail must keep the row, and a row the probe could not answer for at all
+    /// must keep it too. Only the probe's POSITIVE `done` reading evicts, and
+    /// an unanswered handle is an absence, never a death sentence.
+    #[test]
+    fn gc_dormant_gate_never_reaps_a_quiet_row_the_probe_did_not_call_done() {
+        let home = tmp_home("gc-dormant-noreap");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 6 * 3600);
+        let quiet_since = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            for (name, short) in [("bg-on-ci", "onci"), ("bg-mute", "mute")] {
+                let mut row = ask_row(name, None);
+                row.status = AgentStatus::Live;
+                row.short_id = short.into();
+                row.last_message_at = Some(quiet_since.clone());
+                row.pid = Some(std::process::id());
+                r.entries.push(row);
+            }
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            // "onci" answers working. "mute" is absent from the map entirely:
+            // the batch could not answer for it.
+            &tails_for(|handle| (handle == "onci").then(|| "working".to_string())),
+            &|_| None,
+            &|_| None,
+        );
+
+        assert_eq!(summary.dormant_probes_escalated, 2, "both were asked");
+        assert!(summary.reaped_dormant.is_empty());
+        assert!(summary.reaped.is_empty());
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            reg.entries.iter().any(|e| e.name == "bg-on-ci"),
+            "six hours of quiet with a working tail is alive, not gone"
+        );
+        assert!(
+            reg.entries.iter().any(|e| e.name == "bg-mute"),
+            "an unanswered probe is an absence; it must never evict"
+        );
+    }
+
+    /// A live row whose transcript is ADVANCING costs no probe, and the reason
+    /// is `row_idle_secs`, not a stat gate.
+    ///
+    /// x-0d93 planned a transcript-size gate in front of the dormant probe:
+    /// grown since the last sweep -> skip. This test is why that gate is not
+    /// here. The dormant gate only opens when `idle > grace`, and `idle` is
+    /// `now - max(last_message_at, transcript mtime)`. So the gate opening
+    /// ALREADY proves the transcript has not been touched for over an hour
+    /// (the default grace), while sweeps run every 5 seconds. A row whose
+    /// transcript grew since the last sweep has an mtime seconds old and never
+    /// reaches the probe at all.
+    ///
+    /// The `stat_records` map is passed EMPTY here, which is the cold-sweep
+    /// input a size gate would have to escalate on. The row is still not
+    /// probed. Nothing a size comparison could add is reachable, and a guard
+    /// whose skip arm cannot fire is decoration.
+    #[test]
+    fn a_live_row_with_a_growing_transcript_is_never_probed_by_the_dormant_gate() {
+        let home = tmp_home("gc-advancing");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let transcript = home.root().join("advancing.jsonl");
+        std::fs::write(&transcript, b"{\"type\":\"assistant\"}\n").unwrap();
+
+        // `last_message_at` two hours stale against a 1h grace: on that field
+        // alone this row is long idle and the gate would open.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        state::update_registry(&home.registry_json(), |r| {
+            let mut row = ask_row("bg-advancing", None);
+            row.status = AgentStatus::Live;
+            row.short_id = "bgadv".into();
+            row.last_message_at = Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"));
+            row.pid = Some(std::process::id());
+            r.entries.push(row);
+        })
+        .unwrap();
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &|handles: &[String]| {
+                asked.borrow_mut().extend(handles.iter().cloned());
+                std::collections::HashMap::new()
+            },
+            // The transcript written a moment ago IS this row's newest match.
+            &|_| Some(vec![transcript.clone()]),
+            &|_| None,
+        );
+
+        assert!(
+            asked.into_inner().is_empty(),
+            "a fresh transcript mtime closes the dormant gate before any probe is considered"
+        );
+        assert_eq!(summary.dormant_probes_escalated, 0);
+        assert!(summary.reaped_dormant.is_empty());
     }
 
     /// AC7 end-to-end: a LIVE row idle past grace whose tail reads done leaves
@@ -9180,10 +9473,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|handle| match handle {
+            &tails_for(|handle| match handle {
                 "bgdone" => Some("done".to_string()),
                 _ => Some("watching".to_string()), // the credential-dead shape
-            },
+            }),
             &|_| None,
             &|_| None,
         );
@@ -9234,7 +9527,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| None,
             // The cascade refuses for this row: the harness store would not
             // give the session up.
@@ -9338,7 +9631,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(3600),
             true,
-            &|_| None,
+            &no_tails,
             &|_| None,
             &|_| None,
         );
@@ -9416,7 +9709,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter_old,
             &|_| Duration::from_secs(3600),
             false,
-            &|_| None,
+            &no_tails,
             &|_| None,
             &|_| None,
         );
@@ -9434,7 +9727,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter_new,
             &|harness| Duration::from_secs(if harness == "codex" { 8 * 3600 } else { 3600 }),
             false,
-            &|_| None,
+            &no_tails,
             &|_| None,
             &|_| None,
         );
@@ -9507,7 +9800,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             &|_| Duration::from_secs(0),
             false,
-            &live_truth_tail_state,
+            &live_truth_tail_states,
             &|_| None,
             &|_| None,
         );
@@ -11530,6 +11823,47 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
     }
 
+    /// The dormant gate's batch seam answering for nobody: no row's tail is
+    /// readable. Every caller below has no live rows to probe, so this is the
+    /// same "the probe said nothing" input the per-handle `None` used to be.
+    fn no_tails(_handles: &[String]) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+
+    /// Adapt a per-handle tail answer into the dormant gate's BATCH seam, for
+    /// tests that stage a specific tail per row rather than counting spawns.
+    fn tails_for(
+        f: impl Fn(&str) -> Option<String>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, String> {
+        move |handles: &[String]| {
+            handles
+                .iter()
+                .filter_map(|h| Some((h.clone(), f(h)?)))
+                .collect()
+        }
+    }
+
+    /// Adapt a per-handle answer into the BATCH seam `handle_list_with_truth`
+    /// takes, for the rendering tests below - they assert what a row renders,
+    /// never how many processes paid for it.
+    ///
+    /// Deliberately NOT used by
+    /// `list_pays_exactly_one_batch_call_for_the_whole_page`: an adapter that
+    /// fans a batch back out per handle would render identically whether the
+    /// handler called it once or once per row, so the call SHAPE needs its own
+    /// test against the raw seam.
+    fn per_handle(
+        f: impl Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
+    ) -> impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>
+    {
+        move |handles: &[String]| {
+            handles
+                .iter()
+                .filter_map(|h| Some((h.clone(), f(h)?)))
+                .collect()
+        }
+    }
+
     /// A probe carrying the shared verdict, as a current `fno` emits it.
     fn probe_with_verdict(
         state: &str,
@@ -11999,7 +12333,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12068,9 +12402,11 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| {
-            probe_with_verdict("working", "reachable")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| probe_with_verdict("working", "reachable")),
+        );
         let row = &response.result().unwrap()["agents"][0];
 
         assert_eq!(row["reachability"], "reachable");
@@ -12088,7 +12424,7 @@ done
         // A probe that did not answer leaves all five null. That is NOT the
         // same as `no-evidence`, which is a verdict this emitter must never
         // invent on the probe's behalf.
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert!(row["reachability"].is_null());
         assert!(row["basis"].is_null());
@@ -12106,9 +12442,11 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| {
-            probe_with_age("working", "reachable", None)
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| probe_with_age("working", "reachable", None)),
+        );
         let row = &response.result().unwrap()["agents"][0];
 
         assert!(row["last_activity_age_s"].is_null());
@@ -12125,9 +12463,11 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
 
         let parked = Request::new(1, "agent.list", json!({"progress": "parked"}));
-        let response = handle_list_with_truth(&ctx, &parked, |_handle| {
-            probe_with_verdict("done", "reachable")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &parked,
+            per_handle(|_handle| probe_with_verdict("done", "reachable")),
+        );
         assert_eq!(
             response.result().unwrap()["agents"]
                 .as_array()
@@ -12137,9 +12477,11 @@ done
         );
 
         let advancing = Request::new(2, "agent.list", json!({"progress": "advancing"}));
-        let response = handle_list_with_truth(&ctx, &advancing, |_handle| {
-            probe_with_verdict("done", "reachable")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &advancing,
+            per_handle(|_handle| probe_with_verdict("done", "reachable")),
+        );
         assert!(response.result().unwrap()["agents"]
             .as_array()
             .unwrap()
@@ -12196,19 +12538,23 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| {
-            Some(crate::claude_ask::TruthProbe {
-                state: "working".into(),
-                reachability: Some("reachable".into()),
-                basis: Some("transcript".into()),
-                last_activity_age_s: Some(3.5),
-                last_event_at: None,
-                last_message: None,
-                observed_model: json!({
-                    "kind": "observed", "model": "glm-5.2", "samples": 300
-                }),
-            })
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|_handle| {
+                Some(crate::claude_ask::TruthProbe {
+                    state: "working".into(),
+                    reachability: Some("reachable".into()),
+                    basis: Some("transcript".into()),
+                    last_activity_age_s: Some(3.5),
+                    last_event_at: None,
+                    last_message: None,
+                    observed_model: json!({
+                        "kind": "observed", "model": "glm-5.2", "samples": 300
+                    }),
+                })
+            }),
+        );
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"]["model"], "glm-5.2");
         assert_eq!(row["observed_model"]["kind"], "observed");
@@ -12216,7 +12562,7 @@ done
         // A probe that did not answer must not leave a bare null: an absent
         // value is what an operator correctly reads as proving nothing, which
         // is the exact misreading this field exists to end.
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["observed_model"], json!({"kind": "no-transcript"}));
 
@@ -12241,7 +12587,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["status"], "live");
 
@@ -12264,7 +12610,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| None));
         let row = &response.result().unwrap()["agents"][0];
         assert_eq!(row["status"], "unknown");
 
@@ -12290,7 +12636,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12316,7 +12662,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
 
         assert_eq!(result["agents"][0]["crown"], "L1 ?");
@@ -12333,7 +12679,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -12389,7 +12735,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| probe("working")));
         let result = response.result().unwrap();
         let agents = result["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
@@ -12406,10 +12752,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(seen.into_inner(), vec!["uuid-abc12345"]);
@@ -12431,10 +12781,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12458,10 +12812,14 @@ done
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
@@ -12486,16 +12844,89 @@ done
         let req = Request::new(1, "agent.list", json!({"provider": "codex"}));
         let seen = std::cell::RefCell::new(Vec::new());
 
-        let response = handle_list_with_truth(&ctx, &req, |handle| {
-            seen.borrow_mut().push(handle.to_string());
-            probe("working")
-        });
+        let response = handle_list_with_truth(
+            &ctx,
+            &req,
+            per_handle(|handle| {
+                seen.borrow_mut().push(handle.to_string());
+                probe("working")
+            }),
+        );
 
         assert!(response.result().is_some());
         assert_eq!(
             seen.into_inner(),
             vec!["bbbbbbbb-1111-2222-3333-444444444444"]
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_pays_exactly_one_batch_call_for_the_whole_page() {
+        // The x-0d93 fix, asserted where it is spent: N rows used to cost N
+        // Python interpreter cold starts (780 ms each) on every `fno agents
+        // list`. Asserted against the RAW seam, never `per_handle` -- an
+        // adapter that fans a batch back out renders identically whether the
+        // handler called it once or once per row, so only a direct call count
+        // can tell the two apart.
+        let home = short_home("listbatchonce");
+        let rows = 24;
+        for i in 0..rows {
+            seed_stream_row(&home, &format!("worker-{i:02}"), &format!("{i:02}aaaaaa"));
+        }
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
+            calls.borrow_mut().push(handles.to_vec());
+            handles
+                .iter()
+                .map(|h| (h.clone(), probe("working").unwrap()))
+                .collect()
+        });
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1, "one page, one batch");
+        assert_eq!(calls[0].len(), rows, "every filtered row rides that batch");
+        let entries = response.result().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(entries, rows);
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn list_row_the_batch_did_not_answer_renders_exactly_as_an_unanswered_row() {
+        // A handle absent from the batch map must be indistinguishable from the
+        // per-row path's `None`: null triple, no invented model. Anything else
+        // and the batch would be reporting a reading it never took.
+        let home = short_home("listbatchpartial");
+        seed_stream_row(&home, "answered", "aaaaaaaa");
+        seed_stream_row(&home, "unanswered", "bbbbbbbb");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({"all": true}));
+
+        let response = handle_list_with_truth(&ctx, &req, |handles: &[String]| {
+            // Answers for the first handle only; the second is simply missing.
+            handles
+                .iter()
+                .take(1)
+                .map(|h| (h.clone(), probe("working").unwrap()))
+                .collect()
+        });
+
+        let agents = response.result().unwrap()["agents"].clone();
+        let rows = agents.as_array().unwrap();
+        let missing = rows
+            .iter()
+            .find(|r| r["name"] == "unanswered")
+            .expect("the unanswered row still renders");
+        assert!(missing["reachability"].is_null());
+        assert!(missing["basis"].is_null());
+        assert!(missing["last_activity_age_s"].is_null());
+        assert_eq!(missing["observed_model"]["kind"], "no-transcript");
         std::fs::remove_dir_all(home.root()).ok();
     }
 

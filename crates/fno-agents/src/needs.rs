@@ -744,22 +744,45 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
 ///
 /// Reads the live registry directly (IO layer, like [`carveout_age_item`] /
 /// [`stale_claim_item`]), never from `events.jsonl`: a refusal is a current
-/// FACT about a row, not an event that happened once. One truth probe per
-/// row -- the same probe `fno agents list` already pays for `status` -- so
-/// this leg costs nothing a live roster read did not already cost.
+/// FACT about a row, not an event that happened once. ONE batched truth probe
+/// for the whole registry -- the same probe `fno agents list` already pays for
+/// `status` -- so this leg costs one subprocess no matter how large the roster.
 /// Best-effort: an unreadable registry or a probe failure degrades to no
 /// items, never a crash of `fno agents needs`.
 fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
+    refused_worker_items_with(home, crate::claude_ask::family1_truth_probe_many)
+}
+
+/// [`refused_worker_items`] with the batch probe injected, so a test can count
+/// the subprocesses the leg costs without shelling out to a real `fno`.
+///
+/// No stat gate on this leg, deliberately. The decision reads `observed_model`
+/// to tell a refusing worker from a working one, and transcript growth says
+/// nothing about WHICH model answered. A stat can only stand in for a probe
+/// where the question is liveness.
+fn refused_worker_items_with(
+    home: &AgentsHome,
+    truth_fn: impl Fn(&[String]) -> std::collections::HashMap<String, crate::claude_ask::TruthProbe>,
+) -> Vec<NeedItem> {
     let registry = match crate::daemon::load_registry_asserted(&home.registry_json()) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
+    let handles: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        registry
+            .entries
+            .iter()
+            .map(crate::daemon::registry_truth_handle)
+            .filter(|h| seen.insert(h.clone()))
+            .collect()
+    };
+    let truths = truth_fn(&handles);
     let mut items = Vec::new();
     for e in &registry.entries {
-        let handle = crate::daemon::registry_truth_handle(e);
-        let probe = crate::claude_ask::family1_truth_probe(&handle);
+        let probe = truths.get(&crate::daemon::registry_truth_handle(e));
         let (progress, _basis) = crate::daemon::progress_from_truth(
-            probe.as_ref(),
+            probe,
             e.harness_name(),
             e.route_settings_path.as_deref(),
         );
@@ -767,7 +790,6 @@ fn refused_worker_items(home: &AgentsHome) -> Vec<NeedItem> {
             continue;
         }
         let model = probe
-            .as_ref()
             .and_then(|p| p.observed_model.get("model"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown model");
@@ -994,6 +1016,94 @@ mod tests {
         assert_eq!(items[0].kind, "review_wedged");
         assert_eq!(items[0].session_id, "s");
         assert!(items[0].evidence.contains("5 checks"));
+    }
+
+    /// A registry home with `rows` claude rows, each with a resolvable handle.
+    fn refused_home(tag: &str, rows: usize) -> AgentsHome {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static C: AtomicU32 = AtomicU32::new(0);
+        let n = C.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::path::PathBuf::from(format!("/tmp/fnoneeds{tag}{}_{n}", std::process::id()));
+        let home = AgentsHome::at(&root);
+        home.ensure_root().unwrap();
+        // Written as JSON rather than a struct literal: `RegistryEntry` has 30
+        // optional fields with serde defaults and none of them matter here.
+        let entries: Vec<serde_json::Value> = (0..rows)
+            .map(|i| {
+                serde_json::json!({
+                    "name": format!("worker-{i:02}"),
+                    "short_id": format!("{i:02}aaaaaa"),
+                    "harness": "claude",
+                    "harness_session_id": format!("sid-{i:02}"),
+                    "cwd": "/tmp",
+                    "project_root": "/tmp",
+                    "status": "live",
+                    "created_at": "2026-08-19T00:00:00Z",
+                })
+            })
+            .collect();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 6,
+                "agents": entries,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        home
+    }
+
+    fn refused_probe(model: &str) -> crate::claude_ask::TruthProbe {
+        crate::claude_ask::TruthProbe {
+            state: "working".into(),
+            reachability: Some("reachable".into()),
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(1.0),
+            last_event_at: None,
+            last_message: None,
+            observed_model: serde_json::json!({"kind": "observed", "model": model}),
+        }
+    }
+
+    #[test]
+    fn refused_leg_pays_exactly_one_batch_call_regardless_of_roster_size() {
+        // x-0d93: this leg used to spawn one Python interpreter per registry
+        // row on every `fno agents needs`. One batch, one process, 24 rows.
+        let home = refused_home("batchonce", 24);
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let items = refused_worker_items_with(&home, |handles: &[String]| {
+            calls.borrow_mut().push(handles.to_vec());
+            handles
+                .iter()
+                .map(|h| (h.clone(), refused_probe("gpt-5.6-luna")))
+                .collect()
+        });
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1, "one registry read, one probe process");
+        assert_eq!(calls[0].len(), 24, "every row rides that one batch");
+        assert_eq!(items.len(), 24, "and every row is still classified");
+        assert!(items[0].title.as_ref().unwrap().contains("gpt-5.6-luna"));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn refused_leg_on_an_unreadable_registry_returns_no_items() {
+        // Unchanged contract: this leg is best-effort and must never crash
+        // `fno agents needs`. A registry it cannot read also spends no
+        // subprocess, which the panicking factory is what asserts.
+        let home = refused_home("unreadable", 0);
+        std::fs::write(home.registry_json(), b"{ not json at all").unwrap();
+
+        let items = refused_worker_items_with(&home, |_| {
+            panic!("an unreadable registry means no probe to spend")
+        });
+
+        assert!(items.is_empty());
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]

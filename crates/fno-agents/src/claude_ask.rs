@@ -314,64 +314,139 @@ impl TruthAttempt {
     }
 }
 
-fn family1_truth_attempt(
+/// The outcome of running one truth subprocess to a deadline, before any
+/// decoding. Shared by the single-handle attempt and the batch one so the
+/// spawn, the poll loop, and the WARN wording have exactly one implementation.
+#[derive(Debug)]
+enum BoundedRun {
+    /// Never started. `uv tool install --reinstall` replaces the `fno` console
+    /// script itself, not just the package tree, so that window shows up out
+    /// here as a bare ENOENT on spawn - the same "measured nothing" shape as an
+    /// import crash, and it buys the same single retry.
+    SpawnFailed,
+    /// Started, produced nothing usable (timed out, or the wait/collect
+    /// failed). Already warned; a second run would only repeat it.
+    NoOutput,
+    Output(std::process::Output),
+}
+
+fn run_truth_subprocess(
     mut command: std::process::Command,
     timeout: Duration,
-    handle: &str,
-    warn_on_crash: bool,
-) -> TruthAttempt {
+    label: &str,
+    warn_on_spawn_failure: bool,
+) -> BoundedRun {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            // `uv tool install --reinstall` replaces the `fno` console script
-            // itself, not just the package tree, so the window shows up out here
-            // as a bare ENOENT on spawn. That is the same "measured nothing"
-            // shape as an import crash and gets the same single retry, with the
-            // WARN held back for it.
-            if warn_on_crash {
-                eprintln!("WARN: family-1 truth probe for {handle} failed to start: {error}");
+            if warn_on_spawn_failure {
+                eprintln!("WARN: family-1 truth probe for {label} failed to start: {error}");
             }
-            return TruthAttempt {
-                probe: None,
-                crashed: true,
-            };
+            return BoundedRun::SpawnFailed;
         }
     };
+    // Drain both pipes for the WHOLE run, on their own threads. Waiting for
+    // exit before reading deadlocks against a child that fills the pipe
+    // buffer: it blocks in write() and can never reach exit, so `try_wait`
+    // never reports one and the deadline kills a process that was healthy.
+    // Batching is what put this in reach. One handle's answer is ~535 bytes
+    // measured against the live roster, so a single probe had a hundredfold
+    // margin under the 64 KiB buffer, while N handles cross it near 120 rows
+    // -- and an 88-row roster is already on the record in `daemon.rs`, with
+    // `last_message` free text able to inflate any one entry.
+    //
+    // The readers hand their bytes back over a channel rather than a join
+    // handle, because a JOIN here is its own unbounded wait: a GRANDCHILD
+    // inherits these pipe fds, so `read_to_end` does not end when the child
+    // does. `sh -c "sleep 5"` under a 50ms bound proves it -- joining waited
+    // the full five seconds and blew the bound this function exists to keep.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} timed out");
-                return TruthAttempt::answered(None);
+                eprintln!("WARN: family-1 truth probe for {label} timed out");
+                break None;
             }
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                eprintln!("WARN: family-1 truth probe for {handle} wait failed: {error}");
-                return TruthAttempt::answered(None);
+                eprintln!("WARN: family-1 truth probe for {label} wait failed: {error}");
+                break None;
             }
         }
-    }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(error) => {
-            eprintln!("WARN: family-1 truth probe for {handle} output failed: {error}");
-            return TruthAttempt::answered(None);
+    };
+    // A run that blew its bound is over NOW. Waiting on the readers here is
+    // what broke the bound in the first place, and there is no answer to
+    // collect anyway; the threads end when the fds finally close.
+    let Some(status) = status else {
+        return BoundedRun::NoOutput;
+    };
+    // The child exited on its own, so its bytes are already written and the
+    // readers are done or nearly so. Still bounded, for the same grandchild
+    // reason: an inherited fd can hold these pipes open past the child's own
+    // exit, and this function may never wait without a limit.
+    const DRAIN_GRACE: Duration = Duration::from_secs(2);
+    let stdout = match out_rx.recv_timeout(DRAIN_GRACE) {
+        Ok(buf) => buf,
+        Err(_) => {
+            eprintln!("WARN: family-1 truth probe for {label} left its output undrained");
+            return BoundedRun::NoOutput;
         }
     };
+    // stderr is diagnostic only, so a slow one degrades to empty rather than
+    // discarding an answer stdout already delivered.
+    let stderr = err_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+    BoundedRun::Output(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn family1_truth_attempt(
+    command: std::process::Command,
+    timeout: Duration,
+    handle: &str,
+    warn_on_crash: bool,
+) -> TruthAttempt {
+    let output = match run_truth_subprocess(command, timeout, handle, warn_on_crash) {
+        BoundedRun::SpawnFailed => {
+            return TruthAttempt {
+                probe: None,
+                crashed: true,
+            }
+        }
+        BoundedRun::NoOutput => return TruthAttempt::answered(None),
+        BoundedRun::Output(output) => output,
+    };
     let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
-    let state = parsed
-        .as_ref()
-        .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     if !output.status.success() {
         // No parseable body at all means the process never reached the code
         // that writes one, so this run measured nothing about the session -
@@ -400,19 +475,15 @@ fn family1_truth_attempt(
         // standing to assert liveness, so this is monotone-lowering only,
         // exactly like `lower_state_with_verdict` above - it can report
         // done/stalled/unknown, never invent "still working".
-        let probe = match state.as_deref() {
-            Some(s @ ("done" | "stalled" | "unknown")) => {
-                Some(build_truth_probe(parsed.as_ref(), s))
-            }
-            _ => None,
-        };
+        let probe = parsed
+            .as_ref()
+            .and_then(parse_truth_payload)
+            .filter(|p| matches!(p.state.as_str(), "done" | "stalled" | "unknown"));
         return TruthAttempt { probe, crashed };
     }
-    TruthAttempt::answered(match state.as_deref() {
-        Some(s @ ("done" | "watching" | "your-move" | "working" | "stalled" | "unknown")) => {
-            Some(build_truth_probe(parsed.as_ref(), s))
-        }
-        _ => {
+    TruthAttempt::answered(match parsed.as_ref().and_then(parse_truth_payload) {
+        Some(probe) => Some(probe),
+        None => {
             eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
         }
@@ -443,6 +514,260 @@ fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthPr
         observed_model: parsed
             .and_then(|value| value.get("observed_model").cloned())
             .unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// Decode ONE truth payload into a [`TruthProbe`]: the `{state, reachability,
+/// basis, ...}` object `_truth_payload` writes, whether it arrived alone or as
+/// one value of a `--handles` batch.
+///
+/// `None` when `state` is absent or is not one of the six the verb emits, which
+/// is the malformed-output case both entry points already refuse.
+///
+/// The single decoder is the point. Two of them is how a batch reading and a
+/// single reading of the same transcript start disagreeing about the same row.
+fn parse_truth_payload(value: &serde_json::Value) -> Option<TruthProbe> {
+    let state = value.get("state")?.as_str()?;
+    match state {
+        "done" | "watching" | "your-move" | "working" | "stalled" | "unknown" => {
+            Some(build_truth_probe(Some(value), state))
+        }
+        _ => None,
+    }
+}
+
+/// The batch spelling of [`family1_truth_command`]: N handles, ONE interpreter.
+///
+/// Batch mode always exits 0 Python-side (see `cmd_truth`'s `--handles` help),
+/// so the exit code carries no per-handle verdict here and the keyed object is
+/// the whole answer. A handle the batch could not resolve is present with
+/// `state: "unknown"` and its own `reason`.
+fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
+    let mut command = std::process::Command::new("fno");
+    command
+        .args(["agents", "truth", "--handles", &handles.join(","), "--json"])
+        .env("FNO_AGENTS_RUNTIME", "python");
+    command
+}
+
+/// [`family1_truth_probe`] for many handles at once: one child, one cold start.
+///
+/// The daemon probes every roster row on every sweep. Measured on the
+/// operator's box: 0.83 ms of real work per handle behind 780 ms of Python
+/// interpreter startup, a 940-to-1 ratio, so 24 rows cost 18.7 s as
+/// subprocesses and 19.9 ms in one process.
+///
+/// This is a BATCH and not a Rust reimplementation on purpose. [`TruthProbe`]'s
+/// own doc states the constraint: `state` and `observed_model` come from the
+/// SAME reader, so the Rust list emitter reports the identical reading the
+/// Python one does. A Rust port would grow the second transcript reader that
+/// constraint exists to prevent; batching removes the cost and keeps one
+/// reader.
+///
+/// Bounded by [`family1_truth_batch_timeout`], and buying the same
+/// one-silent-retry-on-crash the single probe documents. The retry now re-costs
+/// one cold start for the whole batch rather than one per row. An EMPTY slice
+/// returns an empty map without spawning anything.
+///
+/// A batch that FAILS after its retry falls back to one probe per handle. That
+/// costs exactly what this function exists to delete, and it is still right,
+/// because the alternative is a total outage of the truth column. The trigger
+/// is not hypothetical: an `fno` on PATH that predates `--handles` exits 2 on
+/// the unknown option, and every worktree carries its own binary, so a
+/// half-deployed tree is the ORDINARY state right after this lands. Without the
+/// fallback every list row renders null reachability and `no-transcript`, the
+/// dormant gate can never reach the positive `done` reading an eviction needs,
+/// and `fno agents needs` reports no refused workers - all three at once, until
+/// someone runs `fno update`.
+///
+/// The fallback is keyed on a FAILURE, never on an empty answer. A batch that
+/// ran and legitimately resolved nothing returns an empty map and spends no
+/// second round; only a batch that never answered escalates. Reading "no
+/// answers" as "the batch broke" would re-spawn N processes every sweep over a
+/// roster where nothing resolves.
+pub fn family1_truth_probe_many(
+    handles: &[String],
+) -> std::collections::HashMap<String, TruthProbe> {
+    // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
+    // put on the wire: the reader would split it into two handles that match
+    // no row, and that row would go unanswered on every list, silently and
+    // forever. It takes the single-handle path instead, where it rides its own
+    // argv element and no splitting happens. The canonical namer sanitizes to
+    // [a-z0-9-] and cannot produce one, but that guard sits on ONE of the
+    // paths that write a row's name, and this seam is where the assumption
+    // actually lives.
+    let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
+        handles.iter().cloned().partition(|h| !h.contains(','));
+    let mut probes = family1_truth_probe_batchable(&batchable);
+    for handle in unrepresentable {
+        if let Some(probe) = family1_truth_probe(&handle) {
+            probes.insert(handle, probe);
+        }
+    }
+    probes
+}
+
+fn family1_truth_probe_batchable(
+    handles: &[String],
+) -> std::collections::HashMap<String, TruthProbe> {
+    match family1_truth_batch_retrying(
+        handles,
+        family1_truth_batch_command,
+        family1_truth_batch_timeout(handles.len()),
+    ) {
+        Some(probes) => probes,
+        None => {
+            eprintln!(
+                "WARN: family-1 truth batch of {} handles failed twice; \
+                 falling back to one probe per handle. Either this `fno` \
+                 predates `--handles` (run `fno update`), or no `fno` is on \
+                 PATH right now (a `uv tool install --reinstall` window).",
+                handles.len()
+            );
+            handles
+                .iter()
+                .filter_map(|handle| Some((handle.clone(), family1_truth_probe(handle)?)))
+                .collect()
+        }
+    }
+}
+
+/// The batch's wall-clock bound, scaled to the work asked for.
+///
+/// The single probe's flat 5 s is a budget for ONE handle. Handing a batch of N
+/// the same budget is the defect this function exists to prevent: measured
+/// against the live roster, one handle's resolve costs 90-160 ms of real work
+/// (a registry read plus a transcript-store walk), so twelve real handles took
+/// 5.7 s and a flat 5 s killed the child mid-flight. The whole page then came
+/// back EMPTY - every row rendering null reachability and `no-transcript` - and
+/// the dormant gate stopped evicting, because its verdict needs a positive
+/// `done` reading it could no longer get. A batch that times out is strictly
+/// worse than the per-row probes it replaced, which each had their own 5 s.
+///
+/// 300 ms per handle is roughly double the measured cost, so an ordinary sweep
+/// finishes well inside it. The ceiling keeps one pathological transcript from
+/// wedging a sweep for minutes; the daemon runs this in `spawn_blocking`, off
+/// the select arm, so a long batch cannot starve `accept()` the way the inline
+/// probes once did.
+fn family1_truth_batch_timeout(handles: usize) -> Duration {
+    const BASE: Duration = Duration::from_secs(5);
+    const PER_HANDLE: Duration = Duration::from_millis(300);
+    const CEILING: Duration = Duration::from_secs(60);
+    std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
+}
+
+/// [`family1_truth_probe_many`] with the command built per attempt, so a test
+/// can count the spawns a given failure shape actually costs - and assert that
+/// an empty slice costs none. Mirrors [`family1_truth_probe_retrying`].
+/// `None` means the batch never answered, even after its retry - the signal
+/// [`family1_truth_probe_many`] falls back on. `Some(map)` is a real answer,
+/// including `Some(empty)` for a batch that ran and resolved nothing.
+fn family1_truth_batch_retrying(
+    handles: &[String],
+    mut command_for_attempt: impl FnMut(&[String]) -> std::process::Command,
+    timeout: Duration,
+) -> Option<std::collections::HashMap<String, TruthProbe>> {
+    if handles.is_empty() {
+        return Some(std::collections::HashMap::new());
+    }
+    // Warnings name the batch, not a row: no single handle owns the failure.
+    let label = format!("a batch of {} handles", handles.len());
+    let first = family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, false);
+    if !first.crashed {
+        return Some(first.probes);
+    }
+    let second = family1_truth_batch_attempt(command_for_attempt(handles), timeout, &label, true);
+    if second.crashed {
+        return None;
+    }
+    Some(second.probes)
+}
+
+/// One batch run's outcome. `crashed` carries exactly the meaning
+/// [`TruthAttempt::crashed`] does: the run measured nothing, so a second is
+/// worth one try.
+struct TruthBatchAttempt {
+    probes: std::collections::HashMap<String, TruthProbe>,
+    crashed: bool,
+}
+
+fn family1_truth_batch_attempt(
+    command: std::process::Command,
+    timeout: Duration,
+    label: &str,
+    warn_on_crash: bool,
+) -> TruthBatchAttempt {
+    let empty = || std::collections::HashMap::new();
+    let output = match run_truth_subprocess(command, timeout, label, warn_on_crash) {
+        BoundedRun::SpawnFailed => {
+            return TruthBatchAttempt {
+                probes: empty(),
+                crashed: true,
+            }
+        }
+        // A timeout is an ANSWER, not a crash, so it buys no retry - the same
+        // rule the single probe follows. Deliberate: with a bound that scales
+        // to the handle count, a timeout means a genuine malfunction rather
+        // than an underfunded batch, and retrying would double a wait already
+        // measured in tens of seconds. The bound is the fix for a slow batch;
+        // a retry never was.
+        //
+        // This one flag also withholds the per-handle FALLBACK, which is a
+        // second decision and is meant here too. A batch slow enough to blow a
+        // bound that already scales at 300ms a handle will not be rescued by N
+        // probes each carrying its own 5s: that trades one long wait for a
+        // longer one, on a box already struggling. The outage a fallback
+        // exists to prevent is a batch that CANNOT answer, not one that is
+        // merely slow. A timeout nulls this page and the next sweep tries
+        // again in seconds.
+        BoundedRun::NoOutput => {
+            return TruthBatchAttempt {
+                probes: empty(),
+                crashed: false,
+            }
+        }
+        BoundedRun::Output(output) => output,
+    };
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    match parsed.as_ref().and_then(|value| value.as_object()) {
+        // The keyed object IS the answer. The exit code is deliberately not
+        // consulted: batch mode always exits 0, so it carries nothing a reader
+        // could act on, and every per-handle verdict rides its own entry.
+        Some(object) => TruthBatchAttempt {
+            probes: object
+                .iter()
+                .filter_map(|(handle, value)| Some((handle.clone(), parse_truth_payload(value)?)))
+                .collect(),
+            crashed: false,
+        },
+        // No keyed object and a non-zero exit: the process died before writing
+        // one, or this `fno` predates `--handles` and refused the usage. Both
+        // measured nothing, so both buy the one retry.
+        None if !output.status.success() => {
+            let detail = family1_truth_failure_detail(
+                &output.stdout,
+                &String::from_utf8_lossy(&output.stderr),
+            );
+            if warn_on_crash && !truth_failure_is_routine(&detail) {
+                eprintln!(
+                    "WARN: family-1 truth probe for {label} exited {}: {}",
+                    output.status, detail
+                );
+            }
+            TruthBatchAttempt {
+                probes: empty(),
+                crashed: true,
+            }
+        }
+        // Exited clean and wrote something that is not a keyed object. A real
+        // answer, just an unusable one; a retry would repeat it.
+        None => {
+            eprintln!("WARN: family-1 truth probe for {label} returned malformed output");
+            TruthBatchAttempt {
+                probes: empty(),
+                crashed: false,
+            }
+        }
     }
 }
 
@@ -4539,6 +4864,75 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_answer_larger_than_the_pipe_buffer_still_comes_back_whole() {
+        // The reader used to wait for exit before reading a word, which
+        // deadlocks against a child blocked in write() once its answer passes
+        // the pipe buffer -- 64 KiB, measured on the machine this was written
+        // on. The child then cannot exit, the deadline kills a healthy
+        // process, and the batch reports NoOutput. That maps to `crashed:
+        // false`, so it buys no retry and no per-handle fallback either: every
+        // row on the page renders null reachability at once.
+        //
+        // Sized well past the buffer on purpose. One handle's answer measured
+        // ~535 bytes against the live roster, so this stands in for a roster
+        // of a few hundred rows -- and for a smaller one carrying a single fat
+        // `last_message`.
+        const PAYLOAD: usize = 400 * 1024;
+        let mut fat = std::process::Command::new("sh");
+        fat.args(["-c", &format!("head -c {PAYLOAD} /dev/zero | tr '\\0' 'x'")]);
+        let started = Instant::now();
+        let run = run_truth_subprocess(fat, Duration::from_secs(20), "a fat batch", false);
+        match run {
+            BoundedRun::Output(output) => {
+                assert_eq!(
+                    output.stdout.len(),
+                    PAYLOAD,
+                    "the whole answer must survive, not just the first bufferful"
+                );
+                assert!(output.status.success(), "the child exited on its own");
+            }
+            other => panic!("a large answer must not read as a failed run: {other:?}"),
+        }
+        // Bounded well under the deadline: proves it returned because the
+        // child finished, not because the timeout fired.
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_open_cannot_outrun_the_bound() {
+        // The regression that the drain itself introduced, pinned so it cannot
+        // come back. The child exits AT ONCE while a grandchild keeps the
+        // inherited stdout open for 30s. Reading to end therefore does not end
+        // when the child does, so joining the reader waited on the grandchild
+        // and blew the bound. This must return on the drain grace instead.
+        //
+        // Written with an explicit background grandchild rather than a plain
+        // `sleep`, because a shell may exec a single command in place, which
+        // leaves no grandchild at all and quietly passes on one platform while
+        // failing on another. That is exactly how this reached CI.
+        let mut orphan = std::process::Command::new("sh");
+        orphan.args(["-c", "sleep 30 & exit 0"]);
+        let started = Instant::now();
+        let _ = run_truth_subprocess(orphan, Duration::from_millis(200), "an orphan", false);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the call waited on a grandchild instead of its own bound"
+        );
+    }
+
+    #[test]
+    fn a_child_that_never_exits_is_still_bounded_after_the_drain() {
+        // The drain must not cost the bound: a child holding its pipes open
+        // forever still has to be killed on the deadline.
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 30"]);
+        let started = Instant::now();
+        let run = run_truth_subprocess(hung, Duration::from_millis(100), "a hung batch", false);
+        assert!(matches!(run, BoundedRun::NoOutput));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn only_a_routine_not_found_is_silenced() {
         // The quiet/loud split, pinned directly rather than inferred from a
         // return value both branches share.
@@ -4617,6 +5011,205 @@ mod tests {
             None,
             "a non-zero exit must never assert a live state"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // family1_truth_probe_many: N handles, ONE cold start (x-0d93)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn family1_truth_batch_decodes_every_handle_from_one_spawn() {
+        // The whole win: 24 rows used to cost 24 interpreter starts. One spawn
+        // must come back with every row's full payload, triple included -- a
+        // batch that dropped fields would render a poorer list row than the
+        // per-row path it replaces.
+        let spawns = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string(), "h2".to_string()],
+            |handles| {
+                spawns.set(spawns.get() + 1);
+                assert_eq!(handles.len(), 2);
+                sh(
+                    "printf '{\"h1\":{\"state\":\"working\",\"reachability\":\"reachable\",\
+                    \"basis\":\"transcript\",\"last_activity_age_s\":12.5,\
+                    \"observed_model\":{\"kind\":\"observed\",\"model\":\"glm-5.3\"}},\
+                    \"h2\":{\"state\":\"done\",\"reachability\":\"reachable\",\
+                    \"basis\":\"transcript\"}}'",
+                )
+            },
+            Duration::from_secs(5),
+        )
+        .expect("the batch answered");
+        assert_eq!(spawns.get(), 1, "one batch, one process");
+        assert_eq!(probes.len(), 2);
+        let h1 = &probes["h1"];
+        assert_eq!(h1.state, "working");
+        assert_eq!(h1.reachability.as_deref(), Some("reachable"));
+        assert_eq!(h1.basis.as_deref(), Some("transcript"));
+        assert_eq!(h1.last_activity_age_s, Some(12.5));
+        assert_eq!(h1.observed_model["model"], "glm-5.3");
+        assert_eq!(probes["h2"].state, "done");
+    }
+
+    #[test]
+    fn family1_truth_batch_on_an_empty_slice_spawns_nothing() {
+        // A sweep with nothing to escalate must cost NO subprocess. A factory
+        // that panics is the only way to assert an absence of spawns without
+        // reading one.
+        let probes = family1_truth_batch_retrying(
+            &[],
+            |_| panic!("an empty batch must never spawn"),
+            Duration::from_secs(5),
+        )
+        .expect("an empty batch is an answer, not a failure");
+        assert!(probes.is_empty());
+    }
+
+    #[test]
+    fn family1_truth_batch_crash_is_retried_exactly_once_for_the_whole_batch() {
+        // The reinstall window costs the batch ONE extra cold start, not one
+        // per row -- the retry rule the single probe documents, priced per
+        // batch.
+        let attempts = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| {
+                attempts.set(attempts.get() + 1);
+                match attempts.get() {
+                    1 => sh("echo 'ModuleNotFoundError: fno.agents.cli' >&2; exit 1"),
+                    _ => sh("printf '{\"h1\":{\"state\":\"working\"}}'"),
+                }
+            },
+            Duration::from_secs(5),
+        )
+        .expect("the retry answered");
+        assert_eq!(attempts.get(), 2, "a crash must buy exactly one retry");
+        assert_eq!(probes["h1"].state, "working");
+
+        // And it stops there: a persistently broken probe is loud, not looping.
+        let attempts = std::cell::Cell::new(0);
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| {
+                attempts.set(attempts.get() + 1);
+                sh("exit 1")
+            },
+            Duration::from_secs(5),
+        );
+        assert_eq!(attempts.get(), 2);
+        assert!(
+            probes.is_none(),
+            "two crashes is a FAILURE, distinguishable from an empty answer"
+        );
+    }
+
+    #[test]
+    fn family1_truth_batch_answers_only_for_the_handles_the_batch_resolved() {
+        // A handle the batch could not answer for is simply absent from the
+        // map, which every caller already treats as `None` -- the same reading
+        // the per-row path gave when its probe returned nothing.
+        let probes = family1_truth_batch_retrying(
+            &["h1".to_string(), "gone".to_string()],
+            |_| sh("printf '{\"h1\":{\"state\":\"working\"},\"gone\":{\"state\":\"nonsense\"}}'"),
+            Duration::from_secs(5),
+        )
+        .expect("the batch answered");
+        assert_eq!(probes.len(), 1);
+        assert!(!probes.contains_key("gone"));
+    }
+
+    #[test]
+    fn family1_truth_batch_timeout_scales_with_the_handles_asked_for() {
+        // The bug this pins: a batch of N handed the SINGLE handle's 5 s budget.
+        // Measured on the live roster, twelve real handles took 5.7 s, so a flat
+        // 5 s killed the child and the whole page came back empty - every row
+        // rendering null reachability, and the dormant gate unable to get the
+        // positive `done` reading an eviction needs. A timing-out batch is
+        // strictly worse than the per-row probes it replaced, which each had
+        // their own 5 s.
+        let one = family1_truth_batch_timeout(1);
+        let twelve = family1_truth_batch_timeout(12);
+        let forty = family1_truth_batch_timeout(40);
+
+        assert!(
+            one >= Duration::from_secs(5),
+            "never below the single budget"
+        );
+        assert!(twelve > one, "more handles must buy more time");
+        assert!(forty > twelve);
+
+        // Real measurements this must clear, with headroom: 12 handles in 1.6 s
+        // and the full 31-row roster in 3.9 s after the resolver hoists.
+        assert!(
+            twelve >= Duration::from_secs(8),
+            "12 handles took 1.6s measured"
+        );
+        assert!(
+            forty >= Duration::from_secs(15),
+            "31 handles took 3.9s measured"
+        );
+
+        // Capped, so one pathological transcript cannot wedge a sweep for
+        // minutes. The daemon runs this off the select arm, so the ceiling is
+        // about bounding a stuck probe, never about protecting `accept()`.
+        assert_eq!(
+            family1_truth_batch_timeout(10_000),
+            Duration::from_secs(60),
+            "the bound is capped, not unbounded"
+        );
+        // Saturates rather than wrapping or panicking. Checked by running the
+        // arithmetic, not by reasoning about it: an earlier draft asserted
+        // `Duration * u32` panicked here and added a clamp to prevent it.
+        // Neither was true. 300 ms times u32::MAX is about 1.29e9 seconds, four
+        // orders under Duration::MAX, and `min(..., CEILING)` already bounds
+        // the result. The clamp was a second copy of a cap one line above it.
+        assert_eq!(
+            family1_truth_batch_timeout(usize::MAX),
+            Duration::from_secs(60),
+            "an absurd handle count saturates at the ceiling"
+        );
+    }
+
+    #[test]
+    fn family1_truth_batch_distinguishes_a_failure_from_an_empty_answer() {
+        // The discriminator the per-handle fallback hangs off. An `fno` older
+        // than `--handles` exits 2 on the unknown option with empty stdout -
+        // the ordinary state right after this lands, since every worktree
+        // carries its own binary. That must read as a FAILURE.
+        let old_fno = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| sh("echo 'Error: No such option: --handles' >&2; exit 2"),
+            Duration::from_secs(5),
+        );
+        assert!(old_fno.is_none(), "an fno too old to batch is a failure");
+
+        // A batch that RAN and resolved nothing is an answer. Reading this as a
+        // failure would re-spawn one process per handle every sweep over a
+        // roster where nothing resolves - the exact cost this PR removes.
+        let answered_nothing = family1_truth_batch_retrying(
+            &["h1".to_string()],
+            |_| sh("printf '{}'"),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            answered_nothing
+                .expect("an empty object is an answer")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn family1_truth_batch_command_asks_for_the_keyed_object() {
+        // Pins the wire call itself. The Python side keys `--handles` and emits
+        // the object only under `--json`; a batch command missing either would
+        // silently fall back to a single-handle read of a comma-joined string.
+        let command = family1_truth_batch_command(&["a".to_string(), "b".to_string()]);
+        let argv: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, ["agents", "truth", "--handles", "a,b", "--json"]);
     }
 
     #[test]

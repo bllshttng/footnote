@@ -834,3 +834,215 @@ def test_observed_model_escalates_past_an_inconclusive_tail(tmp_path):
         "model": "gpt-5.6-sol",
         "samples": 1,
     }
+
+
+# ---------------------------------------------------------------------------
+# --handles: one process answers N handles (x-0d93)
+#
+# The probe's real work is 0.83 ms and its delivery was 780 ms of interpreter
+# cold start, paid once per roster row per daemon sweep. These pin the batch
+# contract the Rust side now depends on: a keyed object, an always-zero exit,
+# and one registry read for the whole batch.
+# ---------------------------------------------------------------------------
+
+def test_truth_batch_keys_every_handle_and_exits_zero_with_a_miss(
+    tmp_path, monkeypatch
+):
+    """Two resolve, one does not. The miss rides its own entry, never the exit
+    code -- a batch has no single exit code to carry."""
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sids = {
+        "a": "0badc0de-3333-0000-0000-00000000000a",
+        "b": "0badc0de-3333-0000-0000-00000000000b",
+    }
+    for name, sid in sids.items():
+        _write_claude_transcript(tmp_path, cwd, sid, [f"still going on {name}"])
+
+    real = session_truth.resolve_session_truth
+
+    def routed(handle, **kw):
+        sid = sids.get(handle)
+        if sid is None:
+            return real(handle, resolve=lambda _h: (None, []), projects_root=tmp_path)
+        session = SimpleNamespace(
+            agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8]
+        )
+        return real(handle, resolve=_resolver(session), projects_root=tmp_path)
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", routed)
+
+    result = CliRunner().invoke(
+        app, ["agents", "truth", "--handles", "a,b,c", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"a", "b", "c"}
+    assert payload["a"]["last_message"] == "still going on a"
+    assert payload["b"]["last_message"] == "still going on b"
+    assert payload["c"]["state"] == "unknown"
+    assert payload["c"]["reason"]  # the miss explains itself in its own entry
+
+
+def test_truth_batch_and_single_read_the_same_handle_identically(tmp_path, monkeypatch):
+    """ONE reader, asserted on the whole payload rather than on one field.
+
+    This is the constraint the batch exists to preserve. `state` and
+    `observed_model` must come from the same reader, so the Rust list emitter
+    reports the identical reading the Python one does -- see `TruthProbe` in
+    `crates/fno-agents/src/claude_ask.rs`. A batch that answered even slightly
+    differently from the single form would be the second reader a Rust port was
+    rejected for growing.
+
+    Compared as full dicts, not as a state string: a check that pins one field
+    passes while every other field drifts.
+    """
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-4444-0000-0000-000000000001"
+    _write_claude_transcript_with_model(tmp_path, cwd, sid, "glm-5.3", turns=3)
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+
+    real = session_truth.resolve_session_truth
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **kw: real(
+            handle, resolve=_resolver(session), projects_root=tmp_path
+        ),
+    )
+
+    runner = CliRunner()
+    single = json.loads(
+        runner.invoke(app, ["agents", "truth", "w1", "--json"]).stdout
+    )
+    batch = json.loads(
+        runner.invoke(app, ["agents", "truth", "--handles", "w1", "--json"]).stdout
+    )["w1"]
+
+    # The age advances between two reads by construction; it is the one field a
+    # parity check must exclude rather than the one field it should check.
+    drifts = {"last_activity_age_s"}
+    assert {k: v for k, v in batch.items() if k not in drifts} == {
+        k: v for k, v in single.items() if k not in drifts
+    }
+
+
+def test_batch_resolver_runs_one_discovery_scan_for_every_handle(monkeypatch):
+    """The cost inside the cost, and the one that actually dominated.
+
+    A NAME handle misses the registry fast path in `resolve_or_suggest` and
+    falls through to `discover_live_sessions`, which sweeps every process on the
+    box with psutil and globs the transcript stores. Profiled on the live
+    roster: 483 ms a call, run once per handle, so twelve handles spent 5.8 of
+    their 8.3 seconds in it. One process is not cheap on its own -- it is cheap
+    once the per-handle reads inside it are hoisted. Twelve handles went from
+    5.72 s to 1.56 s, and the full 31-row roster answers in 3.94 s.
+    """
+    from fno.agents import cli as agents_cli
+    from fno.agents import discover as discover_mod
+
+    scans = []
+    registry_reads = []
+
+    def counting_discover(**kwargs):
+        scans.append(kwargs.get("resolve_metadata", True))
+        return []
+
+    def counting_registry(_path=None):
+        registry_reads.append(1)
+        return []
+
+    monkeypatch.setattr(discover_mod, "discover_live_sessions", counting_discover)
+    monkeypatch.setattr(discover_mod, "_discover_from_registry", counting_registry)
+
+    resolve = agents_cli._batch_resolver()
+    for handle in ["a", "b", "c", "d", "e"]:
+        resolve(handle)
+
+    # Two scan shapes exist on this path (bare, then full). Each is paid ONCE
+    # for the whole batch rather than once per handle.
+    assert len(scans) == 2, f"one scan per shape, got {scans}"
+    assert sorted(scans) == [False, True]
+    assert len(registry_reads) == 1, "the registry is read once for the batch"
+
+
+def test_batch_resolver_falls_back_when_the_hoisted_read_fails(monkeypatch):
+    """A hoist must never make a batch LESS able to resolve than a single call.
+
+    When the hoisted registry read raises, the resolver passes `registry_rows=None`
+    and `resolve_or_suggest` reads for itself, exactly as the single-handle path
+    does.
+    """
+    from fno.agents import cli as agents_cli
+    from fno.agents import discover as discover_mod
+
+    def boom(_path=None):
+        raise RuntimeError("unreadable registry")
+
+    seen = {}
+
+    def fake_resolve_or_suggest(handle, **kwargs):
+        seen.update(kwargs)
+        return None, []
+
+    monkeypatch.setattr(discover_mod, "_discover_from_registry", boom)
+    monkeypatch.setattr(discover_mod, "resolve_or_suggest", fake_resolve_or_suggest)
+
+    agents_cli._batch_resolver()("w1")
+
+    assert seen["registry_rows"] is None, "a failed hoist degrades to the per-call read"
+    assert seen["require_alive"] is False
+
+
+def test_truth_batch_refuses_both_a_positional_handle_and_handles():
+    """Two spellings of one question. Exit 2 (usage), nothing on stdout."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+
+    result = CliRunner().invoke(app, ["agents", "truth", "w1", "--handles", "a,b"])
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout.strip() == ""
+
+
+def test_truth_batch_reads_the_registry_once_for_every_handle(monkeypatch):
+    """`load_registry` per handle was the cost inside the cost. One read now
+    serves the whole batch, and the three-key match is unchanged."""
+    from fno.agents import cli as agents_cli
+
+    rows = [
+        SimpleNamespace(name="alpha", harness_session_id="sid-alpha", short_id="aaaa"),
+        SimpleNamespace(name="beta", harness_session_id="sid-beta", short_id="bbbb"),
+    ]
+    reads = []
+
+    def counting_load_registry():
+        reads.append(1)
+        return rows
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", counting_load_registry)
+    monkeypatch.setattr(
+        "fno.agents.reachability.registry_falsifier", lambda row: f"gone:{row.name}"
+    )
+
+    # Matched on name, session id AND short id, exactly as the single form does.
+    out = agents_cli._registry_falsifiers(["alpha", "sid-beta", "bbbb", "nobody"])
+
+    assert len(reads) == 1
+    assert out == {
+        "alpha": "gone:alpha",
+        "sid-beta": "gone:beta",
+        "bbbb": "gone:beta",
+        "nobody": None,
+    }
