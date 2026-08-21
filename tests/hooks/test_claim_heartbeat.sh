@@ -29,7 +29,8 @@ fail() { FAIL=$((FAIL+1)); printf '[heartbeat] FAIL: %s\n' "$*" >&2; }
 command -v jq >/dev/null 2>&1 || { echo "[heartbeat] SKIP: jq not on PATH"; exit 77; }
 
 # setup_env: build a tmp project with a manifest + a stubbed `fno` on PATH.
-# Env knobs read by the stub: STUB_HOLDER, STUB_REFRESH_RC. Every `fno` call is
+# Env knobs read by the stub: STUB_HOLDER/STATE/STATUS_JSON, STUB_REFRESH_RC,
+# STUB_BIND_RC/OUTPUT. Every `fno` call is
 # appended to $CALLLOG. Sets: TMP_DIR CWD CALLLOG (and prepends the stub to PATH).
 setup_env() {
   TMP_DIR="$(mktemp -d)"
@@ -59,10 +60,29 @@ EOF
 echo "\$*" >> "${CALLLOG}"
 case "\$1 \$2" in
   "claim status")
-    printf '{"holder": "%s"}\n' "\${STUB_HOLDER:-}"
+    if [[ -n "\${STUB_STATUS_JSON+x}" ]]; then
+      printf '%s' "\$STUB_STATUS_JSON"
+    else
+      if [[ -f "${TMP_DIR}/refresh-observed" ]]; then
+        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+          "\${STUB_HOLDER_AFTER:-\${STUB_HOLDER:-}}" \
+          "\${STUB_STATE_AFTER:-\${STUB_STATE:-live}}" \
+          "\${STUB_EXPIRES_AFTER:-200}"
+      else
+        printf '{"holder":"%s","state":"%s","expires_at":%s}\n' \
+          "\${STUB_HOLDER:-}" "\${STUB_STATE:-live}" "\${STUB_EXPIRES_BEFORE:-100}"
+      fi
+    fi
+    exit "\${STUB_STATUS_RC:-0}"
     ;;
   "claim refresh")
+    [[ "\${STUB_REFRESH_RC:-0}" -eq 0 ]] && touch "${TMP_DIR}/refresh-observed"
     exit "\${STUB_REFRESH_RC:-0}"
+    ;;
+  "pr bind-created")
+    printf '%s\n' "\${STUB_BIND_OUTPUT:-{\"outcome\":\"bound\"}}"
+    [[ -n "\${STUB_BIND_SLEEP:-}" ]] && sleep "\$STUB_BIND_SLEEP"
+    exit "\${STUB_BIND_RC:-0}"
     ;;
 esac
 exit 0
@@ -71,7 +91,12 @@ EOF
   export PATH="${bindir}:${PATH}"
 }
 
-teardown_env() { rm -rf "$TMP_DIR"; unset STUB_HOLDER STUB_REFRESH_RC; }
+teardown_env() {
+  rm -rf "$TMP_DIR"
+  unset STUB_HOLDER STUB_STATE STUB_STATUS_JSON STUB_STATUS_RC STUB_REFRESH_RC
+  unset STUB_HOLDER_AFTER STUB_STATE_AFTER STUB_EXPIRES_BEFORE STUB_EXPIRES_AFTER
+  unset STUB_BIND_OUTPUT STUB_BIND_RC STUB_BIND_SLEEP
+}
 
 mtime_of() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
@@ -410,6 +435,313 @@ if [[ "$rc" -eq 0 ]] && (( after > before )); then
 else
   fail "T20 GNU stat compatibility: rc=$rc before=$before after=$after"
 fi
+teardown_env
+
+# ── T21: pre-init spawn handover stays alive on PostToolUse ─────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166"
+export FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166 --holder spawn-handover:build-x-a166 --ttl 15m" "$CALLLOG" \
+    && [[ ! -e "${CWD}/.fno/target-state.md" ]]; then
+  pass "T21 pre-init handover refreshes its exact 15m claim without creating a manifest"
+else
+  fail "T21 expected pre-init handover refresh only; calls: $(cat "$CALLLOG")"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T22: pre-init handover never refreshes another holder ───────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166"
+export FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="spawn-handover:some-other-worker"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T22 pre-init handover refreshed another holder"
+elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T22 verified foreign holder did not throttle the positive no-op"
+else
+  pass "T22 pre-init handover mismatch does not acquire or steal and throttles"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T23: successful raw gh pr create invokes the branch binder ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
+printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 ]] \
+    && grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG" \
+    && grep -q -- "--owner 182b29c8-owner-uuid" "$CALLLOG"; then
+  pass "T23 successful raw gh pr create invokes the binder once"
+else
+  fail "T23 expected one bind-created call; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T24: failed or ambiguous gh output never invokes the binder ───────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stderr:"failed: https://github.com/acme/widgets/pull/42 and https://github.com/acme/widgets/pull/43"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+if grep -q "pr bind-created" "$CALLLOG"; then
+  fail "T24 ambiguous output invoked the binder"
+elif [[ "$err" != *"ambiguous PR URLs"* ]]; then
+  fail "T24 ambiguous output emitted no diagnostic: [$err]"
+else
+  pass "T24 ambiguous output diagnoses and mutates nothing"
+fi
+teardown_env
+
+# ── T25: a nonzero gh result cannot bind even when it mentions one URL ─────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"182b29c8-owner-uuid",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{exit_code:1,stderr:"failed after reserving https://github.com/acme/widgets/pull/42"}}')"
+printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" >/dev/null 2>&1
+if grep -q "pr bind-created" "$CALLLOG"; then
+  fail "T25 failed gh result invoked the binder"
+else
+  pass "T25 failed gh result mutates nothing"
+fi
+teardown_env
+
+# ── T26: Codex exec payload reads tool_input.cmd ──────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"019f-codex",tool_name:"exec_command",tool_input:{cmd:"gh pr create --fill"},tool_response:{exit_code:0,stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
+printf '%s' "$payload" | FNO_PLATFORM=codex CODEX_THREAD_ID="019f-codex" bash "$HOOK" >/dev/null 2>&1
+if grep -q "pr bind-created --url https://github.com/acme/widgets/pull/42" "$CALLLOG"; then
+  pass "T26 Codex tool_input.cmd invokes the binder"
+else
+  fail "T26 Codex cmd payload did not invoke binder; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T27: compound shell command is not attributable ──────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"echo prep && gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42\n"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+if grep -q "pr bind-created" "$CALLLOG"; then
+  fail "T27 compound command invoked binder"
+elif [[ "$err" != *"not attributable"* ]]; then
+  fail "T27 compound refusal emitted no diagnostic: [$err]"
+else
+  pass "T27 compound command diagnoses and does not bind"
+fi
+teardown_env
+
+# ── T28: exact holder in a non-live state never refreshes ────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="stale"
+run_hook_sid "owner" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T28 stale exact-holder claim refreshed"
+elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T28 verified stale state did not throttle its positive no-op"
+else
+  pass "T28 non-live exact holder never refreshes"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T29: malformed status stays due and diagnoses ───────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_STATUS_JSON='{"holder":"spawn-handover:build-x-a166"}'
+err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T29 status without a live state refreshed"
+elif [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T29 malformed status incorrectly throttled the retry"
+elif [[ "$err" != *"status unreadable"* ]]; then
+  fail "T29 malformed status emitted no diagnostic: [$err]"
+else
+  pass "T29 malformed status remains due with a diagnostic"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T30: refresh failure stays due and diagnoses ────────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="live" STUB_REFRESH_RC=1
+err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
+if [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T30 failed refresh incorrectly throttled the retry"
+elif [[ "$err" != *"refresh failed"* ]]; then
+  fail "T30 failed refresh emitted no diagnostic: [$err]"
+else
+  pass "T30 refresh failure remains due with a diagnostic"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T31/T32: no URL and binder refusal diagnose but remain nonfatal ──────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"created"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+if [[ "$rc" -eq 0 && "$err" == *"no PR URL"* ]]; then
+  pass "T31 no-URL observation is nonfatal and diagnostic"
+else
+  fail "T31 no-URL rc=$rc diagnostic=[$err]"
+fi
+export STUB_BIND_RC=1 STUB_BIND_OUTPUT='{"outcome":"refused","refusal":"branch unknown"}'
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 \
+      && "$err" == *"branch unknown"* && "$err" == *"$manual"* ]]; then
+  pass "T32 binder refusal retries once, then prints exact manual recovery"
+else
+  fail "T32 refusal rc=$rc calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T33: real hook -> bind-created -> graph reread leaves ready queue ───────
+REAL_TMP="$(mktemp -d)"
+REAL_REPO="$REAL_TMP/repo"
+REAL_GRAPH="$REAL_TMP/graph.json"
+REAL_CONFIG="$REAL_TMP/config.toml"
+REAL_BIN="$REAL_TMP/bin"
+mkdir -p "$REAL_REPO/.fno" "$REAL_BIN"
+git init -q "$REAL_REPO"
+git -C "$REAL_REPO" checkout -q -b feature/x-a166-real
+printf '{"entries":[{"id":"x-a166","status":"ready","title":"live node","priority":"p1","type":"feature","blocked_by":[],"locked_by":null,"session_id":null,"pr_number":null,"pr_url":null}]}\n' > "$REAL_GRAPH"
+printf '[paths]\ngraph_json = "%s"\n' "$REAL_GRAPH" > "$REAL_CONFIG"
+cat > "$REAL_BIN/fno" <<EOF
+#!/usr/bin/env bash
+exec uv run --project "$REPO_ROOT/cli" python -m fno.cli "\$@"
+EOF
+chmod +x "$REAL_BIN/fno"
+payload="$(jq -cn --arg cwd "$REAL_REPO" '{cwd:$cwd,session_id:"owner-session",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | PATH="$REAL_BIN:$PATH" FNO_CONFIG="$REAL_CONFIG" CODEX_THREAD_ID= CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+real_status="$(jq -r '.entries[0].status' "$REAL_GRAPH")"
+if [[ "$rc" -eq 0 && "$real_status" == in_review \
+      && "$(jq -r '.entries[0].pr_number' "$REAL_GRAPH")" == 42 \
+      && "$(jq -r '.entries[0].locked_by' "$REAL_GRAPH")" == owner-session ]]; then
+  pass "T33 real PostToolUse binds the graph and removes the node from ready"
+else
+  fail "T33 rc=$rc status=$real_status graph=$(cat "$REAL_GRAPH") stderr=[$err]"
+fi
+rm -rf "$REAL_TMP"
+
+# ── T34: binder timeout retries once, stays bounded, and diagnoses ────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export STUB_BIND_SLEEP=10
+payload="$(jq -cn --arg cwd "$CWD" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+started="$(date +%s)"
+err="$(printf '%s' "$payload" | FNO_PR_BIND_CREATED_TIMEOUT=1 CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
+elapsed=$(( $(date +%s) - started ))
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+manual="fno pr bind-created --url https://github.com/acme/widgets/pull/42 --repo $CWD --owner owner"
+if [[ "$rc" -eq 0 && "$bind_calls" -eq 2 && "$elapsed" -le 5 \
+      && "$err" == *"timed out"* && "$err" == *"$manual"* ]]; then
+  pass "T34 binder timeout retries once, stays bounded, and prints recovery"
+else
+  fail "T34 timeout rc=$rc calls=$bind_calls elapsed=${elapsed}s diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T35: a positively free claim is a throttled no-op, never a refresh ──────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_STATUS_JSON='{"key":"node:x-a166","state":"free"}'
+run_hook_sid "owner" >/dev/null 2>&1
+if grep -q "claim refresh" "$CALLLOG"; then
+  fail "T35 missing claim was refreshed"
+elif [[ ! -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T35 positive free result was not throttled"
+else
+  pass "T35 missing claim never refreshes and throttles the positive no-op"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T36: suspect exact-holder handover is renewable ──────────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="suspect"
+run_hook_sid "owner" >/dev/null 2>&1
+if grep -q "claim refresh node:x-a166 --holder spawn-handover:build-x-a166 --ttl 15m" "$CALLLOG"; then
+  pass "T36 suspect exact-holder handover refreshes after spawner exit"
+else
+  fail "T36 suspect exact-holder handover was not refreshed; calls: $(cat "$CALLLOG")"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
+teardown_env
+
+# ── T37: quoted shell punctuation belongs to gh arguments ───────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd 'gh pr create --body "literal ; & | text"' '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
+  pass "T37 quoted shell punctuation remains one attributable gh invocation"
+else
+  fail "T37 quoted punctuation calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T38: backslash-newline formatting remains one gh invocation ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+formatted_cmd="$(printf 'gh pr create \\\n  --fill')"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$formatted_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 1 && -z "$err" ]]; then
+  pass "T38 backslash-newline formatting is attributable"
+else
+  fail "T38 multiline calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T39: an unescaped newline introduces a second shell command ──────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+compound_cmd="$(printf 'gh pr create --fill\necho second-command')"
+payload="$(jq -cn --arg cwd "$CWD" --arg cmd "$compound_cmd" '{cwd:$cwd,session_id:"owner",tool_name:"Bash",tool_input:{command:$cmd},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
+err="$(printf '%s' "$payload" | CODEX_THREAD_ID= bash "$HOOK" 2>&1 >/dev/null)"
+bind_calls="$(grep -c "pr bind-created" "$CALLLOG" || true)"
+if [[ "$bind_calls" -eq 0 && "$err" == *"not attributable"* ]]; then
+  pass "T39 actual multiline compound command refuses binding"
+else
+  fail "T39 multiline compound calls=$bind_calls diagnostic=[$err]"
+fi
+teardown_env
+
+# ── T40: exit-zero refresh without lease extension remains due ────────────
+setup_env
+rm -f "${CWD}/.fno/target-state.md"
+export FNO_NODE="x-a166" FNO_NODE_CLAIM_HOLDER="spawn-handover:build-x-a166"
+export STUB_HOLDER="$FNO_NODE_CLAIM_HOLDER" STUB_STATE="suspect"
+export STUB_EXPIRES_BEFORE=100 STUB_EXPIRES_AFTER=100 STUB_STATE_AFTER="stale"
+err="$(run_hook_sid "owner" 2>&1 >/dev/null)"
+if [[ -f "${CWD}/.fno/.claim-handover-heartbeat.stamp" ]]; then
+  fail "T40 unconfirmed exit-zero refresh incorrectly throttled later repair"
+elif [[ "$err" != *"ownership-lost/refresh-not-confirmed"* ]]; then
+  fail "T40 unconfirmed refresh emitted no ownership diagnostic: [$err]"
+else
+  pass "T40 exit-zero without positive lease extension remains due"
+fi
+unset FNO_NODE FNO_NODE_CLAIM_HOLDER
 teardown_env
 
 echo "[heartbeat] ${PASS} passed, ${FAIL} failed"

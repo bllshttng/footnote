@@ -791,6 +791,19 @@ class TestFailoverSweep:
         assert h.events[2][1]["reason"] == "held-by-design"
         assert h.sends == []
 
+    def test_launched_with_owner_stamp_failure_surfaces_partial_once(self, tmp_path):
+        h = _FailoverHarness(output_result="rate limit", outcome="partial")
+
+        self._run(h, tmp_path)
+
+        assert len(h.failover_calls) == 1
+        assert h.sends == []
+        assert h.event_types() == [
+            "worker_refused", "failover_swapped", "failover_blocked",
+        ]
+        assert h.events[1][1]["redispatched"] is True
+        assert h.events[2][1]["reason"] == "partial-owner-stamp"
+
     def test_one_swap_per_tick(self, tmp_path):
         # codex P2: a swap mutates the GLOBAL active provider, so only one
         # rotation may fire per tick; the second stale session surfaces
@@ -970,6 +983,14 @@ class TestDefaultFailover:
         self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude", redispatch_result=False)
         err = recovery.classify_session_error("rate limit")
         assert recovery._default_failover(_stale_candidate(tmp_path), err) == "rotated-no-worker"
+
+    def test_swapped_claude_owner_stamp_failure_returns_partial(self, monkeypatch, tmp_path):
+        from fno.adapters.providers.failover import SwapDecision
+
+        self._patch(monkeypatch, SwapDecision.SWAPPED, new_cli="claude",
+                    redispatch_result="partial")
+        err = recovery.classify_session_error("rate limit")
+        assert recovery._default_failover(_stale_candidate(tmp_path), err) == "partial"
 
     def test_blocked_thrash_maps(self, monkeypatch, tmp_path):
         from fno.adapters.providers.failover import SwapDecision
@@ -1552,7 +1573,8 @@ class TestRedispatch:
         monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: node)
         monkeypatch.setattr(recovery, "_node_is_done", lambda n: done)
 
-    def _patch_run(self, monkeypatch, *, stop_rc=0, stop_out=b"", force_release_rc=0, spawn_rc=0):
+    def _patch_run(self, monkeypatch, *, stop_rc=0, stop_out=b"", force_release_rc=0,
+                   spawn_rc=0, spawn_exc=None, stamp_rc=0, clear_rc=0):
         """Stub subprocess.run; record the (markered) calls for assertions."""
         from types import SimpleNamespace
         import subprocess as sp
@@ -1572,7 +1594,14 @@ class TestRedispatch:
             if all(tok in cmd for tok in ("claim", "release", "--force")):
                 return SimpleNamespace(returncode=force_release_rc)
             if cmd[:3] == ["fno-py", "agents", "spawn"]:
+                if spawn_exc is not None:
+                    raise spawn_exc
                 return SimpleNamespace(returncode=spawn_rc)
+            if cmd[:3] == ["fno-py", "backlog", "update"]:
+                owner = cmd[cmd.index("--locked-by") + 1]
+                return SimpleNamespace(
+                    returncode=clear_rc if owner == "null" else stamp_rc,
+                )
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(sp, "run", fake_run)
@@ -1619,6 +1648,7 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand()) is False
         assert self._index_of(calls, ["fno-py", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+        assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
 
     def test_pane_refusal_runs_the_named_pane_kill_then_rotates(self, monkeypatch):
         # The daemon refuses `agents stop` on a pane row and NAMES the pane-kill
@@ -1652,6 +1682,8 @@ class TestRedispatch:
         calls = self._patch_run(monkeypatch, force_release_rc=1)
         assert recovery._redispatch(self._cand()) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
 
     def test_done_node_not_redispatched(self, monkeypatch):
         # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
@@ -1663,8 +1695,56 @@ class TestRedispatch:
     def test_spawn_failure_returns_false(self, monkeypatch):
         # Spawn exit non-zero (existing contract) → False so the caller nudges.
         self._patch_resolve(monkeypatch)
-        self._patch_run(monkeypatch, spawn_rc=1)
+        calls = self._patch_run(monkeypatch, spawn_rc=1)
         assert recovery._redispatch(self._cand()) is False
+        owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
+        assert [c[-1] for c in owner_updates] == ["null"]
+        spawn = self._index_of(calls, ["agents", "spawn"])
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert spawn is not None and clear is not None and spawn < clear
+
+    def test_spawn_failure_surfaces_corpse_clear_failure(self, monkeypatch, caplog):
+        self._patch_resolve(monkeypatch)
+        self._patch_run(monkeypatch, spawn_rc=1, clear_rc=1)
+
+        assert recovery._redispatch(self._cand()) is False
+        assert "could not clear dead owner for x-370f" in caplog.text
+
+    def test_spawn_timeout_after_stop_clears_corpse(self, monkeypatch):
+        import subprocess
+
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(
+            monkeypatch,
+            spawn_exc=subprocess.TimeoutExpired(cmd="spawn", timeout=60),
+        )
+
+        assert recovery._redispatch(self._cand()) is False
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
+
+    def test_successful_spawn_repoints_node_to_replacement(self, monkeypatch):
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch)
+
+        assert recovery._redispatch(self._cand()) is True
+
+        spawn = self._index_of(calls, ["agents", "spawn"])
+        stamp = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert spawn is not None and stamp is not None and spawn < stamp
+        assert calls[stamp][3] == "x-370f"
+        assert calls[stamp][-2:] == ["--locked-by", "failover-aaaa1111"]
+
+    def test_post_launch_stamp_failure_clears_corpse_and_returns_partial(
+        self, monkeypatch
+    ):
+        self._patch_resolve(monkeypatch)
+        calls = self._patch_run(monkeypatch, stamp_rc=1)
+
+        assert recovery._redispatch(self._cand()) == "partial"
+
+        owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
+        assert [c[-1] for c in owner_updates] == ["failover-aaaa1111", "null"]
 
     def test_spawn_failure_releases_lane_slot(self, monkeypatch):
         # Parallel G4: no replacement worker → the dead lane's dispatch-time
@@ -1715,6 +1795,8 @@ class TestRedispatch:
         assert recovery._redispatch(self._cand(), pre_spawn=lambda: False) is False
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["fno-py", "claim", "release", "--lane"]) is not None
+        clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
+        assert clear is not None and calls[clear][-1] == "null"
 
 
 class TestReviveBgThread:

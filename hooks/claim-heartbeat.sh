@@ -128,6 +128,207 @@ if [[ -n "$LIVE_DIR" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   fi
 fi
 
+# A raw `gh pr create` bypasses the fno PR path, but PostToolUse still observes
+# its successful URL. Bind only one unambiguous GitHub PR URL; the binder then
+# verifies the current branch names exactly one real graph node. Every refusal
+# is non-fatal and leaves the graph unchanged.
+TOOL_NAME=""
+TOOL_COMMAND=""
+if [[ -n "$STDIN" ]] && command -v jq >/dev/null 2>&1; then
+  TOOL_NAME="$(printf '%s' "$STDIN" | jq -r '.tool_name // empty' 2>/dev/null)"
+  TOOL_COMMAND="$(printf '%s' "$STDIN" \
+    | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)"
+fi
+if [[ "$TOOL_NAME" =~ ^(Bash|Shell|exec_command)$ \
+      && "$TOOL_COMMAND" == *gh* && "$TOOL_COMMAND" == *pr* \
+      && "$TOOL_COMMAND" == *create* ]]; then
+  _BARE_GH_CREATE=0
+  _GH_ATTRIBUTION="other"
+  _GH_ATTRIBUTION_RC=0
+  if command -v python3 >/dev/null 2>&1; then
+    _GH_ATTRIBUTION_CODE='
+import shlex
+import sys
+
+source = sys.argv[1].replace("\\\r\n", "").replace("\\\n", "")
+try:
+    lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|()`\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+except ValueError:
+    print("invalid")
+    raise SystemExit(0)
+
+def is_create_at(index):
+    return tokens[index:index + 3] == ["gh", "pr", "create"]
+
+positions = [i for i in range(len(tokens) - 2) if is_create_at(i)]
+operators = {
+    token for token in tokens
+    if token and all(char in ";&|()`\n" for char in token)
+}
+if positions == [0] and not operators:
+    print("bare")
+elif positions:
+    print("compound")
+else:
+    print("other")
+'
+    _GH_ATTRIBUTION="$(with_timeout "${FNO_PR_ATTRIBUTION_TIMEOUT:-2}" \
+      python3 -c "$_GH_ATTRIBUTION_CODE" "$TOOL_COMMAND")"
+    _GH_ATTRIBUTION_RC=$?
+  else
+    _GH_ATTRIBUTION_RC=127
+  fi
+  if [[ "$_GH_ATTRIBUTION_RC" -ne 0 ]]; then
+    echo "claim-heartbeat: gh pr create attribution unavailable; binding skipped" >&2
+  elif [[ "$_GH_ATTRIBUTION" == bare ]]; then
+    _BARE_GH_CREATE=1
+  elif [[ "$_GH_ATTRIBUTION" == compound || "$_GH_ATTRIBUTION" == invalid ]]; then
+    echo "claim-heartbeat: gh pr create not attributable ($_GH_ATTRIBUTION command); binding skipped" >&2
+  fi
+  if [[ "$_BARE_GH_CREATE" -eq 1 ]] && ! command -v fno >/dev/null 2>&1; then
+    echo "claim-heartbeat: gh pr create observed but fno is unavailable; binding skipped" >&2
+  elif [[ "$_BARE_GH_CREATE" -eq 1 ]]; then
+    _CREATED_PR_FAILED="$(printf '%s' "$STDIN" | jq -r '
+      if (.tool_response | type) == "object" and (
+        ((.tool_response.is_error // .tool_response.isError // false) == true) or
+        (((.tool_response.exit_code // .tool_response.exitCode // 0) | tonumber? // 0) != 0)
+      ) then 1 else 0 end' 2>/dev/null)"
+    _CREATED_PR_URLS="$(printf '%s' "$STDIN" | jq -r '
+      [.tool_response | .. | strings
+        | scan("https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")]
+      | unique | .[]' 2>/dev/null)"
+    _CREATED_PR_URL_COUNT="$(printf '%s\n' "$_CREATED_PR_URLS" | awk 'NF { n++ } END { print n+0 }')"
+    if [[ "$_CREATED_PR_FAILED" != 0 ]]; then
+      echo "claim-heartbeat: gh pr create failed; binding skipped" >&2
+    elif [[ "$_CREATED_PR_URL_COUNT" -eq 0 ]]; then
+      echo "claim-heartbeat: gh pr create returned no PR URL; binding skipped" >&2
+    elif [[ "$_CREATED_PR_URL_COUNT" -ne 1 ]]; then
+      echo "claim-heartbeat: gh pr create returned ambiguous PR URLs; binding skipped" >&2
+    else
+      _BIND_OWNER="$CUR_CLAUDE_SID"
+      [[ "$IS_CODEX_HOOK" -eq 1 ]] && _BIND_OWNER="$CUR_CODEX_THREAD_ID"
+      if [[ -z "$_BIND_OWNER" && "${FNO_NODE_CLAIM_HOLDER:-}" == spawn-handover:* ]]; then
+        _BIND_OWNER="${FNO_NODE_CLAIM_HOLDER#spawn-handover:}"
+      fi
+      _bind_args=(pr bind-created --url "$_CREATED_PR_URLS" --repo "$CWD")
+      [[ -n "$_BIND_OWNER" ]] && _bind_args+=(--owner "$_BIND_OWNER")
+      _BIND_MANUAL="fno pr bind-created --url $_CREATED_PR_URLS --repo $CWD"
+      [[ -n "$_BIND_OWNER" ]] && _BIND_MANUAL="$_BIND_MANUAL --owner $_BIND_OWNER"
+      _BIND_ATTEMPT=0
+      _BIND_RC=1
+      _BIND_OUTPUT=""
+      _BIND_TIMEOUT="${FNO_PR_BIND_CREATED_TIMEOUT:-2}"
+      while [[ "$_BIND_ATTEMPT" -lt 2 && "$_BIND_RC" -ne 0 ]]; do
+        _BIND_ATTEMPT=$((_BIND_ATTEMPT + 1))
+        _BIND_OUTPUT="$(with_timeout "$_BIND_TIMEOUT" \
+          fno "${_bind_args[@]}" 2>&1)"
+        _BIND_RC=$?
+      done
+      if [[ "$_BIND_RC" -ne 0 ]]; then
+        if [[ "$_BIND_RC" -eq 124 ]]; then
+          _BIND_REASON="timed out"
+        else
+          _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" \
+            | jq -r '.refusal // .error // empty' 2>/dev/null)"
+          [[ -n "$_BIND_REASON" ]] || _BIND_REASON="$(printf '%s' "$_BIND_OUTPUT" | head -1)"
+          [[ -n "$_BIND_REASON" ]] || _BIND_REASON="binder exited $_BIND_RC"
+        fi
+        echo "claim-heartbeat: PR binding failed after 2 attempts: $_BIND_REASON; run: $_BIND_MANUAL" >&2
+      fi
+    fi
+  fi
+fi
+
+# Before target init there is no manifest, but an explicit spawn already owns
+# a 15-minute handover lease. Keep only that exact holder alive while its worker
+# is producing tool activity. `refresh` can extend; it cannot acquire or steal.
+_HANDOVER_NODE="${FNO_NODE:-}"
+_HANDOVER_HOLDER="${FNO_NODE_CLAIM_HOLDER:-}"
+if [[ "$_HANDOVER_NODE" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ \
+      && "$_HANDOVER_HOLDER" == spawn-handover:* \
+      && "$_HANDOVER_HOLDER" != "spawn-handover:" ]] \
+      && command -v fno >/dev/null 2>&1; then
+  _HANDOVER_STAMP="$CWD/.fno/.claim-handover-heartbeat.stamp"
+  _HANDOVER_THROTTLE="${FNO_CLAIM_HANDOVER_HEARTBEAT_THROTTLE:-300}"
+  _handover_due=1
+  if [[ -f "$_HANDOVER_STAMP" ]]; then
+    _handover_now="$(date +%s 2>/dev/null || echo 0)"
+    _handover_mtime="$(stat -c %Y "$_HANDOVER_STAMP" 2>/dev/null || stat -f %m "$_HANDOVER_STAMP" 2>/dev/null || echo 0)"
+    (( _handover_now > 0 && _handover_mtime > 0 \
+       && _handover_now - _handover_mtime < _HANDOVER_THROTTLE )) && _handover_due=0
+  fi
+  if [[ "$_handover_due" -eq 1 ]]; then
+    _handover_status_json() {
+      local status_json
+      status_json="$(with_timeout "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+        fno claim status "node:$_HANDOVER_NODE" --json --no-roster 2>/dev/null)"
+      [[ -n "$status_json" ]] || status_json="$(with_timeout \
+        "${FNO_CLAIM_HEARTBEAT_STATUS_TIMEOUT:-5}" \
+        fno claim status "node:$_HANDOVER_NODE" --json 2>/dev/null)"
+      printf '%s' "$status_json"
+    }
+    _HANDOVER_STATUS="$(_handover_status_json)"
+    _HANDOVER_STATUS_VALID="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
+      if (type == "object") and
+         (.state == "free" or .state == "live" or .state == "suspect" or
+          .state == "stale" or .state == "corrupted") and
+         ((.holder == null) or (.holder | type) == "string")
+      then 1 else 0 end' 2>/dev/null)"
+    _RECORDED_HANDOVER_STATE="$(printf '%s' "$_HANDOVER_STATUS" \
+      | jq -r '.state // empty' 2>/dev/null)"
+    _RECORDED_HANDOVER_HOLDER="$(printf '%s' "$_HANDOVER_STATUS" \
+      | jq -r '.holder // empty' 2>/dev/null)"
+    _RECORDED_HANDOVER_EXPIRES="$(printf '%s' "$_HANDOVER_STATUS" | jq -r '
+      if ((.expires_at | type) == "number") and
+         ((.expires_at | floor) == .expires_at)
+      then .expires_at else empty end' 2>/dev/null)"
+    if [[ "$_HANDOVER_STATUS_VALID" != 1 ]]; then
+      echo "claim-heartbeat: handover claim status unreadable for node:$_HANDOVER_NODE; refresh remains due" >&2
+    # The short-lived spawner normally exits before init, so its unexpired
+    # handover becomes SUSPECT. The TTL still protects it and permits renewal.
+    elif [[ ( "$_RECORDED_HANDOVER_STATE" == live \
+              || "$_RECORDED_HANDOVER_STATE" == suspect ) \
+            && "$_RECORDED_HANDOVER_HOLDER" == "$_HANDOVER_HOLDER" ]]; then
+      if [[ ! "$_RECORDED_HANDOVER_EXPIRES" =~ ^[0-9]+$ ]]; then
+        echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE (missing deadline); refresh remains due" >&2
+      elif with_timeout "${FNO_CLAIM_HEARTBEAT_REFRESH_TIMEOUT:-5}" \
+        fno claim refresh "node:$_HANDOVER_NODE" --holder "$_HANDOVER_HOLDER" \
+        --ttl "${FNO_CLAIM_HANDOVER_TTL:-15m}" >/dev/null 2>&1; then
+        _HANDOVER_AFTER="$(_handover_status_json)"
+        _HANDOVER_AFTER_VALID="$(printf '%s' "$_HANDOVER_AFTER" | jq -r '
+          if (type == "object") and
+             (.state == "live" or .state == "suspect") and
+             ((.holder | type) == "string") and
+             ((.expires_at | type) == "number") and
+             ((.expires_at | floor) == .expires_at)
+          then 1 else 0 end' 2>/dev/null)"
+        _HANDOVER_AFTER_HOLDER="$(printf '%s' "$_HANDOVER_AFTER" \
+          | jq -r '.holder // empty' 2>/dev/null)"
+        _HANDOVER_AFTER_EXPIRES="$(printf '%s' "$_HANDOVER_AFTER" \
+          | jq -r '.expires_at // empty' 2>/dev/null)"
+        if [[ "$_HANDOVER_AFTER_VALID" == 1 \
+              && "$_HANDOVER_AFTER_HOLDER" == "$_HANDOVER_HOLDER" \
+              && "$_HANDOVER_AFTER_EXPIRES" =~ ^[0-9]+$ ]] \
+              && (( _HANDOVER_AFTER_EXPIRES > _RECORDED_HANDOVER_EXPIRES )); then
+          touch "$_HANDOVER_STAMP" 2>/dev/null || true
+        else
+          echo "claim-heartbeat: handover ownership-lost/refresh-not-confirmed for node:$_HANDOVER_NODE; refresh remains due" >&2
+        fi
+      else
+        echo "claim-heartbeat: handover refresh failed for node:$_HANDOVER_NODE; refresh remains due" >&2
+      fi
+    else
+      # A complete status answer positively proves there is nothing this holder
+      # may refresh. Throttle that safe no-op; only an instrument failure stays due.
+      touch "$_HANDOVER_STAMP" 2>/dev/null || true
+    fi
+  fi
+fi
+
 MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
 

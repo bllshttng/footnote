@@ -15,6 +15,7 @@ line or it does not exist.
 """
 from __future__ import annotations
 
+import copy
 import re
 import subprocess
 import sys
@@ -438,3 +439,116 @@ def bind_closure_claims(
             bindings.append(ClosureBinding(nid, "appended_additional"))
 
     return ClosureBindResult(outcome="bound", claimed_ids=claimed_ids, bindings=bindings)
+
+
+def bind_created_pr(
+    entries: list[dict],
+    *,
+    head_ref: str,
+    pr_url: str,
+    owner: Optional[str] = None,
+) -> ClosureBindResult:
+    """Bind one newly-created PR to the one real node named by its branch.
+
+    Branch text is only a candidate. Exactly one well-formed segment must name
+    a node in this graph; zero or several refuse before any node changes. The
+    URL must carry both a repository and PR number. Repeating the same
+    observation is idempotent.
+    """
+    from fno.graph._intake import _find_node
+    from fno.graph._reconcile import (
+        node_is_open,
+        pr_number_from_url,
+        repo_slug_from_url,
+    )
+
+    pr_number = pr_number_from_url(pr_url)
+    repo = repo_slug_from_url(pr_url)
+    if pr_number is None or repo is None:
+        return ClosureBindResult(
+            outcome="refused", refusal="created PR URL is malformed or unscoped"
+        )
+
+    real_ids = {
+        entry.get("id")
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    matched = list(dict.fromkeys(nid for nid in branch_node_ids(head_ref) if nid in real_ids))
+    if len(matched) != 1:
+        return ClosureBindResult(
+            outcome="refused",
+            claimed_ids=matched,
+            refusal=(
+                "branch does not resolve to exactly one real node"
+                if not matched
+                else f"branch ambiguously names {len(matched)} real nodes"
+            ),
+        )
+
+    result = bind_closure_claims(
+        entries,
+        matched,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        repo=repo,
+    )
+    if result.outcome != "bound":
+        return result
+
+    node = _find_node(entries, matched[0])
+    clean_owner = owner.strip() if isinstance(owner, str) else ""
+    if node is not None and clean_owner and node_is_open(node):
+        node["locked_by"] = clean_owner
+        node["session_id"] = clean_owner
+    return result
+
+
+def bind_created_pr_from_branch(
+    pr_url: str,
+    *,
+    owner: Optional[str] = None,
+    cwd: Optional[str] = None,
+    head_ref: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> ClosureBindResult:
+    """Resolve the current branch and persist a created-PR binding atomically."""
+    from fno.graph.store import locked_mutate_graph, read_graph_strict
+    from fno.paths import graph_json
+    from fno.tracker import active_backend_name
+
+    if active_backend_name() != "graph":
+        return ClosureBindResult(outcome="refused", refusal="graph backend is not active")
+    if head_ref is None:
+        try:
+            proc = runner(
+                ["git", "branch", "--show-current"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return ClosureBindResult(outcome="refused", refusal=f"branch lookup failed: {exc}")
+        head_ref = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+    if not head_ref:
+        return ClosureBindResult(outcome="refused", refusal="current branch is unknown")
+
+    path = graph_json()
+    try:
+        snapshot = read_graph_strict(path)
+    except Exception as exc:
+        return ClosureBindResult(outcome="refused", refusal=f"graph read failed: {exc}")
+    probe = bind_created_pr(copy.deepcopy(snapshot), head_ref=head_ref, pr_url=pr_url, owner=owner)
+    if probe.outcome != "bound":
+        return probe
+
+    box: list[ClosureBindResult] = []
+
+    def _mutate(entries: list[dict]) -> list[dict]:
+        box.append(bind_created_pr(entries, head_ref=head_ref, pr_url=pr_url, owner=owner))
+        return entries
+
+    locked_mutate_graph(path, _mutate)
+    return box[0]

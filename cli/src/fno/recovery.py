@@ -92,6 +92,7 @@ CONTINUE_MESSAGE = "keep going"
 # held socket (x-a76d): the operator wants these off the view, not re-opened.
 CLOSE_MESSAGE = "mission complete but still open - run retro then /stop to close"
 FROM_NAME = "fno-recovery"
+REDISPATCH_PARTIAL = "partial"
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +390,9 @@ def recovery_sweep(
             err = refusal[0] if (refusal is not None and refusal_acts) else None
             if err is not None:
                 outcome = failover_fn(c, err)
-                if outcome in ("swapped", "rotated-no-worker", "notified"):
+                if outcome in (
+                    "swapped", "rotated-no-worker", "notified", REDISPATCH_PARTIAL,
+                ):
                     # Either way the global active provider rotated, so no
                     # further swap this tick.
                     rotated = True
@@ -398,8 +401,14 @@ def recovery_sweep(
                     # failure must NOT report a phantom redispatch).
                     emit("failover_swapped", {
                         "short_id": c.short_id,
-                        "redispatched": outcome == "swapped",
+                        "redispatched": outcome in ("swapped", REDISPATCH_PARTIAL),
                     })
+                    if outcome == REDISPATCH_PARTIAL:
+                        emit("failover_blocked", {
+                            "short_id": c.short_id,
+                            "reason": "partial-owner-stamp",
+                        })
+                        continue
                     if outcome != "rotated-no-worker":
                         # "swapped" (worker/thread respawned) and "notified" (US4/US5:
                         # the human got the exact resume command for a session we
@@ -815,8 +824,11 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
     # for one replacement worker. Which link was taken stays readable in the
     # walk this just wrote, and `failover_exhausted` names them all when the
     # chain ends.
-    if _redispatch(candidate, flags=link_to_spawn_flags(link)):
+    redispatched = _redispatch(candidate, flags=link_to_spawn_flags(link))
+    if redispatched is True:
         return "swapped"
+    if redispatched == REDISPATCH_PARTIAL:
+        return REDISPATCH_PARTIAL
     return "rotated-no-worker"
 
 
@@ -918,16 +930,43 @@ def _release_lane_slot(node: str, cwd: str) -> None:
         log.warning("recovery: lane-release failed for %s: %s", node, exc)
 
 
+def _clear_dead_owner(node: str, cwd: str) -> bool:
+    """Clear a stopped worker's graph pointer, surfacing any failed cleanup."""
+    import logging
+    import subprocess
+
+    try:
+        cleared = subprocess.run(
+            [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
+             "--locked-by", "null"],
+            cwd=cwd, capture_output=True, timeout=30, check=False,
+        )
+        if cleared.returncode == 0:
+            return True
+        logging.getLogger(__name__).warning(
+            "recovery: could not clear dead owner for %s (exit %s)",
+            node, cleared.returncode,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.getLogger(__name__).warning(
+            "recovery: could not clear dead owner for %s: %s", node, exc,
+        )
+    return False
+
+
 def _redispatch(
     candidate: "Candidate",
     *,
     pre_spawn: Optional[Callable[[], bool]] = None,
     flags: Optional[Sequence[str]] = None,
-) -> bool:
+) -> bool | str:
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
-    actually launched (spawn exit 0).
+    actually launched and its graph ownership was stamped. Returns
+    :data:`REDISPATCH_PARTIAL` when the worker launched but its ownership stamp
+    failed, so callers surface the incomplete transition without spawning a
+    second replacement.
 
     With no ``flags``, the caller guarantees the new active provider's cli is
     ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
@@ -965,6 +1004,7 @@ def _redispatch(
         return False
     name = getattr(candidate, "name", None)
     agent = f"failover-{candidate.short_id}"
+    old_worker_stopped = False
     try:
         if name:
             # Kill the rate-limited worker. This does NOT free its node claim.
@@ -997,6 +1037,7 @@ def _redispatch(
                     # then spawning would put two /target workers on one node. Bail to
                     # the nudge to preserve the at-most-one-worker invariant (codex P2).
                     return False
+            old_worker_stopped = True
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
         # worker is success), so this also covers the stop/self-release race.
@@ -1008,6 +1049,8 @@ def _redispatch(
         if rel.returncode != 0:
             # Claim still held → a spawn would refuse on it. Bail so the caller
             # nudges instead of reporting a respawn that cannot start.
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             return False
         # US3 managed auto-switch: materialize the swapped-to account into the
         # shared slot HERE - after the exhausted worker is stopped (so it no
@@ -1017,6 +1060,8 @@ def _redispatch(
         # ANOTHER live session / store failure) aborts the respawn: free the lane
         # slot and bail to the nudge, same as a spawn failure.
         if pre_spawn is not None and not pre_spawn():
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
         # --provider claude: the swap already installed the new claude record as
@@ -1035,14 +1080,34 @@ def _redispatch(
         )
         if proc.returncode != 0:
             # No replacement worker started: the node claim is already freed
-            # (above), so also free any dispatch-time lane slot or lane-fill
-            # keeps skipping the node as peer-owned until the slot TTL (G4).
+            # (above), so clear the stopped worker's graph pointer and free any
+            # dispatch-time lane slot or lane-fill keeps skipping the node as
+            # peer-owned until the slot TTL (G4).
+            if old_worker_stopped:
+                _clear_dead_owner(node, cwd)
             _release_lane_slot(node, cwd)
             return False
+        try:
+            stamped = subprocess.run(
+                [*_subprocess_util.fno_py_cmd(), "backlog", "update", node,
+                 "--locked-by", agent],
+                cwd=cwd, capture_output=True, timeout=30, check=False,
+            )
+            stamp_ok = stamped.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            stamp_ok = False
+        if not stamp_ok:
+            # A worker exists, so this is not a spawn miss. Clear the corpse
+            # pointer when possible and return a distinct outcome; False would
+            # invite another failover spawn onto the same branch.
+            _clear_dead_owner(node, cwd)
+            return REDISPATCH_PARTIAL
         return True
     except (OSError, subprocess.SubprocessError):
         # Non-fatal: the swap already landed; never let a respawn miss crash the
         # sweep for the rest of this tick.
+        if old_worker_stopped:
+            _clear_dead_owner(node, cwd)
         return False
 
 
@@ -1361,12 +1426,20 @@ def _default_failover(candidate: "Candidate", error) -> str:
         if managed:
             if not _auto_switch_enabled(repo_root):
                 return "rotated-no-worker"
-            if _redispatch(candidate,
-                           pre_spawn=lambda: _materialize_managed_switch(snap.id, repo_root)):
+            redispatched = _redispatch(
+                candidate,
+                pre_spawn=lambda: _materialize_managed_switch(snap.id, repo_root),
+            )
+            if redispatched is True:
                 return "swapped"
+            if redispatched == REDISPATCH_PARTIAL:
+                return REDISPATCH_PARTIAL
             return "rotated-no-worker"
-        if _redispatch(candidate):
+        redispatched = _redispatch(candidate)
+        if redispatched is True:
             return "swapped"
+        if redispatched == REDISPATCH_PARTIAL:
+            return REDISPATCH_PARTIAL
         return "rotated-no-worker"
     if result.decision is SwapDecision.BLOCKED_THRASH:
         return "blocked-thrash"
@@ -1377,7 +1450,9 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # chain that yields nothing falls back to the original outcome, so a
         # fresh install with no configured chain behaves exactly as today.
         outcome = _chain_redispatch(candidate, reason="queue-exhausted")
-        return outcome if outcome == "swapped" else "queue-exhausted"
+        if outcome in ("swapped", REDISPATCH_PARTIAL):
+            return outcome
+        return "queue-exhausted"
     return "no-swap"
 
 

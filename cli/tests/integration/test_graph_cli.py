@@ -1355,6 +1355,110 @@ def test_add_pr_minimal_derives_the_url(tmp_graph, monkeypatch):
     ]
 
 
+def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}"
+    )
+    node_id = json.loads(_invoke("backlog", "add", "Still offered").output)["id"]
+    plan = tmp_graph.parent / "ready.md"
+    plan.write_text("---\nstatus: ready\n---\n\n# Ready\n")
+    seeded = _invoke("backlog", "update", node_id, "--plan-path", str(plan))
+    assert seeded.exit_code == 0, seeded.output
+
+    result = _invoke("backlog", "update", node_id, "--add-pr", "777")
+
+    assert result.exit_code == 0, result.output
+    assert "still offered by ready" in result.stderr
+    assert "--locked-by <worker> --pr-number 777" in result.stderr
+
+
+def test_bare_pr_number_receipt_reads_non_ready_status_and_unknown_owner(
+    tmp_graph, monkeypatch
+):
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}"
+    )
+    node_id = json.loads(_invoke("backlog", "add", "Primary PR").output)["id"]
+
+    result = _invoke("backlog", "update", node_id, "--pr-number", "778")
+
+    assert result.exit_code == 0, result.output
+    assert "status=in_review" in result.output
+    assert "pr=778" in result.output
+    assert "owner=unknown" in result.output
+    assert "not offered by ready" in result.output
+
+
+def test_owner_and_pr_receipt_reads_all_fields_from_stored_row(tmp_graph, monkeypatch):
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/o/r/pull/{pr}"
+    )
+    node_id = json.loads(_invoke("backlog", "add", "Bound PR").output)["id"]
+
+    result = _invoke(
+        "backlog",
+        "update",
+        node_id,
+        "--locked-by",
+        "worker-7",
+        "--pr-number",
+        "779",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "status=in_review" in result.output
+    assert "pr=779" in result.output
+    assert "owner=worker-7" in result.output
+
+
+def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
+    old = "2020-01-01T00:00:00+00:00"
+    node_id = "ab-oldowner1"
+    tmp_graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": node_id,
+                        "title": "Long-running work",
+                        "status": "in_progress",
+                        "locked_by": "worker-old",
+                        "session_id": "worker-old",
+                        "claimed_at": old,
+                        "plan_path": "plans/long-running.md",
+                        "created_at": old,
+                    }
+                ]
+            }
+        )
+    )
+
+    replaced = _invoke(
+        "backlog", "update", node_id, "--locked-by", "worker-replacement"
+    )
+    assert replaced.exit_code == 0, replaced.output
+    row = _read_graph(tmp_graph)[0]
+    assert row["status"] == "in_progress"
+    assert row["locked_by"] == "worker-replacement"
+    assert row["session_id"] == "worker-replacement"
+    assert row["claimed_at"] != old
+    assert "ownership_defect" not in row
+
+    cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
+    assert cleared.exit_code == 0, cleared.output
+    row = _read_graph(tmp_graph)[0]
+    assert row["locked_by"] is None
+    assert row["session_id"] is None
+    assert row["claimed_at"] is None
+    assert "ownership_defect" not in row
+
+
 def test_remove_pr_drops_entry_by_number(tmp_graph):
     """--remove-pr N drops the entry with that number from additional_prs."""
     r = _invoke("backlog", "add", "Multi")

@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.claims.cli import cli, _merge_claims_across_roots, _parse_ttl
-from fno.claims.core import ClaimContended, acquire_claim
+from fno.claims.core import ClaimContended, ClaimValidationError, acquire_claim
 from fno.claims.io import dedup_claims_roots
 
 from .test_claim_reap import _dead_pid  # noqa: F401
@@ -100,6 +100,19 @@ def test_refresh_contention_exhaustion_exits_1_not_a_traceback(cwd_tmp, monkeypa
     assert result.exit_code == 1
     assert "contention error" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_refresh_expired_claim_is_named_non_success(cwd_tmp, monkeypatch):
+    """Core's atomic expiry refusal must not render as a PID-liveness no-op."""
+    import fno.claims.cli as claims_cli
+
+    def _raise(*args, **kwargs):
+        raise ClaimValidationError("claim 'k' expired before refresh")
+
+    monkeypatch.setattr(claims_cli, "refresh_claim", _raise)
+    result = runner.invoke(cli, ["refresh", "k", "--holder", "h1"])
+    assert result.exit_code == 2
+    assert "expired before refresh" in result.output
 
 
 def test_reconcile_pr_reservation_mutex(cwd_tmp):

@@ -93,6 +93,9 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "locked_by_harness_session",
     "session_id",
     "claimed_at",
+    # Structured, recomputed uncertainty on a persisted active owner whose
+    # claimed_at age exceeded the graph TTL. It never asserts the worker died.
+    "ownership_defect",
     "completed_at",
     "deferred_at",
     "deferred_reason",

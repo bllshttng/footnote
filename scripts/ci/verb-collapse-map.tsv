@@ -248,6 +248,7 @@ plugins ls	T1	plugins ls	2
 plugins verify	T1	plugins verify	4
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
+pr bind-created	T1	pr bind-created	0
 pr closure-trailer	T1	pr closure-trailer	0
 pr coverage-check	T1	pr coverage-check	1
 pr coverage-publish	T1	pr coverage-publish	0

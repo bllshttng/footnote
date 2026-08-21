@@ -1003,9 +1003,10 @@ def refresh_claim(
     """Extend a TTL claim's expires_at.
 
     Returns the new Claim on success. Returns None for PID-liveness claims
-    (no expires_at) - the call is a no-op by design; the caller is told
-    via the return type rather than an exception so refresh is safe to
-    call from a generic timer that does not know the claim's mode.
+    (no expires_at). An expired TTL claim raises :class:`ClaimValidationError`:
+    it is reclaimable and must never be resurrected over concurrent recovery,
+    and a distinct non-success keeps callers from misreporting it as the
+    legitimate PID-liveness no-op.
 
     ``_attempt`` is internal bookkeeping only (never pass it): on mutex
     contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
@@ -1014,6 +1015,7 @@ def refresh_claim(
     Raises:
         HolderMismatch: existing claim is held by someone else.
         ClaimGoneAway: claim was released between read and rewrite.
+        ClaimValidationError: claim expired before the locked rewrite.
         ClaimCorrupted: existing file fails parse/schema validation.
         ClaimContended: mutex contention exhausted ACQUIRE_MAX_ATTEMPTS retries.
     """
@@ -1058,6 +1060,10 @@ def refresh_claim(
             raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
         if existing.expires_at is None:
             return None
+        if is_expired(existing):
+            raise ClaimValidationError(
+                f"claim {key!r} expired before refresh; refusing to resurrect it"
+            )
 
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS
         anchor_pid = _reanchor_pid_for(existing)

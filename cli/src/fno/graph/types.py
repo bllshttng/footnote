@@ -123,6 +123,7 @@ class Entry(BaseModel):
     locked_by_harness_session: Optional[str] = None
     session_id: Optional[str] = None
     claimed_at: Optional[str] = None
+    ownership_defect: Optional[dict[str, str]] = None
     completed_at: Optional[str] = None
     # Defer state. Mutually exclusive with completed_at by cascade
     # convention: done > deferred. recompute_statuses enforces that

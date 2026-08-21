@@ -11724,6 +11724,25 @@ done
     }
 
     #[test]
+    fn list_row_live_worker_with_null_activity_age_has_unknown_progress() {
+        let home = short_home("listnullage");
+        seed_stream_row(&home, "worker-null-age", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| {
+            probe_with_age("working", "reachable", None)
+        });
+        let row = &response.result().unwrap()["agents"][0];
+
+        assert!(row["last_activity_age_s"].is_null());
+        assert_eq!(row["progress"], "unknown");
+        assert_eq!(row["progress_basis"], "no-evidence");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
     fn list_progress_filter_is_independent_from_status() {
         let home = short_home("listprogressfilter");
         seed_stream_row(&home, "worker-progress", "abc12345");

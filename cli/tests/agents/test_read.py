@@ -404,6 +404,41 @@ def test_list_agents_family1_truth_overrides_stale_orphaned_render(
     assert row["status"] == "live"
 
 
+def test_list_agents_live_worker_with_null_activity_age_has_unknown_progress(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _codex(
+                name="live-unmeasured",
+                status="live",
+                pid=None,
+                harness_session_id="019f8ff2-1111-2222-3333-555555555555",
+            )
+        ]
+    )
+    _patch_claude_agents_json({})
+    from fno.agents import session_truth
+
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda *_args, **_kwargs: {
+            "state": "working",
+            "reachability": "reachable",
+            "basis": "transcript",
+            "last_activity_age_s": None,
+        },
+    )
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["status"] == "live"
+    assert row["last_activity_age_s"] is None
+    assert row["progress"] == "unknown"
+    assert row["progress_basis"] == "no-evidence"
+
+
 def test_list_agents_unknown_truth_never_inherits_registry_death(
     tmp_path, monkeypatch, _patch_claude_agents_json
 ):
